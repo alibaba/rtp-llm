@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"

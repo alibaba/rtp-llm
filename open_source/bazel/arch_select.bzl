@@ -62,17 +62,6 @@ def torch_deps():
     })
     return deps
 
-def cutlass_kernels_interface():
-    native.alias(
-        name = "cutlass_kernels_interface",
-        actual = "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-    )
-
-    native.alias(
-        name = "cutlass_headers_interface",
-        actual = "//src/fastertransformer/cutlass:cutlass_headers",
-    )
-
 def fa_deps():
     native.alias(
         name = "fa",
@@ -90,3 +79,15 @@ def kernel_so_deps():
         "//:using_rocm": [":libmmha_so"],
         "//conditions:default":[],
     })
+
+def trt_plugins():
+    native.alias(
+        name = "trt_plugins",
+        actual = "//src/fastertransformer/trt_plugins:trt_plugins",
+    )
+
+def cuda_base():
+    native.alias(
+        name = "cuda_base",
+        actual = "//src/fastertransformer/devices/cuda_impl:gpu_base",
+    )

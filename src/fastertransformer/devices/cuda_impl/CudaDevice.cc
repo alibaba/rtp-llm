@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/CudaDevice.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"

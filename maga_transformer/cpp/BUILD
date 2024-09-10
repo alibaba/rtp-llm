@@ -3,6 +3,7 @@ load("//bazel:arch_select.bzl", "requirement", "whl_deps", "torch_deps")
 load("//bazel:arch_select.bzl", "embedding_arpc_deps")
 package(default_visibility = ["//maga_transformer:__subpackages__"])
 
+
 requirement([
     "grpcio"
 ])

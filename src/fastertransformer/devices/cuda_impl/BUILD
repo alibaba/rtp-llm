@@ -1,16 +1,21 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "trt_plugins")
+load("//bazel:arch_select.bzl", "cuda_base", "trt_plugins")
 
+cuda_base()
 trt_plugins()
 
 cc_library(
-    name = "cuda_impl",
+    name = "gpu_base",
     hdrs = glob([
-        "*.h",
-    ]) + [
-    ],
+        "CudaDevice.h",
+    ]),
     srcs = glob([
-        "*.cc",
+        "CudaDevice.cc",
+        "CudaAttentionOp.cc",
+        "CudaFfnLayer.cc",
+        "CudaGemmOp.cc",
+        "CudaGroupGemmOp.cc",
+        "CudaLoraLinearWithActOp.cc",
     ]),
     deps = [
         "//src/fastertransformer/devices:devices_base",
@@ -23,6 +28,26 @@ cc_library(
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+    alwayslink = 1,
+    include_prefix = "src/fastertransformer/devices/",
+)
+cc_library(
+    name = "cuda_impl",
+    srcs = glob([
+        "CudaActOp.cc",
+        "CudaAddBiasOp.cc",
+        "CudaEmbeddingLookup.cc",
+        "CudaLayernorm.cc",
+        "CudaOps.cc",
+        "CudaQuantizeOp.cc",
+        "CudaSampleOp.cc",
+        "CudaSoftmaxOp.cc",
+    ]),
+    deps = [
+        ":cuda_base",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

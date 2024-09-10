@@ -7,7 +7,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-
 # py_test (
 #     name = "model_rpc_client_test",
 #     srcs = ["model_rpc_client_test.py"],

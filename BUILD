@@ -96,7 +96,6 @@ filegroup(
             "src/fastertransformer/th_op/th_utils.cc",
             "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
-            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
         ],
         "//:using_rocm": [
             "src/fastertransformer/th_op/th_utils.cc",
@@ -111,6 +110,7 @@ filegroup(
     srcs = select({
         "//:using_cuda": [
             "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
         ],
         "//conditions:default": [],
     }),

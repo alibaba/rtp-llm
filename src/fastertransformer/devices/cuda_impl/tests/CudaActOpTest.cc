@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/CudaDevice.h"
 #include "src/fastertransformer/devices/base_tests/ActOpTest.hpp"
 
 using namespace std;
