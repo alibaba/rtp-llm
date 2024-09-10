@@ -1,7 +1,11 @@
 from typing import List, Tuple, Union
 
 import torch
-from decord import VideoReader, cpu
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
 from PIL import Image
 from torchvision import transforms
 

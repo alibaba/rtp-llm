@@ -116,6 +116,7 @@ build:arm --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:arm --linkopt -ldl
 build:arm --copt="-DUSING_CUDA=0"
 build:arm --define=xft_use_icx=false
+build:arm --copt=-Wno-tautological-compare
 
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"

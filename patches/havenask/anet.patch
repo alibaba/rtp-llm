@@ -1,0 +1,12 @@
+diff --git aios/network/anet/BUILD aios/network/anet/BUILD
+index 3774514c..ee6e92e4 100644
+--- aios/network/anet/BUILD
++++ aios/network/anet/BUILD
+@@ -5,5 +5,5 @@ cc_library(
+     srcs=glob(['*.cpp']),
+     hdrs=glob(['*.h']),
+     deps=['//aios/alog:alog', '//aios/autil:env_util'],
+-    copts=['-Wformat-truncation=0'],
++    copts=['-Wformat-truncation=0', '-mcpu=native'],
+     alwayslink=True
+)

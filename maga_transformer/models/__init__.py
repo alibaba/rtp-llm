@@ -14,20 +14,22 @@ from .qwen_v2 import QWenV2
 from .falcon import Falcon
 from .mpt import Mpt
 from .phi import Phi
+
 import platform
 if platform.processor() != 'aarch64':
     from .chat_glm_v4_vision import ChatGlmV4Vision
     from .llava import Llava
     from .qwen_vl import QWen_VL
+    from .cogvlm2 import CogVLM2
+    from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
+    from .internvl import InternVL
+    from .minicpmv.minicpmv import MiniCPMV
+
 from .mixtral import Mixtral
 from .bert import Bert
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .qwen_v2_moe import Qwen2Moe
-from .cogvlm2 import CogVLM2
-from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
-from .internvl import InternVL
-from .minicpmv.minicpmv import MiniCPMV
 
 import logging
 try:
