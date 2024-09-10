@@ -10,7 +10,8 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ]
+    ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -26,6 +27,7 @@ py_test(
         "//maga_transformer:testlib",
     ],
     imports = ["aios/kmonitor/python_client"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -55,6 +57,7 @@ py_test(
         "//maga_transformer:sdk",
         "//maga_transformer:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -77,6 +80,7 @@ py_test(
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
         "//maga_transformer/test/tokenizer_test:testdata",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -92,6 +96,7 @@ py_test(
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
         "//maga_transformer/test/tokenizer_test:testdata",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -125,5 +130,6 @@ py_test(
         "//maga_transformer:testlib",
         "//maga_transformer/test/model_test/test_util",
     ],
-    timeout = 'short'
+    timeout = 'short',
+    exec_properties = {'gpu':'A10'},
 )

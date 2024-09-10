@@ -848,7 +848,6 @@ static std::string getDriverVersion() {
     if (NVML_SUCCESS != result) {
         throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API");
     }
-
     result = nvmlShutdown();
     if (NVML_SUCCESS != result) {
         std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
@@ -919,27 +918,10 @@ static bool checkOnSameNumaNodes(std::vector<int> device_ids) {
     return true;
 }
 
-static std::vector<int> getVisibleDevices() {
-    const char* cudadev = std::getenv("CUDA_VISIBLE_DEVICES");
-    if (cudadev == nullptr) {
-        // If CUDA_VISIBLE_DEVICES is not set, return an empty vector or handle as needed
-        return {};
-    }
-
-    std::vector<int> deviceIds;
-    std::stringstream ss(cudadev);
-    int deviceId;
-    while (ss >> deviceId) {
-        // Successfully read an integer, add it to the vector
-        deviceIds.push_back(deviceId);
-
-        // Check for a comma to skip it before reading the next number
-        if (ss.peek() == ',') {
-            ss.ignore();
-        }
-    }
-
-    return deviceIds;
+static int getVisibleDeviceNum() {
+    int device_count;
+    check_cuda_error(cudaGetDeviceCount(&device_count));
+    return device_count;
 }
 
 /* ************************** end of common utils ************************** */

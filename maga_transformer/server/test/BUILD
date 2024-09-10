@@ -5,7 +5,8 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ]
+    ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (

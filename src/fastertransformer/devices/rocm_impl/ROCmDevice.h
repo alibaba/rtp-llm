@@ -10,7 +10,6 @@
 #include <hip/hip_bf16.h>
 #endif
 
-#include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 #include "src/fastertransformer/devices/DeviceBase.h"
@@ -88,7 +87,6 @@ private:
     bool use_openSource_fmha    = true;
 
     NcclParam nccl_param_;
-    std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
     //moe
     std::unique_ptr<rocmMoeWrapper> moe_runner_;

@@ -65,14 +65,6 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         NCCLCHECK(ncclGroupEnd());
     }    
     
-    // Initialize custom all reduce communicator
-    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
-    if (nccl_param_.world_size_ > 1) {
-        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
-        std::vector<int> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
-        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
-    }
-
 #if PINCPU_MEM
     allocator_.reset(new Allocator<AllocatorType::ROCM>());
     hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());

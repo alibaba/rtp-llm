@@ -92,18 +92,13 @@ cc_library(
     ],
     deps = [
         ":nccl",
-    ] + select({
-        "//:using_cuda": [  ":cuda_utils",
-                            ":memory_utils",
-                            "//src/fastertransformer/core:types",
-                            "//src/fastertransformer/kernels:kernels_cu",
-                            "@local_config_cuda//cuda:cuda_headers",
-                            "@local_config_cuda//cuda:cudart",],
-        "//:using_rocm": [  "//src/fastertransformer/rocm:memory_utils",
-                            "//src/fastertransformer/rocm:rocm_utils",
-                            "//src/fastertransformer/kernels:gpt_kernels_rocm",]}),
-
-
+        ":cuda_utils",
+        ":memory_utils",
+        "//src/fastertransformer/core:types",
+        "//src/fastertransformer/kernels:kernels_cu",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -228,6 +223,7 @@ cc_library(
         "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
     include_prefix = "src",

@@ -526,29 +526,6 @@ void compareTwoTensor(
     delete[] h_ref;
 }
 
-static std::vector<int> getVisibleDevices() {
-    const char* cudadev = std::getenv("CUDA_VISIBLE_DEVICES");
-    if (cudadev == nullptr) {
-        // If CUDA_VISIBLE_DEVICES is not set, return an empty vector or handle as needed
-        return {};
-    }
-
-    std::vector<int> deviceIds;
-    std::stringstream ss(cudadev);
-    int deviceId;
-    while (ss >> deviceId) {
-        // Successfully read an integer, add it to the vector
-        deviceIds.push_back(deviceId);
-
-        // Check for a comma to skip it before reading the next number
-        if (ss.peek() == ',') {
-            ss.ignore();
-        }
-    }
-
-    return deviceIds;
-}
-
 /* ************************** end of common utils ************************** */
 }  // namespace rocm
 }  // namespace fastertransformer
