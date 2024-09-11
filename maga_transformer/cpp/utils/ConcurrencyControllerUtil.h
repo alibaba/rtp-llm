@@ -25,8 +25,10 @@ public:
                 return true;
             }
             if (block_) {
+                FT_LOG_INFO("reach concurrency_controller limit, blocking...");
                 cv_.wait(scopeLock);
             } else {
+                FT_LOG_INFO("reach concurrency_controller limit, rejecting...");
                 return false;
             }
         }

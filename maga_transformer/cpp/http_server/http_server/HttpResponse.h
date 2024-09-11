@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <optional>
 
 #include "autil/Log.h"
 #include "http_server/HttpError.h"
@@ -22,13 +23,16 @@ public:
     static std::unique_ptr<HttpResponse> makeChunkedResponseData(const std::string &body);
 
     anet::Packet *encode() const;
+    void setStatusCode(int code) { _statusCode = code; }
+    void setStatusMessage(const std::string message) { _statusMessage = message; }
 
 private:
     HttpResponse() : _isHttpPacket(true), _statusCode(200) {}
 
 private:
     bool _isHttpPacket;
-    int32_t _statusCode;
+    int _statusCode;
+    std::optional<std::string> _statusMessage;
     HeadersType _headers;
     std::string _body;
 

@@ -41,16 +41,20 @@ bool HttpResponseWriter::DoWrite(const std::string &data) {
         return false;
     }
 
-    auto response = HttpResponse::make(data);
+    auto response = HttpResponse::make(data, _headers);
     if (!response) {
         AUTIL_LOG(WARN, "write failed, genarate http response failed");
         return false;
     }
+
+    response->setStatusCode(_statusCode);
+    if (_statusMessage) response->setStatusMessage(_statusMessage.value());
     auto packet = response->encode();
     if (!packet) {
         AUTIL_LOG(WARN, "write failed, http response encode failed");
         return false;
     }
+
     if (!_connection->postPacket(packet)) {
         AUTIL_LOG(ERROR, "write failed, connection post http response packet failed");
         packet->free();
@@ -163,7 +167,5 @@ void HttpResponseWriter::SendErrorResponse() {
         packet->free();
     }
 }
-
-void HttpResponseWriter::AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
 
 } // namespace http_server

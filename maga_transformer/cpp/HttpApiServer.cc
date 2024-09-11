@@ -62,7 +62,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
                    std::shared_ptr<ConcurrencyController>           controller_) {
 
     if (controller_->increment() == false) {
-        // TODO: writer->setStatus(429, "Too Many Requests");
+        writer->SetStatus(429, "Too Many Requests");
         writer->Write("");
         return;
     }

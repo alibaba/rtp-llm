@@ -14,6 +14,7 @@ anet::Packet *HttpResponse::encode() const {
         auto httpPacket = static_cast<anet::HTTPPacket *>(packet);
         httpPacket->setVersion(anet::HTTPPacket::HTTP_1_1);
         httpPacket->setStatusCode(_statusCode);
+        if (_statusMessage) httpPacket->setReasonPhrase(_statusMessage.value().c_str());
         httpPacket->setPacketType(anet::HTTPPacket::PT_RESPONSE);
         for (auto &header : _headers) {
             httpPacket->addHeader(header.first.c_str(), header.second.c_str());

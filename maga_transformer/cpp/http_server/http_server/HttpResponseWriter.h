@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <string>
+#include <optional>
 
 #include "aios/network/anet/connection.h"
 #include "autil/Log.h"
@@ -21,7 +22,11 @@ public:
     // is valid for write stream, call this method when write complete
     bool WriteDone();
 
-    void AddHeader(const std::string &key, const std::string &value);
+    void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
+    void SetStatus(int code, const std::string message) {
+        _statusCode = code;
+        _statusMessage = message;
+    }
 
 private:
     bool DoWrite(const std::string &data);
@@ -39,6 +44,9 @@ private:
 
     std::shared_ptr<anet::Connection> _connection;
     WriteStatus _status{WriteStatus::Undefined};
+
+    int _statusCode;
+    std::optional<std::string> _statusMessage;
 
     // for normal response
     bool _sent{false};
