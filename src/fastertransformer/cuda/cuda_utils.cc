@@ -786,7 +786,10 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
 
             nvmlGpuP2PStatus_t isActive;
             result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
-            if (NVML_SUCCESS != result || isActive != NVML_P2P_STATUS_OK) {
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API");
+            }
+            if (isActive != NVML_P2P_STATUS_OK) {
                 FT_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
                 return false;
             }
@@ -800,20 +803,46 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
     return true;
 }
 
-// Note: Avoid using this function when driver version is 470.82.01, as using the domain to check if the device 
-// is on the same NUMA node is not reliable on that version
 bool checkOnSameNumaNodes(std::vector<int> device_ids) {
-    unsigned int last_numa_id = INT32_MAX;
-    for (size_t i = 0; i < device_ids.size(); i++) {
-        size_t device_id = device_ids[i];
-        cudaDeviceProp device_prop;
-        check_cuda_error(cudaGetDeviceProperties(&device_prop, device_id));
-        unsigned int numa_id = device_prop.pciDomainID;
-        if (numa_id != last_numa_id && last_numa_id != INT32_MAX) {
-            return false;
-        }
-        last_numa_id = numa_id;
+    nvmlReturn_t result;
+    nvmlDevice_t deviceHandles[2];
+
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
     }
+
+    for (size_t i = 0; i < device_ids.size(); i++) {
+        for (size_t j = i + 1; j < device_ids.size(); j++) {
+            size_t device_id1 = device_ids[i];
+            size_t device_id2 = device_ids[j];
+
+            result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ": " + std::to_string(result));
+            }
+
+            result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ": " + std::to_string(result));
+            }
+
+            nvmlGpuTopologyLevel_t topo;
+            result = nvmlDeviceGetTopologyCommonAncestor(deviceHandles[0], deviceHandles[1], &topo);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API");
+            }
+            if (topo == NVML_TOPOLOGY_SYSTEM) {
+                FT_LOG_INFO("GPU %d and GPU %d are not on same numa node", device_id1, device_id2);
+                return false;
+            }
+        }
+    }
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+    }
+    FT_LOG_INFO("All GPUs are on same numa node");
     return true;
 }
 
