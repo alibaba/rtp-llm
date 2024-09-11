@@ -94,13 +94,6 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
     size_t offset = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
     for (auto& stream : stream_groups.allStreams()) {
-        if (stream->isChunkStream()) {
-            FT_FAIL("Speculative engine does not support chunk stream");
-        }
-
-        if (stream->calculateLoss()) {
-            FT_FAIL("Speculative engine does not support return loss");
-        }
         auto current_batch_size = stream->scoreLen();
         
         // TODO(xyz): specutial handle like gathersamplerInput

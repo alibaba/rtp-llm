@@ -188,6 +188,9 @@ absl::Status SpeculativeEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, score_model_params_.gpt_init_parameter, resource_context_, metrics_reporter_);
+    if (stream->calculateLoss()) {
+        FT_FAIL("Speculative engine does not support return loss");
+    }
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -235,7 +238,7 @@ absl::Status SpeculativeEngine::step() {
 }
 
 void SpeculativeEngine::reportMetrics(const SpeculativeSamplerOutput& sampler_output, int64_t propose_begin_time_us, int64_t score_begin_time_us, int64_t sampler_begin_time_us, int64_t update_begin_time_us) {
-    if (metrics_reporter_ == nullptr) {
+    if (!metrics_reporter_) {
         return;
     }
 

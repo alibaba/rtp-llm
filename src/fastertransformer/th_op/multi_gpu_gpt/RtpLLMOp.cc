@@ -49,8 +49,7 @@ rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
             // kmon metric init
             (void)rtp_llm::initKmonitorFactory();
             auto kmon_tags = rtp_llm::getHippoTags();
-            metric_reporter_ = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
-            params.metrics_reporter = metric_reporter_;
+            params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         return params;
      } catch (const std::exception& e){

@@ -51,11 +51,11 @@ public:
         }
 
         if (generate_input_->generate_config->return_logits) {
-            output_buffer_->logits = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"logits"}});
+            output_buffer_->logits = device_->clone({*logits, ft::AllocationType::DEVICE, {"score_logits"}});
         }
 
         if (generate_input_->generate_config->return_hidden_states) {
-            output_buffer_->hidden_states = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"score"}});
+            output_buffer_->hidden_states = device_->clone({*hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
         }
     }
 

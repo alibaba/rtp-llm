@@ -40,7 +40,6 @@ private:
     std::thread                                   grpc_server_thread_;
     std::atomic<bool>                             is_server_ready_{false};
     std::atomic<bool>                             is_server_shutdown_{false};
-    kmonitor::MetricsReporterPtr                  metric_reporter_ = nullptr;
 };
 
 void registerRtpLLMOp(const py::module& m);

@@ -27,7 +27,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             accepted_len = stochasticSample(propose_step, propose_stream_output, scorer_stream_output);
         }
         FT_LOG_DEBUG(
-            "stream [%d], propose_tokens = [%d], accept_tokens = [%d]", stream->streamId(), propose_step, accepted_len);
+            "stream [%d], topk [%d], topp [%f], propose_tokens = [%d], accept_tokens = [%d]", stream_config->top_k, stream_config->top_p, stream->streamId(), propose_step, accepted_len);
 
         ft::BufferPtr accepted_tokens =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST});
@@ -74,6 +74,18 @@ size_t RejectionSampler::stochasticSample(size_t                                
                                           const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const {
     torch::Tensor propose_all_probs = Buffer2torchTensor(propose_stream_output->all_probs, false);
     torch::Tensor score_all_probs   = Buffer2torchTensor(scorer_stream_output->all_probs, false);
+
+    size_t propose_vocab_size = propose_all_probs.size(1);
+    size_t score_vocab_size = score_all_probs.size(1);
+
+    if (propose_vocab_size > score_vocab_size) {
+        propose_all_probs = propose_all_probs.narrow(1, 0, score_vocab_size);
+    } else if (propose_vocab_size < score_vocab_size) {
+        long padding_size = score_vocab_size - propose_vocab_size;
+        auto zeros_padding = torch::zeros({propose_all_probs.size(0), padding_size}, propose_all_probs.options());
+        propose_all_probs = torch::cat({propose_all_probs, zeros_padding}, 1);
+    }
+
     torch::Tensor randoms           = torch::rand({(long)propose_step}, torch::Device(torch::kCUDA)).to(torch::kFloat);
     size_t        accepted_len      = 0;
     while (accepted_len < propose_step) {
