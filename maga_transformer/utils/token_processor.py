@@ -4,7 +4,7 @@ import asyncio
 import torch
 
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import List
+from typing import Any, List
 
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slices, \
             truncate_response_with_stop_words, truncate_token_with_stop_word_id, match_stop_words
@@ -13,6 +13,9 @@ class TokenProcessor:
     def __init__(self, tokenizer, special_tokens):
         self.tokenizer = tokenizer
         self.special_tokens = special_tokens
+
+    def __call__(self, prompt: str) -> Any:
+        return self.tokenizer(prompt, return_offsets_mapping=True, return_attention_mask=False)
     
     def decode(self, token_id: List[int]) -> str:
         return self.tokenizer.decode(token_id)

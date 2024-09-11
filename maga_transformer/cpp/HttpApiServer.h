@@ -10,12 +10,15 @@
 
 namespace rtp_llm {
 
+class TokenizerEncodeResponse;
+
 class Pipeline {
 public:
     Pipeline(py::object token_processor): token_processor_(token_processor) {}
     std::string        decode(std::vector<int> token_ids);
     std::vector<int>   encode(std::string prompt);
     static std::string format_response(std::string generate_texts, const GenerateOutputs* generate_outputs);
+    std::shared_ptr<TokenizerEncodeResponse> tokenizer(const std::string& prompt);
 
 private:
     py::object token_processor_;
@@ -62,6 +65,7 @@ private:
     bool registerV1Model();
     bool registerSetDebugLog();
     bool registerSetDebugPrint();
+    bool registerTokenizerEncode();
 
 private:
     http_server::HttpServer http_server_;

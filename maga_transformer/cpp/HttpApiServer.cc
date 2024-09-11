@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "maga_transformer/cpp/HttpApiServer.h"
 #include "autil/AtomicCounter.h"
 #include "autil/legacy/json.h"
@@ -55,6 +56,56 @@ struct PipelineResponse: public Jsonizable {
     std::string    response;
     bool           finished;
     AuxInfoAdapter aux_info;
+};
+
+class TokenizerEncodeResponse: public Jsonizable {
+public:
+    TokenizerEncodeResponse()           = default;
+    ~TokenizerEncodeResponse() override = default;
+
+public:
+    void Jsonize(Jsonizable::JsonWrapper& json) override {
+        if (!offset_mapping.empty()) {
+            json.Jsonize("offset_mapping", offset_mapping);
+        }
+        json.Jsonize("token_ids", token_ids, token_ids);
+        json.Jsonize("tokens", tokens, tokens);
+        json.Jsonize("error", error, error);
+    }
+
+public:
+    std::vector<std::vector<int>> offset_mapping;
+    std::vector<std::string>      tokens;
+    std::vector<int>              token_ids;
+    std::string                   error;
+};
+
+class ErrorResponse: public Jsonizable {
+public:
+    void Jsonize(Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("error_code", error_code, error_code);
+        json.Jsonize("message", error_msg, error_msg);
+    }
+
+public:
+    int         error_code;
+    std::string error_msg;
+};
+
+class ParallelInfo {
+public:
+    static bool isMaster() {
+        int world_rank = 0;
+        if (const char* world_rank_env = std::getenv("WORLD_RANK"); world_rank_env) {
+            std::string world_rank_str = world_rank_env;
+            try {
+                world_rank = std::stoi(world_rank_str);
+            } catch (...) {
+                FT_LOG_WARNING("env WORLD_RANK should be a int: %s", world_rank_str.c_str());
+            }
+        }
+        return world_rank == 0;
+    }
 };
 
 autil::AtomicCounter requestCounter;
@@ -198,34 +249,7 @@ void HttpApiServer::registerResponses() {
     registerV1Model();
     registerSetDebugLog();
     registerSetDebugPrint();
-}
-
-std::string Pipeline::decode(std::vector<int> token_ids) {
-    py::gil_scoped_acquire acquire;
-    std::string            res = py::cast<std::string>(token_processor_.attr("decode")(token_ids));
-    return res;
-}
-
-std::vector<int> Pipeline::encode(std::string prompt) {
-    py::gil_scoped_acquire acquire;
-    auto                   res = token_processor_.attr("encode")(prompt);
-    std::vector<int>       vecInt;
-    if (!py::isinstance<py::list>(res)) {
-        throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(res)));
-    }
-    py::list py_list = py::reinterpret_borrow<py::list>(res);
-    for (auto item : py_list) {
-        vecInt.push_back(py::cast<int>(item));
-    }
-    return vecInt;
-}
-
-std::string Pipeline::format_response(std::string generate_texts, const GenerateOutputs* generate_outputs) {
-    PipelineResponse res;
-    res.response = generate_texts;
-    res.finished = generate_outputs->generate_outputs[0].finished;
-    res.aux_info = AuxInfoAdapter(generate_outputs->generate_outputs[0].aux_info);
-    return ToJsonString(res, /*isCompact=*/true);
+    registerTokenizerEncode();
 }
 
 bool HttpApiServer::registerRoot() {
@@ -301,18 +325,21 @@ bool HttpApiServer::registerSetDebugLog() {
         try {
             auto body     = ParseJson(request.GetBody());
             auto body_map = AnyCast<JsonMap>(body);
-            if (auto it = body_map.find("debug"); it != body_map.end()) {
-                auto value = AnyCast<bool>(it->second);
-                torch_ext::setDebugLogLevel(value);
-                writer->Write(R"({"status":"ok"})");
-                return;
-            } else {
+            auto it       = body_map.find("debug");
+            if (it == body_map.end()) {
                 FT_LOG_WARNING("set debug log level failed, request has no debug info");
+                writer->Write(R"({"error":"set debug log level failed, request has no debug info"})");
+                return;
             }
+            auto value = AnyCast<bool>(it->second);
+            torch_ext::setDebugLogLevel(value);
+            writer->Write(R"({"status":"ok"})");
+            return;
         } catch (...) {
             FT_LOG_WARNING("set debug log level failed, exception occurred when parse request");
+            writer->Write(R"({"error":"set debug log level failed, exception occurred when parse request"})");
+            return;
         }
-        writer->Write(R"({"error":"set debug log level failed"})");
     };
     return http_server_.RegisterRoute("POST", "/set_debug_log", callback);
 }
@@ -325,20 +352,159 @@ bool HttpApiServer::registerSetDebugPrint() {
         try {
             auto body     = ParseJson(request.GetBody());
             auto body_map = AnyCast<JsonMap>(body);
-            if (auto it = body_map.find("debug"); it != body_map.end()) {
-                auto value = AnyCast<bool>(it->second);
-                torch_ext::setDebugPrintLevel(value);
-                writer->Write(R"({"status":"ok"})");
-                return;
-            } else {
+            auto it       = body_map.find("debug");
+            if (it == body_map.end()) {
                 FT_LOG_WARNING("set debug print level failed, request has no debug info");
+                writer->Write(R"({"error":"set debug print level failed, request has no debug info"})");
+                return;
             }
+            auto value = AnyCast<bool>(it->second);
+            torch_ext::setDebugPrintLevel(value);
+            writer->Write(R"({"status":"ok"})");
+            return;
         } catch (...) {
             FT_LOG_WARNING("set debug print level failed, exception occurred when parse request");
+            writer->Write(R"({"error":"set debug print level failed, exception occurred when parse request"})");
+            return;
         }
-        writer->Write(R"({"error":"set debug print level failed"})");
     };
     return http_server_.RegisterRoute("POST", "/set_debug_print", callback);
+}
+
+bool HttpApiServer::registerTokenizerEncode() {
+    auto callback = [pipeline = pipeline_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                           const http_server::HttpRequest&                  request) mutable -> void {
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
+        if (!ParallelInfo::isMaster()) {
+            ErrorResponse error_response;
+            error_response.error_code = 515;
+            error_response.error_msg  = "gang worker should not access /tokenizer/encode api directly";
+            auto response_json_str    = ToJsonString(error_response, true);
+            writer->Write(response_json_str);
+            return;
+        }
+        try {
+            auto body      = ParseJson(request.GetBody());
+            auto body_map  = AnyCast<JsonMap>(body);
+            auto prompt_it = body_map.find("prompt");
+            if (prompt_it == body_map.end()) {
+                FT_LOG_WARNING("tokenizer encode failed, request has no prompt");
+                writer->Write("tokenizer encode failed, request has no prompt", 500);
+                return;
+            }
+            auto prompt         = AnyCast<std::string>(prompt_it->second);
+            bool offset_mapping = false;
+            if (auto offset_mapping_it = body_map.find("return_offsets_mapping"); offset_mapping_it != body_map.end()) {
+                offset_mapping = AnyCast<bool>(offset_mapping_it->second);
+            }
+            std::shared_ptr<TokenizerEncodeResponse> tokenizer_response;
+            if (offset_mapping) {
+                tokenizer_response = pipeline.tokenizer(prompt);
+            } else {
+                auto                     token_ids = pipeline.encode(prompt);
+                std::vector<std::string> tokens;
+                for (auto id : token_ids) {
+                    tokens.push_back(pipeline.decode(std::vector<int>{id}));
+                }
+                tokenizer_response            = std::make_shared<TokenizerEncodeResponse>();
+                tokenizer_response->token_ids = token_ids;
+                tokenizer_response->tokens    = tokens;
+            }
+            if (!tokenizer_response) {
+                FT_LOG_WARNING("tokenizer encode failed, response is null, offset_mapping: %d", offset_mapping);
+                writer->Write("tokenizer encode failed, maybe tokenizer failed", 500);
+                return;
+            }
+            auto response_json_str = ToJsonString(*tokenizer_response, true);
+            writer->Write(response_json_str);
+            return;
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("tokenizer encode failed, found exception: [%s]", e.what());
+            writer->Write("tokenizer encode failed, exception occurred", 500);
+            return;
+        }
+    };
+    return http_server_.RegisterRoute("POST", "/tokenizer/encode", callback);
+}
+
+// ------------------------------- Pipeline -------------------------------
+
+std::string Pipeline::decode(std::vector<int> token_ids) {
+    py::gil_scoped_acquire acquire;
+    std::string            res = py::cast<std::string>(token_processor_.attr("decode")(token_ids));
+    return res;
+}
+
+std::vector<int> Pipeline::encode(std::string prompt) {
+    py::gil_scoped_acquire acquire;
+    auto                   res = token_processor_.attr("encode")(prompt);
+    std::vector<int>       vecInt;
+    if (!py::isinstance<py::list>(res)) {
+        throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(res)));
+    }
+    py::list py_list = py::reinterpret_borrow<py::list>(res);
+    for (auto item : py_list) {
+        vecInt.push_back(py::cast<int>(item));
+    }
+    return vecInt;
+}
+
+std::string Pipeline::format_response(std::string generate_texts, const GenerateOutputs* generate_outputs) {
+    PipelineResponse res;
+    res.response = generate_texts;
+    res.finished = generate_outputs->generate_outputs[0].finished;
+    res.aux_info = AuxInfoAdapter(generate_outputs->generate_outputs[0].aux_info);
+    return ToJsonString(res, /*isCompact=*/true);
+}
+
+std::shared_ptr<TokenizerEncodeResponse> Pipeline::tokenizer(const std::string& prompt) {
+    auto                   response = std::make_shared<TokenizerEncodeResponse>();
+    py::gil_scoped_acquire acquire;
+    auto                   res    = token_processor_(prompt);
+    auto                   py_res = py::cast<py::dict>(res);
+
+    // offset_mapping
+    if (py_res.contains("offset_mapping")) {
+        auto py_offset_mapping = py_res["offset_mapping"];
+        if (!py::isinstance<py::list>(py_offset_mapping)) {
+            FT_LOG_WARNING("tokenizer failed, offset mapping expected list but get: %s",
+                           py::cast<std::string>(py::str(py_offset_mapping)).c_str());
+            return nullptr;
+        }
+        std::vector<std::vector<int>> offset_mapping;
+        auto                          py_offset_mapping_list = py::cast<py::list>(py_offset_mapping);
+        for (auto& py_offset : py_offset_mapping_list) {
+            offset_mapping.push_back({});
+            auto py_offset_list = py::cast<py::list>(py_offset);
+            for (auto py_num : py_offset_list) {
+                offset_mapping.back().push_back(py::cast<int>(py_num));
+            }
+        }
+        response->offset_mapping = offset_mapping;
+    } else {
+        FT_LOG_WARNING("tokenizer result has no offset_mapping");
+    }
+
+    // input_ids
+    if (py_res.contains("input_ids")) {
+        auto py_input_ids = py_res["input_ids"];
+        if (!py::isinstance<py::list>(py_input_ids)) {
+            FT_LOG_WARNING("tokenizer failed, input ids expected list but get: ",
+                           py::cast<std::string>(py::str(py_input_ids)).c_str());
+            return nullptr;
+        }
+        std::vector<int> input_ids;
+        auto             py_input_ids_list = py::cast<py::list>(py_input_ids);
+        for (auto& py_id : py_input_ids_list) {
+            input_ids.push_back(py::cast<int>(py_id));
+        }
+        response->token_ids = input_ids;
+    } else {
+        FT_LOG_WARNING("tokenizer result has no input_ids");
+    }
+
+    return response;
 }
 
 }  // namespace rtp_llm
