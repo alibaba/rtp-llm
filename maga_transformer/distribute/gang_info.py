@@ -36,7 +36,7 @@ def get_c2_members():
 
     infos = [x for x in content.split("\n") if "app.c2.io/biz-detail-ganginfo" in x]
     if len(infos) != 1:
-        raise Exception(f"ganginfo length is not equal to 1, acutal: {infos}")
+        raise Exception(f"ganginfo length is not equal to 1, actual: {infos}")
 
     gang_info = infos[0].replace("\\", "")
     logging.info(f"gang info: {gang_info[gang_info.index('=') + 2: -1]}")

@@ -24,7 +24,7 @@ def slice_index_transepose(ts: List[torch.Tensor], index: int, inter_size: int):
 def expand_scale(ts: List[torch.Tensor], hidden_size:int):
     new_ts: List[torch.Tensor] = []
     for t in ts:
-        assert t.shape == torch.Size([1]), "tensor shape should be [1], acutal: " + str(t.shape)
+        assert t.shape == torch.Size([1]), "tensor shape should be [1], actual: " + str(t.shape)
         new_ts.append(t.expand(hidden_size))
     return torch.concat(new_ts, dim=-1)
 
