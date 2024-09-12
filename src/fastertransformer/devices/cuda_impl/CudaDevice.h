@@ -82,6 +82,7 @@ public:
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
+    BufferPtr mlaQKVGemm(const AttentionLayerParams& params) override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }

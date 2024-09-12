@@ -370,6 +370,14 @@ struct AttentionConfigs {
     float q_scaling = 1.0f;
     bool fuse_qkv_add_bias = true;
     bool use_logn_attn = false;
+
+    // mla config
+    bool   use_mla = false;
+    size_t q_lora_rank;
+    size_t kv_lora_rank;
+    size_t nope_head_dim;
+    size_t rope_head_dim;
+    size_t v_head_dim;
 };
 
 using AttentionModuleOutput = void;

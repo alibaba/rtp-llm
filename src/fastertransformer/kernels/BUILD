@@ -26,6 +26,7 @@ cc_library(
     name = "kernels_cu",
     srcs = glob([
         "*.cu",
+        "mla_kernels/*.cu",
     ], exclude = [
         "layernorm_fp8_kernels.cu",
         "activation_fp8_kernels.cu",
@@ -37,6 +38,7 @@ cc_library(
     hdrs = glob([
         "*.h",
         "*.cuh",
+        "mla_kernels/*.h"
     ], exclude=[
         "AttentionFP8Weight.h",
         "moe_kernels.h",

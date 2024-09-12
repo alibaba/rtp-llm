@@ -33,6 +33,10 @@ public:
     virtual MaskOutput attentionMask(const MaskParams& params);
     virtual BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params);
 
+    // QKV ops
+    virtual BufferPtr mhaQKVGemm(const AttentionLayerParams& params);
+    virtual BufferPtr mlaQKVGemm(const AttentionLayerParams& params);
+
     // dedicated attention ops
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     virtual AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);

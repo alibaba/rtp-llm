@@ -78,6 +78,14 @@ MaskOutput DeviceOps::attentionMask(const MaskParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr DeviceOps::mhaQKVGemm(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+BufferPtr DeviceOps::mlaQKVGemm(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AttentionModuleOutput DeviceOps::contextAttention(const AttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

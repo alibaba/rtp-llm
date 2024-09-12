@@ -42,6 +42,7 @@ public:
     LossOutput loss(const LossParams& params) override;
     MaskOutput attentionMask(const MaskParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    BufferPtr mhaQKVGemm(const AttentionLayerParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

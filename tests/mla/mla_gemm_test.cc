@@ -1,0 +1,119 @@
+
+#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/OpData.h"
+
+using namespace fastertransformer;
+
+namespace unittest {
+
+class MlaQKVGemmOP: public torch::jit::CustomClassHolder {
+public:
+    MlaQKVGemmOP(int64_t head_num,
+                 int64_t q_lora_dim,
+                 int64_t kv_lora_dim,
+                 int64_t nope_head_dim,
+                 int64_t rope_head_dim,
+                 int64_t v_head_dim);
+
+    void forward(torch::Tensor input,
+                 torch::Tensor output,
+                 torch::Tensor q_a_weight,
+                 torch::Tensor q_b_weight,
+                 torch::Tensor kv_a_weight,
+                 torch::Tensor k_nope_weight,
+                 torch::Tensor k_rope_weight,
+                 torch::Tensor v_weight,
+                 torch::Tensor q_layernorm_weight,
+                 torch::Tensor kv_a_layernorm_weight);
+
+private:
+    DeviceBase*      device = nullptr;
+    AttentionConfigs attention_configs;
+    LayerNormConfig  layernorm_config;
+};
+
+MlaQKVGemmOP::MlaQKVGemmOP(int64_t head_num,
+                           int64_t q_lora_dim,
+                           int64_t kv_lora_dim,
+                           int64_t nope_head_dim,
+                           int64_t rope_head_dim,
+                           int64_t v_head_dim) {
+    std::string device_name   = "CUDA";
+    auto        device_params = GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}};
+
+    auto& default_device_params = device_params.device_params[0].second;
+
+    default_device_params.device_reserve_memory_bytes = 1L * 1024 * 1024 * 1024;
+    default_device_params.host_reserve_memory_bytes   = 1L * 1024 * 1024 * 1024;
+    DeviceFactory::initDevices(device_params);
+    device = DeviceFactory::getDefaultDevice();
+
+    attention_configs.use_mla       = true;
+    attention_configs.head_num      = head_num;
+    attention_configs.q_lora_rank   = q_lora_dim;
+    attention_configs.kv_lora_rank  = kv_lora_dim;
+    attention_configs.nope_head_dim = nope_head_dim;
+    attention_configs.rope_head_dim = rope_head_dim;
+    attention_configs.v_head_dim    = v_head_dim;
+
+    layernorm_config.eps       = 1e-6;
+    layernorm_config.norm_type = NormType::rmsnorm;
+}
+
+void MlaQKVGemmOP::forward(torch::Tensor input,
+                           torch::Tensor output,
+                           torch::Tensor q_a_weight,
+                           torch::Tensor q_b_weight,
+                           torch::Tensor kv_a_weight,
+                           torch::Tensor k_nope_weight,
+                           torch::Tensor k_rope_weight,
+                           torch::Tensor v_weight,
+                           torch::Tensor q_layernorm_weight,
+                           torch::Tensor kv_a_layernorm_weight) {
+    auto hidden       = torchTensor2Buffer(input);
+    auto q_a          = torchTensor2Buffer(q_a_weight);
+    auto q_b          = torchTensor2Buffer(q_b_weight);
+    auto kv_a         = torchTensor2Buffer(kv_a_weight);
+    auto k_nope       = torchTensor2Buffer(k_nope_weight);
+    auto k_rope       = torchTensor2Buffer(k_rope_weight);
+    auto v            = torchTensor2Buffer(v_weight);
+    auto q_layernorm  = torchTensor2Buffer(q_layernorm_weight);
+    auto kv_layernorm = torchTensor2Buffer(kv_a_layernorm_weight);
+
+    AttentionLayerWeights attention_weights;
+    attention_weights.q_a_weight.reset(new DenseWeights(q_a));
+    attention_weights.q_b_weight.reset(new DenseWeights(q_b));
+    attention_weights.kv_a_weight.reset(new DenseWeights(kv_a));
+    attention_weights.k_nope_weight.reset(new DenseWeights(k_nope));
+    attention_weights.k_rope_weight.reset(new DenseWeights(k_rope));
+    attention_weights.v_weight.reset(new DenseWeights(v));
+
+    BufferPtr bias = nullptr;
+    attention_weights.q_a_norm_weight.reset(new LayerNormWeights(q_layernorm, bias));
+    attention_weights.kv_a_norm_weight.reset(new LayerNormWeights(kv_layernorm, bias));
+
+    auto                      t1 = Buffer::emptyBuffer();
+    auto                      t2 = Buffer::emptyBuffer();
+    AttentionCommonInputs attention_common_inputs{t1, t2};
+
+    // create Attention
+    AttentionLayerParams params{-1,
+                                *hidden,
+                                nullptr,
+                                attention_configs,
+                                attention_weights,
+                                attention_common_inputs,
+                                std::nullopt,
+                                layernorm_config};
+    BufferPtr qkv;
+    qkv = device->mlaQKVGemm(params);
+
+    float* qkv_out_data = (float*)output.data_ptr();
+    cudaMemcpy(qkv_out_data, qkv->data(), qkv->sizeBytes(), cudaMemcpyDeviceToDevice);
+}
+}  // namespace unittest
+
+static auto MlaQKVGemmTHS = torch::jit::class_<unittest::MlaQKVGemmOP>("unittest", "MlaQKVGemmOP")
+                                .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>())
+                                .def("forward", &unittest::MlaQKVGemmOP::forward);

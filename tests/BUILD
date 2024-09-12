@@ -33,11 +33,14 @@ cc_library(
         "gemm_dequantize/*.cc",
         "gemm_group/*.cc",
         "int8_gemm/*.cc",
+        "mla/*.cc",
     ]),
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
-	"//:th_utils",
+        "//:th_utils",
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "@flash_attention//:flash_attention2_impl",
     ],
     copts = cuda_copts(),
     alwayslink = True,
@@ -127,6 +130,36 @@ py_test(
     deps = [
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "merge_transpose_test",
+    srcs = [
+        "mla/merge_transpose_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mla_gemm_test",
+    srcs = [
+        "mla/mla_gemm_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
     ],
     exec_properties = {'gpu':'A10'},
 )
