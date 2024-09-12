@@ -66,6 +66,7 @@ public:
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
 #define JSONIZE(field) json.Jsonize(#field, field, field)
+#define JSONIZE_OPTIONAL(field) if (field.has_value()) json.Jsonize(#field, field.value(), field.value())
         JSONIZE(max_new_tokens);
         JSONIZE(min_new_tokens);
         JSONIZE(num_validate_token);
@@ -75,13 +76,13 @@ public:
         JSONIZE(top_p);
         JSONIZE(temperature);
         JSONIZE(repetition_penalty);
-        //JSONIZE(random_seed);
-        //JSONIZE(top_p_decay);
-        //JSONIZE(top_p_min);
-        //JSONIZE(top_p_reset_ids);
-        //JSONIZE(task_id);
-        //JSONIZE(adapter_name);
-        //JSONIZE(select_tokens_id);
+        JSONIZE_OPTIONAL(random_seed);
+        JSONIZE_OPTIONAL(top_p_decay);
+        JSONIZE_OPTIONAL(top_p_min);
+        JSONIZE_OPTIONAL(top_p_reset_ids);
+        JSONIZE_OPTIONAL(task_id);
+        JSONIZE(adapter_name);
+        JSONIZE(select_tokens_id);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
         JSONIZE(return_incremental);
@@ -90,6 +91,7 @@ public:
         JSONIZE(timeout_ms);
         JSONIZE(stop_words_list);
 #undef JSONIZE
+#undef JSONIZE_OPTIONAL
     }
 
 };
