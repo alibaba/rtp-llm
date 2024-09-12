@@ -15,6 +15,9 @@ HttpError HttpRequest::Parse(anet::HTTPPacket *request) {
     if (!request) {
         return HttpError::BadRequest("http packet is nullptr");
     }
+    if (_request) {
+        _request->free();
+    }
     _request = request;
 
     std::string uri = request->getURI();

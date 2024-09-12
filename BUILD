@@ -103,6 +103,7 @@ filegroup(
         ],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
