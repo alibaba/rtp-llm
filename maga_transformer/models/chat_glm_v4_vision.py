@@ -13,12 +13,22 @@ from maga_transformer.models.chat_glm_v4_vision_weight import (
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
+from maga_transformer.utils.multimodal_util import MMUrlType
 
+
+class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
+    @torch.inference_mode()
+    def mm_process(self, mm_input, device, **kwargs):
+        embeddings = self.image_embedding([mm_input], device)[0]
+        pos_ids = [1] * embeddings.shape[0]
+        pos_ids[0] = 0
+        pos_ids[-1] = 2
+        return embeddings, torch.tensor(pos_ids, dtype=torch.int32)
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     def init_multimodal(self, config: GptInitModelParameters):
         if g_parallel_info.tp_rank == 0:
-            self.mm_part = EVA2CLIPImageEmbedding(config)
+            self.mm_part = ChatGlmV4VisionImageEmbedding(config)
             config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
                 {"vit": self.mm_part.vit}
             )
@@ -44,8 +54,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config.mm_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
         config.mm_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
         config.mm_sep_tokens = [[config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]]
-        config.cal_mm_tokens_in_rotary_emb = False
         config.include_sep_tokens = True
+        config.mm_position_ids_style = 1
         return config
 
     @staticmethod

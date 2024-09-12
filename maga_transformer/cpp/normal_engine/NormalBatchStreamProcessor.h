@@ -26,7 +26,7 @@ public:
         use_int8_kv_cache_(params.int8_kv_cache_),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
-        cal_mm_tokens_in_rotary_emb_(params.cal_mm_tokens_in_rotary_emb_),
+        mm_position_ids_style_((positionIdsStyle)params.mm_position_ids_style_),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     virtual absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const MergedOutput& merge_outputs) const;
@@ -43,13 +43,13 @@ protected:
     void    setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch = false) const;
 
 protected:
-    size_t          num_layers_;
-    size_t          vocab_size_;
-    bool            use_int8_kv_cache_;
-    bool            has_positional_encoding_;
-    bool            is_multimodal_;
-    bool            cal_mm_tokens_in_rotary_emb_;
-    ft::DeviceBase* device_;
+    size_t           num_layers_;
+    size_t           vocab_size_;
+    bool             use_int8_kv_cache_;
+    bool             has_positional_encoding_;
+    bool             is_multimodal_;
+    positionIdsStyle mm_position_ids_style_;
+    ft::DeviceBase*  device_;
 };
 
 }  // namespace rtp_llm

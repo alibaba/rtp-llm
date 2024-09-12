@@ -126,16 +126,14 @@ class Pipeline(object):
         if request_id == None:
             request_id = request_counter.increment()
 
-        # align urls and prompts
-        if urls is None or len(urls) == 0:
-            urls = []
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(generate_config_json, self.model.config.vocab_size,
                                                       self.model.config.special_tokens, self.tokenizer, **kwargs)
         # for delete stop word from output
         prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), **kwargs)
+        mm_inputs = []
         if self.model.is_multimodal():
-            prompt, urls = self.piple_funcs.multimodal_modify_prompt_func(prompt, urls, self._mm_token,
+            prompt, mm_inputs = self.piple_funcs.multimodal_modify_prompt_func(prompt, urls, self._mm_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
@@ -148,7 +146,7 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
-        return self.generate_stream(request_id, token_ids, urls, generate_config, **kwargs)
+        return self.generate_stream(request_id, token_ids, mm_inputs, generate_config, **kwargs)
 
     def process_stop_id(self,
                         generate_config: GenerateConfig,
@@ -252,7 +250,7 @@ class Pipeline(object):
         return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
 
     @torch.inference_mode()
-    async def generate_stream(self, request_id: int, token_ids: List[int], urls: List[str],
+    async def generate_stream(self, request_id: int, token_ids: List[int], mm_inputs: List[MultimodalInput],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
 
@@ -261,7 +259,6 @@ class Pipeline(object):
         else:
             token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
-        mm_inputs = [MultimodalInput(url) for url in urls]
         input = GenerateInput(request_id=request_id,
                               token_ids=token_ids,
                               mm_inputs=mm_inputs,

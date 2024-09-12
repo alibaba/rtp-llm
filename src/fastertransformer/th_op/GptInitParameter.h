@@ -202,7 +202,7 @@ public:
     bool                 is_multimodal_ = false;
     std::vector<std::vector<int64_t>> mm_sep_tokens_ = {};
     bool                 include_sep_tokens_ = false;
-    bool                 cal_mm_tokens_in_rotary_emb_ = true;
+    int64_t              mm_position_ids_style_ = 0; // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 
     bool     int8_kv_cache_       = false;
     bool     pre_allocate_op_mem_ = true;

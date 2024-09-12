@@ -50,6 +50,7 @@ cc_library(
         ":common",
         ":cache",
         ":system_prompt",
+        ":position_ids_generator",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -344,6 +345,20 @@ cc_library(
     deps = [
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/utils:py_utils",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "position_ids_generator",
+    hdrs = glob([
+        "position_ids_generator/*.h",
+    ]),
+    srcs = glob([
+        "position_ids_generator/*.cc",
+    ]),
+    deps = [
+        "//src/fastertransformer/devices:devices_base",
     ],
     visibility = ["//visibility:public"]
 )

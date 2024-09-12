@@ -9,6 +9,7 @@
 #include "autil/SynchronizedQueue.h"
 #include "absl/status/statusor.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
 namespace ft = fastertransformer;
 
@@ -184,6 +185,10 @@ public:
 
     void beamSearchKvCacheUpdate(ft::BufferPtr beam_idx);
 
+    ft::BufferPtr generateContextPositionIds(ft::DeviceBase* device);
+    
+    void generateNextPositionId(int32_t* now_pos);
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
@@ -229,6 +234,9 @@ protected:
     ft::BufferPtr                       loss_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;
+
+    std::optional<ft::BufferPtr>        context_position_ids_;
+    positionIdsStyle                    mm_position_ids_style_;
 
     // just for bool test
     bool perf_test_ = false;

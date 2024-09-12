@@ -247,7 +247,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(is_multimodal, is_multimodal_)                         \
     DEF_PROPERTY(mm_sep_tokens, mm_sep_tokens_)                         \
     DEF_PROPERTY(include_sep_tokens, include_sep_tokens_)               \
-    DEF_PROPERTY(cal_mm_tokens_in_rotary_emb, cal_mm_tokens_in_rotary_emb_) \
+    DEF_PROPERTY(mm_position_ids_style, mm_position_ids_style_)         \
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)             \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)               \
     DEF_PROPERTY(block_nums, block_nums_)                               \

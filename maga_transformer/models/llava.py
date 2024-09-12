@@ -87,11 +87,11 @@ class Llava(Llama, MultiModalMixin):
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
-        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
+        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
         if img_token in prompt:
-            return prompt, images
+            return prompt, mm_inputs
         else:
-            return prompt + (img_token + "\n") * len(images), images
+            return prompt + (img_token + "\n") * len(images), mm_inputs
 
     @staticmethod
     def _create_config(ckpt_path):

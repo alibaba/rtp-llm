@@ -9,6 +9,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
 namespace ft = fastertransformer;
 
@@ -69,6 +70,7 @@ public:
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<ft::BufferPtr>                text_tokens_mask; // text part for 1 and multimodal part for 0
     std::optional<ft::BufferPtr>                mm_locs; // multimodal input locations
+    std::optional<std::vector<ft::BufferPtr>>   mm_position_ids;
 
     int                             lora_id       = -1;
     int                             prefix_length = 0;

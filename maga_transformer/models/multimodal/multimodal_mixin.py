@@ -13,6 +13,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
+from maga_transformer.models.base_model import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
@@ -92,7 +93,7 @@ class MultiModalMixin:
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], urls: List[str],
-                                        mm_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
+                                        mm_token: str, **kwargs: Any) -> Tuple[str, List[MultimodalInput]]:
         # should delete after chatapi interface update
         if kwargs.get('generate_config', {})['request_format'] == RequestFormat.CHAT_API:
             if isinstance(prompt, str):
@@ -120,10 +121,10 @@ class MultiModalMixin:
                         else:
                             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "content type can only be text or image_url, but get: " + x['type'])
                     new_prompt += '\n'
-            return new_prompt + 'ASSISTANT :', new_urls
+            return new_prompt + 'ASSISTANT :', [MultimodalInput(new_url) for new_url in new_urls]
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
-        return prompt, urls
+        return prompt, [MultimodalInput(url) for url in urls]
 
     def _load_mm_weight(
         self, weights_info: ModelDeployWeightInfo, ckpt_path: str, vit_params: VitParameters,

@@ -10,7 +10,7 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
 from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
-from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.base_model import BaseModel, MultimodalInput
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
 from maga_transformer.model_factory_register import register_model
@@ -42,8 +42,8 @@ class QWen_VL(QWen, MultiModalMixin):
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
-                                        img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
-        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
+                                        img_token: str, **kwargs: Any) -> Tuple[str, List[MultimodalInput]]:
+        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
         start_str = '<img>'
         end_str = '</img>'
         if img_token in prompt:
@@ -55,7 +55,7 @@ class QWen_VL(QWen, MultiModalMixin):
             for split_prompt in split_prompts[1:]:
                 res = res + start_str + images[idx] + end_str + split_prompt
                 idx = idx + 1
-            return res, images
+            return res, mm_inputs
         else:
             prefix_prompt = ''
             if len(images) > 0:
@@ -71,7 +71,7 @@ class QWen_VL(QWen, MultiModalMixin):
                 images.append(tmp_prompt[start_idx + len(start_str): end_idx])
                 tmp_prompt = tmp_prompt[end_idx + len(end_str):]
 
-            return prefix_prompt + prompt, images
+            return prefix_prompt + prompt, [MultimodalInput(image) for image in images]
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

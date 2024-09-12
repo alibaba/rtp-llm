@@ -45,7 +45,11 @@ class MultiModalEmbeddingInterface:
                 mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type)
             except Exception as e:
                 raise Exception(f"multimodal process for {url} error, exception {e}")
-            features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs).to(dtype).contiguous()
+            features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs)
+            if isinstance(features, tuple):
+                features = (features[0].to(dtype).contiguous(), features[1].contiguous())
+            else:
+                features = features.to(dtype).contiguous()
             vit_emb_cache_.insert_cache(url, features)
             return features
         else:

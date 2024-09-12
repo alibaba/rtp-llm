@@ -25,6 +25,11 @@ struct ExpandedOutput {
         expanded_ids(expanded_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
 };
 
+struct MMEmbeddingRes {
+    std::vector<torch::Tensor> mm_features = {};
+    std::optional<std::vector<ft::BufferPtr>> mm_position_ids = std::nullopt;
+};
+
 class MultimodalProcessor {
 public:
         MultimodalProcessor(py::object mm_proces_engine, std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int64_t max_seq_len):
@@ -53,9 +58,9 @@ private:
         return absl::OkStatus();
     }
 
-    virtual absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    virtual absl::StatusOr<MMEmbeddingRes> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_inputs.size() == 0) {
-            return std::vector<torch::Tensor>();
+            return MMEmbeddingRes();
         } else if (!mm_process_engine_.is_none()) {
             std::vector<std::string> urls;
             std::vector<int32_t> types;
@@ -66,12 +71,24 @@ private:
             try {
                 py::gil_scoped_acquire acquire;
                 auto res = mm_process_engine_.attr("submit")(urls, types);
-                auto mm_embedding_vec = ft::convertPyObjectToVec(res);
-                std::vector<torch::Tensor> embedding_res;
+                auto mm_embedding_vec = ft::convertPyObjectToVec(res.attr("embeddings"));
+
+                MMEmbeddingRes mm_embedding_res;
+                std::vector<torch::Tensor> mm_features;
                 for (auto& emb: mm_embedding_vec) {
-                    embedding_res.emplace_back(ft::convertPyObjectToTensor(emb));
+                    mm_features.emplace_back(ft::convertPyObjectToTensor(emb));
                 }
-                return embedding_res;
+                mm_embedding_res.mm_features = mm_features;
+                auto position_id_vec = res.attr("position_ids");
+                std::vector<ft::BufferPtr> position_ids;
+                if (!position_id_vec.is_none()) {
+                    for (auto& position_id: ft::convertPyObjectToVec(position_id_vec)) {
+                        auto pos = ft::torchTensor2Buffer(ft::convertPyObjectToTensor(position_id));
+                        position_ids.emplace_back(pos);
+                    }
+                    mm_embedding_res.mm_position_ids = position_ids;
+                }
+                return mm_embedding_res;
             } catch (py::error_already_set &e) {
                 return absl::InternalError(std::string(e.what()));
             }
@@ -204,8 +221,9 @@ private:
 
 public:
     absl::Status update_mm_features(std::shared_ptr<rtp_llm::GenerateInput>& input) {
-        CHECK_AND_RETURN_REF(mm_features, mm_embedding(input->multimodal_inputs.value()));
-        input->multimodal_features = std::move(mm_features);
+        CHECK_AND_RETURN_REF(mm_embedding_res, mm_embedding(input->multimodal_inputs.value()));
+        input->multimodal_features = std::move(mm_embedding_res.mm_features);
+        input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
         CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
         input->input_ids = expanded_ids.expanded_ids;
         input->text_tokens_mask = expanded_ids.text_tokens_mask;
