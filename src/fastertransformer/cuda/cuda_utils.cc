@@ -735,21 +735,21 @@ std::string getDriverVersion() {
 
     result = nvmlInit();
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
     }
     result = nvmlDeviceGetHandleByIndex(0, &device);
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API");
+        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
     }
 
     char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
     result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API");
+        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: " + std::to_string(result));
     }
     result = nvmlShutdown();
     if (NVML_SUCCESS != result) {
-        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
     }
     return std::string(driverVersion);
 }
@@ -766,7 +766,7 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
 
     result = nvmlInit();
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
     }
 
     for (size_t i = 0; i < device_ids.size(); i++) {
@@ -776,18 +776,18 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
 
             result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ": " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
             result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ": " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
             }
 
             nvmlGpuP2PStatus_t isActive;
             result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API");
+                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API, Error code: " + std::to_string(result));
             }
             if (isActive != NVML_P2P_STATUS_OK) {
                 FT_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
@@ -797,7 +797,7 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
     }
     result = nvmlShutdown();
     if (NVML_SUCCESS != result) {
-        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
     }
     FT_LOG_INFO("All GPUs are connected via NVLink");
     return true;
@@ -809,7 +809,7 @@ bool checkOnSameNumaNodes(std::vector<int> device_ids) {
 
     result = nvmlInit();
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
     }
 
     for (size_t i = 0; i < device_ids.size(); i++) {
@@ -819,18 +819,18 @@ bool checkOnSameNumaNodes(std::vector<int> device_ids) {
 
             result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ": " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
             result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ": " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
             }
 
             nvmlGpuTopologyLevel_t topo;
             result = nvmlDeviceGetTopologyCommonAncestor(deviceHandles[0], deviceHandles[1], &topo);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API");
+                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API, Error code: " + std::to_string(result));
             }
             if (topo == NVML_TOPOLOGY_SYSTEM) {
                 FT_LOG_INFO("GPU %d and GPU %d are not on same numa node", device_id1, device_id2);
@@ -840,7 +840,7 @@ bool checkOnSameNumaNodes(std::vector<int> device_ids) {
     }
     result = nvmlShutdown();
     if (NVML_SUCCESS != result) {
-        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
     }
     FT_LOG_INFO("All GPUs are on same numa node");
     return true;
