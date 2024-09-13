@@ -40,7 +40,6 @@ class InternVLConversation(Conversation):
                 prompt += f"{self.roles[message.role]}{self.connector[0]}{message.content}"
             elif isinstance(message.content, list):
                 now_prompt = ""
-                mm_prefix = ""
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
                         assert (isinstance(content_part.text, str))
@@ -48,15 +47,15 @@ class InternVLConversation(Conversation):
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         urls.append(content_part.image_url.url)
-                        mm_prefix += "<image>\n"
+                        now_prompt += "<image>\n"
                         types.append(MMUrlType.IMAGE)
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert (content_part.video_url != None)
                         urls.append(content_part.video_url.url)
-                        mm_prefix += "".join([f"Frame{i+1}: <image>\n" for i in range(video_frame_num)])
+                        now_prompt += "".join([f"Frame{i+1}: <image>\n" for i in range(video_frame_num)])
                         types.append(MMUrlType.VIDEO)
 
-                prompt += f"{self.roles[message.role]}" + self.connector[0] + mm_prefix + now_prompt
+                prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
                 prompt += self.seps[index % 2]
             else:

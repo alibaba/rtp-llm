@@ -32,18 +32,16 @@ class QwenVLRenderer(CustomChatRenderer):
                 prompt += f"<|im_start|>{message.role}\n{message.content}<|im_end|>\n"
             elif isinstance(message.content, list):
                 prompt += f"<|im_start|>{message.role}\n"
-                text_prompt: str = ""
-                image_prompt: str = ""
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
                         assert (isinstance(content_part.text, str))
-                        text_prompt += content_part.text
+                        prompt += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         url = content_part.image_url.url
                         images.append(url)
-                        image_prompt += f"Picture {len(images)}: <img>{url}</img>\n"
-                prompt += image_prompt + text_prompt + "<|im_end|>\n"
+                        prompt += f"Picture {len(images)}: <img>{url}</img>\n"
+                prompt += "<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
         return PromptWithMMInput(prompt=prompt, urls=images)
 
