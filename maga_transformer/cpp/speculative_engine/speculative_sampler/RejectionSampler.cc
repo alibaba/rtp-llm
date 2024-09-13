@@ -27,7 +27,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             accepted_len = stochasticSample(propose_step, propose_stream_output, scorer_stream_output);
         }
         FT_LOG_DEBUG(
-            "stream [%d], topk [%d], topp [%f], propose_tokens = [%d], accept_tokens = [%d]", stream_config->top_k, stream_config->top_p, stream->streamId(), propose_step, accepted_len);
+            "stream [%d], topk = [%d], topp = [%f], propose_tokens = [%d], accept_tokens = [%d]", stream->streamId(), stream_config->top_k, stream_config->top_p, propose_step, accepted_len);
 
         ft::BufferPtr accepted_tokens =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST});

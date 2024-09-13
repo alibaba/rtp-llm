@@ -322,8 +322,7 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void kernelLaunchConfig(
-        int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, size_t data_type_bytes,
-        int ranks_per_node)
+        int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, size_t data_type_bytes)
 {
     assert(data_type_bytes == 2 || data_type_bytes == 4);
     // NOTE: need to support FP16 and FP32
@@ -367,7 +366,7 @@ void kernelLaunchConfig(
 
             // TODO(xyz): when elts / MAX_RANKS_PER_NODE % MAX_RANKS_PER_NODE != 0(for example, 100000), 
             // there exist some bug in custom ar kernel, fix it
-            int total_threads = elts / ranks_per_node / ranks_per_node;
+            int total_threads = elts / MAX_RANKS_PER_NODE / MAX_RANKS_PER_NODE;
             assert(elts / MAX_RANKS_PER_NODE % MAX_RANKS_PER_NODE == 0 && total_threads % WARP_SIZE == 0);
 
             while (total_threads % blocks_per_grid != 0 || total_threads / blocks_per_grid > DEFAULT_BLOCK_SIZE) {
@@ -401,7 +400,7 @@ void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, cudaStream_t 
         kernel_algo = 0;
     }
 
-    kernelLaunchConfig(blocks_per_grid, threads_per_block, elts_total, kernel_algo, sizeof(T), RANKS_PER_NODE);
+    kernelLaunchConfig(blocks_per_grid, threads_per_block, elts_total, kernel_algo, sizeof(T));
 
     if (kernel_algo == 0) {
         param->elts_per_rank  = elts_total;
