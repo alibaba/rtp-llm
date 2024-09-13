@@ -46,7 +46,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
@@ -97,7 +97,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
@@ -149,7 +149,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);

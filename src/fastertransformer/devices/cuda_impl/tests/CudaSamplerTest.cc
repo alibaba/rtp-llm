@@ -1,5 +1,6 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
+#include "src/fastertransformer/kernels/banRepeatNgram.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -44,9 +45,8 @@ TEST_F(CudaSamplerTest, testTopK) {
     GreedyParams params({
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt,
-        *output_all_probs,
+        nullopt, nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -105,9 +105,8 @@ TEST_F(CudaSamplerTest, testTopP) {
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt,
-        *output_all_probs,
+        nullopt, nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -172,9 +171,8 @@ TEST_F(CudaSamplerTest, testTopKTopPBatch) {
     GreedyParams params({
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt,
-        *output_all_probs,
+        nullopt, nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -197,9 +195,9 @@ TEST_F(CudaSamplerTest, testTopKTopPBatch) {
     auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
     ASSERT_VECTOR_NEAR(
         output_all_probs_host,
-        std::vector<float>({0, 0, 0, 0, 0, 0.999999, 0, 0, 0,      0,        
-                            0.247309, 0, 0.254418, 0, 0, 0, 0, 0, 0.249385, 0.248887, 
-                            0, 0, 0, 0, 0, 0, 0, 0.50008, 0.49992, 0, 
+        std::vector<float>({0, 0, 0, 0, 0, 0.999999, 0, 0, 0,      0,
+                            0.247309, 0, 0.254418, 0, 0, 0, 0, 0, 0.249385, 0.248887,
+                            0, 0, 0, 0, 0, 0, 0, 0.50008, 0.49992, 0,
                             0, 0, 0, 0, 0, 0, 0, 0.833467, 0.166533, 0}),
         1e-3);
 }
@@ -214,23 +212,26 @@ TEST_F(CudaSamplerTest, testRandom) {
     BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
     // BufferPtr finished = createBuffer<bool>({1}, {0});
     BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
-        1, 1, 0, 0, 0, 0,
+        1, 2, 8, 1, 2, 0
     });
 
-    BufferPtr input_lengths = createBuffer<int32_t>({1}, {5});
-    BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {-1});
+    // NOTE(wangyin): The lengths are substrated by 1 here, as it needs to add 1 in the kernel.
+    // TODO(wangyin): fix this when new fmha is available.
+    BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {4});
+    BufferPtr input_lengths = createBuffer<int32_t>({1}, {-1});
     BufferPtr cum_log_probs = createBuffer<float>({1}, {-1.0});
     BufferPtr rand_seed = createBuffer<uint64_t>({1}, {1}, AllocationType::HOST);
 
     auto top_k = createBuffer<uint32_t>({1}, {0}, AllocationType::HOST);
     auto top_p = createBuffer<float>({1}, {0.5f}, AllocationType::HOST);
     auto temperture = createBuffer<float>({1}, {0.2}, AllocationType::HOST);
+    auto no_repeat_ngram_size = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
 
     auto logits_input = device_->clone({*logits});
     GreedyParams params({
-        *logits_input, *sequence_lengths, *input_lengths, *output_token_ids, step,
+        *logits_input, *input_lengths, *sequence_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt, *no_repeat_ngram_size,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
@@ -247,7 +248,10 @@ TEST_F(CudaSamplerTest, testRandom) {
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
-    std::unordered_set<size_t> expected = {2, 8, 9};
+    for (int i = 0; i < vocab_size; i++) {
+        printf("counts[%d] = %ld\n", i, counts[i]);
+    }
+    std::unordered_set<size_t> expected = {2, 9};
     for (int i = 0; i < vocab_size; i++) {
         if (expected.find(i) != expected.end()) {
             EXPECT_GE(counts[i], 1000);
@@ -267,7 +271,10 @@ TEST_F(CudaSamplerTest, testRandom) {
         counts[output_token_ids_host[5]]++;
     }
 
-    expected = {0, 2, 8, 9};
+    for (int i = 0; i < vocab_size; i++) {
+        printf("counts[%d] = %ld\n", i, counts[i]);
+    }
+    expected = {0, 1, 2, 9};
     for (int i = 0; i < vocab_size; i++) {
         if (expected.find(i) != expected.end()) {
             EXPECT_GE(counts[i], 1000);
@@ -276,3 +283,74 @@ TEST_F(CudaSamplerTest, testRandom) {
         }
     }
 }
+
+TEST_F(CudaSamplerTest, testBanRepeatNGram) {
+    const auto no_repeat_ngram_size_buf = createBuffer<int32_t>({4}, {2, 3, 2, 3});
+    const auto vocab_size = 10;
+
+    const auto batch_size = 4;
+    const auto beam_width = 1;
+
+    BufferPtr logits = createBuffer<float>({batch_size, vocab_size}, {
+        0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1,
+    });
+
+    size_t step = 8; // also max_input_length
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        0, 2, 3, 4, 5, 0, 0, 2, 0,
+        1, 2, 3, 3, 3, 1, 2, 3, 0,
+        1, 2, 1, 2, 1, 2, 1, 2, 0,
+        9, 8, 6, 9, 8, 0, 0, 0, 0,
+    });
+
+    // NOTE(wangyin): The lengths are substrated by 1 here, as it needs to add 1 in the kernel.
+    // TODO(wangyin): fix this when new fmha is available.
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {7, 7, 7, 4});
+    BufferPtr no_repeat_ngram_size = createBuffer<int32_t>({4}, {3, 4, 5, 2});
+
+    const auto cuda_device = dynamic_cast<CudaDevice*>(device_);
+    const auto stream = cuda_device->getStream();
+
+    sync_check_cuda_error();
+
+    std::vector<uint64_t> output_ids_ptrs(batch_size);
+    for (int i = 0; i < batch_size; i++) {
+        output_ids_ptrs[i] = (uint64_t)(output_token_ids->data<int32_t>() + i * (step + 1));
+        printf("output_ids_ptrs[%d] = %p\n", i, (void*)output_ids_ptrs[i]);
+    }
+    auto output_ids_ptrs_device = createBuffer<uint64_t>({batch_size}, output_ids_ptrs);
+
+    tensorrt_llm::kernels::invokeBanRepeatNgram(
+        logits->data<float>(),
+        (int32_t const**)(output_ids_ptrs_device->data()),
+        nullptr, // finished_buf
+        nullptr, // parent_ids_buf
+        nullptr, // batch_slot
+        sequence_lengths->data<int32_t>(),
+        batch_size,
+        beam_width,
+        step,
+        no_repeat_ngram_size_buf->data<int32_t>(),
+        vocab_size,
+        step,
+        stream);
+    sync_check_cuda_error();
+
+    std::vector<int32_t> expcted_ban_token_ids = {3, 3, 1, 6};
+    const auto logits_tensor = bufferToTensor(*logits, device_);
+    for (int i = 0; i < batch_size; i++) {
+        auto ban_id = expcted_ban_token_ids[i];
+        for (int j = 0; j < vocab_size; j++) {
+            if (j == ban_id) {
+                EXPECT_EQ(logits_tensor[i][j].item<float>(), -INFINITY);
+            } else {
+                EXPECT_GT(logits_tensor[i][j].item<float>(), 0.0f);
+            }
+        }
+    }
+
+}
+

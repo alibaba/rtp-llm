@@ -69,6 +69,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
         rand_seed,
         repetition_penalty,
         min_length,
+        nullptr, // no_repeat_ngram_size
         device_->clone({*cum_log_probs}),
     };
 

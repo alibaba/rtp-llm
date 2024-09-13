@@ -306,6 +306,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.random_seeds  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.repetition_penalty = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.min_lengths   = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.no_repeat_ngram_size = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.token_ids = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
@@ -321,6 +322,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
     uint64_t* random_seeds    = sampler_inputs.random_seeds->data<uint64_t>();
     float* repetition_penalty = sampler_inputs.repetition_penalty->data<float>();
     int32_t* min_lengths      = sampler_inputs.min_lengths->data<int32_t>();
+    int32_t* no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
 
     int batch_idx   = 0;
     for (auto& stream : all_streams) {
@@ -351,6 +353,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
                 std::uniform_int_distribution<std::int64_t> distrib(0, std::numeric_limits<std::int64_t>::max());
                 random_seeds[batch_idx]   = distrib(gen);
             }
+            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             batch_idx += 1;
         }
     }

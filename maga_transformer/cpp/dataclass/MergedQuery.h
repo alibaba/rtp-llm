@@ -22,6 +22,7 @@ public:
     std::optional<ft::BufferPtr> presence_penalty;
     std::optional<ft::BufferPtr> min_length;
     std::optional<ft::BufferPtr> len_penalty;
+    std::optional<ft::BufferPtr> no_repeat_ngram_size;
     std::optional<ft::BufferPtr> beam_search_diversity_rate;
     std::optional<ft::BufferPtr> random_seed;
     std::optional<ft::BufferPtr> top_p_decay;

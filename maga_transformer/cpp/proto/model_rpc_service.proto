@@ -36,20 +36,21 @@ message GenerateConfigPB {
     float top_p = 6;
     float temperature = 7;
     float repetition_penalty = 8;
-    google.protobuf.Int64Value random_seed = 9;
-    google.protobuf.FloatValue top_p_decay = 10;
-    google.protobuf.FloatValue top_p_min = 11;
-    google.protobuf.Int32Value top_p_reset_ids = 12;
-    google.protobuf.StringValue task_id = 13;
-    int32 calculate_loss = 14;
-    bool return_incremental = 15;
-    bool return_hidden_states = 16;
-    bool return_logits = 17;
-    bool is_streaming = 18;
-    int32 timeout_ms = 19;
-    IntMatrix stop_words_list = 20;
-    repeated int32 select_tokens_id = 21;
-    google.protobuf.StringValue adapter_name = 22;
+    google.protobuf.Int32Value no_repeat_ngram_size = 9;
+    google.protobuf.Int64Value random_seed = 10;
+    google.protobuf.FloatValue top_p_decay = 11;
+    google.protobuf.FloatValue top_p_min = 12;
+    google.protobuf.Int32Value top_p_reset_ids = 13;
+    google.protobuf.StringValue task_id = 14;
+    int32 calculate_loss = 15;
+    bool return_incremental = 16;
+    bool return_hidden_states = 17;
+    bool return_logits = 18;
+    bool is_streaming = 19;
+    int32 timeout_ms = 20;
+    IntMatrix stop_words_list = 21;
+    repeated int32 select_tokens_id = 22;
+    google.protobuf.StringValue adapter_name = 23;
 }
 
 message MulitmodalInputPB {

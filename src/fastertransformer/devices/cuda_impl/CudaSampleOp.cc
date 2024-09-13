@@ -4,7 +4,9 @@
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
+#include "src/fastertransformer/kernels/banRepeatNgram.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace std;
 
@@ -154,6 +156,36 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                 vocab_size_padded,
                 stream_);
         }
+
+        if (params.no_repeat_ngram_size) {
+            const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value().get();
+            if (any_of(no_repeat_ngram_size.data<int32_t>(),
+                       no_repeat_ngram_size.data<int32_t>() + decoder_batch_size,
+                       [](auto s) { return s != 0; }))
+            {
+                auto no_repeat_ngram_size_buf = clone({no_repeat_ngram_size});
+                auto output_ids_ptrs = allocateBuffer({DataType::TYPE_UINT64, {decoder_batch_size}, AllocationType::HOST});
+                for (int i = 0; i < decoder_batch_size; i++) {
+                    output_ids_ptrs->data<uint64_t>()[i] = (uint64_t)(device_tokens->data<int32_t>() + i * (step + 1));
+                }
+                auto output_ids_ptrs_device = clone({*output_ids_ptrs, AllocationType::DEVICE});
+
+                tensorrt_llm::kernels::invokeBanRepeatNgram(
+                    logits.data<float>(),
+                    (int32_t const**)(output_ids_ptrs_device->data()),
+                    nullptr, // finished_buf
+                    nullptr, // parent_ids_buf
+                    nullptr, // batch_slot
+                    sequence_lengths->data<int32_t>(),
+                    decoder_batch_size,
+                    1, // beam_width
+                    step + 1,
+                    no_repeat_ngram_size_buf->data<int32_t>(),
+                    vocab_size_padded,
+                    step + 1,
+                    stream_);
+            }
+        }
     }
 
     // 4. run sampling
@@ -184,7 +216,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                     nullptr, // output_log_probs
                                     nullptr, // curandstaste
                                     max_top_k,
-                                    max_top_p, 
+                                    max_top_p,
                                     vocab_size_padded,
                                     nullptr, // end ids
                                     nullptr,

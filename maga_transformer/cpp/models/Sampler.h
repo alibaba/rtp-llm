@@ -19,7 +19,7 @@ public:
         std::stringstream debug_string;
         debug_string << "SamplerInputs { "
                      << "batch_size: " << batch_size
-                     << ", step: " << step 
+                     << ", step: " << step
                      << ", logits: " << logits->debugStringWithData<int32_t>()
                      << ", token_ids: " << token_ids->debugStringWithData<int32_t>()
                      << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
@@ -44,9 +44,10 @@ public:
     ft::BufferPtr random_seeds;        // shape: [batch_size]
     ft::BufferPtr repetition_penalty;  // shape: [batch_size]
     ft::BufferPtr min_lengths;         // shape: [batch_size]
+    ft::BufferPtr no_repeat_ngram_size;    // shape: [batch_size]
 
-    mutable ft::BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
-    mutable ft::BufferPtr all_probs;    // shape: [batch_size * num_beams, vocab_size]
+    mutable ft::BufferPtr cum_log_probs; // shape: [batch_size * num_beams]
+    mutable ft::BufferPtr all_probs;     // shape: [batch_size * num_beams, vocab_size]
 };
 
 struct SamplerOutput {

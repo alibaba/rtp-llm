@@ -62,6 +62,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto random_seeds = MAY_GET_BUFFER_VIEW(inputs.random_seeds);
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty);
             auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
+            auto no_repeat_ngram_size = MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size);
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx, sample_seq_num) : Buffer::emptyBuffer());
             device_->sampleGreedy({
                 sample_logits,
@@ -76,6 +77,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
                 inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                 *eos_ids_,
+                inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                 *sample_cum_log_probs,
                 nullopt, // output_log_probs
                 inputs.all_probs ? (OptionalBufferRef) all_probs: nullopt

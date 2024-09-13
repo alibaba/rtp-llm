@@ -30,6 +30,7 @@ public:
     float                top_p                = 0.0;
     float                temperature          = 1.0;
     float                repetition_penalty   = 1.0;
+    std::optional<int>   no_repeat_ngram_size;
     std::optional<int>   random_seed;
     std::optional<float> top_p_decay;
     std::optional<float> top_p_min;
@@ -76,6 +77,7 @@ public:
         JSONIZE(top_p);
         JSONIZE(temperature);
         JSONIZE(repetition_penalty);
+        JSONIZE_OPTIONAL(no_repeat_ngram_size);
         JSONIZE_OPTIONAL(random_seed);
         JSONIZE_OPTIONAL(top_p_decay);
         JSONIZE_OPTIONAL(top_p_min);

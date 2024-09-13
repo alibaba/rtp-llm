@@ -459,6 +459,7 @@ struct GreedyParams {
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef min_lengths;
     OptionalBufferRef eos_ids;
+    OptionalBufferRef no_repeat_ngram_size;
 
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;

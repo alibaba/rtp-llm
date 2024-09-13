@@ -47,6 +47,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.top_p = input_py.generate_config.top_p
     generate_config_pb.temperature = input_py.generate_config.temperature
     generate_config_pb.repetition_penalty = input_py.generate_config.repetition_penalty
+    trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")

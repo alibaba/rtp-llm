@@ -38,6 +38,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->top_p = config_proto->top_p();
     generate_config->temperature = config_proto->temperature();
     generate_config->repetition_penalty = config_proto->repetition_penalty();
+    TRANS_OPTIONAL(no_repeat_ngram_size);
     TRANS_OPTIONAL(random_seed);
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);
