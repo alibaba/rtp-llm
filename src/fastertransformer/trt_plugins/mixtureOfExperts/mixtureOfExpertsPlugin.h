@@ -36,44 +36,31 @@
 namespace tensorrt_llm::plugins
 {
 
-class MixtureOfExpertsPlugin 
+class MixtureOfExpertsPlugin
 {
 public:
     // using MOEParallelismMode = tensorrt_llm::kernels::MOEParallelismMode;
     using MOEExpertScaleNormalizationMode = tensorrt_llm::kernels::MOEExpertScaleNormalizationMode;
 
     MixtureOfExpertsPlugin() = default;
-    MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size, 
-        int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type, 
-        nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode);
+    MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
+        int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
+        nvinfer1::DataType weight_type, bool has_zeros, int group_size,
+        MOEExpertScaleNormalizationMode normalization_mode);
 
-    void init(int number_of_experts, int top_k, bool normalize_expert_scale,
-    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
-    nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode);
+    void init(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
+        int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
+        nvinfer1::DataType weight_type, bool has_zeros, int group_size,
+        MOEExpertScaleNormalizationMode normalization_mode);
 
     ~MixtureOfExpertsPlugin() = default;
 
     size_t getWorkspaceSize(int num_tokens);
-    int enqueue(
-    const void* input,
-    const float* moe_gates,
-    const void* fc1_expert_weight,
-    const void* fc1_quant_scale,
-    const void* fc1_quant_zero,
-    const void* fc1_expert_bias,
-    const void* fc2_expert_weight,
-    const void* fc2_quant_scale,
-    const void* fc2_quant_zero,
-    const void* fc2_expert_bias,
-    const int num_rows,
-    void* workspace,
-    void* final_output,
-    void* fc2_result,
-    const bool* finished,
-    void* expert_scale,
-    int* src_row_to_dst_row,
-    int* export_for_src_row,
-    cudaStream_t stream) noexcept;
+    int enqueue(void const* input, float const* moe_gates, void const* fc1_expert_weight, void const* fc1_quant_scale,
+        void const* fc1_quant_zero, void const* fc1_expert_bias, void const* fc2_expert_weight,
+        void const* fc2_quant_scale, void const* fc2_quant_zero, void const* fc2_expert_bias, int const num_rows,
+        void* workspace, void* final_output, void* fc2_result, bool const* finished, void* expert_scale,
+        int* src_row_to_dst_row, int* export_for_src_row, cudaStream_t stream) noexcept;
 
 private:
     std::shared_ptr<kernels::CutlassMoeFCRunnerInterface> mMOERunner{};
@@ -94,7 +81,6 @@ private:
     MOEExpertScaleNormalizationMode mNormalizationMode{};
 
     kernels::MOEParallelismConfig getParallelismConfig() const;
-
 };
 
 } // namespace tensorrt_llm::plugins

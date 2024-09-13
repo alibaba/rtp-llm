@@ -152,11 +152,10 @@ struct HopperGroupedGemmInput
 
 using ActivationType = fastertransformer::ActivationType;
 
-template <typename T,                   /*The type used for activations/scales/compute*/
-    typename WeightType,                /* The type for the MoE weights */
-    cutlass::WeightOnlyQuantOp QuantOp,
-    typename OutputType,                /* The output type for the GEMM */
-    typename ScaleBiasType = OutputType /* The type for the scales/bias */
+template <typename T,                                        /*The type used for activations/scales/compute*/
+    typename WeightType,                                     /* The type for the MoE weights */
+    cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, /* The output type for the GEMM */
+    typename ScaleBiasType = OutputType                      /* The type for the scales/bias */
     >
 class MoeGemmRunner
 {
@@ -169,16 +168,16 @@ public:
     static constexpr bool use_fp8 = false;
 #endif
 
-    void moeGemmBiasAct(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size,
-        ScaleBiasType const* biases, bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert,
-        HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-        ActivationType activation_type, bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream,
-        cutlass_extensions::CutlassGemmConfig chosen_conf);
-
-    void moeGemm(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, void* C,
+    void moeGemmBiasAct(T const* A, WeightType const* B, ScaleBiasType const* weight_scales,
+        ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,
         int64_t const* total_tokens_including_expert, HopperGroupedGemmInput layout_info, int64_t total_rows,
-        int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe, float const** alpha_scale_ptr_array,
-        cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf);
+        int64_t gemm_n, int64_t gemm_k, int num_experts, ActivationType activation_type, bool use_fused_moe,
+        float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf);
+
+    void moeGemm(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros,
+        int group_size, void* C, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput layout_info,
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,
+        float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf);
 
     std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs() const;
     static std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs(int sm);
@@ -197,18 +196,18 @@ public:
 
 private:
     template <typename EpilogueTag>
-    void dispatchToArch(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size,
-        ScaleBiasType const* biases, bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert,
-        HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-        cutlass_extensions::CutlassGemmConfig gemm_config, bool use_fused_moe, float const** alpha_scale_ptr_array,
-        cudaStream_t stream, int* occupancy = nullptr);
+    void dispatchToArch(T const* A, WeightType const* B, ScaleBiasType const* weight_scales,
+        ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,
+        int64_t const* total_tokens_including_expert, HopperGroupedGemmInput layout_info, int64_t total_rows,
+        int64_t gemm_n, int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config,
+        bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr);
 
     template <typename EpilogueTag>
-    void runGemm(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases,
-        bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert,
-        HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-        bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream,
-        cutlass_extensions::CutlassGemmConfig chosen_conf);
+    void runGemm(T const* A, WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros,
+        int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,
+        int64_t const* total_tokens_including_expert, HopperGroupedGemmInput layout_info, int64_t total_rows,
+        int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe, float const** alpha_scale_ptr_array,
+        cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf);
 
 private:
     int sm_{};

@@ -52,9 +52,8 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_type_conversion.h"
 
 #include "moe_gemm_kernels_template_sm90.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
-#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/launchers/fused_moe_gemm_launcher_sm80.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -67,14 +66,13 @@ namespace kernels::cutlass_kernels
 {
 
 // ============================= Variable batched Gemm things ===========================
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
-    typename ThreadblockShape, typename WarpShape, int Stages>
-void genericMoeGemmKernelLauncher(T const* A, WeightType const* B,
-                                  GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t num_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int const multi_processor_count, bool use_fused_moe,
-    float const** alpha_scale_ptr_array, cudaStream_t stream, int* kernel_occupancy = nullptr)
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag, typename ThreadblockShape, typename WarpShape, int Stages>
+void genericMoeGemmKernelLauncher(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t num_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int const multi_processor_count,
+    bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream, int* kernel_occupancy = nullptr)
 {
 #if defined(ENABLE_FP8)
     static_assert(cutlass::platform::is_same<T, __nv_bfloat16>::value || cutlass::platform::is_same<T, half>::value
@@ -117,13 +115,12 @@ void genericMoeGemmKernelLauncher(T const* A, WeightType const* B,
 
         using Operator = typename MixedGemmArchTraits::Operator;
         using TaggedOperator = typename std::conditional<cutlass::platform::is_same<T, WeightType>::value,
-                               typename MixedGemmArchTraits::Operator,
-                               typename cutlass::arch::TagOperator<Operator, QuantOp>::TaggedOperator>::type;
+            typename MixedGemmArchTraits::Operator,
+            typename cutlass::arch::TagOperator<Operator, QuantOp>::TaggedOperator>::type;
 
 #if defined(ENABLE_FP8)
-        if constexpr ((std::is_same_v<T, __nv_fp8_e4m3>
-                          || std::is_same_v<T, __nv_fp8_e5m2>) &&std::is_same_v<EpilogueTag,
-                          cutlass_extensions::EpilogueOpDefault>)
+        if constexpr ((std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>)
+            && std::is_same_v<EpilogueTag, cutlass_extensions::EpilogueOpDefault>)
         {
             TLLM_CHECK_WITH_INFO(weight_scales == nullptr && biases == nullptr && alpha_scale_ptr_array,
                 "weight_scales and biases should be nullptr and alpha_scale_ptr_array shouldn't be nullptr for FP8 "
@@ -195,13 +192,13 @@ void genericMoeGemmKernelLauncher(T const* A, WeightType const* B,
 
 } // namespace kernels::cutlass_kernels
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename Arch, typename EpilogueTag,
-    typename ThreadblockShape, typename WarpShape, int Stages>
-static void dispatch(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases,
-    bool bias_is_broadcast, GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t num_rows,
-    int64_t gemm_n, int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config,
-    int multi_processor_count, bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream,
-    int* occupancy = nullptr)
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename Arch,
+    typename EpilogueTag, typename ThreadblockShape, typename WarpShape, int Stages>
+static void dispatch(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t num_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+    float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
 
     static_assert(!std::is_same_v<Arch, cutlass::arch::Sm90>, "Use TMA specialised functions for arch SM90");
@@ -212,13 +209,12 @@ static void dispatch(T const* A, WeightType const* B, GemmOutputType const* weig
 #endif
 
     if constexpr ((Stages == 2 || Arch::kMinComputeCapability >= 80)
-                  && (!isFp8 /* || std::is_same_v<Arch, cutlass::arch::Sm89> */) )
+        && (!isFp8 /* || std::is_same_v<Arch, cutlass::arch::Sm89> */))
     {
-        kernels::cutlass_kernels::genericMoeGemmKernelLauncher<T, WeightType, QuantOp, GemmOutputType, Arch, EpilogueTag,
-                                                               ThreadblockShape, WarpShape, Stages>(
-                                                                       A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, num_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        kernels::cutlass_kernels::genericMoeGemmKernelLauncher<T, WeightType, QuantOp, GemmOutputType, Arch,
+            EpilogueTag, ThreadblockShape, WarpShape, Stages>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, num_rows, gemm_n, gemm_k, num_experts, gemm_config,
+            multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
     }
     else
     {
@@ -227,30 +223,33 @@ static void dispatch(T const* A, WeightType const* B, GemmOutputType const* weig
     }
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
-    typename ThreadblockShape, typename WarpShape>
-void dispatchGemmConfig(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t num_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag, typename ThreadblockShape, typename WarpShape>
+void dispatchGemmConfig(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t num_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
     switch (gemm_config.stages)
     {
     case 2:
-        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 2>(A, B, weight_scales, weight_zeros, group_size,
-            biases, bias_is_broadcast, C, total_tokens_including_expert, num_rows, gemm_n, gemm_k, num_experts,
-            gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 2>(A, B,
+            weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+            num_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe,
+            alpha_scale_ptr_array, stream, occupancy);
         break;
     case 3:
-        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 3>(A, B, weight_scales, weight_zeros, group_size,
-            biases, bias_is_broadcast, C, total_tokens_including_expert, num_rows, gemm_n, gemm_k, num_experts,
-            gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 3>(A, B,
+            weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+            num_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe,
+            alpha_scale_ptr_array, stream, occupancy);
         break;
     case 4:
-        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 4>(A, B, weight_scales, weight_zeros, group_size,
-            biases, bias_is_broadcast, C, total_tokens_including_expert, num_rows, gemm_n, gemm_k, num_experts,
-            gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatch<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, ThreadblockShape, WarpShape, 4>(A, B,
+            weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+            num_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe,
+            alpha_scale_ptr_array, stream, occupancy);
         break;
     default: TLLM_THROW("dispatchGemmConfig does not support stages %d", gemm_config.stages); break;
     }
@@ -258,16 +257,17 @@ void dispatchGemmConfig(T const* A, WeightType const* B, GemmOutputType const* w
 
 // This overload will handle tensorop gemms. It is disabled via SFINAE for fp32.
 // This overload is only enabled when T == WeightType.
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag,
     typename std::enable_if<!std::is_same<T, float>::value
 #if defined(ENABLE_FP8)
         && !std::is_same<T, __nv_fp8_e4m3>::value && !std::is_same<T, __nv_fp8_e5m2>::value
 #endif
         && std::is_same<T, WeightType>::value>::type* = nullptr>
-void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
     switch (gemm_config.tile_config)
@@ -276,39 +276,44 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
         TLLM_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
-            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<16, 128, 64>,
-                               cutlass::gemm::GemmShape<16, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-                total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config,
-                multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+                cutlass::gemm::GemmShape<16, 128, 64>, cutlass::gemm::GemmShape<16, 32, 64>>(A, B, weight_scales,
+                weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows,
+                gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array,
+                stream, occupancy);
         }
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
         TLLM_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
-            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<16, 256, 64>,
-                cutlass::gemm::GemmShape<16, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-                total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config,
-                multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+                cutlass::gemm::GemmShape<16, 256, 64>, cutlass::gemm::GemmShape<16, 64, 64>>(A, B, weight_scales,
+                weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows,
+                gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array,
+                stream, occupancy);
         }
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<32, 128, 64>,
-            cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<32, 128, 64>, cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape64x128x64_WarpShape32x64x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<64, 128, 64>,
-            cutlass::gemm::GemmShape<32, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<64, 128, 64>, cutlass::gemm::GemmShape<32, 64, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape128x128x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<128, 128, 64>,
-            cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<128, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::Undefined: TLLM_THROW("GEMM config undefined."); break;
     case cutlass_extensions::CutlassTileConfig::ChooseWithHeuristic:
@@ -321,12 +326,13 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
 // Tensorop GEMM overload
 // Overload for quantize MoE GEMMs. We disable some warp configs here since they will not be used and we can improve
 // compile time
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag,
     typename std::enable_if<!std::is_same<T, float>::value && !std::is_same<T, WeightType>::value>::type* = nullptr>
-void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
     switch (gemm_config.tile_config)
@@ -335,39 +341,44 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
         TLLM_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
-            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<16, 128, 64>,
-                cutlass::gemm::GemmShape<16, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-                total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config,
-                multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+                cutlass::gemm::GemmShape<16, 128, 64>, cutlass::gemm::GemmShape<16, 32, 64>>(A, B, weight_scales,
+                weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows,
+                gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array,
+                stream, occupancy);
         }
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
         TLLM_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
-            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<16, 256, 64>,
-                cutlass::gemm::GemmShape<16, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-                total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config,
-                multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+            dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+                cutlass::gemm::GemmShape<16, 256, 64>, cutlass::gemm::GemmShape<16, 64, 64>>(A, B, weight_scales,
+                weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows,
+                gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array,
+                stream, occupancy);
         }
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<32, 128, 64>,
-            cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<32, 128, 64>, cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<64, 128, 64>,
-            cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<64, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<128, 128, 64>,
-            cutlass::gemm::GemmShape<128, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<128, 128, 64>, cutlass::gemm::GemmShape<128, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::Undefined: TLLM_THROW("GEMM config undefined."); break;
     case cutlass_extensions::CutlassTileConfig::ChooseWithHeuristic:
@@ -380,58 +391,66 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
 // This overload will handle tensorop gemms.
 // This overload is only enabled when T == WeightType and T == __nv_fp8_e4m3 or __nv_fp8_e5m2
 #if defined(ENABLE_FP8)
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag,
     typename std::enable_if<(std::is_same<T, __nv_fp8_e4m3>::value || std::is_same<T, __nv_fp8_e5m2>::value)
         && std::is_same<T, WeightType>::value>::type* = nullptr>
-void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
     switch (gemm_config.tile_config)
     {
     case cutlass_extensions::CutlassTileConfig::CtaShape16x256x128_WarpShape16x64x128:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<16, 256, 128>,
-            cutlass::gemm::GemmShape<16, 64, 128>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<16, 256, 128>, cutlass::gemm::GemmShape<16, 64, 128>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<32, 128, 64>,
-            cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<32, 128, 64>, cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<64, 128, 64>,
-            cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<64, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape64x64x128_WarpShape32x64x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<64, 64, 128>,
-            cutlass::gemm::GemmShape<32, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<64, 64, 128>, cutlass::gemm::GemmShape<32, 64, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape128x64x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<128, 64, 64>,
-            cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<128, 64, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape128x256x64_WarpShape64x64x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<128, 256, 64>,
-            cutlass::gemm::GemmShape<64, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<128, 256, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<256, 128, 64>,
-            cutlass::gemm::GemmShape<64, 64, 64>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<256, 128, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::Undefined: TLLM_THROW("GEMM config undefined."); break;
     case cutlass_extensions::CutlassTileConfig::ChooseWithHeuristic:
@@ -443,21 +462,22 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
 #endif
 
 // This overload will handle simt gemms. It is disabled via SFINAE for tensorop.
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch, typename EpilogueTag,
-    typename std::enable_if<std::is_same<T, float>::value>::type* = nullptr>
-void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales, GemmOutputType const* weight_zeros, int group_size,
-    GemmOutputType const* biases, bool bias_is_broadcast, GemmOutputType* C,
-    int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename GemmOutputType, typename arch,
+    typename EpilogueTag, typename std::enable_if<std::is_same<T, float>::value>::type* = nullptr>
+void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType const* weight_scales,
+    GemmOutputType const* weight_zeros, int group_size, GemmOutputType const* biases, bool bias_is_broadcast,
+    GemmOutputType* C, int64_t const* total_tokens_including_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k,
+    int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
     switch (gemm_config.tile_config)
     {
     case cutlass_extensions::CutlassTileConfig::CtaShape128x128x8_WarpShape64x64x8:
-        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag, cutlass::gemm::GemmShape<128, 128, 8>,
-                           cutlass::gemm::GemmShape<64, 64, 8>>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count,
-            use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        dispatchGemmConfig<T, WeightType, QuantOp, GemmOutputType, arch, EpilogueTag,
+            cutlass::gemm::GemmShape<128, 128, 8>, cutlass::gemm::GemmShape<64, 64, 8>>(A, B, weight_scales,
+            weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            gemm_k, num_experts, gemm_config, multi_processor_count, use_fused_moe, alpha_scale_ptr_array, stream,
+            occupancy);
         break;
     case cutlass_extensions::CutlassTileConfig::Undefined: TLLM_THROW("GEMM config undefined."); break;
     case cutlass_extensions::CutlassTileConfig::ChooseWithHeuristic:
@@ -467,16 +487,18 @@ void dispatchMoeGemmToCutlass(T const* A, WeightType const* B, GemmOutputType co
     }
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 std::vector<cutlass_extensions::CutlassGemmConfig>
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getConfigs() const
 {
     return getConfigs(sm_);
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
-std::vector<cutlass_extensions::CutlassGemmConfig> MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getConfigs(
-    int sm)
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
+std::vector<cutlass_extensions::CutlassGemmConfig>
+MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getConfigs(int sm)
 {
     std::vector<cutlass_extensions::CutlassGemmConfig> candidate_configs = getHopperConfigs(sm);
     std::vector<cutlass_extensions::CutlassGemmConfig> ampere_configs = getAmpereConfigs(sm);
@@ -485,7 +507,8 @@ std::vector<cutlass_extensions::CutlassGemmConfig> MoeGemmRunner<T, WeightType, 
     return candidate_configs;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 std::vector<cutlass_extensions::CutlassGemmConfig>
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getAmpereConfigs(int sm)
 {
@@ -512,7 +535,8 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getAmpereConfi
     return ampere_configs;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 std::vector<cutlass_extensions::CutlassGemmConfig>
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getHopperConfigs(int sm)
 {
@@ -538,7 +562,8 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getHopperConfi
     return hopper_configs;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::isHopperSpecialised(
     cutlass_extensions::CutlassGemmConfig gemm_config) const
 {
@@ -546,20 +571,23 @@ bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::isHopperS
     return supportsHopperSpecialisation() && config_is_sm90;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::supportsHopperSpecialisation() const
 {
     return sm_ == 90 && kernels::cutlass_kernels::isValidHopperMOESpecialisation<T, WeightType>();
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 int MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getSM() const
 {
     return this->sm_;
 }
 
 // currently support sm80 bf16/fp16 gate activation, only set predication tensor for m direction
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::supportsFusedGatedActivation(
     bool is_gated_activation, int gemm_n, int gemm_k) const
 {
@@ -567,14 +595,16 @@ bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::supportsF
         && (this->getSM() >= 80) && (gemm_k % 64 == 0) && (gemm_n % 64 == 0);
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::isFusedGatedActivation(
     cutlass_extensions::CutlassGemmConfig gemm_config, bool is_gated_activation, int gemm_n, int gemm_k) const
 {
     return supportsFusedGatedActivation(is_gated_activation, gemm_n, gemm_k) && !gemm_config.is_sm90;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::MoeGemmRunner()
 {
     int device{-1};
@@ -583,13 +613,15 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::MoeGemmRunner(
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 template <typename EpilogueTag>
 void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchToArch<EpilogueTag>(T const* A,
-                                                                                                   WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast,
-    void* C_void, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input, int64_t total_rows,
-    int64_t gemm_n, int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config,
-    bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy)
+    WeightType const* B, ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size,
+    ScaleBiasType const* biases, bool bias_is_broadcast, void* C_void, int64_t const* total_tokens_including_expert,
+    HopperGroupedGemmInput hopper_input, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
+    cutlass_extensions::CutlassGemmConfig gemm_config, bool use_fused_moe, float const** alpha_scale_ptr_array,
+    cudaStream_t stream, int* occupancy)
 {
     static_assert(std::is_same_v<ScaleBiasType, OutputType>,
         "Separate Scale/Bias type is not supported. This is assumed to be the gemm output type");
@@ -605,24 +637,30 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchT
 
     if (sm_ >= 70 && sm_ < 75)
     {
-        if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value) {
+        if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value)
+        {
             TLLM_THROW("sm70 no support bf16 moe");
-        } else {
-            dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm70, EpilogueTag>(
-                    A, B, weight_scales, weight_zeros, group_size,
-                    biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts,
-                    gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        }
+        else
+        {
+            dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm70, EpilogueTag>(A, B,
+                weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+                total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_, use_fused_moe,
+                alpha_scale_ptr_array, stream, occupancy);
         }
     }
     else if (sm_ >= 75 && sm_ < 80)
     {
-        if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value) {
+        if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value)
+        {
             TLLM_THROW("sm75 no support bf16 moe");
-        } else {
-            dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm75, EpilogueTag>(
-                    A, B, weight_scales, weight_zeros, group_size,
-                    biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n, gemm_k, num_experts,
-                    gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array, stream, occupancy);
+        }
+        else
+        {
+            dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm75, EpilogueTag>(A, B,
+                weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+                total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_, use_fused_moe,
+                alpha_scale_ptr_array, stream, occupancy);
         }
     }
     else if (sm_ >= 80 && sm_ < 90)
@@ -636,16 +674,16 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchT
 
             TLLM_CHECK_WITH_INFO(sm_ == 89, "For sm >= 80 and < 90, fp8 is only supported with sm == 89");
             // dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm89, EpilogueTag>(A, B,
-            //     weight_scales, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n, gemm_k,
-            //     num_experts, gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array, stream,
-            //     occupancy);
+            //     weight_scales, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n,
+            //     gemm_k, num_experts, gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array,
+            //     stream, occupancy);
         }
         else
         {
             dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm80, EpilogueTag>(A, B,
-                                                                                                              weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n, gemm_k,
-                num_experts, gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array, stream,
-                occupancy);
+                weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+                total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_, use_fused_moe,
+                alpha_scale_ptr_array, stream, occupancy);
         }
     }
     else if (sm_ >= 90)
@@ -695,9 +733,9 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchT
             TLLM_CHECK_WITH_INFO(!gemm_config.is_sm90,
                 "GEMM config is for SM90 configuration, but this configuration is not valid for Hppper");
             dispatchMoeGemmToCutlass<T, WeightType, QuantOp, ScaleBiasType, cutlass::arch::Sm80, EpilogueTag>(A, B,
-                                                                                                              weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert, total_rows, gemm_n, gemm_k,
-                num_experts, gemm_config, multi_processor_count_, use_fused_moe, alpha_scale_ptr_array, stream,
-                occupancy);
+                weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
+                total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_, use_fused_moe,
+                alpha_scale_ptr_array, stream, occupancy);
         }
         else
         {
@@ -710,7 +748,8 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchT
     }
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getMaxWorkspaceSize(int num_experts) const
 {
     if (num_experts != num_experts_)
@@ -722,7 +761,8 @@ size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getMaxW
     return gemm_workspace_size_;
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::calcMaxWorkspaceSize(int num_experts) const
 {
     if (!supportsHopperSpecialisation())
@@ -746,7 +786,7 @@ size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::calcMax
             max_size = std::max(max_size, size);                                                                       \
             has_config = true;                                                                                         \
         }                                                                                                              \
-        catch (const std::runtime_error &e)                             \
+        catch (const std::runtime_error& e)                                                                            \
         {                                                                                                              \
             TLLM_LOG_TRACE("Unsupported config skipped when calculating MOE workspace size");                          \
         }                                                                                                              \
@@ -765,73 +805,77 @@ size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::calcMax
     }
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 template <typename EpilogueTag>
 void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::runGemm(T const* A, WeightType const* B,
-    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,
-    int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input, int64_t total_rows,
-    int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe, float const** alpha_scale_ptr_array,
-    cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf)
+    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases,
+    bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input,
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,
+    float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf)
 {
-    dispatchToArch<EpilogueTag>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C, total_tokens_including_expert,
-        hopper_input, total_rows, gemm_n, gemm_k, num_experts, chosen_conf, use_fused_moe, alpha_scale_ptr_array,
-        stream, nullptr);
+    dispatchToArch<EpilogueTag>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
+        total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, chosen_conf,
+        use_fused_moe, alpha_scale_ptr_array, stream, nullptr);
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::moeGemmBiasAct(T const* A, WeightType const* B,
-    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,
-    int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input, int64_t total_rows,
-    int64_t gemm_n, int64_t gemm_k, int num_experts, ActivationType activation_type, bool use_fused_moe,
-    float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf)
+    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases,
+    bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input,
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, ActivationType activation_type,
+    bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream,
+    cutlass_extensions::CutlassGemmConfig chosen_conf)
 {
     switch (activation_type)
     {
     case ActivationType::Relu:
-        runGemm<cutlass_extensions::EpilogueOpDefaultReLU>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefaultReLU>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::Gelu:
-        runGemm<cutlass_extensions::EpilogueOpDefaultFtGelu>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefaultFtGelu>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::Silu:
-        runGemm<cutlass_extensions::EpilogueOpDefaultSilu>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefaultSilu>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::Identity:
-        runGemm<cutlass_extensions::EpilogueOpDefault>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefault>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::Swiglu:
-        runGemm<cutlass_extensions::EpilogueOpDefaultSilu>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefaultSilu>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::Geglu:
-        runGemm<cutlass_extensions::EpilogueOpDefaultFtGelu>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
-            alpha_scale_ptr_array, stream, chosen_conf);
+        runGemm<cutlass_extensions::EpilogueOpDefaultFtGelu>(A, B, weight_scales, weight_zeros, group_size, biases,
+            bias_is_broadcast, C, total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            use_fused_moe, alpha_scale_ptr_array, stream, chosen_conf);
         break;
     case ActivationType::InvalidType: TLLM_THROW("Activation type for fpA_intB must be valid."); break;
     default: TLLM_THROW("Invalid activation type."); break;
     }
 }
 
-template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType, typename ScaleBiasType>
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::moeGemm(T const* A, WeightType const* B,
-    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, void* C, int64_t const* total_tokens_including_expert,
-    HopperGroupedGemmInput hopper_input, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
-    bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream,
-    cutlass_extensions::CutlassGemmConfig chosen_conf)
+    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, void* C,
+    int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input, int64_t total_rows,
+    int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe, float const** alpha_scale_ptr_array,
+    cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf)
 {
-    runGemm<cutlass_extensions::EpilogueOpDefault>(A, B, weight_scales, weight_zeros, group_size, nullptr, true, C, total_tokens_including_expert,
-        hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, alpha_scale_ptr_array, stream,
-        chosen_conf);
+    runGemm<cutlass_extensions::EpilogueOpDefault>(A, B, weight_scales, weight_zeros, group_size, nullptr, true, C,
+        total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, use_fused_moe,
+        alpha_scale_ptr_array, stream, chosen_conf);
 }
 
 } // namespace tensorrt_llm

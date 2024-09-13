@@ -43,9 +43,9 @@
 #pragma GCC diagnostic pop
 
 #include "src/fastertransformer/cuda/trt_utils.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.inl"
-#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -734,6 +734,7 @@ float const** computeFP8DequantScale(
 
     return alpha_scale_ptr_array;
 }
+
 template <class T>
 __global__ void loraReorderKernel(
     T* output, T const* lora_result, int64_t const* num_valid_tokens_ptr, int64_t inter_size)
@@ -840,7 +841,6 @@ void dequantFP8(OutputType* output, InputType const* input, int64_t const* num_v
     dequantFP8Kernel<OutputType, InputType>
         <<<blocks, threads, 0, stream>>>(output, input, num_valid_tokens_ptr, inter_size, scale, scale_is_dequant);
 }
-
 
 // ==================== Helper for getting load balanced routing for profiling ==================================
 
@@ -1176,62 +1176,22 @@ void GemmProfilerBackend::runProfiler(
     mInterface->is_profiler = true;
     if (mGemmToProfile == GemmToProfile::GEMM_1)
     {
-        mInterface->gemm1(inputs,                             //
-            outputs,                                          //
-            intermediate,                                     //
-            expert_first_token_offset,                        //
-            hopper_input_template,                            //
-            weights,                                          //
-            bias,                                             //
-            expert_first_token_offset + num_experts_per_node, //
-            quant_params.fc1_weight_scales,                   //
-            quant_params.fc1_weight_zeros,                   //
-            quant_params.group_size,
-            quant_params.dequant_fc1,                         //
-            quant_params.quant_fc2,                           //
-            expanded_num_tokens,                              //
-            mExpertHiddenSize,                                //
-            mExpertInterSize,                                 //
-            num_experts_per_node,                             //
-            mActivationType,                                  //
-            alpha_scale_ptr_array,                            //
-            !mUseLora,                                        //
-            stream,                                           //
-            tactic);
+        mInterface->gemm1(inputs, outputs, intermediate, expert_first_token_offset, hopper_input_template, weights,
+            bias, expert_first_token_offset + num_experts_per_node, quant_params.fc1_weight_scales,
+            quant_params.fc1_weight_zeros, quant_params.group_size, quant_params.dequant_fc1, quant_params.quant_fc2,
+            expanded_num_tokens, mExpertHiddenSize, mExpertInterSize, num_experts_per_node, mActivationType,
+            alpha_scale_ptr_array, !mUseLora, stream, tactic);
     }
     else
     {
         TLLM_CHECK(mGemmToProfile == GemmToProfile::GEMM_2);
-        mInterface->gemm2(inputs,                           //
-            intermediate,                                   //
-            outputs,                                        //
-            expert_first_token_offset,                      //
-            hopper_input_template,                          //
-            weights,                                        //
-            bias,                                           //
-            quant_params.fc2_weight_scales,                 //
-            quant_params.fc2_weight_zeros,                  //
-            quant_params.group_size,
-            quant_params.dequant_fc2,                       //
-            token_topk_unpermuted_scales,                   //
-            token_topk_permuted_scales,                     //
-            source_to_dest,                                 //
-            dest_to_source,                                 //
-            expert_for_source_row,                          //
-            expert_first_token_offset + mNumExpertsPerNode, //
-            original_num_tokens,                            //
-            expanded_num_tokens,                            //
-            mExpertHiddenSize,                              //
-            mExpertInterSize,                               //
-            num_experts_per_node,                           //
-            mK,                                             //
-            !mInterface->use_deterministic_hopper_reduce_,  //
-            alpha_scale_ptr_array,                          //
-            false,                                          //
-            nullptr,                                        //
-            stream,                                         //
-            mParallelismConfig,                             //
-            tactic);
+        mInterface->gemm2(inputs, intermediate, outputs, expert_first_token_offset, hopper_input_template, weights,
+            bias, quant_params.fc2_weight_scales, quant_params.fc2_weight_zeros, quant_params.group_size,
+            quant_params.dequant_fc2, token_topk_unpermuted_scales, token_topk_permuted_scales, source_to_dest,
+            dest_to_source, expert_for_source_row, expert_first_token_offset + mNumExpertsPerNode, original_num_tokens,
+            expanded_num_tokens, mExpertHiddenSize, mExpertInterSize, num_experts_per_node, mK,
+            !mInterface->use_deterministic_hopper_reduce_, alpha_scale_ptr_array, false, nullptr, stream,
+            mParallelismConfig, tactic);
     }
     mInterface->is_profiler = false;
 

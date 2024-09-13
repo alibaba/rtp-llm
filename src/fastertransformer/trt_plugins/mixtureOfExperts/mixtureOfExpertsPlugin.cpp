@@ -16,8 +16,8 @@
  */
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
-#include "src/fastertransformer/utils/utils.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
+#include "src/fastertransformer/utils/utils.h"
 #include <numeric>
 
 using namespace nvinfer1;
@@ -26,17 +26,18 @@ using namespace tensorrt_llm::kernels;
 // using tensorrt_llm::common::QuantMode;
 using tensorrt_llm::plugins::MixtureOfExpertsPlugin;
 
-
 MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale,
     int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
-    nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
+    nvinfer1::DataType type, nvinfer1::DataType weight_type, bool has_zeros, int group_size,
+    MOEExpertScaleNormalizationMode normalization_mode)
 {
-    init(number_of_experts, top_k, normalize_expert_scale, expert_hidden_size, expert_inter_size, activation_type, type, weight_type, has_zeros, group_size, normalization_mode );
+    init(number_of_experts, top_k, normalize_expert_scale, expert_hidden_size, expert_inter_size, activation_type, type,
+        weight_type, has_zeros, group_size, normalization_mode);
 }
 
-void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normalize_expert_scale,
-    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
-    nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
+void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
+    int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
+    nvinfer1::DataType weight_type, bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
 {
     mNumExperts = number_of_experts;
     mK = top_k;
@@ -49,21 +50,29 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     mHasZeros = has_zeros;
     mGroupSize = group_size;
     mNormalizationMode = normalization_mode;
-    if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4){
-        FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
-            FT_SWITCH_V(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
-                FT_SWITCH_T(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
-                    mMOERunner = std::make_shared<CutlassMoeFCRunner<T, WT, Q>>();
-                });
+    if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4)
+    {
+        FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16,
+            [&]
+            {
+                FT_SWITCH_V(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS,
+                    cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY,
+                    [&]
+                    {
+                        FT_SWITCH_T(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t,
+                            [&] { mMOERunner = std::make_shared<CutlassMoeFCRunner<T, WT, Q>>(); });
+                    });
             });
-        });
     }
-    else if(mWeightType == DataType::kHALF){
+    else if (mWeightType == DataType::kHALF)
+    {
         mMOERunner = std::make_shared<CutlassMoeFCRunner<half, half, cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #ifdef ENABLE_BF16
-    else if(mWeightType == DataType::kBF16){
-        mMOERunner = std::make_shared<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16,cutlass::WeightOnlyQuantOp::UNDEFINED>>();
+    else if (mWeightType == DataType::kBF16)
+    {
+        mMOERunner = std::make_shared<
+            CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16, cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #endif
     else
@@ -77,8 +86,8 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
 {
 
-    size_t moe_workspace_size = mMOERunner->getWorkspaceSize(
-            num_tokens, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, mActivationType, mNormalizationMode, getParallelismConfig(), false);
+    size_t moe_workspace_size = mMOERunner->getWorkspaceSize(num_tokens, mExpertHiddenSize, mExpertInterSize,
+        mNumExperts, mK, mActivationType, mNormalizationMode, getParallelismConfig(), false);
 
     return moe_workspace_size;
 }
@@ -98,60 +107,31 @@ MOEParallelismConfig MixtureOfExpertsPlugin::getParallelismConfig() const
     // return {};
 }
 
-int MixtureOfExpertsPlugin::enqueue(
-    const void* input,
-    const float* moe_gates,
-    const void* fc1_expert_weight,
-    const void* fc1_quant_scale,
-    const void* fc1_quant_zeros,
-    const void* fc1_expert_bias,
-    const void* fc2_expert_weight,
-    const void* fc2_quant_scale,
-    const void* fc2_quant_zeros,
-    const void* fc2_expert_bias,
-    const int num_rows,
-    void* workspace,
-    void* final_output,
-    void* fc2_result,
-    const bool* finished,
-    void* expert_scale,
-    int* src_row_to_dst_row,
-    int* export_for_src_row,
+int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, void const* fc1_expert_weight,
+    void const* fc1_quant_scale, void const* fc1_quant_zeros, void const* fc1_expert_bias,
+    void const* fc2_expert_weight, void const* fc2_quant_scale, void const* fc2_quant_zeros,
+    void const* fc2_expert_bias, int const num_rows, void* workspace, void* final_output, void* fc2_result,
+    bool const* finished, void* expert_scale, int* src_row_to_dst_row, int* export_for_src_row,
     cudaStream_t stream) noexcept
 {
-    const int num_not_finished = num_rows; // TODO Take this as an input
+    int const num_not_finished = num_rows; // TODO Take this as an input
     MOEParallelismConfig parallelism_config = getParallelismConfig();
     LoraParams lora_params;
 
-    mMOERunner->runMoe(
-        input,   // const void*
-        moe_gates,
-        fc1_expert_weight,
-        fc1_expert_bias,
-        mActivationType,
-        fc2_expert_weight,
-        fc2_expert_bias,
-        QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize),
-        num_rows,
-        mExpertHiddenSize,
-        mExpertInterSize,
-        mNumExperts,
-        mK,
+    mMOERunner->runMoe(input, // const void*
+        moe_gates, fc1_expert_weight, fc1_expert_bias, mActivationType, fc2_expert_weight, fc2_expert_bias,
+        QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize), num_rows,
+        mExpertHiddenSize, mExpertInterSize, mNumExperts, mK,
         // mNormalizeExpertScale,
         reinterpret_cast<char*>(workspace),
         // Outputs
         final_output,
-        finished, //bool
-        num_not_finished,  //const int
-        expert_scale, // void*
+        finished,           // bool
+        num_not_finished,   // const int
+        expert_scale,       // void*
         src_row_to_dst_row, // int*
-        export_for_src_row,  // int*
-        0,
-        parallelism_config,
-        mNormalizationMode,
-        false,
-        lora_params,
-        stream);
+        export_for_src_row, // int*
+        0, parallelism_config, mNormalizationMode, false, lora_params, stream);
 
     return 0;
 }
