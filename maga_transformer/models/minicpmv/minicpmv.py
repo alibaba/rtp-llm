@@ -73,7 +73,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             raise Exception("unknown mm url type")
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Any], device: str) -> torch.Tensor:
+    def image_embedding(self, images: List[Any], device: str) -> List[torch.Tensor]:
         data = self.processor.image_processor(images, return_tensors="pt")
         dtype = torch.half
         tgt_sizes = data['tgt_sizes']

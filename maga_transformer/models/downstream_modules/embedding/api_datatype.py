@@ -1,6 +1,7 @@
 from typing import Union, List, Dict, Optional, Any
 from enum import Enum
 from maga_transformer.config.base_model_config import PyDanticModelBase
+from pydantic import BaseModel
 
 class Usage(PyDanticModelBase):
     prompt_tokens: int = 0
@@ -9,8 +10,28 @@ class Usage(PyDanticModelBase):
 class ExtraConfigs(PyDanticModelBase):
     tokenizer_config: Dict[str, Any] = {}
 
+class ContentPartTypeEnum(str, Enum):
+    text = "text"
+    image_url = "image_url"
+    video_url = "video_url"
+    audio_url = "audio_url"
+
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[str] = "auto"
+
+class AudioURL(BaseModel):
+    url: str
+
+class ContentPart(BaseModel):
+    type: ContentPartTypeEnum
+    text: Optional[str] = None
+    image_url: Optional[ImageURL] = None
+    video_url: Optional[ImageURL] = None
+    audio_url: Optional[AudioURL] = None
+
 class OpenAIEmbeddingRequest(PyDanticModelBase):
-    input: Union[str, List[str]]
+    input: Union[str, List[str], ContentPart, List[ContentPart]]
     model: str = ""
     encoding_format: str = 'float'
     user: str = ""
@@ -51,8 +72,8 @@ class ALLEmbeddingResponse(PyDanticModelBase):
     usage: Usage = Usage()
 
 class SimilarityRequest(PyDanticModelBase):
-    left: List[str]
-    right: List[str]
+    left: Union[List[str], List[ContentPart]]
+    right: Union[List[str], List[ContentPart]]
     model: str = ""
     return_response: bool = False
 

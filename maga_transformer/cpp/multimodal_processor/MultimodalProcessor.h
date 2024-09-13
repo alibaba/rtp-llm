@@ -14,6 +14,8 @@
 namespace ft = fastertransformer;
 namespace py = pybind11;
 
+namespace rtp_llm {
+
 struct ExpandedOutput {
     ft::BufferPtr expanded_ids;
     ft::BufferPtr text_tokens_mask;
@@ -78,7 +80,6 @@ private:
             exception_str << "number of multimodal tags and multimodal input not matched, expect " << locs.size() << ", get " << mm_num;
             return absl::InternalError(exception_str.str());
         }
-
         for (int i = 0;i < mm_num;i++) {
             // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
             expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
@@ -183,4 +184,18 @@ public:
         input->mm_locs = expanded_ids.locs;
         return absl::OkStatus();
     }
+
+
+    absl::StatusOr<MultimodalFeature> get_mm_features(const ft::BufferPtr& input_ids, const std::vector<MultimodalInput> &mm_inputs) {
+        MultimodalFeature mm_features;
+        CHECK_AND_RETURN_REF(features, mm_embedding(mm_inputs));
+        mm_features.features = std::move(features);
+        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(mm_features.features, input_ids));
+        mm_features.expanded_ids = expanded_ids.expanded_ids;
+        mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
+        mm_features.locs = expanded_ids.locs;
+        return mm_features;
+    }
 };
+
+}

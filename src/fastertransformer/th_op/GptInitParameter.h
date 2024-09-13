@@ -137,6 +137,7 @@ public:
     int64_t org_embedding_max_pos_     = 0;
     // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
     double  input_embedding_scalar_    = 1;
+    double  residual_scalar_    = 1;
 
     bool    use_logn_attn_ = false;
     double  q_scaling_ = 1;

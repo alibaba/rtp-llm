@@ -2,6 +2,7 @@
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
@@ -62,10 +63,25 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     if (params_.position_ids_style_ == 1) {
         position_bias = params_.special_tokens_.pad_token_id_ + 1;
     }
-
+    std::vector<ft::BufferPtr> gathered_mm_features;
+    std::vector<int> new_locs;
+    std::vector<int> merged_text_mask;
+    merged_text_mask.resize(token_num, 1);
     for (auto& stream: streams) {
         int length = stream->inputLength();
         int batchSize = stream->batchSize();
+        const auto& mm_feature = stream->multimodalFeature();
+        if (mm_feature.has_value()) {
+            for (const auto& feature: mm_feature.value().features) {
+                gathered_mm_features.emplace_back(torchTensor2Buffer(feature));
+            }
+            const auto mm_locs = mm_feature.value().locs;
+            for (int i = 0; i < mm_locs->size(); ++i) {
+                new_locs.push_back(*mm_locs->dataWithOffset<int>(i) + token_idx);
+            }
+            const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            memcpy(merged_text_mask.data() + token_idx, text_token_mask->data(), text_token_mask->size() * sizeof(int));
+        }
         memcpy(merged_tokens + (int)token_idx, stream->embeddingInput()->token_ids->data(), length * sizeof(int32_t));
         memcpy(merged_token_type_ids + (int)token_idx, stream->embeddingInput()->token_type_ids->data(), length * sizeof(int32_t));
         memcpy(input_lengths + (int)batch_idx, stream->embeddingInput()->input_lengths->data(), stream->batchSize() * sizeof(int32_t));
@@ -81,6 +97,11 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         }
         batch_idx += stream->batchSize();
         token_idx += length;
+    }
+    if (!gathered_mm_features.empty()) {
+        model_input.multimodal_features = std::move(gathered_mm_features);
+        model_input.mm_features_locs = device_->clone({*vector2Buffer(new_locs), ft::AllocationType::HOST});
+        model_input.text_tokens_mask = device_->clone({*vector2Buffer(merged_text_mask), ft::AllocationType::HOST});
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
     reportMetrics(batch_size, token_num, max_seq_len);

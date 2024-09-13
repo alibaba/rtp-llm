@@ -5,7 +5,8 @@ from typing_extensions import override
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from maga_transformer.async_decoder_engine.base_engine import BaseEngine
-from maga_transformer.ops import RtpEmbeddingOp, LoadBalanceInfo
+from maga_transformer.ops import RtpEmbeddingOp, LoadBalanceInfo, MultimodalInputCpp
+from maga_transformer.utils.mm_process_engine import MMProcessEngine
 
 class EmbeddingCppEngine(BaseEngine):
     def __init__(self, model: BaseModel):
@@ -21,12 +22,17 @@ class EmbeddingCppEngine(BaseEngine):
 
     @override
     def start(self):
-        self.cpp_engine.init(self.model)
+        if self.model.is_multimodal():
+            self.mm_engine = MMProcessEngine(self.model)
+        else:
+            self.mm_engine = None
+        self.cpp_engine.init(self.model, self.mm_engine)
         self.model.custom_module.handler.init_cpp_handler()
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         try:
-            results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
+            multimodal_inputs = [MultimodalInputCpp(i.url, int(i.mm_type)) for i in inputs.multimodal_inputs]
+            results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0, multimodal_inputs)
             outputs.outputs = results
             outputs.input_length = inputs.input_length
         except Exception as e:

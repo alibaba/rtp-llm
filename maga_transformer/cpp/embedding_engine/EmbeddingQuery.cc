@@ -8,12 +8,14 @@ EmbeddingInput::EmbeddingInput(const std::shared_ptr<ft::Buffer>& token_ids,
                                const std::shared_ptr<ft::Buffer>& token_type_ids,
                                const std::shared_ptr<ft::Buffer>& input_lengths,
                                const int64_t                      total_length,
-                               int64_t request_id)
+                               int64_t request_id,
+                               std::optional<MultimodalFeature> multimodal_features)
     : token_ids(token_ids)
     , token_type_ids(token_type_ids)
     , input_lengths(input_lengths)
     , total_length(total_length)
     , request_id(request_id)
+    , multimodal_features(multimodal_features)
 {
     checkVaild();
 }

@@ -9,7 +9,7 @@ from concurrent.futures import Future
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo, MultimodalInput
+from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
@@ -18,7 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     RoleEnum, RendererInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput
 
 @dataclass
 class StreamResponseObject:

@@ -215,6 +215,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(rotary_factor1, rotary_factor1_)                       \
     DEF_PROPERTY(rotary_factor2, rotary_factor2_)                       \
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)       \
+    DEF_PROPERTY(residual_scalar, residual_scalar_)                     \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)     \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_) \
     DEF_PROPERTY(data_type, data_type_)                                 \

@@ -20,6 +20,7 @@ struct GptModelDescription {
     size_t               vocab_size = 0;
     bool                 post_layernorm = false;
     double               input_embedding_scalar = 1;
+    double               residual_scalar = 1;
 };
 
 struct GptModelInitParams {

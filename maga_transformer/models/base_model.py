@@ -13,7 +13,7 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import MultimodalInput
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -31,14 +31,6 @@ class EmbeddingOutput:
                 raise Exception("Extra input must have same shape except dim 0")
         else:
             self.extra_input = None
-
-class MultimodalInput:
-    url: str
-    mm_type: MMUrlType
-
-    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT):
-        self.url = url
-        self.mm_type = mm_type
 
 # single batch prompt input
 class GenerateInput(PyBaseModel):

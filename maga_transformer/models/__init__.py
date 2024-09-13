@@ -24,6 +24,7 @@ if platform.processor() != 'aarch64':
     from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
     from .internvl import InternVL
     from .minicpmv.minicpmv import MiniCPMV
+    from .minicpmv_embedding.minicpmv_embedding import MiniCPMVEmbedding
 
 from .mixtral import Mixtral
 from .bert import Bert

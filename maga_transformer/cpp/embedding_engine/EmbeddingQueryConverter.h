@@ -12,7 +12,8 @@ public:
         const torch::Tensor& token_ids,
         const torch::Tensor& token_type_ids,
         const torch::Tensor& input_lengths,
-        int request_id);
+        int request_id,
+        std::optional<MultimodalFeature> multimodal_features = std::nullopt);
     static th::Tensor convertEmbeddingOutputs(EmbeddingStreamPtr stream);
 };
 

@@ -11,7 +11,8 @@ EmbeddingStreamPtr EmbeddingQueryConverter::convertEmbeddingInputs(
     const th::Tensor& token_ids,
     const th::Tensor& token_type_ids,
     const th::Tensor& input_lengths,
-    int request_id)
+    int request_id,
+    std::optional<MultimodalFeature> multimodal_features)
 {
     auto token_buffer_ptr =
         std::make_shared<ft::Buffer>(
@@ -36,7 +37,7 @@ EmbeddingStreamPtr EmbeddingQueryConverter::convertEmbeddingInputs(
             std::vector<size_t>{(size_t)input_lengths.size(0)},
             input_lengths.data_ptr());
     auto input =
-        std::make_shared<EmbeddingInput>(token_buffer_ptr, token_type_buffer_ptr, input_lengths_buffer_ptr, total_length, request_id);
+        std::make_shared<EmbeddingInput>(token_buffer_ptr, token_type_buffer_ptr, input_lengths_buffer_ptr, total_length, request_id, multimodal_features);
     return std::make_shared<EmbeddingStream>(input);
 }
 

@@ -26,6 +26,15 @@ class MMUrlType(IntEnum):
     VIDEO = 2
     AUDIO = 3
 
+class MultimodalInput:
+    url: str
+    mm_type: MMUrlType
+
+    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT):
+        self.url = url
+        self.mm_type = mm_type
+
+
 def get_bytes_io_from_url(url: str):
     if url.startswith("http") or url.startswith("https"):
         return BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)

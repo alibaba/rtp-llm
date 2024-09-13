@@ -9,6 +9,7 @@
 #include "autil/TimeUtility.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQuery.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/core/BufferHelper.h"
@@ -27,6 +28,8 @@ public:
     // Exported to python world.
     std::shared_ptr<EmbeddingInput> embeddingInput() const;
     std::shared_ptr<EmbeddingOutput> embeddingOutput() const;
+
+    const std::optional<MultimodalFeature>& multimodalFeature() const;
 
     int64_t inputLength() const;
 

@@ -128,11 +128,12 @@ class CohereWeightNames:
     TOKEN_EMBEDDING = 'model.embed_tokens.weight'
 
 class LlamaWeightInfo(ModelDeployWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
+    def __init__(self, config, tp_size, tp_rank, prefix=''):
         super().__init__(config, tp_size, tp_rank)
         self._names = None
         self._merge_qkv = None
         self._merge_qkv_b = None
+        self._prefix = prefix
 
     def _process_meta(self, meta_dicts, weight_keys):
         if self._quant_algo.isSmoothQuant():
@@ -155,15 +156,15 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             self._names = InternlmWeightNames
             self._merge_qkv = merge_qkv_hf
             self._merge_qkv_b = merge_qkv_b
-        elif DefaultWeightNames.OUTPUT in weight_keys:
+        elif self._prefix + DefaultWeightNames.OUTPUT in weight_keys:
             logging.info('load default llama1 style weight')
             self._names = DefaultWeightNames
             self._merge_qkv = merge_qkv
-        elif HfWeightNames.OUTPUT in weight_keys:
+        elif self._prefix + HfWeightNames.OUTPUT in weight_keys:
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
             self._merge_qkv = merge_qkv_hf
-        elif HfWeightNames.FFN_NORM.format(i='0') not in weight_keys:
+        elif self._prefix + HfWeightNames.FFN_NORM.format(i='0') not in weight_keys:
             logging.info('load cohere style weight')
             self._names = CohereWeightNames
             self._merge_qkv = merge_qkv_hf
@@ -172,79 +173,79 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
 
     def _get_weight_info(self):
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING, concat_1)], identity),
-            WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self._names.NORM, identity)], identity),
+            WeightInfo(W.embedding, [CkptWeightInfo(self._prefix + self._names.TOKEN_EMBEDDING, concat_1)], identity),
+            WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self._prefix + self._names.NORM, identity)], identity),
             WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
         if self._names == CohereWeightNames:
-            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._names.TOKEN_EMBEDDING, identity)], identity))
+            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._prefix + self._names.TOKEN_EMBEDDING, identity)], identity))
         else:
-            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._names.OUTPUT, concat_0)], identity))
+            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._prefix + self._names.OUTPUT, concat_0)], identity))
 
         layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self._names.ATTEN_NORM, identity)], identity),
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self._prefix + self._names.ATTEN_NORM, identity)], identity),
 
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.FFN_NORM, identity)], identity),
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._prefix + self._names.FFN_NORM, identity)], identity),
         ]
         if self._names == SQWeightNames:
             layer_weights.extend([
-                WeightInfo(W.attn_o_w, [CkptWeightInfo(self._names.WO, identity)], transpose),
-                WeightInfo(W.attn_o_s, [CkptWeightInfo(self._names.WO_S, identity)], identity),
+                WeightInfo(W.attn_o_w, [CkptWeightInfo(self._prefix + self._names.WO, identity)], transpose),
+                WeightInfo(W.attn_o_s, [CkptWeightInfo(self._prefix + self._names.WO_S, identity)], identity),
 
-                WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFW1, identity)], transpose),
-                WeightInfo(W.ffn_s1, [CkptWeightInfo(self._names.FFW1_S, identity)], identity),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo(self._prefix + self._names.FFW1, identity)], transpose),
+                WeightInfo(W.ffn_s1, [CkptWeightInfo(self._prefix + self._names.FFW1_S, identity)], identity),
 
-                WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFW3, identity)], transpose),
-                WeightInfo(W.ffn_s3, [CkptWeightInfo(self._names.FFW3_S, identity)], identity),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo(self._prefix + self._names.FFW3, identity)], transpose),
+                WeightInfo(W.ffn_s3, [CkptWeightInfo(self._prefix + self._names.FFW3_S, identity)], identity),
 
-                WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, identity)], transpose),
-                WeightInfo(W.ffn_s2, [CkptWeightInfo(self._names.FFW2_S, identity)], identity),
+                WeightInfo(W.ffn_w2, [CkptWeightInfo(self._prefix + self._names.FFW2, identity)], transpose),
+                WeightInfo(W.ffn_s2, [CkptWeightInfo(self._prefix + self._names.FFW2_S, identity)], identity),
 
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV,
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._prefix + self._names.W_QKV,
                                                          functools.partial(qkv_transpose, hidden_size=self._hidden_size))],
                            transpose),
-                WeightInfo(W.attn_qkv_s, [CkptWeightInfo(self._names.W_QKV_S, identity)],
+                WeightInfo(W.attn_qkv_s, [CkptWeightInfo(self._prefix + self._names.W_QKV_S, identity)],
                            identity),
 
-                WeightInfo(W.attn_o_smoother, [CkptWeightInfo(self._names.WO_Smoother, identity)], identity),
-                WeightInfo(W.ffn_smoother, [CkptWeightInfo(self._names.FFNW2_Smoother, identity)], identity),
+                WeightInfo(W.attn_o_smoother, [CkptWeightInfo(self._prefix + self._names.WO_Smoother, identity)], identity),
+                WeightInfo(W.ffn_smoother, [CkptWeightInfo(self._prefix + self._names.FFNW2_Smoother, identity)], identity),
             ]
             )
         else:
             layer_weights.extend([
-                WeightInfo(W.attn_o_w, [CkptWeightInfo(self._names.WO, concat_1)], transpose),
+                WeightInfo(W.attn_o_w, [CkptWeightInfo(self._prefix + self._names.WO, concat_1)], transpose),
 
-                WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFW1, concat_0)], transpose),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo(self._prefix + self._names.FFW1, concat_0)], transpose),
 
-                WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFW3, concat_0)], transpose),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo(self._prefix + self._names.FFW3, concat_0)], transpose),
 
-                WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, concat_1)], transpose),
+                WeightInfo(W.ffn_w2, [CkptWeightInfo(self._prefix + self._names.FFW2, concat_1)], transpose),
             ]
             )
 
             if self._names == CohereWeightNames:
                 layer_weights.append(WeightInfo(W.qk_ln_gamma,
-                                                [CkptWeightInfo(self._names.Q_NORM, identity),
-                                                 CkptWeightInfo(self._names.K_NORM, identity)], concat_0))
+                                                [CkptWeightInfo(self._prefix + self._names.Q_NORM, identity),
+                                                 CkptWeightInfo(self._prefix + self._names.K_NORM, identity)], concat_0))
             else:
-                layer_weights.append(WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.FFN_NORM, identity)], identity))
+                layer_weights.append(WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._prefix + self._names.FFN_NORM, identity)], identity))
 
             if self._names == InternlmWeightNames:
                 layer_weights.append(
                     WeightInfo(W.attn_qkv_b,
-                                        [CkptWeightInfo(self._names.BQ, identity),
-                                        CkptWeightInfo(self._names.BK, identity),
-                                        CkptWeightInfo(self._names.BV, identity)],
+                                        [CkptWeightInfo(self._prefix + self._names.BQ, identity),
+                                        CkptWeightInfo(self._prefix + self._names.BK, identity),
+                                        CkptWeightInfo(self._prefix + self._names.BV, identity)],
                                         functools.partial(self._merge_qkv_b))),
-                layer_weights.append(WeightInfo(W.attn_o_b, [CkptWeightInfo(self._names.BO, identity)], identity))
+                layer_weights.append(WeightInfo(W.attn_o_b, [CkptWeightInfo(self._prefix + self._names.BO, identity)], identity))
 
             if self._merge_qkv is not None:
                 if hasattr(self._names, 'W_QKV'):
-                    infos = [CkptWeightInfo(self._names.W_QKV, identity)]
+                    infos = [CkptWeightInfo(self._prefix + self._names.W_QKV, identity)]
                 else:
-                    infos = [CkptWeightInfo(self._names.WQ, concat_0),
-                             CkptWeightInfo(self._names.WK, concat_0),
-                             CkptWeightInfo(self._names.WV, concat_0)]
+                    infos = [CkptWeightInfo(self._prefix + self._names.WQ, concat_0),
+                             CkptWeightInfo(self._prefix + self._names.WK, concat_0),
+                             CkptWeightInfo(self._prefix + self._names.WV, concat_0)]
                 layer_weights.append(
                     WeightInfo(W.attn_qkv_w, infos,
                                functools.partial(self._merge_qkv,
@@ -253,7 +254,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                                  head_num=self._head_num)))
             else:
                 layer_weights.append(
-                    WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV, identity)], transpose))
+                    WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._prefix + self._names.W_QKV, identity)], transpose))
 
         if self._quant_algo.isGptq() or self._quant_algo.isAwq():
             layer_weights = get_layer_group_quant_weight_info(layer_weights, self._quant_algo, self._inter_padding_size)

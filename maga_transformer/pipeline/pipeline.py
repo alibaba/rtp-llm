@@ -17,7 +17,8 @@ from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput, MultimodalInput
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput
+from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slices, \
@@ -143,7 +144,7 @@ class Pipeline(object):
                                              add_special_tokens=self.model.config.add_special_tokens,
                                              special_tokens=self._special_tokens,
                                              **kwargs)
-        
+
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
@@ -155,7 +156,7 @@ class Pipeline(object):
                         tokens,
                         stop_word_ids: List[List[int]],
                         stop_word_id_slices: List[List[int]]):
-        if not generate_config.print_stop_words:                
+        if not generate_config.print_stop_words:
             if not generate_output.finished:
                 tokens = truncate_token_with_stop_word_id(tokens, stop_word_id_slices)
             else:
@@ -175,7 +176,7 @@ class Pipeline(object):
             generate_output.finished = True
 
         if not generate_config.print_stop_words:
-            if not generate_config.return_incremental:                    
+            if not generate_config.return_incremental:
                 if not generate_output.finished:
                     text = truncate_response_with_stop_words(text, stop_word_str_slices)
                 else:
@@ -227,24 +228,24 @@ class Pipeline(object):
             tokens = generate_output.output_ids
             tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
             output_lens.append(tokens.nelement())
-            
+
             tokens = self.process_stop_id(generate_config, generate_output, tokens.tolist(), stop_word_ids, stop_word_id_slices)
-            
+
             text, all_text = self.piple_funcs.process_decode_func(tokens,
                                           generate_config=generate_config.model_dump(),
                                           tokenizer=self.tokenizer,
                                           decoding_state=decoding_states[i],
                                           return_incremental=generate_config.return_incremental,
                                           **kwargs)
-            
+
             text, token_buffers[i] = self.process_stop_str(generate_config, generate_output, text, all_text, stop_word_str_list,
                     stop_word_str_slices, token_buffers[i], **kwargs)
-            
+
             text = self.piple_funcs.modify_response_func(
                     text, hidden_states=generate_output.hidden_states,
                     generate_config=generate_config.model_dump(),
                     **kwargs)
-    
+
             texts.append(text)
             all_texts.append(all_text)
             i += 1

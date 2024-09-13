@@ -14,12 +14,23 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-class MultimodalInput {
-public:
+struct MultimodalInput {
+// public:
     std::string url;
-    int32_t     mm_type;
+    int32_t     mm_type = 0;
     MultimodalInput(std::string url, int32_t mm_type = 0): url(url), mm_type(mm_type) {}
 };
+
+class MultimodalFeature {
+public:
+    std::vector<torch::Tensor>   features;
+    std::vector<MultimodalInput> inputs;
+    ft::BufferPtr                text_tokens_mask; // text part for 1 and multimodal part for 0
+    ft::BufferPtr                locs; // multimodal input locations
+    ft::BufferPtr                expanded_ids;
+    MultimodalFeature() {}
+};
+
 
 class GenerateInput {
 public:
@@ -53,6 +64,7 @@ public:
     ft::BufferPtr                   input_ids;
 
     // For multi-modality models
+    // std::optional<MultimodalFeature> multimodal_features;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<ft::BufferPtr>                text_tokens_mask; // text part for 1 and multimodal part for 0
@@ -117,5 +129,7 @@ struct GenerateStatus {
     absl::StatusCode error_code;
     std::string      error_info;
 };
+
+void registerMultimodalInput(const py::module& m);
 
 }  // namespace rtp_llm

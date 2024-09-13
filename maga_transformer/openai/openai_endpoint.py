@@ -3,19 +3,16 @@ import torch
 from typing import Union, Optional, List, Dict, Generator, Coroutine, AsyncGenerator, Any, Iterator
 import os
 import logging
-from dataclasses import dataclass
 from functools import partial
 
 from transformers import PreTrainedTokenizerBase
-from transformers.generation.stopping_criteria import StoppingCriteria
-
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from transformers import PreTrainedTokenizerBase
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse, GenerateInput, MultimodalInput
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
-    FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse, \
+    ChatCompletionStreamResponse, \
     DebugInfo
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs, CustomChatRenderer

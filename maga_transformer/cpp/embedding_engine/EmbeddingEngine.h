@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <thread>
 #include "absl/status/status.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
@@ -20,7 +21,7 @@ public:
     ~EmbeddingEngine();
 
     absl::Status enqueue(EmbeddingStreamPtr stream);
-    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);
+    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features = std::nullopt);
     // absl::Status update_streams(std::list<EmbeddingStreamPtr>& streams);
     absl::Status stop();
 

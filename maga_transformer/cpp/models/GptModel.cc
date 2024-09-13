@@ -218,6 +218,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) : nullptr;
     const BufferPtr mm_feature_locs = inputs.mm_features_locs ? inputs.mm_features_locs: nullptr;
 
+    BufferPtr residual_scale;
+    if (abs(description_.residual_scalar - 1.0) > 1e-6) {
+        residual_scale = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
+    }
+
     // word embedding lookup
     auto hidden = device_->embeddingLookup({
             *combo_tokens, *embedding_table, description_.input_embedding_scalar,
@@ -227,6 +232,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
             weights_.token_type_embedding ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
     const auto dtype = hidden->type();
+    if (residual_scale) {
+        residual_scale = device_->convert({residual_scale, hidden->type()});
+    }
     if (device_props_.tp_size > 1) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
@@ -341,6 +349,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
             attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
         }
+        if (residual_scale) {
+            attn_hidden = device_->multiply({*residual_scale, *attn_hidden});
+        }
         printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
 
         if (layer.post_layernorm) {
@@ -412,6 +423,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         if (device_props_.tp_size > 1) {
             // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
             hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
+        }
+        if (residual_scale) {
+            hidden = device_->multiply({*residual_scale, *hidden});
         }
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 

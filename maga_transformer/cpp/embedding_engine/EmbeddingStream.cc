@@ -22,6 +22,10 @@ int64_t EmbeddingStream::streamId() const {
     return embedding_input_->request_id;
 }
 
+const std::optional<MultimodalFeature>& EmbeddingStream::multimodalFeature() const {
+    return embedding_input_->multimodal_features;
+}
+
 int64_t EmbeddingStream::batchSize() const {
     return embedding_input_->input_lengths->shape()[0];
 }
