@@ -106,4 +106,18 @@ TEST_F(HttpApiServerTest, testRegisterTokenizerEncode) {
     MockRouteCallback("POST", "/tokenizer/encode", request);
 }
 
+TEST_F(HttpApiServerTest, testRegisterInferenceInternal) {
+    EXPECT_TRUE(server_->registerInferenceInternal());
+    const std::string body    = R"del(
+{
+    "prompt": "hello, what is your age",
+    "generate_config": {
+        "max_new_tokens": 20
+    }
+}
+)del";
+    auto              request = CreateHttpRequest(body);
+    MockRouteCallback("POST", "/inference_internal", request);
+}
+
 }  // namespace rtp_llm

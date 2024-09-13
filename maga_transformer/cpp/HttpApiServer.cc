@@ -105,6 +105,9 @@ public:
         int world_rank = autil::EnvUtil::getEnv("WORLD_RANK", 0);
         return world_rank == 0;
     }
+    static bool isWorker() {
+        return !isMaster();
+    }
 };
 
 autil::AtomicCounter requestCounter;
@@ -205,6 +208,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
+    writer->AddHeader("Content-Type", "application/json");
     auto stream = engine->enqueue(input);
     while (!stream->finished()) {
         const auto output_status = stream->nextOutput();
@@ -250,6 +254,7 @@ void HttpApiServer::registerResponses() {
     registerSetDebugLog();
     registerSetDebugPrint();
     registerTokenizerEncode();
+    registerInferenceInternal();
 }
 
 bool HttpApiServer::registerRoot() {
@@ -384,6 +389,7 @@ bool HttpApiServer::registerTokenizerEncode() {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (!ParallelInfo::isMaster()) {
+            FT_LOG_WARNING("gang worker should not access /tokenizer/encode api directly");
             auto msg =
                 CreateErrorResponseJsonString(515, "gang worker should not access /tokenizer/encode api directly");
             writer->Write(msg);
@@ -438,6 +444,24 @@ bool HttpApiServer::registerTokenizerEncode() {
         }
     };
     return http_server_.RegisterRoute("POST", "/tokenizer/encode", callback);
+}
+
+bool HttpApiServer::registerInferenceInternal() {
+    auto callback = [engine = engine_, params = params_, pipeline = pipeline_, controller = controller_](
+                        std::unique_ptr<http_server::HttpResponseWriter> writer,
+                        const http_server::HttpRequest&                  request) -> void {
+        if (!ParallelInfo::isWorker()) {
+            FT_LOG_WARNING("gang master should not access /inference_internal api directly");
+            writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+            writer->AddHeader("Content-Type", "application/json");
+            auto msg =
+                CreateErrorResponseJsonString(515, "gang master should not access /inference_internal api directly");
+            writer->Write(msg);
+            return;
+        }
+        inferResponse(std::move(writer), request, engine, params, pipeline, controller);
+    };
+    return http_server_.RegisterRoute("POST", "/inference_internal", callback);
 }
 
 void HttpApiServer::stop() {
