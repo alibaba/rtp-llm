@@ -92,18 +92,17 @@ public:
     std::string error_msg;
 };
 
+inline std::string CreateErrorResponseJsonString(int error_code, const std::string& error_msg) {
+    ErrorResponse response;
+    response.error_code = error_code;
+    response.error_msg  = error_msg;
+    return ToJsonString(response, true);
+}
+
 class ParallelInfo {
 public:
     static bool isMaster() {
-        int world_rank = 0;
-        if (const char* world_rank_env = std::getenv("WORLD_RANK"); world_rank_env) {
-            std::string world_rank_str = world_rank_env;
-            try {
-                world_rank = std::stoi(world_rank_str);
-            } catch (...) {
-                FT_LOG_WARNING("env WORLD_RANK should be a int: %s", world_rank_str.c_str());
-            }
-        }
+        int world_rank = autil::EnvUtil::getEnv("WORLD_RANK", 0);
         return world_rank == 0;
     }
 };
@@ -118,6 +117,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
                    std::shared_ptr<ConcurrencyController>           controller_) {
 
     if (controller_->increment() == false) {
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->SetStatus(429, "Too Many Requests");
         writer->Write("");
         return;
@@ -241,8 +241,8 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
 }
 
 void HttpApiServer::registerResponses() {
-    http_server_.RegisterRoute("POST", "/inference",
-            std::bind(inferResponse, _1, _2, engine_, params_, pipeline_, controller_));
+    http_server_.RegisterRoute(
+        "POST", "/inference", std::bind(inferResponse, _1, _2, engine_, params_, pipeline_, controller_));
     // TODO: register other routes
     registerRoot();
     registerHealth();
@@ -258,9 +258,10 @@ bool HttpApiServer::registerRoot() {
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
-        if (shared_this->isShutdown()) {
-            FT_LOG_WARNING("server has been shutdown");
-            writer->Write("server has been shutdown", 503);
+        if (shared_this->isStopped()) {
+            FT_LOG_WARNING("called root route, but server has been shutdown");
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"this server has been shutdown"})");
             return;
         }
         writer->Write(R"({"status":"home"})");
@@ -274,9 +275,10 @@ bool HttpApiServer::registerHealth() {
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
-        if (shared_this->isShutdown()) {
-            FT_LOG_WARNING("server has been shutdown");
-            writer->Write("server has been shutdown", 503);
+        if (shared_this->isStopped()) {
+            FT_LOG_WARNING("called health route, but server has been shutdown");
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"this server has been shutdown"})");
             return;
         }
         writer->Write("ok");
@@ -322,12 +324,12 @@ bool HttpApiServer::registerSetDebugLog() {
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
+        const auto body = request.GetBody();
         try {
-            auto body     = ParseJson(request.GetBody());
-            auto body_map = AnyCast<JsonMap>(body);
+            auto body_map = AnyCast<JsonMap>(ParseJson(body));
             auto it       = body_map.find("debug");
             if (it == body_map.end()) {
-                FT_LOG_WARNING("set debug log level failed, request has no debug info");
+                FT_LOG_WARNING("set debug log level failed, request has no debug info, request body: %s", body.c_str());
                 writer->Write(R"({"error":"set debug log level failed, request has no debug info"})");
                 return;
             }
@@ -335,8 +337,10 @@ bool HttpApiServer::registerSetDebugLog() {
             torch_ext::setDebugLogLevel(value);
             writer->Write(R"({"status":"ok"})");
             return;
-        } catch (...) {
-            FT_LOG_WARNING("set debug log level failed, exception occurred when parse request");
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("set debug log level failed, found exception. request body: %s, exception: [%s]",
+                           body.c_str(),
+                           e.what());
             writer->Write(R"({"error":"set debug log level failed, exception occurred when parse request"})");
             return;
         }
@@ -349,12 +353,13 @@ bool HttpApiServer::registerSetDebugPrint() {
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
+        const auto body = request.GetBody();
         try {
-            auto body     = ParseJson(request.GetBody());
-            auto body_map = AnyCast<JsonMap>(body);
+            auto body_map = AnyCast<JsonMap>(ParseJson(body));
             auto it       = body_map.find("debug");
             if (it == body_map.end()) {
-                FT_LOG_WARNING("set debug print level failed, request has no debug info");
+                FT_LOG_WARNING("set debug print level failed, request has no debug info. request body: %s",
+                               body.c_str());
                 writer->Write(R"({"error":"set debug print level failed, request has no debug info"})");
                 return;
             }
@@ -362,8 +367,10 @@ bool HttpApiServer::registerSetDebugPrint() {
             torch_ext::setDebugPrintLevel(value);
             writer->Write(R"({"status":"ok"})");
             return;
-        } catch (...) {
-            FT_LOG_WARNING("set debug print level failed, exception occurred when parse request");
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("set debug print level failed, found exception. request body: %s, exception: [%s]",
+                           body.c_str(),
+                           e.what());
             writer->Write(R"({"error":"set debug print level failed, exception occurred when parse request"})");
             return;
         }
@@ -377,20 +384,20 @@ bool HttpApiServer::registerTokenizerEncode() {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (!ParallelInfo::isMaster()) {
-            ErrorResponse error_response;
-            error_response.error_code = 515;
-            error_response.error_msg  = "gang worker should not access /tokenizer/encode api directly";
-            auto response_json_str    = ToJsonString(error_response, true);
-            writer->Write(response_json_str);
+            auto msg =
+                CreateErrorResponseJsonString(515, "gang worker should not access /tokenizer/encode api directly");
+            writer->Write(msg);
             return;
         }
+        const auto body = request.GetBody();
         try {
-            auto body      = ParseJson(request.GetBody());
-            auto body_map  = AnyCast<JsonMap>(body);
+            auto body_map  = AnyCast<JsonMap>(ParseJson(body));
             auto prompt_it = body_map.find("prompt");
             if (prompt_it == body_map.end()) {
-                FT_LOG_WARNING("tokenizer encode failed, request has no prompt");
-                writer->Write("tokenizer encode failed, request has no prompt", 500);
+                FT_LOG_WARNING("tokenizer encode failed, request has no prompt, request body: %s", body.c_str());
+                writer->SetStatus(500, "Internal Server Error");
+                auto msg = CreateErrorResponseJsonString(500, "tokenizer encode failed, request has no prompt");
+                writer->Write(msg);
                 return;
             }
             auto prompt         = AnyCast<std::string>(prompt_it->second);
@@ -412,20 +419,31 @@ bool HttpApiServer::registerTokenizerEncode() {
                 tokenizer_response->tokens    = tokens;
             }
             if (!tokenizer_response) {
-                FT_LOG_WARNING("tokenizer encode failed, response is null, offset_mapping: %d", offset_mapping);
-                writer->Write("tokenizer encode failed, maybe tokenizer failed", 500);
+                FT_LOG_WARNING("tokenizer encode failed, response is null, request body: %s", body.c_str());
+                writer->SetStatus(500, "Internal Server Error");
+                auto msg = CreateErrorResponseJsonString(500, "tokenizer encode failed, maybe tokenizer failed");
+                writer->Write(msg);
                 return;
             }
             auto response_json_str = ToJsonString(*tokenizer_response, true);
             writer->Write(response_json_str);
             return;
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("tokenizer encode failed, found exception: [%s]", e.what());
-            writer->Write("tokenizer encode failed, exception occurred", 500);
+            FT_LOG_WARNING(
+                "tokenizer encode failed, found exception. request body: %s, exception: [%s]", body.c_str(), e.what());
+            writer->SetStatus(500, "Internal Server Error");
+            auto msg = CreateErrorResponseJsonString(500, "tokenizer encode failed, exception occurred");
+            writer->Write(msg);
             return;
         }
     };
     return http_server_.RegisterRoute("POST", "/tokenizer/encode", callback);
+}
+
+void HttpApiServer::stop() {
+    FT_LOG_WARNING("http api server stopped");
+    is_stopped_.store(true);
+    http_server_.Stop();
 }
 
 // ------------------------------- Pipeline -------------------------------
@@ -468,7 +486,8 @@ std::shared_ptr<TokenizerEncodeResponse> Pipeline::tokenizer(const std::string& 
     if (py_res.contains("offset_mapping")) {
         auto py_offset_mapping = py_res["offset_mapping"];
         if (!py::isinstance<py::list>(py_offset_mapping)) {
-            FT_LOG_WARNING("tokenizer failed, offset mapping expected list but get: %s",
+            FT_LOG_WARNING("tokenizer failed, offset mapping expected list but type is %s, offset mapping: %s",
+                           py::cast<std::string>(py::str(py::type::of(py_offset_mapping))).c_str(),
                            py::cast<std::string>(py::str(py_offset_mapping)).c_str());
             return nullptr;
         }
@@ -490,7 +509,8 @@ std::shared_ptr<TokenizerEncodeResponse> Pipeline::tokenizer(const std::string& 
     if (py_res.contains("input_ids")) {
         auto py_input_ids = py_res["input_ids"];
         if (!py::isinstance<py::list>(py_input_ids)) {
-            FT_LOG_WARNING("tokenizer failed, input ids expected list but get: ",
+            FT_LOG_WARNING("tokenizer failed, input ids expected list but type is: %s, input ids: %s",
+                           py::cast<std::string>(py::str(py::type::of(py_input_ids))).c_str(),
                            py::cast<std::string>(py::str(py_input_ids)).c_str());
             return nullptr;
         }

@@ -26,9 +26,7 @@ private:
 
 class HttpApiServer: public std::enable_shared_from_this<HttpApiServer> {
 public:
-    HttpApiServer(std::shared_ptr<EngineBase> engine,
-                  ft::GptInitParameter        params,
-                  py::object                  token_processor):
+    HttpApiServer(std::shared_ptr<EngineBase> engine, ft::GptInitParameter params, py::object token_processor):
         engine_(engine), params_(params), pipeline_(Pipeline(token_processor)) {
 
         bool block = autil::EnvUtil::getEnv("CONCURRENCY_WITH_BLOCK", false);
@@ -45,18 +43,13 @@ public:
     bool start(std::string addrSpec) {
         return http_server_.Start(addrSpec);
     }
-    void stop() {
-        http_server_.Stop();
-    }
+    void               stop();
     void               registerResponses();
     static std::string SseResponse(std::string& response) {
         return "data: " + response + "\n\n";
     }
-    void notifyServerHasShutdown() {
-        is_shutdown_.store(true);
-    }
-    bool isShutdown() const {
-        return is_shutdown_.load();
+    bool isStopped() const {
+        return is_stopped_.load();
     }
 
 private:
@@ -72,11 +65,11 @@ private:
 
     // attach params and engine to HttpApiServer in RtpLLMOp.cc
     std::shared_ptr<EngineBase> engine_;
-    ft::GptInitParameter params_;
+    ft::GptInitParameter        params_;
 
-    Pipeline pipeline_;
+    Pipeline                               pipeline_;
     std::shared_ptr<ConcurrencyController> controller_;
-    std::atomic<bool>           is_shutdown_{false};
+    std::atomic<bool>                      is_stopped_{false};
 };
 
 }  // namespace rtp_llm

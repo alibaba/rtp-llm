@@ -24,7 +24,7 @@ public:
     };
     void SetWriteType(WriteType type) { _type = type; }
     // not thread safe
-    bool Write(const std::string &data, int statusCode = 200);
+    bool Write(const std::string &data);
     bool WriteDone();
 
     void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
@@ -34,7 +34,7 @@ public:
     }
 
 private:
-    bool WriteNormal(const std::string &data, int statusCode = 200);
+    bool WriteNormal(const std::string &data);
     bool WriteStream(const std::string &data, bool isWriteDone);
     std::shared_ptr<HttpResponse> Chunk(const std::string &data, bool isWriteDone);
     bool PostHttpResponse(const std::shared_ptr<HttpResponse> &response) const;
@@ -43,7 +43,7 @@ private:
     std::shared_ptr<anet::Connection> _connection;
     WriteType _type{WriteType::Undefined};
 
-    int _statusCode;
+    int _statusCode{200};
     std::optional<std::string> _statusMessage;
 
     // for normal response

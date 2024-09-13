@@ -16,13 +16,13 @@ HttpResponseWriter::~HttpResponseWriter() {
     _connection.reset();
 }
 
-bool HttpResponseWriter::Write(const std::string &data, int statusCode) {
+bool HttpResponseWriter::Write(const std::string &data) {
     if (_type == WriteType::Undefined) {
         AUTIL_LOG(WARN, "write failed, write type is undefined, call SetWriteType first");
         return false;
     }
     if (_type == WriteType::Normal) {
-        return WriteNormal(data, statusCode);
+        return WriteNormal(data);
     } else {
         return WriteStream(data, false);
     }
@@ -40,21 +40,21 @@ bool HttpResponseWriter::WriteDone() {
     return true;
 }
 
-bool HttpResponseWriter::WriteNormal(const std::string &data, int statusCode) {
+bool HttpResponseWriter::WriteNormal(const std::string &data) {
     if (_alreadyWrite) {
         AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
         return false;
     }
     std::shared_ptr<HttpResponse> response;
-    if (statusCode == 200) {
-        response = std::make_shared<HttpResponse>(data, _headers);
+    if (_statusCode == 200) {
+        response = std::make_shared<HttpResponse>(data);
     } else {
         HttpError error;
-        error.code    = statusCode;
+        error.code    = _statusCode;
         error.message = data;
         response      = std::make_shared<HttpResponse>(error);
     }
-    response->setStatusCode(_statusCode);
+    response->SetHeaders(_headers);
     if (_statusMessage) response->setStatusMessage(_statusMessage.value());
     if (!PostHttpResponse(response)) {
         AUTIL_LOG(WARN, "write normal failed, post http response failed");
@@ -75,6 +75,7 @@ bool HttpResponseWriter::WriteStream(const std::string &data, bool isWriteDone) 
         AUTIL_LOG(WARN, "write stream failed, chunk http response failed");
         return false;
     }
+    if (_statusMessage) chunkResponse->setStatusMessage(_statusMessage.value());
     if (!PostHttpResponse(chunkResponse)) {
         AUTIL_LOG(WARN, "write stream failed, post http response failed");
         return false;
@@ -113,8 +114,9 @@ std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data,
         std::stringstream ss;
         ss << std::hex << data.size();
         const auto body = ss.str() + "\r\n" + data + "\r\n";
-        auto response = std::make_shared<HttpResponse>(body, _headers);
+        auto response = std::make_shared<HttpResponse>(body);
         if (response) {
+            response->SetHeaders(_headers);
             response->SetDisableContentLengthHeader(true);
         }
         return response;
@@ -134,7 +136,5 @@ std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data,
     }
     return response;
 }
-
-void HttpResponseWriter::AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
 
 } // namespace http_server
