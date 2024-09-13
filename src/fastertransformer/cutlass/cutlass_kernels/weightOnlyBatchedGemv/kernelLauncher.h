@@ -68,7 +68,8 @@ inline bool is_supported(int arch, KernelType kernel_type)
         return true;
     if (arch >= 70 && arch < 75)
     {
-        SUPPORT(KernelType::FP16Int8PerChannel);
+        return false;
+        // SUPPORT(KernelType::FP16Int8PerChannel);
     }
     else if (arch >= 75 && arch < 80)
     {
@@ -84,10 +85,11 @@ inline bool is_supported(int arch, KernelType kernel_type)
     }
     else if (arch >= 90)
     {
-        SUPPORT(KernelType::FP16Int4Groupwise);
-        SUPPORT(KernelType::BF16Int4Groupwise);
-        SUPPORT(KernelType::FP16Int8PerChannel);
-        SUPPORT(KernelType::BF16Int8PerChannel);
+        return false;
+        // SUPPORT(KernelType::FP16Int4Groupwise);
+        // SUPPORT(KernelType::BF16Int4Groupwise);
+        // SUPPORT(KernelType::FP16Int8PerChannel);
+        // SUPPORT(KernelType::BF16Int8PerChannel);
     }
     return false;
 #undef SUPPORT
