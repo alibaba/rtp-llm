@@ -96,7 +96,7 @@ size_t RejectionSampler::stochasticSample(size_t                                
                 .item<bool>()) {
             auto new_p = score_all_probs[accepted_len]
                              .subtract(propose_all_probs[accepted_len])
-                             .maximum(torch::zeros_like(score_all_probs[accepted_len]));
+                             .maximum(torch::zeros_like(score_all_probs[accepted_len], torch::Device(torch::kCUDA)));
             auto norm_p                                                          = new_p.div(new_p.sum(0));
             auto new_token_tensor                                                = norm_p.multinomial(1);
             *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = new_token_tensor.item<int32_t>();
