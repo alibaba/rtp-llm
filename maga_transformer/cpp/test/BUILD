@@ -85,7 +85,7 @@ cc_test(
 )
 
 cc_test(
-    name = "unittest",
+    name = "http_api_server_unittest",
     srcs = [
         "HttpApiServerTest.cc",
     ],

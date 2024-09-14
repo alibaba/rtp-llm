@@ -60,6 +60,7 @@ private:
     bool registerSetDebugPrint();
     bool registerTokenizerEncode();
     bool registerInferenceInternal();
+    bool registerWorkerStatus();
 
 private:
     http_server::HttpServer http_server_;

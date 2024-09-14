@@ -120,4 +120,10 @@ TEST_F(HttpApiServerTest, testRegisterInferenceInternal) {
     MockRouteCallback("POST", "/inference_internal", request);
 }
 
+TEST_F(HttpApiServerTest, testRegisterWorkerStatus) {
+    EXPECT_TRUE(server_->registerWorkerStatus());
+    auto request = CreateHttpRequest("");
+    MockRouteCallback("GET", "/worker_status", request);
+}
+
 }  // namespace rtp_llm

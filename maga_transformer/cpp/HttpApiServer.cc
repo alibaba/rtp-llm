@@ -4,6 +4,7 @@
 #include "autil/legacy/json.h"
 #include "autil/legacy/jsonizable.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 
 namespace torch_ext {
@@ -78,6 +79,24 @@ public:
     std::vector<std::string>      tokens;
     std::vector<int>              token_ids;
     std::string                   error;
+};
+
+class WorkerStatusResponse: public Jsonizable {
+public:
+    void Jsonize(Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("available_concurrency", available_concurrency);
+        json.Jsonize("available_kv_cache", load_balance_info.available_kv_cache);
+        json.Jsonize("total_kv_cache", load_balance_info.total_kv_cache);
+        json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
+        json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
+        json.Jsonize("iterate_count", load_balance_info.iterate_count);
+        json.Jsonize("alive", alive);
+    }
+
+public:
+    int             available_concurrency;
+    LoadBalanceInfo load_balance_info;
+    bool            alive;
 };
 
 class ErrorResponse: public Jsonizable {
@@ -255,6 +274,7 @@ void HttpApiServer::registerResponses() {
     registerSetDebugPrint();
     registerTokenizerEncode();
     registerInferenceInternal();
+    registerWorkerStatus();
 }
 
 bool HttpApiServer::registerRoot() {
@@ -462,6 +482,48 @@ bool HttpApiServer::registerInferenceInternal() {
         inferResponse(std::move(writer), request, engine, params, pipeline, controller);
     };
     return http_server_.RegisterRoute("POST", "/inference_internal", callback);
+}
+
+bool HttpApiServer::registerWorkerStatus() {
+    auto shared_this = shared_from_this();
+    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest&                  request) -> void {
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
+        if (shared_this->isStopped()) {
+            FT_LOG_WARNING("called worker status route, but server has been shutdown");
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"this server has been shutdown"})");
+            return;
+        }
+        // load balance info
+        LoadBalanceInfo load_balance_info;
+        if (shared_this->engine_) {
+            load_balance_info = shared_this->engine_->getLoadBalanceInfo();
+        } else {
+            FT_LOG_WARNING("called register worker status route, engine is null");
+        }
+        // concurrency
+        int        available_concurrency = 0;
+        const auto load_balance_env      = autil::EnvUtil::getEnv("LOAD_BALANCE", 0);
+        if (load_balance_env && load_balance_info.step_per_minute > 0 && load_balance_info.step_latency_us > 0) {
+            available_concurrency = load_balance_info.step_per_minute;
+        } else {
+            if (shared_this->controller_) {  // controller should not be null
+                available_concurrency = shared_this->controller_->get_available_concurrency();
+            } else {
+                FT_LOG_WARNING("called register worker status route, concurrency controller is null");
+            }
+        }
+        WorkerStatusResponse worker_status_response;
+        worker_status_response.available_concurrency = available_concurrency;
+        worker_status_response.load_balance_info     = load_balance_info;
+        worker_status_response.alive                 = true;
+        auto response_json_str                       = ToJsonString(worker_status_response, true);
+        writer->Write(response_json_str);
+        return;
+    };
+    return http_server_.RegisterRoute("GET", "/worker_status", callback);
 }
 
 void HttpApiServer::stop() {
