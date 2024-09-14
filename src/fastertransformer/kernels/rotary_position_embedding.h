@@ -359,6 +359,7 @@ struct YarnRope {
     float beta_fast;
     float scaling_factor;
     float extrapolation_factor;
+    float mscale;
 
     static __device__ __inline__ float find_correction_dim(const int num_rotations, const int dim, const int base,
                                                            const int max_position_embeddings=2048) {
@@ -380,14 +381,6 @@ struct YarnRope {
         return low_high;
     }
 
-    static __device__ __inline__ float get_mscale(float scale=1) {
-        if (scale <= 1) {
-            return 1.0;
-        } else {
-            return 0.1 * log(scale) + 1.0;
-        }
-    }
-
     static __device__ __inline__ float linear_ramp_mask(float min_, float max_, int tidx) {
         if (min_ == max_) {
             max_ += 0.001;
@@ -405,7 +398,7 @@ struct YarnRope {
     }
 
     __device__ __inline__ float sin_cos_scale() const {
-        return get_mscale(scaling_factor);
+        return mscale;
     }
 };
 
@@ -618,33 +611,36 @@ __device__ __inline__ void apply_rotary_embedding(bf16_8_t&   q,
 #endif  // ENABLE_BF16
 
 template<typename RopeInit, typename scalar_t, typename vector_t>
-__device__ __inline__ void normal_rope(vector_t&   x,
-                                       scalar_t*   smem,
-                                       const int   tidx,
-                                       const int   seqidx,
-                                       const int   dim,
-                                       const float base,
-                                       const RopeInit &rope_init)
+__device__ __inline__ void normal_rope(vector_t&       x,
+                                       scalar_t*       smem,
+                                       const int       tidx,
+                                       const int       seqidx,
+                                       const int       dim,
+                                       const float     base,
+                                       const RopeInit& rope_init,
+                                       const int       offset = 0)
 {
-    const int  vec_size = vector_size<scalar_t, vector_t>::size;
-    const bool work     = (tidx * vec_size < dim);
+    const int  vec_size  = vector_size<scalar_t, vector_t>::size;
+    const int  rope_idx  = tidx * vec_size - offset;
+    const bool work      = (rope_idx >= 0 && rope_idx < dim);
+    const int  rope_tidx = rope_idx / vec_size;
 
     if (work) {
-        reinterpret_cast<vector_t*>(smem)[tidx] = x;
+        reinterpret_cast<vector_t*>(smem)[rope_tidx] = x;
     }
 
     __syncthreads();
 
     if (work) {
-        RotaryHalfRead(x, smem, tidx, dim / 2);
-        apply_rotary_embedding(x, tidx, dim, seqidx, base, rope_init);
-        RotaryHalfWrite(x, smem, tidx, dim / 2);
+        RotaryHalfRead(x, smem, rope_tidx, dim / 2);
+        apply_rotary_embedding(x, rope_tidx, dim, seqidx, base, rope_init);
+        RotaryHalfWrite(x, smem, rope_tidx, dim / 2);
     }
 
     __syncthreads();
 
     if (work) {
-        x = reinterpret_cast<vector_t*>(smem)[tidx];
+        x = reinterpret_cast<vector_t*>(smem)[rope_tidx];
     }
 }
 
@@ -707,7 +703,8 @@ __device__ inline void apply_rope(RopeConfig rope_config,
         normal_rope(x, smem, tidx, seqidx, dim, base,
                     YarnRope{rope_config.dim, rope_config.base, rope_config.max_pos,
                         rope_config.factor1, rope_config.factor2, rope_config.scale,
-                        rope_config.extrapolation_factor});
+                        rope_config.extrapolation_factor, rope_config.mscale},
+                    rope_config.offset);
         break;
     case RopeStyle::QwenDynamicNTK:
         if (seq_len > rope_config.max_pos) {

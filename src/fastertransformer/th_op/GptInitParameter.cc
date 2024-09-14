@@ -112,6 +112,8 @@ RopeConfig GptInitParameter::getRopeConfig() const {
     rope_config.max_pos      = org_embedding_max_pos_;
     rope_config.factor1      = rotary_factor1_;
     rope_config.factor2      = rotary_factor2_;
+    rope_config.mscale       = rotary_embedding_mscale_;
+    rope_config.offset       = rotary_embedding_offset_;
     return rope_config;
 }
 
@@ -269,7 +271,9 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
     DEF_PROPERTY(use_kvcache, use_kvcache_)                             \
     DEF_PROPERTY(use_expert_attention, use_expert_attention_)           \
-    DEF_PROPERTY(local_rank, local_rank_)
+    DEF_PROPERTY(local_rank, local_rank_)                               \
+    DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)    \
+    DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num

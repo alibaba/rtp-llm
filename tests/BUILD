@@ -74,6 +74,7 @@ py_test(
     srcs = [
         "rotary_embedding/rotary_position_embedding.py",
         "rotary_embedding/yarn_rotary_embedding.py",
+        "rotary_embedding/deepseek_yarn_rotary_embedding.py",
     ],
     data = [
         "//:th_transformer",

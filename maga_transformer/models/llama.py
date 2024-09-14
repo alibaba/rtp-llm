@@ -22,6 +22,12 @@ class LlamaTokenizer(LlamaTokenizerOrigin):
 
 class Llama(GPT):
     @staticmethod
+    def get_mscale(scale: float):
+        if scale <= 1:
+            return 1.0
+        return 0.1 * math.log(scale) + 1.0
+
+    @staticmethod
     def get_weight_cls():
         return LlamaWeightInfo
 
@@ -58,7 +64,7 @@ class Llama(GPT):
             Llama.from_params(config, param_json)
         else:
             raise Exception("llama parameter from unkown source")
-        
+
         GPT._load_quant_config(ckpt_path, config_json, config)
 
         return config
@@ -92,6 +98,7 @@ class Llama(GPT):
                 config.rotary_factor1 = rope_scaling.get('beta_slow', 1)
                 config.rotary_factor2 = rope_scaling.get('beta_fast', 32)
                 config.org_embedding_max_pos = rope_scaling['original_max_position_embeddings']
+                config.rotary_embedding_mscale = Llama.get_mscale(config.rotary_embedding_scale)
             elif rope_type == 'llama3':
                 config.rotary_embedding_style = 6
                 config.rotary_embedding_scale = rope_scaling['factor']

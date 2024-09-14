@@ -20,14 +20,16 @@ enum class RopeStyle {
 
 struct RopeConfig {
     RopeStyle style = RopeStyle::No;
-    int dim = 0;
-    int base = 10000;
+    int       dim   = 0;
+    int       base  = 10000;
 
-    float scale = 1.0;
-    float factor1 = 0;
-    float factor2 = 0;
-    int max_pos = 0;
+    float scale                = 1.0;
+    float factor1              = 0;
+    float factor2              = 0;
+    int   max_pos              = 0;
     float extrapolation_factor = 1.0;
+    float mscale               = 1.0;
+    int   offset               = 0;
 };
 
 #define FT_ROPE_SWITCH(COND, CONST_NAME, ...)                           \

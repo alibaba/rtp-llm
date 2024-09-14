@@ -127,14 +127,16 @@ public:
     TaskType       task_type_           = TaskType::LANGUAGE_MODEL;
     ActivationType activation_type_     = ActivationType::Gelu;
 
-    int64_t rotary_embedding_dim_      = 0;
-    int64_t rotary_embedding_style_    = 0;
-    int64_t position_ids_style_        = 0;
-    float rotary_embedding_base_     = 10000.f;
+    int64_t rotary_embedding_dim_    = 0;
+    int64_t rotary_embedding_style_  = 0;
+    int64_t position_ids_style_      = 0;
+    float   rotary_embedding_base_   = 10000.f;
     double  rotary_embedding_scale_  = 1.0;
     double  rotary_factor1_          = 0;
     double  rotary_factor2_          = 0;
-    int64_t org_embedding_max_pos_     = 0;
+    int64_t org_embedding_max_pos_   = 0;
+    double  rotary_embedding_mscale_ = 1.0;
+    int64_t rotary_embedding_offset_ = 0;
     // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
     double  input_embedding_scalar_    = 1;
     double  residual_scalar_    = 1;
