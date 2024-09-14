@@ -40,9 +40,9 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto& top_p = params.top_p;
     auto& temperature = params.temperature;
     auto& random_seed = params.random_seed;
-    FT_CHECK(top_k.size() == batch_size);
-    FT_CHECK(top_p.size() == batch_size);
-    FT_CHECK(temperature.size() == batch_size);
+    ROCM_CHECK_VALUE(top_k.size() == batch_size, "top_k.size() != batch_size");
+    ROCM_CHECK_VALUE(top_p.size() == batch_size, "top_p.size() != batch_size");
+    ROCM_CHECK_VALUE(temperature.size() == batch_size, "temperature.size() != batch_size");
 
     auto default_top_k = top_k.data<uint32_t>()[0];
     auto default_top_p = top_p.data<float>()[0];

@@ -123,7 +123,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                             hipblasGemmAlgo_t  algo) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
-    check_hip_error(hipblasGemmEx(hipblas_handle_,
+    ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
                                   transa,
                                   transb,
                                   m,
@@ -250,7 +250,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
         hipblasLtMatrixLayoutDestroy(Cdesc);
     } else {
         int hipblasAlgo = info.algoId;
-        check_hip_error(hipblasGemmEx(hipblas_handle_,
+        ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
                                       transa,
                                       transb,
                                       m,
@@ -336,7 +336,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(hipblasOperation_t));
     hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epi, sizeof(hipblasLtEpilogue_t));
     hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(const void*));
-    check_hip_error(hipblasLtMatmul(
+    ROCM_CHECK(hipblasLtMatmul(
         hipblaslt_handle_, operationDesc, alpha, A, Adesc, B, Bdesc, beta, C, Cdesc, C, Cdesc, NULL, NULL, 0, stream_));
     hipblasLtMatrixLayoutDestroy(Adesc);
     hipblasLtMatrixLayoutDestroy(Bdesc);
@@ -372,7 +372,7 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
     const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
     hipblasLtMatmulAlgo_info info = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
 
-    check_hip_error(hipblasGemmStridedBatchedEx(hipblas_handle_,
+    ROCM_CHECK(hipblasGemmStridedBatchedEx(hipblas_handle_,
                                                 transa,
                                                 transb,
                                                 m,
@@ -430,7 +430,7 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
     const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
     hipblasLtMatmulAlgo_info info = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
 
-    check_hip_error(hipblasGemmStridedBatchedEx(hipblas_handle_,
+    ROCM_CHECK(hipblasGemmStridedBatchedEx(hipblas_handle_,
                                                 transa,
                                                 transb,
                                                 m,
@@ -481,7 +481,7 @@ void hipblasMMWrapper::batchedGemm(hipblasOperation_t transa,
     const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
     hipblasLtMatmulAlgo_info info = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
 
-    check_hip_error(hipblasGemmBatchedEx(hipblas_handle_,
+    ROCM_CHECK(hipblasGemmBatchedEx(hipblas_handle_,
                                          transa,
                                          transb,
                                          m,
@@ -534,14 +534,14 @@ std::pair<bool, cublasLtMatmulAlgo_t> hipblasMMWrapper::findBestAlgo(cublasLtHan
 
     std::vector<cublasLtMatmulHeuristicResult_t> heuristics(200);
     cublasLtMatmulPreference_t                   preference;
-    check_hip_error(cublasLtMatmulPreferenceCreate(&preference));
-    check_hip_error(cublasLtMatmulPreferenceInit(preference));
+    ROCM_CHECK(cublasLtMatmulPreferenceCreate(&preference));
+    ROCM_CHECK(cublasLtMatmulPreferenceInit(preference));
     uint64_t workspace_size = HIPBLAS_WORKSPACE_SIZE;
-    check_hip_error(cublasLtMatmulPreferenceSetAttribute(
+    ROCM_CHECK(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
 #if (CUBLAS_VERSION) <= 12000
     uint32_t pointer_mode_mask = 0;
-    check_hip_error(cublasLtMatmulPreferenceSetAttribute(
+    ROCM_CHECK(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_EPILOGUE_MASK, &pointer_mode_mask, sizeof(pointer_mode_mask)));
 #endif
 
@@ -574,7 +574,7 @@ std::pair<bool, cublasLtMatmulAlgo_t> hipblasMMWrapper::findBestAlgo(cublasLtHan
         for (int i = 0; i < 11; i++) {
             float duration_ms;
             hipEventRecord(start_event, stream);
-            check_hip_error(cublasLtMatmul(lightHandle,
+            ROCM_CHECK(cublasLtMatmul(lightHandle,
                                            computeDesc,
                                            alpha,
                                            A,
@@ -730,24 +730,24 @@ void hipblasMMWrapper::_Int8Gemm(const int     m,
 
     // --------------------------------------
     // Create descriptors for the original matrices
-    check_hip_error(cublasLtMatrixLayoutCreate(&Adesc, dataType, k, m, lda));
-    check_hip_error(cublasLtMatrixLayoutCreate(&Bdesc, dataType, k, n, ldb));
-    check_hip_error(cublasLtMatrixLayoutCreate(&Cdesc, resultType, m, n, ldc));
+    ROCM_CHECK(cublasLtMatrixLayoutCreate(&Adesc, dataType, k, m, lda));
+    ROCM_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, dataType, k, n, ldb));
+    ROCM_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, resultType, m, n, ldc));
 
-    check_hip_error(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
+    ROCM_CHECK(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
 
     auto pointer_mode = CUBLASLT_POINTER_MODE_HOST;
     if (mode == 0) {
         pointer_mode =
             per_column_scaling ? CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST : CUBLASLT_POINTER_MODE_DEVICE;
     }
-    check_hip_error(
+    ROCM_CHECK(
         cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_a, sizeof(hipblasOperation_t)));
-    check_hip_error(
+    ROCM_CHECK(
         cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &op_b, sizeof(hipblasOperation_t)));
-    check_hip_error(
+    ROCM_CHECK(
         cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &op_b, sizeof(hipblasOperation_t)));
-    check_hip_error(cublasLtMatmulDescSetAttribute(
+    ROCM_CHECK(cublasLtMatmulDescSetAttribute(
         operationDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
 
     const int32_t int_one    = 1;
@@ -780,7 +780,7 @@ void hipblasMMWrapper::_Int8Gemm(const int     m,
                                      workSpace,
                                      workspaceSize,
                                      stream_);
-    check_hip_error(ret);
+    ROCM_CHECK(ret);
 
     cublasLtMatmulDescDestroy(operationDesc);
     cublasLtMatrixLayoutDestroy(Adesc);

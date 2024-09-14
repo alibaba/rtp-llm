@@ -25,7 +25,7 @@ hipblasOperation_t opConvert(TransposeOperation op) {
         case TransposeOperation::TRANSPOSE:
             return hipblasOperation_t::HIPBLAS_OP_T;
         default:
-            FT_FAIL("[GEMM]: Other TransposeOperation not implemented");
+            ROCM_FAIL("[GEMM]: Other TransposeOperation not implemented");
     }
 };
 
@@ -38,7 +38,7 @@ hipblasDatatype_t dtypeConvert(DataType dtype) {
         case DataType::TYPE_FP32:
             return hipblasDatatype_t::HIPBLAS_R_32F;
         default:
-            FT_FAIL("[GEMM]: Other DataType not implemented");
+            ROCM_FAIL("[GEMM]: Other DataType not implemented");
     }
 };
 
@@ -184,14 +184,18 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
 
     if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
         if (reinterpret_cast<const QBuffer&>(params.B).zerosData() != nullptr) {
-            FT_CHECK(reinterpret_cast<const QBuffer&>(params.B).scales().dim() == 2);
+            ROCM_CHECK_VALUE(reinterpret_cast<const QBuffer&>(params.B).scales().dim() == 2,
+                "scales().dim() = %d", reinterpret_cast<const QBuffer&>(params.B).scales().dim());
             size_t kernel_dim0 = params.B.shape()[0];
             size_t scales_dim0 = reinterpret_cast<const QBuffer&>(params.B).scales().shape()[0];
-            FT_CHECK((kernel_dim0 % scales_dim0 == 0));
+            ROCM_CHECK_VALUE((kernel_dim0 % scales_dim0 == 0),
+                "kernel_dim0 % scales_dim0 != 0");
             size_t group_size = (kernel_dim0 / scales_dim0);
-            FT_CHECK((group_size == 64 || group_size == 128));
+            ROCM_CHECK_VALUE((group_size == 64 || group_size == 128),
+                "group_size != 64 and group_size != 128");
             size_t type_bits = getTypeBits(params.B.type());
-            FT_CHECK((type_bits == 4 || type_bits == 8));
+            ROCM_CHECK_VALUE((type_bits == 4 || type_bits == 8),
+                "type_bits != 4 and type_bits != 8");
 
             BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
             BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT4X2});
@@ -246,7 +250,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                     computeType);
             return move(output);
         } else {
-            FT_FAIL("[GEMM]: Other weight quantization not implemented");
+            ROCM_FAIL("[GEMM]: Other weight quantization not implemented");
         }
     }
 
@@ -313,7 +317,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                 computeType);
         return std::move(output);
     } else {
-        FT_FAIL("[GEMM]:other dispatch not implemented");
+        ROCM_FAIL("[GEMM]:other dispatch not implemented");
     }
     return std::move(output);
 }

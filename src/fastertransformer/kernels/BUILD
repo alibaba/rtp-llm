@@ -32,6 +32,7 @@ cc_library(
         "activation_fp8_kernels.cu",
         "unfused_attention_fp8_kernels.cu",
         "moe_kernels.cu",
+        "rocm/*.cu",
     ]) + [
         ":mmha",
     ],

@@ -34,10 +34,10 @@ using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
-    check_hip_error(hipInit(0));
-    check_hip_error(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
-    check_hip_error(hipStreamCreate(&stream_));
-    check_hip_error(hipGetDeviceProperties(&rocmDevProp, device_id_));
+    ROCM_CHECK(hipInit(0));
+    ROCM_CHECK(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
+    ROCM_CHECK(hipStreamCreate(&stream_));
+    ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
         const auto rank = params.tp_rank;
@@ -74,7 +74,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 #endif
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
-        check_hip_error(hipMemGetInfo(&free_bytes, &total_bytes));
+        ROCM_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
 #if PINCPU_MEM
         tracker_params.real_allocator     = allocator_.get();  // TODO(rocm): leak?
@@ -120,7 +120,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
 #endif
 
-    check_hip_error(hipGetDeviceProperties(&device_prop_, device_id_));
+    ROCM_CHECK(hipGetDeviceProperties(&device_prop_, device_id_));
 
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
@@ -150,7 +150,7 @@ ROCmDevice::~ROCmDevice() {
     curandstate_buf_.reset();
 
     if (stream_ != nullptr) {
-        check_hip_error(hipStreamDestroy(stream_));
+        ROCM_CHECK(hipStreamDestroy(stream_));
     }
 
     if (nccl_param_.nccl_comm_) {
@@ -175,7 +175,7 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
 }
 
 void ROCmDevice::copy(const CopyParams& params) {
-    FT_CHECK_WITH_INFO(params.src.type() == params.dst.type(),
+    ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
                        "copy dst[%d] and src[%d] need has same type.",
                        params.src.type(), params.dst.type());
 
@@ -238,7 +238,7 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 }
 
 void ROCmDevice::syncAndCheck() {
-    sync_check_hip_error();
+    ROCM_SYNC_AND_CHECK();
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {

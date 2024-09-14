@@ -61,7 +61,7 @@ namespace fastertransformer {
 
 BufferPtr ROCmDevice::activation(const ActivationParams& params) {
     auto states = params.states;
-    FT_CHECK_WITH_INFO(states != nullptr, "state should not be nullptr in activation");
+    ROCM_CHECK_VALUE(states != nullptr, "state should not be nullptr in activation");
     const auto data_type = params.states->type();
 
     if (params.atype == ActivationType::Sigmoid) {

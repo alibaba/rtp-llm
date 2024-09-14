@@ -23,9 +23,11 @@
 
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/kernels/custom_ar_kernels.h"
+
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
+
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/utils/logger.h"
 

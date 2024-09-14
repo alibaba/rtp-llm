@@ -2,7 +2,7 @@
 #include "src/fastertransformer/devices/torch_impl/FfnLayer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
-
+#include <iostream>
 class FfnLayerTest : public DeviceTestBase {
 public:
 
@@ -226,16 +226,8 @@ public:
         assertTensorClose(result.out.to(result_ref.out.scalar_type()), result_ref.out);
     }
 
-
-
-
-
-
-    std::vector<std::shared_ptr<Expert>> experts;
-    std::shared_ptr<GatingNetwork>       gating_network;
-    int64_t                              topK;
 };
-TORCH_MODULE(MoE);
+
 
 class MoELayerTest: public DeviceTestBase {
 public:
@@ -287,7 +279,7 @@ public:
     }
 
     MoELayerTestOutput MoETorchRefRun(MoELayerTestInput& params, size_t expertNum, size_t topK, ActivationType Atype) {
-        MoE moe(params.gate.sizes()[1], params.gate.sizes()[2], params.gate.sizes()[0], topK, Atype);
+        torch_impl::MoE moe(params.gate.sizes()[1], params.gate.sizes()[2], params.gate.sizes()[0], topK, Atype);
         moe.ptr()->to(torch::Device(torch::kCPU));
         auto state_dict = moe.ptr()->named_parameters();
 

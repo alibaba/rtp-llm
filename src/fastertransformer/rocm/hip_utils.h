@@ -20,8 +20,16 @@
 
 namespace fastertransformer {
 
-#define check_hip_error(val) rocm::check((val), #val, __FILE__, __LINE__)
-#define sync_check_hip_error() rocm::sync_and_check(__FILE__, __LINE__)
+#define ROCM_CHECK(val) rocm::check((val), #val, __FILE__, __LINE__)
+#define ROCM_SYNC_AND_CHECK() rocm::sync_and_check(__FILE__, __LINE__)
+#define ROCM_CHECK_VALUE(val, info, ...)                              \
+do {                                                                \
+    bool is_valid_val = (val);                                      \
+    if (!is_valid_val) {						                    \
+        rocm::throwRocmError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__)); \
+    }								                                \
+} while (0)
+#define ROCM_FAIL(info, ...) rocm::throwRocmError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
 
 #define MAX_CONFIG_NUM 20
 #define COL32_ 32
@@ -143,7 +151,7 @@ static const char* _hipGetErrorEnum(hipblasStatus_t error)
     return "<unknown>";
 }
 
-inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
+static void throwRocmError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg = std::string("[ROCm][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
@@ -156,26 +164,16 @@ template<typename T>
 void check(T result, char const* const func, const char* const file, int const line)
 {
     if (result) {
-        throwRuntimeError(file, line, _hipGetErrorEnum(result));
+        throwRocmError(file, line, _hipGetErrorEnum(result));
     }
 }
 inline void sync_and_check(const char* const file, int const line) {
     hipDeviceSynchronize();
     hipError_t result = hipGetLastError();
     if(result) {
-        throwRuntimeError(file, line, _hipGetErrorEnum(result));;
+        throwRocmError(file, line, _hipGetErrorEnum(result));;
     }
 }
-
-#define FT_CHECK_WITH_INFO(val, info, ...)                              \
-    do {                                                                \
-        bool is_valid_val = (val);                                      \
-	    if (!is_valid_val) {						                    \
-  	        fastertransformer::throwRuntimeError(__FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
-	    }								                                \
-    } while (0)
-#define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")
-#define FT_FAIL(info, ...) rocm::throwRuntimeError(__FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__))
 
 /*************Time Handling**************/
 class HipTimer {
@@ -191,18 +189,18 @@ public:
     }
     void start()
     {
-        check_hip_error(hipEventCreate(&event_start_));
-        check_hip_error(hipEventCreate(&event_stop_));
-        check_hip_error(hipEventRecord(event_start_, stream_));
+        ROCM_CHECK(hipEventCreate(&event_start_));
+        ROCM_CHECK(hipEventCreate(&event_stop_));
+        ROCM_CHECK(hipEventRecord(event_start_, stream_));
     }
     float stop()
     {
         float time;
-        check_hip_error(hipEventRecord(event_stop_, stream_));
-        check_hip_error(hipEventSynchronize(event_stop_));
-        check_hip_error(hipEventElapsedTime(&time, event_start_, event_stop_));
-        check_hip_error(hipEventDestroy(event_start_));
-        check_hip_error(hipEventDestroy(event_stop_));
+        ROCM_CHECK(hipEventRecord(event_stop_, stream_));
+        ROCM_CHECK(hipEventSynchronize(event_stop_));
+        ROCM_CHECK(hipEventElapsedTime(&time, event_start_, event_stop_));
+        ROCM_CHECK(hipEventDestroy(event_start_));
+        ROCM_CHECK(hipEventDestroy(event_stop_));
         return time;
     }
     ~HipTimer() {}
@@ -218,7 +216,7 @@ static double diffTime(timeval start, timeval end)
 inline void print_mem_usage(std::string time = "after allocation")
 {
     size_t free_bytes, total_bytes;
-    check_hip_error(hipMemGetInfo(&free_bytes, &total_bytes));
+    ROCM_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
     float free  = static_cast<float>(free_bytes) / 1024.0 / 1024.0 / 1024.0;
     float total = static_cast<float>(total_bytes) / 1024.0 / 1024.0 / 1024.0;
     float used  = total - free;
@@ -228,29 +226,29 @@ inline void print_mem_usage(std::string time = "after allocation")
 inline int getSMVersion()
 {
     int device{-1};
-    check_hip_error(hipGetDevice(&device));
+    ROCM_CHECK(hipGetDevice(&device));
     int sm_major = 0;
     int sm_minor = 0;
-    check_hip_error(hipDeviceGetAttribute(&sm_major, hipDeviceAttributeComputeCapabilityMajor, device));
-    check_hip_error(hipDeviceGetAttribute(&sm_minor, hipDeviceAttributeComputeCapabilityMinor, device));
+    ROCM_CHECK(hipDeviceGetAttribute(&sm_major, hipDeviceAttributeComputeCapabilityMajor, device));
+    ROCM_CHECK(hipDeviceGetAttribute(&sm_minor, hipDeviceAttributeComputeCapabilityMinor, device));
     return sm_major * 10 + sm_minor;
 }
 
 inline int getMaxSharedMemoryPerBlock()
 {
     int device{-1};
-    check_hip_error(hipGetDevice(&device));
+    ROCM_CHECK(hipGetDevice(&device));
     int max_shared_memory_size = 0;
-    check_hip_error(hipDeviceGetAttribute(&max_shared_memory_size, hipDeviceAttributeMaxSharedMemoryPerBlock, device));
+    ROCM_CHECK(hipDeviceGetAttribute(&max_shared_memory_size, hipDeviceAttributeMaxSharedMemoryPerBlock, device));
     return max_shared_memory_size;
 }
 
 inline std::string getDeviceName()
 {
     int device{-1};
-    check_hip_error(hipGetDevice(&device));
+    ROCM_CHECK(hipGetDevice(&device));
     hipDeviceProp_t props;
-    check_hip_error(hipGetDeviceProperties(&props, device));
+    ROCM_CHECK(hipGetDeviceProperties(&props, device));
     return std::string(props.name);
 }
 
@@ -264,14 +262,14 @@ hipError_t getSetDevice(int i_device, int* o_device = NULL);
 inline int getDevice()
 {
     int current_dev_id = 0;
-    check_hip_error(hipGetDevice(&current_dev_id));
+    ROCM_CHECK(hipGetDevice(&current_dev_id));
     return current_dev_id;
 }
 
 inline int getDeviceCount()
 {
     int count = 0;
-    check_hip_error(hipGetDeviceCount(&count));
+    ROCM_CHECK(hipGetDeviceCount(&count));
     return count;
 }
 
@@ -474,8 +472,8 @@ void compareTwoTensor(
 {
     T1* h_pred = new T1[size];
     T2* h_ref  = new T2[size];
-    check_hip_error(hipMemcpy(h_pred, pred, size * sizeof(T1), hipMemcpyDeviceToHost));
-    check_hip_error(hipMemcpy(h_ref, ref, size * sizeof(T2), hipMemcpyDeviceToHost));
+    ROCM_CHECK(hipMemcpy(h_pred, pred, size * sizeof(T1), hipMemcpyDeviceToHost));
+    ROCM_CHECK(hipMemcpy(h_ref, ref, size * sizeof(T2), hipMemcpyDeviceToHost));
 
     FILE* fd = nullptr;
     if (filename != "") {

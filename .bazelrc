@@ -121,13 +121,6 @@ build:arm --copt=-Wno-tautological-compare
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
-# remote cache conflicts with remote executor.
-build:remote --jobs=500 --local_test_jobs=HOST_CPUS*.8 --build_request_id="https://host?ENSURE_OUTPUTS_PRESENT=true#00000000-0000-0000-0000-000000000000"
-build:remote --remote_local_fallback_strategy=sandboxed
-build:remote --experimental_remote_merkle_tree_cache
-build:remote --define=with_remote_exec=true
-build:remote --remote_download_minimal
-
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --noverbose_failures --auto_output_filter=all
@@ -146,7 +139,6 @@ test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env PY_LOG_LEVEL="INFO"
-#test --test_env ACT_TYPE="bf16"
 
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"

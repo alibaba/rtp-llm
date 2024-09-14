@@ -1,5 +1,5 @@
 #include "rocmMoeWrapper.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/utils/string_utils.h"
 
 #include "ck/ck.hpp"
 #include "ck/tensor_operation/gpu/device/tensor_layout.hpp"
@@ -15,6 +15,16 @@
 #include "ck/library/utility/device_memory.hpp"
 
 namespace fastertransformer {
+
+static void throwCKError(const char* const file, int const line, std::string const& info = "") {
+    auto error_msg = std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
+    std::printf("%s", error_msg.c_str());
+    fflush(stdout);
+    fflush(stderr);
+    abort();
+    throw std::exception();
+}
+#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
 
 void* add_offset(void* ptr, std::size_t offset, std::size_t element_size) {
     char* char_ptr = static_cast<char*>(ptr);
@@ -177,8 +187,7 @@ void MoeRunnerImpl_groupGEMM_caller(const rocmGroupGEMMParams& params, Activatio
             MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params);
             break;
         default:
-            FT_CHECK_WITH_INFO(false, "not support activation type");
-            break;
+            CK_FAIL("not support activation type");
     }
 }
 
@@ -266,8 +275,7 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
     auto argument = gemmRunner.MakeArgument(p_a, p_b, p_Ds, p_c, gemm_descs, a_element_op, b_element_op, c_element_op);
 
     if (!gemmRunner.IsSupportedArgument(argument)) {
-        throw std::runtime_error("CK wrong! device_gemm with the specified compilation parameters does "
-                                "not support this GEMM problem");
+        CK_FAIL("device_gemm with the specified compilation parameters does not support this GEMM problem");
     }
 
     DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
@@ -374,8 +382,7 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
     auto argument = gemmRunner.MakeArgument(p_As, p_Bs, p_Ds, p_Cs, gemm_descs);
 
     if (!gemmRunner.IsSupportedArgument(argument)) {
-        throw std::runtime_error("CK wrong! device_gemm with the specified compilation parameters does "
-                                "not support this GEMM problem");
+        CK_FAIL("device_gemm with the specified compilation parameters does not support this GEMM problem");
     }
     DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
     gemmRunner.SetWorkSpacePointer(&argument, gemm_desc_workspace.GetDeviceBuffer());
@@ -418,8 +425,7 @@ void rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
     //     using WeightT = I8;
     //     MoeRunnerImpl<InputT, WeightT>(params);
     } else {
-        FT_LOG_ERROR("input type %d and weights type %d not supported by CK",
-            dtype, wtype);
+        CK_FAIL("input type %d and weights type %d not supported by CK", dtype, wtype);
     }
 }
 

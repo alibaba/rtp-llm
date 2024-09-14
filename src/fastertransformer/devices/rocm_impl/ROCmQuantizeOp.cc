@@ -13,27 +13,27 @@ inline rocm::QuantType quantTypeConvert(DataType dtype) {
             return rocm::QuantType::INT8_WEIGHT_ONLY;
         }
         default: {
-            FT_CHECK_WITH_INFO(false, "Invalid quant type");
+            ROCM_FAIL("Invalid quant type");
         }
     }
 }
 
 BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
-    FT_CHECK_WITH_INFO((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
+    ROCM_CHECK_VALUE((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
                         || params.input.type() == DataType::TYPE_BF16),
                        "quantize only support half or float quantize. but get %d.",
                        params.input.type());
 
-    FT_CHECK_WITH_INFO((params.qtype == DataType::TYPE_QINT8 || params.qtype == DataType::TYPE_QINT4X2),
+    ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QINT8 || params.qtype == DataType::TYPE_QINT4X2),
                        "cuda quantize only support qint8 or qint4x2 quantize. but get %d.",
                        params.qtype);
 
-    FT_CHECK_WITH_INFO((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D input.");
+    ROCM_CHECK_VALUE((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D input.");
 
-    FT_CHECK_WITH_INFO((params.axis == (params.input.dim() - 1)), "quantize only support last axis.");
+    ROCM_CHECK_VALUE((params.axis == (params.input.dim() - 1)), "quantize only support last axis.");
 
     if (params.input.where() == MemoryType::MEMORY_GPU) {
-        FT_CHECK_WITH_INFO((params.input.dim() == 2), "quantize only support 2D input.");
+        ROCM_CHECK_VALUE((params.input.dim() == 2), "quantize only support 2D input.");
         size_t groupSize   = params.groupSize;
         size_t scales_dim0 = params.input.shape()[0] / groupSize;
 
@@ -61,14 +61,14 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                                              zeros->data<half>(),
                                              stream_);
         } else {
-            FT_FAIL("other quantize not implemented");
+            ROCM_FAIL("other quantize not implemented");
         }
 
-        sync_check_cuda_error();
+        ROCM_SYNC_AND_CHECK();
         return BufferPtr(new QBuffer(std::move(kernel), std::move(scales), std::move(zeros)));
 
     } else {
-        FT_FAIL("cpu quantize not implemented");
+        ROCM_FAIL("cpu quantize not implemented");
     }
 }
 
@@ -94,13 +94,13 @@ BufferPtr ROCmDevice::dequantize(const QuantizeParams& params) {
                                              QB.zeros().data<half>(),
                                              stream_);
 
-            sync_check_cuda_error();
+            ROCM_SYNC_AND_CHECK();
             return fpB;
         } else {
-            FT_FAIL("other dequantize not implemented");
+            ROCM_FAIL("other dequantize not implemented");
         }
     } else {
-        FT_FAIL("cpu dequantize not implemented");
+        ROCM_FAIL("cpu dequantize not implemented");
     }
 }
 
