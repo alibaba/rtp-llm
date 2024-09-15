@@ -142,7 +142,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
     std::ifstream file;
     std::string   line;
 
-    line.reserve(1024);
+    line.reserve(256);
     file.open(filename);
 
     if (!std::getline(file, line)) {
@@ -152,7 +152,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
 
     if (line != COLUMN_HEADER) {
         std::printf("MISMATCH %s | %s\n", line.c_str(), std::string(COLUMN_HEADER).c_str());
-        std::abort();
+        abort();
     }
 
     std::vector<int>                              algoIndices{1};
@@ -196,7 +196,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
         algoIndices[0] = algoIndex;
         algos.clear();
         hipblasStatus_t sts = hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos);
-        printf("status = %s, algoIndex = %d, line = %s\n", hipblasGetErrorEnum(sts), algoIndices[0], line.c_str());
+        // printf("status = %s, algoIndex = %d, line = %s\n", hipblasGetErrorEnum(sts), algoIndices[0], line.c_str());
 
         if(algos.size() > 0)
         {
@@ -281,31 +281,8 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                 return "<?>";
         }
     };
-
-
-    for (auto it = algo_map_.begin(); it != algo_map_.end(); it++)
-    {
-        auto cfg = it->first;
-
-        printf("cfg: %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
-                   opToString(cfg.trans_a),
-                   opToString(cfg.trans_b),
-                   cfg.m,
-                   cfg.n,
-                   cfg.k,
-                   dataTypeToString(cfg.A_data_type),
-                   cfg.lda,
-                   cfg.stride_a,
-                   dataTypeToString(cfg.B_data_type),
-                   cfg.ldb,
-                   cfg.stride_b,
-                   dataTypeToString(cfg.C_data_type),
-                   cfg.ldc,
-                   cfg.stride_c,
-                   computeTypeToString(cfg.compute_type),
-                   cfg.batch_count);
-    }
-    FT_LOG_WARNING("MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
+    
+    /*FT_LOG_WARNING("MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
                    opToString(trans_a),
                    opToString(trans_b),
                    m,
@@ -321,7 +298,7 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                    ldc,
                    stride_c,
                    computeTypeToString(compute_type),
-                   batch_count);
+                   batch_count);*/
 
     return nullptr;
 }

@@ -109,9 +109,9 @@ build:rocm --copt="-Wno-array-parameter"
 build:rocm --copt="-Wno-error=array-bounds"
 build:rocm --copt="-Wno-error=unused-result"
 build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/"
-build:rocm --action_env ROCM_HIPBLASLT_CONFIG="/ali/rtp-llm/gemm_config_bert.csv" # blas config
-#build:rocm --action_env ROCM_DISABLE_HIPBLASLT=1
-#build:rocm --action_env HIPBLASLT_LOG_MASK="32" # to log blas
+#build:rocm --action_env ROCM_HIPBLASLT_CONFIG="/ali/rtp-llm/gemm_config_bert61.csv" # blasLt config
+#build:rocm --action_env ROCM_DISABLE_HIPBLASLT=1 # to use blas only
+#build:rocm --action_env HIPBLASLT_LOG_MASK="32" # to log blasLt
 #build:rocm --action_env ROCBLAS_LAYER="4"
 #build:rocm --copt="-DENABLE_PROF=1"
 
