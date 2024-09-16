@@ -106,7 +106,6 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                                void*  cu_kv_seqlens,
                                void*  output,
                                uint32_t* tile_counter_ptr,
-                               const void* paged_kv_block_offsets_on_host,
                                size_t batch_size,
                                size_t input_seq_len,
                                size_t max_past_kv_len,
@@ -137,7 +136,6 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                               0);
 
     trtv2_fmha_runner_->run(input,
-                            paged_kv_block_offsets_on_host,
                             kv_block_array,
                             cu_q_seqlens,
                             cu_kv_seqlens,
@@ -179,7 +177,6 @@ void cufmha::runTrtV2Fmha(void* input,
 
 
         trtv2_fmha_runner_->run(input,
-                            nullptr,
                             kv_block_array,
                             cu_seqlens,
                             cu_seqlens,

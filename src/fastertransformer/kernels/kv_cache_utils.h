@@ -109,6 +109,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
     bool int8_mode = false;
     DataType* scale = nullptr;
     int mScaleBytesPerBlock = 1;
+    void* pagedKVBlockOffsetsOnHost;
 
     KVBlockArray() = default;
 
@@ -207,6 +208,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
     __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
         return getScaleBlockPtr(getScaleRowPtr(kvIdx, seqIdx), tokenIdx);
     }
+
     __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {
         return getScalePtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
     }
@@ -216,7 +218,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
     }
 
 
-        __host__ __device__ inline int32_t getKVScaleLocalIdx(int32_t globalTokenIdx, int32_t headIdx) {
+    __host__ __device__ inline int32_t getKVScaleLocalIdx(int32_t globalTokenIdx, int32_t headIdx) {
         // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
         // [numHeads, tokensPerBlock, hiddenSizePerHead].
         // This member function computes the corresponding linear index.

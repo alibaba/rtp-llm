@@ -154,7 +154,27 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const float*                     scale,
                                     const int                        int8_mode,
                                     const bool                       use_paged_fmha,
+                                    const bool                       store_qkv,
+                                    const bool                       store_q,
+                                    const bool                       store_kv,
+                                    const bool                       store_cache,
                                     cudaStream_t                     stream);
+
+template<typename T>
+void invokeLoadPrefixKVCache(T*                               q_buf,
+                             T*                               k_buf,
+                             T*                               v_buf,
+                             PrefixPromptBatchWeightsParam*   param,
+                             const int                        batch_size,
+                             const int                        seq_len,
+                             const int                        head_num,
+                             const int                        head_num_kv,
+                             const int                        size_per_head,
+                             const float*                     scale,
+                             const int                        int8_mode,
+                             cudaStream_t                     stream);
+
+
 template<typename T>
 void invokeTranspose4d(T*           dst,
                        T*           src,
@@ -166,20 +186,6 @@ void invokeTranspose4d(T*           dst,
                        const int    batch_size,
                        const int    ite,
                        cudaStream_t stream);
-
-template<typename T, typename KVCacheBuffer>
-void invokeTranspose4dBatchMajor(const T*              kSrc,
-                                 const T*              vSrc,
-                                 KVCacheBuffer&        kvTable,
-                                 const int             localBatchSize,
-                                 const int             seqLen,
-                                 const int             sizePerHead,
-                                 const int             localHeadNum,
-                                 const KvCacheDataType cache_type,
-                                 const float*          kvScaleOrigQuant,
-                                 const int*            sequence_lengths,
-                                 const int*            prefix_lengths,
-                                 cudaStream_t          stream);
 
 template<typename T>
 void invokeAddRelativeAttentionBias(T*           qk_buf,

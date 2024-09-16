@@ -630,7 +630,7 @@ public:
         xmmaKernel->run(mParams, mLaunchParams, stream);
     }
 
-    void run_paged_kv(void const* qPtr, void const* pagedKVBlockOffsetsOnHost, fastertransformer::KVBlockArray const& pagedKVCache,
+    void run_paged_kv(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
         void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
         void* outputPtr, cudaStream_t stream)
     {
@@ -646,7 +646,7 @@ public:
         mLaunchParams.paged_kv_input = true;
         mLaunchParams.paged_kv_pool_ptr = pagedKVCache.mPrimaryPoolPtr;
         mLaunchParams.paged_kv_block_offsets
-            = reinterpret_cast<decltype(mLaunchParams.paged_kv_block_offsets)>(pagedKVBlockOffsetsOnHost);
+            = reinterpret_cast<decltype(mLaunchParams.paged_kv_block_offsets)>(pagedKVCache.pagedKVBlockOffsetsOnHost);
 
         if (sm == kSM_90 && mLaunchParams.use_tma)
         {
@@ -747,13 +747,13 @@ void FusedMHARunnerV2::setup_flags(
     pimpl->setup_flags(force_fp32_acc, is_s_padded, causal_mask, num_kv_heads);
 }
 
-void FusedMHARunnerV2::run(void const* qPtr, void const* pagedKVBlockOffsetsOnHost, fastertransformer::KVBlockArray const& pagedKVCache,
+void FusedMHARunnerV2::run(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
     void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
     void* outputPtr, cudaStream_t stream)
 {
     if (pimpl->use_paged_kv_fmha())
     {
-        pimpl->run_paged_kv(qPtr, pagedKVBlockOffsetsOnHost, pagedKVCache, cuQSeqlenPtr, cuKVSeqlenPtr, tileCounterPtr,
+        pimpl->run_paged_kv(qPtr, pagedKVCache, cuQSeqlenPtr, cuKVSeqlenPtr, tileCounterPtr,
             scaleBmm2Ptr, outputPtr, stream);
     }
     else

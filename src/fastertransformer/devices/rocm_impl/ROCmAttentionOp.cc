@@ -11,7 +11,6 @@ namespace fastertransformer {
 
 KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                              const Buffer&                kv_cache_offset_pointers,
-                             const Buffer&                kv_cache_scale_offset_pointers,
                              int                          batch_size,
                              cudaStream_t                 stream) {
     const auto& kv_cache         = params.common.kv_cache;
@@ -55,42 +54,14 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
                               "v scale buffer should has value when use k scale buffer has value");
-        invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_scale_offset_pointers.data(),
-                                            (int*)kv_blocks_offset.data(),
-                                            batch_size,
-                                            max_blocks_per_batch,
-                                            kv_block_offset,
-                                            stream);
         kv_cache_buffer.scale =
-            (fastertransformer::KVBlockArrayForContextFMHA::DataType*)(kv_cache_scale_offset_pointers.data());
+            (fastertransformer::KVBlockArrayForContextFMHA::DataType*)(kv_cache_offset_pointers.data());
         kv_cache_buffer.int8_mode = true;
         const auto& k_scale = *(kv_cache->k_scale_buffer);
         kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
     sync_check_cuda_error();
     return kv_cache_buffer;
-}
-
-template <typename T>
-void writeContextKvCache(
-        const AttentionModuleParams& params,
-        const Buffer& k, const Buffer& v,
-        KVBlockArray kv_block_array,
-        hipStream_t stream)
-{
-    invokeTranspose4dBatchMajor<T, KVBlockArray>(
-        k.data<T>(),
-        v.data<T>(),
-        kv_block_array,
-        params.common.context_batch_size,
-        params.common.context_max_seq_len + params.common.max_prefix_length,
-        params.configs.size_per_head,
-        params.configs.kv_head_num,
-        params.common.kv_cache->k_scale_buffer ? KvCacheDataType::INT8 : KvCacheDataType::BASE,
-        nullptr,  // kvScaleOrigQuant
-        params.common.input_lengths.dataWithOffset<int32_t>(params.common.decoder_batch_size),
-        params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr,
-        stream);
 }
 
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
@@ -122,8 +93,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     BufferPtr kv_cache_offset = nullptr;
 
-    BufferPtr kv_cache_offset_host = nullptr;
-    BufferPtr kv_cache_scale_pointers = nullptr;
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
@@ -132,23 +101,14 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         kv_cache_offset =  allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
                                          {"kv_cache_offset"});
 
-        kv_cache_offset_host = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::HOST},
-                                               {"kv_cache_offset_host"});
-        if (params.common.kv_cache->k_scale_buffer) {
+        kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, stream_);
 
-            kv_cache_scale_pointers = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                                                 {"kv_cache_scale_pointers"});
-
-        }
-        kv_block_array = getKVBlockArray(params, *kv_cache_offset, *kv_cache_scale_pointers, batch_size, stream_);
-
-        this->copy({*kv_cache_offset_host, *kv_cache_offset});
+        prefix_prompt_param.kv_block_array           = kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {
             prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
             prefix_prompt_param.count_length             = 1;
-            prefix_prompt_param.kv_block_array           = kv_block_array;
         }
     }
     printBufferData(params.common.input_lengths, "input_lengths");
@@ -161,6 +121,28 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     // int8
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
+
+   if (prefix_prompt_param.max_prefix_prompt_length > 0) {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeLoadPrefixKVCache,
+            q_output->data(),
+            k_output->data(),
+            v_output->data(),
+            &prefix_prompt_param,
+            batch_size,
+            seq_len,
+            head_num,
+            kv_head_num,
+            size_per_head,
+            scale_out_ptr,
+            int8_mode,
+            stream_
+        );
+    }
+
+    bool store_qkv = true;
+    bool store_q = true;
+    bool store_kv = true;
+    bool store_cache = true;
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
         q_output->data(),
@@ -183,20 +165,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         scale_out_ptr,
         int8_mode,
         false,
+        store_qkv,
+        store_q,
+        store_kv,
+        store_cache,
         stream_
     );
     sync_check_cuda_error();
-
-    if (params.common.kv_cache) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         writeContextKvCache,
-                                         std::cref(params),
-                                         std::cref(*k_output),
-                                         std::cref(*v_output),
-                                         kv_block_array,
-                                         stream_);
-        sync_check_cuda_error();
-    }
 
     fmha_runner_->setup(datatype,
                         params.configs.mask_type,
@@ -409,12 +384,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
     const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
     auto       kv_cache_offset      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
-    BufferPtr kv_cache_scale_pointers = nullptr;
-    if (params.common.kv_cache->k_scale_buffer) {
-        kv_cache_scale_pointers = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                                                 {"kv_cache_scale_pointers"});
-    }
-    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, *kv_cache_scale_pointers, batch_size, stream_);
+    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, stream_);
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,

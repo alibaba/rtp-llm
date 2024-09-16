@@ -1316,129 +1316,6 @@ INSTANTIATETRANSPOSEATTENTIONOUTREMOVEPADDING(__nv_bfloat16);
 #undef INSTANTIATETRANSPOSEATTENTIONOUTREMOVEPADDING
 
 template<typename T>
-__global__ void add_fusedQKV_bias_transpose_kernel(T* q_buf,
-                                                   T* k_buf,
-                                                   T* v_buf,
-                                                   T* QKV,
-                                                   const T* __restrict qkv_bias,
-                                                   const int*   padding_offset,
-                                                   const int    batch_size,
-                                                   const int    seq_len,
-                                                   const int    token_num,
-                                                   const int    head_num,
-                                                   const int    size_per_head,
-                                                   const float* scale,
-                                                   const int    int8_mode)
-{
-    // QKV: [token_num, 3, n]
-    // qkv_bias: [3, n]
-    // q_buf, k_buf, v_buf: [batch, head_num, seq_len, size_per_head]
-
-    T*        qkv_ptr[3] = {q_buf, k_buf, v_buf};
-    const int n          = head_num * size_per_head;
-    for (int index = blockDim.x * blockIdx.x + threadIdx.x; index < token_num * 3 * n;
-         index += gridDim.x * blockDim.x) {
-        const int bias_id = index % (3 * n);
-
-        const int token_idx        = index / (3 * n);
-        const int token_padded_idx = token_idx + (padding_offset == nullptr ? 0 : padding_offset[token_idx]);
-        const int target_batch_id  = token_padded_idx / seq_len;
-        const int seq_id           = token_padded_idx % seq_len;
-
-        const int qkv_id  = (index % (3 * n)) / n;
-        const int head_id = (index % n) / size_per_head;
-        const int size_id = index % size_per_head;
-
-        T val;
-        if (int8_mode == 2) {
-            val = cuda_cast<T>(cuda_cast<float>(reinterpret_cast<const int8_t*>(QKV)[index]) * scale[qkv_id]);
-        }
-        else {
-            val = ldg(&QKV[index]);
-        }
-        if (qkv_bias) {
-            val = val + ldg(&qkv_bias[bias_id]);
-        }
-
-        if (int8_mode == 2) {
-            // TODO(mseznec): add support for int8 BMM with FusedAtt
-        }
-        else {
-            QKV[index] = val;
-        }
-
-        qkv_ptr[qkv_id][target_batch_id * head_num * seq_len * size_per_head + head_id * seq_len * size_per_head
-                        + seq_id * size_per_head + size_id] = val;
-    }
-}
-
-template<typename T>
-__global__ void add_fusedQKV_bias_transpose_kernel(T* q_buf,
-                                                   T* k_buf,
-                                                   T* v_buf,
-                                                   T* QKV,
-                                                   const T* __restrict qkv_bias,
-                                                   const int*   padding_offset,
-                                                   const int    batch_size,
-                                                   const int    seq_len,
-                                                   const int    token_num,
-                                                   const int    head_num,
-                                                   const int    head_num_kv,
-                                                   const int    size_per_head,
-                                                   const float* scale,
-                                                   const int    int8_mode)
-{
-    // QKV: [token_num, 3, n]
-    // qkv_bias: [3, n]
-    // q_buf, k_buf, v_buf: [batch, head_num, seq_len, size_per_head] [batch, head_num_kv, seq_len, size_per_head] * 2
-    // grid(token_num, head_num)
-    // block(size_per_head)
-
-    const int head_idx         = blockIdx.y;
-    const int token_idx        = blockIdx.x;
-    const int size_id          = threadIdx.x;
-    const int bias_idx         = head_idx * size_per_head + size_id;
-    const int token_padded_idx = token_idx + (padding_offset == nullptr ? 0 : padding_offset[token_idx]);
-    const int target_batch_id  = token_padded_idx / seq_len;
-    const int seq_id           = token_padded_idx % seq_len;
-
-    const int qkv_offset =
-        token_idx * (head_num + head_num_kv * 2) * size_per_head + head_idx * size_per_head + size_id;
-
-    T val;
-    if (int8_mode == 2) {
-        // TODO
-        val = cuda_cast<T>(cuda_cast<float>(reinterpret_cast<const int8_t*>(QKV)[qkv_offset]) * scale[0]);
-    }
-    else {
-        val = ldg(&QKV[qkv_offset]);
-    }
-    if (qkv_bias) {
-        val = val + ldg(&qkv_bias[bias_idx]);
-    }
-
-    if (int8_mode == 2) {
-        // TODO(mseznec): add support for int8 BMM with FusedAtt
-    }
-    else {
-        QKV[qkv_offset] = val;
-    }
-
-    if (head_idx < head_num) {
-        q_buf[target_batch_id * head_num * seq_len * size_per_head + head_idx * seq_len * size_per_head
-              + seq_id * size_per_head + size_id] = val;
-    }
-    else if (head_idx < head_num + head_num_kv) {
-        k_buf[target_batch_id * head_num_kv * seq_len * size_per_head + (head_idx - head_num) * seq_len * size_per_head
-              + seq_id * size_per_head + size_id] = val;
-    }
-    else {
-        v_buf[target_batch_id * head_num_kv * seq_len * size_per_head
-              + (head_idx - head_num - head_num_kv) * seq_len * size_per_head + seq_id * size_per_head + size_id] = val;
-    }
-}
-
-template<typename T>
 struct Vec_t {
     static constexpr int size = 0;
 };
@@ -1463,7 +1340,7 @@ struct Vec_t<__nv_bfloat16> {
 };
 #endif
 
-template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
+template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, bool STORE_QKV, bool STORE_Q, bool STORE_KV, bool STORE_CACHE, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
                                                    T*                               k_buf,
                                                    T*                               v_buf,
@@ -1498,8 +1375,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
-    const int token_idx            = blockIdx.x - batch_size * param.max_prefix_prompt_length;
-    const int token_padding_offset = (padding_offset == nullptr || token_idx < 0) ? 0 : padding_offset[token_idx];
+    const int token_idx            = blockIdx.x;
+    const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 
     const int batch_idx = tgt_token_idx / seq_len;
@@ -1509,41 +1386,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int     tidx          = threadIdx.x;
     const int     total_seq_len = param.max_prefix_prompt_length + seq_len;
 
-    const bool is_masked = tidx * vec_size >= size_per_head;
-    // NOTE: blockIdx.x < batch_size * param.max_prefix_prompt_length really handles prefix prompts
-    if (PREFIX_PROMPT && token_idx < 0) {
-        if (head_idx < head_num_kv) {
-            const int prompt_batch_idx = blockIdx.x / param.max_prefix_prompt_length;
-            const int prompt_seq_idx   = blockIdx.x % param.max_prefix_prompt_length;
-            const int prompt_length    = param.d_prefix_prompt_lengths[prompt_batch_idx];
-
-            if (prompt_seq_idx < prompt_length) {
-                const int dest_kv_idx = prompt_batch_idx * size_per_head * total_seq_len * head_num_kv
-                                        + head_idx * size_per_head * total_seq_len + prompt_seq_idx * size_per_head
-                                        + tidx * vec_size;
-                if (param.kv_block_array.mMaxSeqs > 0) {
-                    if (!is_masked) {
-                        Tcache* k_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
-                        Tcache* v_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
-                        const int inBlockIdx = param.kv_block_array.getKVLocalIdx(
-                            prompt_seq_idx, head_idx, size_per_head, tidx * vec_size);
-
-                        if constexpr (ENABLE_8BITS_CACHE) {
-                            float* k_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getKScalePtr(prompt_batch_idx, prompt_seq_idx));
-                            float* v_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
-                            int    inScaleIdx  = param.kv_block_array.getKVScaleLocalIdx(prompt_seq_idx, head_idx);
-                            load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]), k_cache, inBlockIdx, k_scale_ptr[inScaleIdx]);
-                            load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]), v_cache, inBlockIdx, v_scale_ptr[inScaleIdx]);
-                        } else  {
-                            *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
-                                *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
-                            *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
-                                *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
-                        }
-                    }
-                }
-            }
-        }
+    if (tidx * vec_size >= size_per_head) {
         return;
     }
 
@@ -1551,7 +1394,6 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int hidden_idx           = head_idx * size_per_head + tidx * vec_size;
     const int n                    = head_num * size_per_head;
     const int kv_n                 = head_num_kv * size_per_head;  // MQA
-
     // the [0..seq_len) indices really handle KV [max_pp_len..seq_len+max_pp_len)
     // and Q [0..seq_len)
     // Note: if !PREFIX_PROMPT, max_pp_len = 0, so it's no-op
@@ -1564,25 +1406,23 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int src_v_idx = token_idx * (n + 2 * kv_n) + hidden_idx + kv_n + n;
 
     Vec_t q, k, v;
-    if (!is_masked) {
-        q = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
+    q = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
+
+    if (head_idx < head_num_kv) {
+        k = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
+        v = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
+    }
+
+    if (qkv_bias) {
+        Vec_t q_bias, k_bias, v_bias;
+        q_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+        q      = add(q, q_bias);
 
         if (head_idx < head_num_kv) {
-            k = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
-            v = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
-        }
-
-        if (qkv_bias) {
-            Vec_t q_bias, k_bias, v_bias;
-            q_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-            q      = add(q, q_bias);
-
-            if (head_idx < head_num_kv) {
-                k_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-                v_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-                k      = add(k, k_bias);
-                v      = add(v, v_bias);
-            }
+            k_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+            v_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
+            k      = add(k, k_bias);
+            v      = add(v, v_bias);
         }
     }
 
@@ -1603,11 +1443,14 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             prefix_prompt_length,
             param.count_length);
 
-    if (use_logn_attn && !is_masked) {
+    if (use_logn_attn) {
         logn_attention(q, seq_idx, rope_config.max_pos);
     }
 
-    if (!is_masked) {
+    __syncthreads();
+
+
+    if constexpr (STORE_QKV) {
         *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q;
         if (head_idx < head_num_kv) {
             *reinterpret_cast<Vec_t*>(&QKV[src_k_idx]) = k;
@@ -1615,22 +1458,63 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
         }
     }
 
-    size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
-                           + seq_idx * size_per_head + tidx * vec_size;
-    if constexpr (USE_PAGED_FMHA) {
-        dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num
-                     + head_idx * size_per_head + tidx * vec_size;
+    if constexpr (STORE_Q) {
+        size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
+                            + seq_idx * size_per_head + tidx * vec_size;
+        if constexpr (USE_PAGED_FMHA) {
+            dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num
+                        + head_idx * size_per_head + tidx * vec_size;
+        }
+
+        *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
-    const int dest_kv_idx = batch_idx * size_per_head * total_seq_len * head_num_kv
+    if constexpr (STORE_KV) {
+         const int dest_kv_idx = batch_idx * size_per_head * total_seq_len * head_num_kv
                             + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
                             + tidx * vec_size;
 
-    if (!is_masked) {
-        *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
         if (head_idx < head_num_kv) {
             *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) = k;
             *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) = v;
+        }
+    }
+
+    if constexpr (STORE_CACHE) {
+        if (head_idx < head_num_kv) {
+            KVBlockArray kv_block_array = param.kv_block_array;
+            if constexpr (ENABLE_8BITS_CACHE) {
+                float* k_scale_ptr = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
+                float* v_scale_ptr = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
+                int    inScaleIdx  = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
+                const int  size_per_head_div_vec_size = size_per_head / vec_size;
+
+                float k_per_head_max = vector_abs_max(k);
+        #pragma unroll
+                for (int mask = size_per_head_div_vec_size / 2; mask >= 1; mask /= 2) {
+                    k_per_head_max = fmaxf(k_per_head_max, __shfl_xor_sync(uint32_t(-1), k_per_head_max, mask));
+                }
+                store_8bits_kv_cache_vec(k_scale_ptr, k, inScaleIdx, float(1 << (8 - 1)) / k_per_head_max);
+                if (tidx == 0) {
+                    *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = k_per_head_max / float(1 << (8 - 1));
+                }
+
+                float v_per_head_max = vector_abs_max(v);
+        #pragma unroll
+                for (int mask = size_per_head_div_vec_size / 2; mask >= 1; mask /= 2) {
+                    v_per_head_max = fmaxf(v_per_head_max, __shfl_xor_sync(uint32_t(-1), v_per_head_max, mask));
+                }
+                store_8bits_kv_cache_vec(v_scale_ptr, v, inScaleIdx, float(1 << (8 - 1)) / v_per_head_max);
+                if (tidx == 0) {
+                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = v_per_head_max / float(1 << (8 - 1));
+                }
+            } else  {
+                Tcache* k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
+                Tcache* v_cache = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+                const int inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
+                *reinterpret_cast<Vec_t*>(&k_cache[inBlockIdx]) = k;
+                *reinterpret_cast<Vec_t*>(&v_cache[inBlockIdx]) = v;
+            }
         }
     }
 }
@@ -1656,38 +1540,141 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const float*                     scale,
                                     const int                        int8_mode,
                                     const bool                       use_paged_fmha,
+                                    const bool                       store_qkv,
+                                    const bool                       store_q,
+                                    const bool                       store_kv,
+                                    const bool                       store_cache,
                                     cudaStream_t                     stream)
 {
     auto &param = *param_ptr;
     dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
-    dim3 grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
+    dim3 grid(token_num, head_num);
     size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
 
     FT_SWITCH(param.max_prefix_prompt_length != 0, PREFIX_PROMPT, [&]{
         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&]{
-            FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
-                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&]{
-                    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
-                        <<<grid, block, smem_size, stream>>>(
-                                q_buf,
-                                k_buf,
-                                v_buf,
-                                param,
-                                QKV,
-                                position_ids,
-                                qkv_bias,
-                                padding_offset,
-                                cu_seqlens,
-                                batch_size,
-                                seq_len,
-                                head_num,
-                                head_num_kv,
-                                size_per_head,
-                                rope_config,
-                                use_logn_attn);
+            FT_SWITCH(store_qkv, STORE_QKV, [&]{
+                FT_SWITCH(store_q, STORE_Q, [&]{
+                    FT_SWITCH(store_kv, STORE_KV, [&]{
+                        FT_SWITCH(store_cache, STORE_CACHE, [&]{
+                            FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
+                                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&]{
+                                    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, STORE_QKV, STORE_Q, STORE_KV, STORE_CACHE, ROPE_STYLE>
+                                        <<<grid, block, smem_size, stream>>>(
+                                                q_buf,
+                                                k_buf,
+                                                v_buf,
+                                                param,
+                                                QKV,
+                                                position_ids,
+                                                qkv_bias,
+                                                padding_offset,
+                                                cu_seqlens,
+                                                batch_size,
+                                                seq_len,
+                                                head_num,
+                                                head_num_kv,
+                                                size_per_head,
+                                                rope_config,
+                                                use_logn_attn);
+                                });
+                            });
+                        });
+                    });
                 });
             });
         });
+    });
+}
+
+template<typename T, typename Tcache>
+__global__ void load_prefix_KVCache_kernel(T*                               q_buf,
+                                                   T*                               k_buf,
+                                                   T*                               v_buf,
+                                                   PrefixPromptBatchWeightsParam    param,
+                                                   const int   seq_len,
+                                                   const int   head_num,
+                                                   const int   head_num_kv,
+                                                   const int   size_per_head)
+{
+    extern __shared__ __align__(sizeof(float2)) char smem_[];  // align on largest vector type
+
+    static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
+
+    constexpr int vec_size         = Vec_t<T>::size;
+    using Vec_t                    = typename Vec_t<T>::Type;
+
+    const int     head_idx      = blockIdx.y;
+    const int     tidx          = threadIdx.x;
+    const int     total_seq_len = param.max_prefix_prompt_length + seq_len;
+
+    const bool is_masked = tidx * vec_size >= size_per_head;
+    // NOTE: blockIdx.x < batch_size * param.max_prefix_prompt_length really handles prefix prompts
+
+    if (head_idx < head_num_kv) {
+        const int prompt_batch_idx = blockIdx.x / param.max_prefix_prompt_length;
+        const int prompt_seq_idx   = blockIdx.x % param.max_prefix_prompt_length;
+        const int prompt_length    = param.d_prefix_prompt_lengths[prompt_batch_idx];
+
+        if (prompt_seq_idx < prompt_length) {
+            const int dest_kv_idx = prompt_batch_idx * size_per_head * total_seq_len * head_num_kv
+                                    + head_idx * size_per_head * total_seq_len + prompt_seq_idx * size_per_head
+                                    + tidx * vec_size;
+            if (param.kv_block_array.mMaxSeqs > 0) {
+                if (!is_masked) {
+                    Tcache* k_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                    Tcache* v_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                    const int inBlockIdx = param.kv_block_array.getKVLocalIdx(
+                        prompt_seq_idx, head_idx, size_per_head, tidx * vec_size);
+
+                    if constexpr (ENABLE_8BITS_CACHE) {
+                        float* k_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getKScalePtr(prompt_batch_idx, prompt_seq_idx));
+                        float* v_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
+                        int    inScaleIdx  = param.kv_block_array.getKVScaleLocalIdx(prompt_seq_idx, head_idx);
+                        load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]), k_cache, inBlockIdx, k_scale_ptr[inScaleIdx]);
+                        load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]), v_cache, inBlockIdx, v_scale_ptr[inScaleIdx]);
+                    } else  {
+                        *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
+                            *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
+                        *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
+                            *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+template<typename T>
+void invokeLoadPrefixKVCache(T*                               q_buf,
+                             T*                               k_buf,
+                             T*                               v_buf,
+                             PrefixPromptBatchWeightsParam*   param_ptr,
+                             const int                        batch_size,
+                             const int                        seq_len,
+                             const int                        head_num,
+                             const int                        head_num_kv,
+                             const int                        size_per_head,
+                             const float*                     scale,
+                             const int                        int8_mode,
+                             cudaStream_t                     stream)
+{
+    auto &param = *param_ptr;
+    dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+    dim3 grid(batch_size * param.max_prefix_prompt_length, head_num);
+
+    FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
+        load_prefix_KVCache_kernel<T, Tcache>
+            <<<grid, block, 0, stream>>>(
+                    q_buf,
+                    k_buf,
+                    v_buf,
+                    param,
+                    seq_len,
+                    head_num,
+                    head_num_kv,
+                    size_per_head);
     });
 }
 
@@ -1784,6 +1771,10 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const float*                     scale,                               \
                                                  const int                        int8_mode,                           \
                                                  const bool                       use_paged_fmha,                      \
+                                                 const bool                       store_qkv,                           \
+                                                 const bool                       store_q,                             \
+                                                 const bool                       store_kv,                            \
+                                                 const bool                       store_cache,                         \
                                                  cudaStream_t                     stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(half);
@@ -1791,6 +1782,28 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(half);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(__nv_bfloat16);
 #endif
 #undef INSTANTIATEADDFUSEDQKVBIASTRANSPOSE
+
+
+#define INSTANTIATEINVOKELOADPREFIXKVCACHE(T)                                                                   \
+    template void invokeLoadPrefixKVCache(T*                               q_buf,                               \
+                                          T*                               k_buf,                               \
+                                          T*                               v_buf,                               \
+                                          PrefixPromptBatchWeightsParam*   param,                               \
+                                          const int                        batch_size,                          \
+                                          const int                        seq_len,                             \
+                                          const int                        head_num,                            \
+                                          const int                        head_num_kv,                         \
+                                          const int                        size_per_head,                       \
+                                          const float*                     scale,                               \
+                                          const int                        int8_mode,                           \
+                                          cudaStream_t                     stream)
+INSTANTIATEINVOKELOADPREFIXKVCACHE(float);
+INSTANTIATEINVOKELOADPREFIXKVCACHE(half);
+#ifdef ENABLE_BF16
+INSTANTIATEINVOKELOADPREFIXKVCACHE(__nv_bfloat16);
+#endif
+#undef INSTANTIATEINVOKELOADPREFIXKVCACHE
+
 
 template<typename T>
 __global__ void transpose_4d(T*        dst,
@@ -1889,155 +1902,6 @@ void invokeGetSkipLength(int* skip_length, int* prefix_lengths, int batch_size, 
     dim3 block(1);
     getSkipLength<<<grid, block, 0, stream>>>(skip_length, prefix_lengths, batch_size);
 }
-
-template<typename T, typename T_cache, typename KVCacheBuffer>
-__global__ void transpose4dBatchMajorKVCache(const T*      kSrc,
-                                             const T*      vSrc,
-                                             KVCacheBuffer kvCacheBuffer,
-                                             const int     headNum,
-                                             const int     sizePerHead,
-                                             const int     seqLen,
-                                             const float*  kvScaleOrigQuant,
-                                             const int*    sequence_lengths,
-                                             const int*    prefix_lengths)
-{
-    // We allow only fp32/fp16/bf16 as input types
-    static_assert(sizeof(T) == 4 || sizeof(T) == 2, "");
-
-    constexpr int  X_ELEMS            = (sizeof(T) == 4) ? 4 : 8;
-    constexpr bool ENABLE_8BITS_CACHE = sizeof(T_cache) == 1;
-    using T_dst                       = T_cache;
-    using T_src                       = typename packed_type<T, X_ELEMS>::type;
-
-    const int batchIdx        = blockIdx.y;
-    const int headIdx         = blockIdx.z;
-    const int sequence_length = sequence_lengths[batchIdx];
-    const int prefix_legnth   = prefix_lengths ? prefix_lengths[batchIdx] : 0;
-
-    // idx is over output dimension L * sizePerHead / x for values
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // threadIdx.y 0 handles k, while threadIdx.y 1 handles v.
-    const bool handle_k        = (threadIdx.y == 0);
-    const int  sizePerHeadDivX = sizePerHead / X_ELEMS;
-
-    if (idx >= sizePerHeadDivX * (sequence_length + prefix_legnth)) {
-        return;
-    }
-
-    // Get linear token index
-    const int tokenIdx = idx / sizePerHeadDivX;
-    // Get channel index
-    const int channelIdx = idx % sizePerHeadDivX;
-    // return in idx < prefix_legnth branch: avoid to write the reuse block
-    if (tokenIdx < prefix_legnth || tokenIdx >= (sequence_length + prefix_legnth)) {
-        return;
-    }
-
-    // Get pointer to the dst block given sequence, head and token ids
-    auto valDst = handle_k ? reinterpret_cast<T_dst*>(kvCacheBuffer.getKBlockPtr(batchIdx, tokenIdx)) :
-                             reinterpret_cast<T_dst*>(kvCacheBuffer.getVBlockPtr(batchIdx, tokenIdx));
-
-    // Local to block dst idx
-    int inBlockIdx = kvCacheBuffer.getKVLocalIdx(tokenIdx, headIdx, sizePerHeadDivX, channelIdx);
-
-    // 16 byte loads will handle "x" dimension
-    const size_t srcOffset = (batchIdx * headNum + headIdx) * sizePerHead * seqLen;
-    auto         valSrc    = reinterpret_cast<const T_src*>((handle_k ? kSrc : vSrc) + srcOffset);
-
-    T_src val = valSrc[idx];
-    if (ENABLE_8BITS_CACHE) {
-        // If T is fp32, T_src is float4 and num_elems<T_src>::value returns 4
-        // If T is fp16/bf16, T_src is uint4 and num_elems<T_src>::value returns 8
-        // packed_type<int8_t ...>::type becomes uint32_t or uint64_t respectively
-        // FIXME num_elems semantic is confusing
-        inBlockIdx = inBlockIdx * sizeof(typename packed_type<T_dst, num_elems<T_src>::value>::type);
-        // Cast float scale to dst data type.
-        // using T_scale = typename kv_cache_scale_type_t<T, T_cache>::Type;
-        // T_scale scaleOrigQuant;
-        // convert_from_float(&scaleOrigQuant, kvScaleOrigQuant[0]);
-        // Store 8bits kv cache.
-        // all size per head will be in one wrap
-        float val_max = vector_abs_max(val);
-#pragma unroll
-        for (int mask = sizePerHeadDivX / 2; mask >= 1; mask /= 2) {
-            val_max = fmaxf(val_max, __shfl_xor_sync(uint32_t(-1), val_max, mask));
-        }
-        store_8bits_kv_cache_vec(valDst, val, inBlockIdx, float(1 << (8 - 1)) / val_max);
-        if (channelIdx == 0) {
-            float* val_scale  = handle_k ? reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(batchIdx, tokenIdx)) :
-                                           reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(batchIdx, tokenIdx));
-            int    inScaleIdx = kvCacheBuffer.getKVScaleLocalIdx(tokenIdx, headIdx);
-            *reinterpret_cast<float*>(&val_scale[inScaleIdx]) = val_max / float(1 << (8 - 1));
-        }
-    }
-    else {
-        reinterpret_cast<T_src*>(valDst)[inBlockIdx] = val;
-    }
-}
-
-template<typename T, typename KVCacheBuffer>
-void invokeTranspose4dBatchMajor(const T*              kSrc,
-                                 const T*              vSrc,
-                                 KVCacheBuffer&        kvTable,
-                                 const int             localBatchSize,
-                                 const int             seqLen,
-                                 const int             sizePerHead,
-                                 const int             localHeadNum,
-                                 const KvCacheDataType cache_type,
-                                 const float*          kvScaleOrigQuant,
-                                 const int*            sequence_lengths,
-                                 const int*            prefix_lengths,
-                                 cudaStream_t          stream)
-{
-    // Block handles both K and V tile.
-    dim3          blockSz(128, 2);
-    constexpr int x = (sizeof(T) == 4) ? 4 : 8;
-    dim3          gridSz((seqLen * sizePerHead / x + blockSz.x - 1) / blockSz.x, localBatchSize, localHeadNum);
-
-    assert(sizePerHead % x == 0 && "Size per head is not a multiple of X");
-
-    if (cache_type == KvCacheDataType::INT8) {
-        transpose4dBatchMajorKVCache<T, int8_t, KVCacheBuffer><<<gridSz, blockSz, 0, stream>>>(
-            kSrc, vSrc, kvTable, localHeadNum, sizePerHead, seqLen, kvScaleOrigQuant, sequence_lengths, prefix_lengths);
-    }
-#ifdef ENABLE_FP8
-    else if (cache_type == KvCacheDataType::FP8) {
-        transpose4dBatchMajorKVCache<T, __nv_fp8_e4m3, KVCacheBuffer><<<gridSz, blockSz, 0, stream>>>(
-            kSrc, vSrc, kvTable, localHeadNum, sizePerHead, seqLen, kvScaleOrigQuant, sequence_lengths, prefix_lengths);
-    }
-#endif  // ENABLE_FP8
-    else {
-        transpose4dBatchMajorKVCache<T, T, KVCacheBuffer><<<gridSz, blockSz, 0, stream>>>(
-            kSrc, vSrc, kvTable, localHeadNum, sizePerHead, seqLen, kvScaleOrigQuant, sequence_lengths, prefix_lengths);
-    }
-}
-
-#define INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE(T, KVCacheBuffer)                                           \
-    template void invokeTranspose4dBatchMajor(const T*              kSrc,                                              \
-                                              const T*              vSrc,                                              \
-                                              KVCacheBuffer&        kvTable,                                           \
-                                              const int             localBatchSize,                                    \
-                                              const int             seqLen,                                            \
-                                              const int             sizePerHead,                                       \
-                                              const int             localHeadNum,                                      \
-                                              const KvCacheDataType cache_type,                                        \
-                                              const float*          kvScaleOrigQuant,                                  \
-                                              const int*            sequence_lengths,                                  \
-                                              const int*            prefix_lengthscuda,                                \
-                                              cudaStream_t          stream)
-
-#define INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(T)                                                                        \
-    INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE(T, KVBlockArray);                                               
-
-
-INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(float)
-INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(half)
-#ifdef ENABLE_BF16
-INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(__nv_bfloat16);
-#endif
-
-#undef INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE
-#undef INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR
 
 template<typename T>
 __global__ void addRelativeAttentionBias(

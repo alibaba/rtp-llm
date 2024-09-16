@@ -63,7 +63,7 @@ public:
         int const num_kv_heads /* MQA or GQA */)
         = 0;
 
-    virtual void run(void const* qPtr, void const* pagedKVBlockOffsetsOnHost, fastertransformer::KVBlockArray const& pagedKVCache,
+    virtual void run(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
         void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
         void* outputPtr, cudaStream_t stream)
         = 0;
@@ -106,7 +106,7 @@ public:
 
     bool fmha_supported() override;
 
-    void run(void const* qPtr, void const* pagedKVBlockOffsetsOnHost, fastertransformer::KVBlockArray const& pagedKVCache,
+    void run(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
         void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
         void* outputPtr, cudaStream_t stream) override;
 
@@ -114,7 +114,7 @@ public:
     void run(void const* inputPtr, void const* cuQSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
         void* outputPtr, cudaStream_t stream)
     {
-        run(inputPtr, nullptr, fastertransformer::KVBlockArray(), cuQSeqlenPtr, cuQSeqlenPtr, tileCounterPtr, scaleBmm2Ptr, outputPtr,
+        run(inputPtr, fastertransformer::KVBlockArray(), cuQSeqlenPtr, cuQSeqlenPtr, tileCounterPtr, scaleBmm2Ptr, outputPtr,
             stream);
     }
 

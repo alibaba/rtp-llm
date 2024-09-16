@@ -71,7 +71,6 @@ public:
                            void*  cu_kv_seqlens,
                            void*  output,
                            uint32_t* tile_counter_ptr,
-                           const void* paged_kv_block_offsets_on_host,
                            size_t batch_size,
                            size_t input_seq_len,
                            size_t max_past_kv_len,
