@@ -646,6 +646,7 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream) {
         loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
     }
     stream_cache_resource_.setStream(this);
+    generate_input_->generate_config = std::make_shared<GenerateConfig>(*other_stream.generate_input_->generate_config);
 }
 
 }  // namespace rtp_llm

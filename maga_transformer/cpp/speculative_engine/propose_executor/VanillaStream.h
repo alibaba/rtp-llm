@@ -21,10 +21,7 @@ public:
         setMetricsReporter(nullptr);
         allocateOutputBuffer(propose_step);
         setNeedReleaseResource(false);
-
-        if (!stream.generateConfig()->top1()) {
-            setReturnAllProbs(true);
-        }
+        setGenerateConfig();
     }
 
     ~VanillaStream() {}
@@ -57,6 +54,16 @@ private:
     void allocateOutputBuffer(size_t propose_step) {
         output_buffer_->tokens = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"score_tokens"});
+    }
+
+    void setGenerateConfig() {
+        std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
+        if (!generate_config->top1()) {
+            setReturnAllProbs(true);
+        } 
+        if (generate_config->top_k == 0 && generate_config->top_p > 0.0) {
+            generate_config->top_k = 20;
+        }
     }
 
 protected:
