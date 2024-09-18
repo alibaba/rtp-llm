@@ -15,6 +15,7 @@ from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.dump_config_utils import dump_model_to_table
 from maga_transformer.utils.fuser import fetch_remote_file_to_local
+from maga_transformer.utils.util import check_with_info
 from maga_transformer.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env, get_propose_weight_type_from_env
 
 from maga_transformer.model_factory_register import _model_factory
@@ -22,9 +23,9 @@ from maga_transformer.model_factory_register import _model_factory
 class ModelFactory:
     @staticmethod
     def get_config_json(ckpt_path: str):
-        assert os.path.isdir(ckpt_path)
+        check_with_info(os.path.isdir(ckpt_path), f"{ckpt_path} check os.isdir failed")
         config_json_path = os.path.join(ckpt_path, 'config.json')
-        assert os.path.isfile(config_json_path)
+        check_with_info(os.path.isfile(config_json_path), f"{config_json_path} check os.isdir failed")
         with open(config_json_path, "r", encoding="utf-8") as reader:
             text = reader.read()
             return json.loads(text)

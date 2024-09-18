@@ -435,6 +435,8 @@ py_library(
     ],
     deps = [
         ":maga_transformer_lib",
+        "//maga_transformer/test/utils:port_util",
+        "//maga_transformer/test/utils:device_resource",
         ":aiohttp",
     ]
 )

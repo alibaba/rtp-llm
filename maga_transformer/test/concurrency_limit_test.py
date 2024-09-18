@@ -15,6 +15,7 @@ from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.server.inference_server import InferenceWorker
 from maga_transformer.server.inference_app import InferenceApp
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
+from maga_transformer.test.utils.port_util import get_consecutive_free_ports
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 def fake_init(self, *args, **kwargs):
     self.model = None
@@ -42,6 +43,7 @@ class ConcurrencyLimitTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.inference_app = InferenceApp()
+        self.port = get_consecutive_free_ports(3)[0]
         self.port = random.randint(20000, 30000)
         g_worker_info.server_port = self.port
         os.environ['CONCURRENCY_LIMIT'] = '16'

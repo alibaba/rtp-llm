@@ -31,7 +31,7 @@ class InferenceWorkerTest(TestCase):
 
     def create_inference_worker(self):
         port_list = get_consecutive_free_ports(3)
-        update_master_info('0.0.0.0', int(os.environ.get('START_PORT', port_list[0])))
+        update_master_info('0.0.0.0', int(port_list[0]))
         self.fake_model_loader = FakeModelLoader(model_type='llama',
                                                  tokenizer_path=self.tokenizer_path,
                                                  ckpt_path=self.ckpt_path,
