@@ -2,7 +2,7 @@
 
 #include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"

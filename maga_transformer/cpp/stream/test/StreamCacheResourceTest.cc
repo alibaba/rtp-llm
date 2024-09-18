@@ -4,9 +4,9 @@
 #define private public
 #define protected public
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
@@ -411,7 +411,7 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(stream_->maxBlockSize(), 4);
     ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
-    
+
     // partial fallback
     stream_->tryReleaseKVBlock(2);
     stream_->setPaused();

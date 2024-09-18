@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <memory>
 #include "autil/EnvUtil.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
@@ -543,13 +543,22 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
                 return;
             }
         }
-        
+
         device_->copy({(*complete_token_ids_)[i].view(seq_length_, num_new_tokens), (*new_tokens)[i].view(0, num_new_tokens)});
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
     updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs);
 }
+
+
+void GenerateStream::update(const GptModelOutputs& model_outputs,
+                            SamplerOutput&   sampler_output)
+{
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+}
+
+
 
 void GenerateStream::setLoss(const ft::Buffer& loss) {
     FT_CHECK(loss_index_ + loss.size() < inputLength());
@@ -606,7 +615,7 @@ std::string GenerateStream::debugString() const {
 
     debug_string << ", cum_log_probs: " << cum_log_probs_->debugStringWithData<float>();
     debug_string << ", stream_cache_resource: "<< stream_cache_resource_.debugString();
-         
+
     debug_string << "}";
     return debug_string.str();
 }

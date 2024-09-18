@@ -3,7 +3,6 @@
 
 #define private public
 
-#include "maga_transformer/cpp/models/ModelFactory.h"
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"

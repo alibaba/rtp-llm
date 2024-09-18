@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "requirement", "whl_deps")
 cc_library(
     name = "embedding_engine",
     hdrs = glob([
-        "*.h",        
+        "*.h",
     ]),
     srcs = glob([
         "*.cc",
@@ -48,6 +48,7 @@ cc_library(
         "handlers/*.cc",
     ]),
     deps = [
+        "//maga_transformer/cpp:stream",
         ":embedding_handler_base",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:models",
@@ -64,7 +65,7 @@ cc_library(
         "arpc/ArpcServerWrapper.h",
         "arpc/ArpcServiceCreator.h"
     ]),
-    srcs = glob([        
+    srcs = glob([
         "arpc/ArpcServerWrapper.cc"
     ]),
     deps = [

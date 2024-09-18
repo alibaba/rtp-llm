@@ -2,7 +2,7 @@
 
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreOutput.h"
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/SpeculativeSamplerOutput.h"

@@ -67,6 +67,22 @@ cc_library(
 )
 
 cc_library(
+    name = "stream",
+    hdrs = glob([
+        "stream/*.h",
+    ]),
+    srcs = glob([
+        "stream/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":models",
+        ":dataclass",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+
+cc_library(
     name = "lora",
     hdrs = glob([
         "lora/*.h",
@@ -76,18 +92,10 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":dataclass",
+        ":stream",
         ":utils",
         ":common",
         ":cache",
-        ":system_prompt",
-        "//:gpt_init_params_hdr",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@havenask//aios/autil:synchronized_queue",
-        "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices:device_utils",
-        "//src/fastertransformer/models:weights_define",
     ],
     visibility = ["//visibility:public"],
 )
@@ -206,6 +214,7 @@ cc_library(
         "schedulers/*.cc",
     ]),
     deps = torch_deps() + [
+        ":stream",
         ":dataclass",
         ":metrics",
         ":utils",

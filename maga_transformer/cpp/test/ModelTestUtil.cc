@@ -129,5 +129,14 @@ unique_ptr<const Weights> loadWeightsFromDir(std::string dir_path) {
     }
 }
 
+unique_ptr<GptModel> createGptModel(const GptModelInitParams& params) {
+    // TODO(yitian team): create own model implementation and return.
+    if (params.device->getDeviceProperties().type == ft::DeviceType::Yitian) {
+        return make_unique<GptModel>(params);
+    }
+    return make_unique<GptModel>(params);
+}
+
+
 } // namespace rtp_llm
 

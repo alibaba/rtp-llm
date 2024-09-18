@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"

@@ -1,5 +1,5 @@
 #pragma once
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreOutput.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/assert_utils.h"

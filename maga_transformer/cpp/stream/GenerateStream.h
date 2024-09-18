@@ -1,24 +1,14 @@
 #pragma once
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <optional>
-#include <queue>
-#include <condition_variable>
-#include "src/fastertransformer/core/Buffer.h"
-#include "autil/TimeUtility.h"
-#include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
-#include "maga_transformer/cpp/cache/CacheManager.h"
-#include "autil/SynchronizedQueue.h"
+
+#include "maga_transformer/cpp/models/GptModel.h"
+#include "maga_transformer/cpp/models/Sampler.h"
+#include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+
+#include "autil/TimeUtility.h"
+#include "autil/SynchronizedQueue.h"
 #include "absl/status/statusor.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace ft = fastertransformer;
 
@@ -51,6 +41,9 @@ public:
                 const ft::BufferPtr& logits,
                 const ft::BufferPtr& cum_log_probs,
                 const ft::BufferPtr& all_probs);
+
+    void update(const GptModelOutputs& gpt_model_outputs,
+                SamplerOutput&   sampler_output);
 
 
     virtual size_t scoreLen() const {

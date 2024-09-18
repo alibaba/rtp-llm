@@ -13,7 +13,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
 #include "autil/EnvUtil.h"
 

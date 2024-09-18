@@ -6,7 +6,7 @@
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/dataclass/StreamGroups.h"
+#include "maga_transformer/cpp/stream/StreamGroups.h"
 
 namespace rtp_llm {
 

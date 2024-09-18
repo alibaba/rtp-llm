@@ -3,7 +3,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
-#include "maga_transformer/cpp/dataclass/StreamGroups.h"
+#include "maga_transformer/cpp/stream/StreamGroups.h"
 #include "absl/status/statusor.h"
 #include "absl/status/status.h"
 

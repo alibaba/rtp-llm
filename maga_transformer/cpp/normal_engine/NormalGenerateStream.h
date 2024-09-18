@@ -1,6 +1,5 @@
 #pragma once
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 
 namespace ft = fastertransformer;
 

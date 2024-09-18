@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
-#include "maga_transformer/cpp/dataclass/StreamGroups.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
+#include "maga_transformer/cpp/stream/StreamGroups.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaStream.h"
 
@@ -24,7 +24,7 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
 
     FT_LOG_DEBUG("propose done");
 
-    return propose_output; 
+    return propose_output;
 }
 
 }  // namespace rtp_llm

@@ -2,7 +2,7 @@
 
 #include <cstring>
 #include <memory>
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "src/fastertransformer/core/Buffer.h"

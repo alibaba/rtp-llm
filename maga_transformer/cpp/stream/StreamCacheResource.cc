@@ -1,5 +1,5 @@
-#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/StreamCacheResource.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 
 using namespace std;
 namespace ft = fastertransformer;

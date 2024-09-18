@@ -1,7 +1,7 @@
 #pragma once
 
 #include "absl/status/status.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "src/fastertransformer/devices/DeviceBase.h"

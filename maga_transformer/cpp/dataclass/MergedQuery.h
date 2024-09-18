@@ -1,6 +1,6 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/core/Buffer.h"
