@@ -56,11 +56,11 @@ private:
 };
 
 struct LoadBalanceInfo {
-    int64_t step_latency_us;
-    int64_t iterate_count;
-    int64_t step_per_minute;
-    int64_t available_kv_cache;
-    int64_t total_kv_cache;
+    int64_t step_latency_us = 0;
+    int64_t iterate_count = 0;
+    int64_t step_per_minute = 0;
+    int64_t available_kv_cache = 0;
+    int64_t total_kv_cache = 0;
 };
 
 void registerLoadBalanceInfo(const pybind11::module& m);
