@@ -314,9 +314,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     FT_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
         bool store_qkv = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE;
-        bool store_q = fmha_type_ == FMHAType::PAGED_TRT_V2;
+        bool store_q = fmha_type_ == FMHAType::PAGED_TRT_V2 || fmha_type_ == FMHAType::NONE;
         bool store_kv = fmha_type_ == FMHAType::NONE;
-        bool store_cache = fmha_type_ != FMHAType::NONE;
+        bool store_cache = params.common.kv_cache.has_value();
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
             q_output->data(),
             k_output->data(),

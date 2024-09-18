@@ -142,7 +142,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     bool store_qkv = true;
     bool store_q = true;
     bool store_kv = true;
-    bool store_cache = true;
+    bool store_cache = params.common.kv_cache.has_value();
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
         q_output->data(),
