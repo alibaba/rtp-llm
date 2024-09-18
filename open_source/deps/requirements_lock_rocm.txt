@@ -4,6 +4,8 @@
 #
 #    bazel run //open_source/deps:requirements_rocm.update
 #
+--extra-index-url https://mirrors.aliyun.com/pypi/simple/
+
 accelerate==0.25.0 \
     --hash=sha256:c7bb817eb974bba0ff3ea1ba0f24d55afb86d50e3d4fe98d6922dc69cf2ccff1 \
     --hash=sha256:ecf55b0ab278a1dac8539dde0d276977aff04683f07ede73eaf02478538576a1
