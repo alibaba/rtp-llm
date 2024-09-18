@@ -98,6 +98,7 @@ cc_test(
         "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(

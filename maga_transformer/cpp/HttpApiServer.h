@@ -59,6 +59,7 @@ private:
     bool registerSetDebugLog();
     bool registerSetDebugPrint();
     bool registerTokenizerEncode();
+    bool registerInference();
     bool registerInferenceInternal();
     bool registerWorkerStatus();
 
@@ -72,6 +73,7 @@ private:
     Pipeline                               pipeline_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::atomic<bool>                      is_stopped_{false};
+    std::atomic<int32_t>                   active_request_count_{0};
 };
 
 }  // namespace rtp_llm

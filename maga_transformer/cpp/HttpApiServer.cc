@@ -264,8 +264,6 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
 }
 
 void HttpApiServer::registerResponses() {
-    http_server_.RegisterRoute(
-        "POST", "/inference", std::bind(inferResponse, _1, _2, engine_, params_, pipeline_, controller_));
     // TODO: register other routes
     registerRoot();
     registerHealth();
@@ -273,6 +271,7 @@ void HttpApiServer::registerResponses() {
     registerSetDebugLog();
     registerSetDebugPrint();
     registerTokenizerEncode();
+    registerInference();
     registerInferenceInternal();
     registerWorkerStatus();
 }
@@ -466,6 +465,26 @@ bool HttpApiServer::registerTokenizerEncode() {
     return http_server_.RegisterRoute("POST", "/tokenizer/encode", callback);
 }
 
+bool HttpApiServer::registerInference() {
+    auto shared_this = shared_from_this();
+    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest&                  request) {
+        shared_this->active_request_count_.fetch_add(1);
+        try {
+            inferResponse(std::move(writer),
+                          request,
+                          shared_this->engine_,
+                          shared_this->params_,
+                          shared_this->pipeline_,
+                          shared_this->controller_);
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("called inference route but found exception: [%s]", e.what());
+        }
+        shared_this->active_request_count_.fetch_sub(1);
+    };
+    return http_server_.RegisterRoute("POST", "/inference", callback);
+}
+
 bool HttpApiServer::registerInferenceInternal() {
     auto callback = [engine = engine_, params = params_, pipeline = pipeline_, controller = controller_](
                         std::unique_ptr<http_server::HttpResponseWriter> writer,
@@ -481,7 +500,18 @@ bool HttpApiServer::registerInferenceInternal() {
         }
         inferResponse(std::move(writer), request, engine, params, pipeline, controller);
     };
-    return http_server_.RegisterRoute("POST", "/inference_internal", callback);
+    auto shared_this      = shared_from_this();
+    auto callback_wrapper = [shared_this, callback](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                    const http_server::HttpRequest&                  request) {
+        shared_this->active_request_count_.fetch_add(1);
+        try {
+            callback(std::move(writer), request);
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("called inference internal but found exception: [%s]", e.what());
+        }
+        shared_this->active_request_count_.fetch_sub(1);
+    };
+    return http_server_.RegisterRoute("POST", "/inference_internal", callback_wrapper);
 }
 
 bool HttpApiServer::registerWorkerStatus() {
@@ -529,6 +559,11 @@ bool HttpApiServer::registerWorkerStatus() {
 void HttpApiServer::stop() {
     FT_LOG_WARNING("http api server stopped");
     is_stopped_.store(true);
+    while (active_request_count_.load() > 0) {
+        FT_LOG_DEBUG("http api server stop called, wait active request processed. active request count: %d",
+                     active_request_count_.load());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
     http_server_.Stop();
 }
 
