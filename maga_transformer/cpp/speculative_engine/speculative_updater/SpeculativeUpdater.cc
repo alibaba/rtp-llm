@@ -43,6 +43,7 @@ absl::Status SpeculativeUpdater::dispatch(const GenerateStreamPtr& stream, const
     stream->update(accepted_tokens, num_accepted_tokens, logits, hidden_states, nullptr, nullptr);
     stream->setReuseLength(stream->seqLength() - 1);
     stream->setFallbackPrefixLength(stream->reuseLength());
+    stream->setAccepedBounsToken(stream_output.acceped_bouns_token);
     stream->step();
     return absl::OkStatus();
 }

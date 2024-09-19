@@ -17,13 +17,13 @@ public:
                 size_t                                    propose_step):
         GenerateStream(stream),
         propose_step_(propose_step),
-        score_len_(propose_step == 0 ? 1 : propose_step),
+        score_len_(propose_step == 0 ? 1 : propose_step + 1),
         output_buffer_(stream_output) {
         // WARNING: ScoreStream currently only support batch_size = 1
         FT_CHECK(tileNum() == 1);
         CopyOnWrite(stream);
         updateProposeTokens(stream_input);
-        allocateOutputBuffer(propose_step);
+        allocateOutputBuffer();
         setNeedReleaseResource(false);
 
         if (!stream.generateConfig()->top1()) {
@@ -70,10 +70,10 @@ private:
         setSeqLength(seqLength() + propose_tokens->size());
     }
 
-    void allocateOutputBuffer(size_t propose_step) {
-        if (propose_step > 0) {
+    void allocateOutputBuffer() {
+        if (scoreLen() > 0) {
             output_buffer_->tokens = device_->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"score_tokens"});
+                {ft::DataType::TYPE_INT32, {1, scoreLen()}, ft::AllocationType::HOST}, {"score_tokens"});
             setIsContextStream(true);
         }
     }

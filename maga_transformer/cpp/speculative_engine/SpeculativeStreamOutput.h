@@ -40,12 +40,14 @@ public:
                                    size_t        accepted_token_nums,
                                    ft::BufferPtr accepted_tokens,
                                    ft::BufferPtr logits,
-                                   ft::BufferPtr hidden_states):
+                                   ft::BufferPtr hidden_states,
+                                   bool          accepted_bouns_token = false):
         propose_step(propose_step),
         accepted_token_nums(accepted_token_nums),
         accepted_tokens(accepted_tokens),
         logits(logits),
-        hidden_states(hidden_states) {}
+        hidden_states(hidden_states),
+        acceped_bouns_token(accepted_bouns_token) {}
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -68,6 +70,7 @@ public:
     ft::BufferPtr accepted_tokens = nullptr;
     ft::BufferPtr logits = nullptr;
     ft::BufferPtr hidden_states = nullptr;
+    bool          acceped_bouns_token = false;
 };
 
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;

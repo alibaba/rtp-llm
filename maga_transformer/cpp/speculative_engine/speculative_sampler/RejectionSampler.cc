@@ -38,8 +38,9 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
                      propose_step,
                      accepted_len);
 
+
         ft::BufferPtr accepted_tokens =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST});
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST}, {"accepted_tokens"});
         device_->copy(
             {(*accepted_tokens)[0].view(0, accepted_len), (*scorer_stream_output->tokens)[0].view(0, accepted_len)});
 
@@ -57,7 +58,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
                                             {"return_hidden_states"}});
         }
         sampler_output.outputs.emplace_back(
-            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states));
+            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), accepted_len > propose_step);
         stream_index++;
     }
     FT_LOG_DEBUG("speculative sample done");
@@ -75,7 +76,7 @@ size_t RejectionSampler::top1Sample(size_t                                    pr
         }
         accepted_len++;
     }
-    return std::min(propose_step, accepted_len + 1);
+    return accepted_len + 1;
 }
 
 size_t RejectionSampler::stochasticSample(size_t                                    propose_step,
@@ -117,14 +118,12 @@ size_t RejectionSampler::stochasticSample(size_t                                
             auto norm_p                                                          = new_p.div(new_p.sum(0));
             auto new_token_tensor                                                = norm_p.multinomial(1);
             *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = new_token_tensor.item<int32_t>();
-            accepted_len++;
             break;
         }
         *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = propose_token_id;
         accepted_len++;
     }
-
-    return std::min(propose_step, accepted_len);
+    return accepted_len + 1;
 }
 
 };  // namespace rtp_llm

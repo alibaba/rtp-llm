@@ -170,6 +170,14 @@ public:
         return return_all_probs_;
     }
 
+    void setAccepedBounsToken(bool acceped_bouns_token) {
+        acceped_bouns_token_ = acceped_bouns_token;
+    }
+
+    bool getAccepedBounsToken() {
+        return acceped_bouns_token_;
+    }
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
@@ -178,6 +186,7 @@ protected:
     int                                 max_seq_len_;
     int                                 seq_length_;
     int                                 start_check_seq_length_ = 0;
+    bool                                acceped_bouns_token_ = false;
     int64_t                             vocab_size_;
     ft::BufferPtr                       complete_token_ids_;
     int64_t                             begin_time_us_;

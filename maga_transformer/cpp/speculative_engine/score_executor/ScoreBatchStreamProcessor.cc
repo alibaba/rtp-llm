@@ -67,10 +67,10 @@ ScoreBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_grou
     batch_idx += total_decode_batch_size;
     size_t offset = 0;
     for (auto& stream : context_streams) {
-        size_t  current_batch_size = stream->scoreLen();
+        size_t current_batch_size = stream->scoreLen();
         offset += stream->contextLength();
         for (int i = 0; i < current_batch_size; ++i) {
-            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.all_logits->view(offset - current_batch_size + i - 1, 1)});
+            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.all_logits->view(offset - current_batch_size + i, 1)});
             batch_idx += 1;
         }
     }
@@ -96,7 +96,6 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
     for (auto& stream : stream_groups.allStreams()) {
         auto current_batch_size = stream->scoreLen();
         
-        // TODO(xyz): specutial handle like gathersamplerInput
         auto batch_logits = model_output.all_logits->slice(offset, current_batch_size);
         auto batch_hidden_states = model_output.all_hidden_states->slice(offset, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;

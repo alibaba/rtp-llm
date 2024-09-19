@@ -22,6 +22,7 @@ public:
         allocateOutputBuffer(propose_step);
         setNeedReleaseResource(false);
         setGenerateConfig();
+        handleBounsToken();
     }
 
     ~VanillaStream() {}
@@ -53,7 +54,14 @@ public:
 private:
     void allocateOutputBuffer(size_t propose_step) {
         output_buffer_->tokens = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"score_tokens"});
+            {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"vanilla_propose_tokens"});
+    }
+
+    void handleBounsToken() {
+        if (acceped_bouns_token_) {
+            setReuseLength(seqLength() - 1);
+            setIsContextStream(true);
+        }
     }
 
     void setGenerateConfig() {
