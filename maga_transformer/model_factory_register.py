@@ -62,11 +62,14 @@ class ModelDict:
             # hack for ChatGLMModel: chatglm and chatglm2 use same architecture
             architecture = config.get('architectures')[0]
             if architecture in ['ChatGLMModel', 'ChatGLMForConditionalGeneration']:
-                if not config.get('multi_query_attention', False) or 'chatglm-6b' in config.get('_name_or_path', ''):
+                _name_or_path = config.get('_name_or_path', '')
+                if not config.get('multi_query_attention', False) or 'chatglm-6b' in _name_or_path:
                     return 'chatglm'
-                elif 'chatglm3' in config.get('_name_or_path', ''):
+                elif 'chatglm3' in _name_or_path:
                     return 'chatglm3'
-                elif 'glm-4v' in config.get('_name_or_path', ''):
+                elif 'glm-4-' in _name_or_path:
+                    return 'chatglm4'
+                elif 'glm-4v' in _name_or_path:
                     return 'chatglm4v'
                 else:
                     return 'chatglm2'

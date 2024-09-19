@@ -19,7 +19,7 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
         ckpt_path=model_path,
         weight_type=get_weight_type_from_env(env_params),
         ptuning_path=ptuning_path,
-        max_seq_len=0,
+        max_seq_len=int(env_params.get("MAX_SEQ_LEN", "0")),
         tokenizer_path=None
     )
     config: GptInitModelParameters = model_cls.create_config(model_config)
