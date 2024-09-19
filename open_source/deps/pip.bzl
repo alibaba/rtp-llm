@@ -16,6 +16,14 @@ def pip_deps():
     )
 
     pip_parse(
+        name = "pip_arm_torch",
+        requirements_lock = "//open_source/deps:requirements_lock_torch_arm.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS,
+        timeout = 3600,
+    )
+
+    pip_parse(
         name = "pip_gpu_torch",
         requirements_lock = "//open_source/deps:requirements_lock_torch_gpu.txt",
         python_interpreter = "/opt/conda310/bin/python3",

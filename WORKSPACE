@@ -27,21 +27,19 @@ load("//deps:pip.bzl", "pip_deps")
 pip_deps()
 
 load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
-
 pip_cpu_torch_install_deps()
 
-load("@pip_gpu_torch//:requirements.bzl", pip_gpu_torch_install_deps = "install_deps")
+load("@pip_arm_torch//:requirements.bzl", pip_arm_torch_install_deps = "install_deps")
+pip_arm_torch_install_deps()
 
+load("@pip_gpu_torch//:requirements.bzl", pip_gpu_torch_install_deps = "install_deps")
 pip_gpu_torch_install_deps()
 
 load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
-
 pip_ppu_torch_install_deps()
 
 load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
-
 pip_gpu_cuda12_torch_install_deps()
 
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
-
 pip_gpu_rocm_torch_install_deps()
