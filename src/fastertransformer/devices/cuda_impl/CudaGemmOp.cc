@@ -253,7 +253,9 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
                                  A,
                                  arguments.lda,
                                  D,
-                                 arguments.ldc);
+                                 arguments.ldc,
+                                 arguments.alpha,
+                                 arguments.beta);
     } else if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_3DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
