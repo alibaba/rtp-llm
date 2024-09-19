@@ -136,7 +136,12 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     } else {
+#if defined(__aarch64__)
+	// Arm attention op only support fp32 data type, convert to original dtype
         auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output, dtype);
+#else
+        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output);
+#endif
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
 
