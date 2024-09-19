@@ -95,22 +95,25 @@ size_t RejectionSampler::stochasticSample(size_t                                
         propose_all_probs  = torch::cat({propose_all_probs, zeros_padding}, 1);
     }
 
-    torch::Tensor randoms      = torch::rand({(long)propose_step}, torch::Device(torch::kCPU)).to(torch::kFloat);
+    torch::Device host_device = torch::Device(torch::kCPU);
+    torch::Device target_device = device_->getTorchDevice();
+
+    torch::Tensor randoms      = torch::rand({(long)propose_step}, torch::Device(host_device)).to(torch::kFloat);
     size_t        accepted_len = 0;
-    torch::Tensor row_indices  = torch::arange((long)propose_step, torch::Device(torch::kCUDA)).to(torch::kInt32);
+    torch::Tensor row_indices  = torch::arange((long)propose_step, torch::Device(target_device)).to(torch::kInt32);
     torch::Tensor col_indices  = torch::from_blob(propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len),
                                                  {(long)propose_step},
                                                  torch::kInt32)
-                                    .to(torch::Device(torch::kCUDA));
-    torch::Tensor score_probs   = score_all_probs.index({row_indices, col_indices}).to(torch::Device(torch::kCPU));
-    torch::Tensor propose_probs = propose_all_probs.index({row_indices, col_indices}).to(torch::Device(torch::kCPU));
+                                    .to(torch::Device(target_device));
+    torch::Tensor score_probs   = score_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
+    torch::Tensor propose_probs = propose_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     torch::Tensor div_probs     = score_probs.div(propose_probs);
     while (accepted_len < propose_step) {
         int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len);
         if (randoms[accepted_len].greater(div_probs[accepted_len]).item<bool>()) {
             auto new_p = score_all_probs[accepted_len]
                              .subtract(propose_all_probs[accepted_len])
-                             .maximum(torch::zeros_like(score_all_probs[accepted_len], torch::Device(torch::kCUDA)));
+                             .maximum(torch::zeros_like(score_all_probs[accepted_len], torch::Device(target_device)));
             auto norm_p                                                          = new_p.div(new_p.sum(0));
             auto new_token_tensor                                                = norm_p.multinomial(1);
             *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = new_token_tensor.item<int32_t>();

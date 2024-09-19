@@ -18,6 +18,10 @@ public:
     virtual void preRun() {}
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
+    virtual torch::Device getTorchDevice() {
+        throw std::runtime_error("getTorchDevice() is not implemented");
+    }
+
     void traceMemoryUsage();
     void setTraceMemory(bool trace_memory);
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});

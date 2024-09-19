@@ -57,6 +57,7 @@ private:
 public:
     cudaStream_t getStream() {return stream_;}
     NcclParam getNcclParam() {return nccl_param_;}
+    torch::Device getTorchDevice() override { return torch::Device(torch::kCUDA);};
 
 public:
     void copy(const CopyParams& params) override;

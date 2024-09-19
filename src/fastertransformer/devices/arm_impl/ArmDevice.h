@@ -18,6 +18,7 @@ public:
     DeviceProperties getDeviceProperties() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return allocator_.get(); }
+    torch::Device getTorchDevice() override { return torch::Device(torch::kCPU);};
 
 public:
     void copy(const CopyParams& params) override;
