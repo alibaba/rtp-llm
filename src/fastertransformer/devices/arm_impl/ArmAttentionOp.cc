@@ -66,20 +66,12 @@ void assemCache(const AttentionModuleParams& params, int batch, BufferPtr k_out,
 template<typename Ti, typename Tb>
 void addQKVBias(void* qkv, const void* bias,
                 int batch_sz, int seq_len, int num_heads, int kv_num_heads, int head_size) {
-    const Tb* q_bias = (Tb*)bias;
-    const Tb* k_bias = (Tb*)bias + num_heads * head_size;
-    const Tb* v_bias = (Tb*)bias + (num_heads + kv_num_heads) * head_size;
-
     const int N = batch_sz * seq_len;
     parallel_for(N, [&](int tid) {
-        Ti* q_input = (Ti*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size;
-        Ti* k_input = (Ti*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size + num_heads * head_size;
-        Ti* v_input = (Ti*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size + (num_heads + kv_num_heads) * head_size;
+        Ti* qkv_input = (Ti*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size;
 
-        for (int i = 0; i < num_heads * head_size; i++) {
-            q_input[i] += q_bias[i];
-            k_input[i] += k_bias[i];
-            v_input[i] += v_bias[i];
+        for (int i = 0; i < (num_heads + 2 * kv_num_heads) * head_size; i++) {
+            qkv_input[i] += ((Tb*)bias)[i];
         }
     });
 }
@@ -147,16 +139,19 @@ void ArmCpuDevice::halfRopeQK(void *qkv, int batch, int seq_len, int num_heads, 
 
                 auto  v0 = q_input + h * head_size + d;
                 auto  v1 = q_input + h * head_size + d + inv_freq_size;
-                auto  v2 = k_input + h * head_size + d;
-                auto  v3 = k_input + h * head_size + d + inv_freq_size;
                 auto  d0 = *v0;
                 auto  d1 = *v1;
-                auto  d2 = *v2;
-                auto  d3 = *v3;
                 *v0  = d0 * fcr - d1 * fci;
                 *v1  = d0 * fci + d1 * fcr;
-                *v2  = d2 * fcr - d3 * fci;
-                *v3  = d2 * fci + d3 * fcr;
+
+                if (h < kv_num_heads) {
+                    auto  v2 = k_input + h * head_size + d;
+                    auto  v3 = k_input + h * head_size + d + inv_freq_size;
+                    auto  d2 = *v2;
+                    auto  d3 = *v3;
+                    *v2  = d2 * fcr - d3 * fci;
+                    *v3  = d2 * fci + d3 * fcr;
+                }
             }
         }
     });
@@ -327,6 +322,28 @@ void ArmCpuDevice::runOneBatch(const AttentionModuleParams& params, size_t past_
     printBufferData(*q_output, "q_output");
     printBufferData(*k_out, "k_out");
     printBufferData(*v_out, "v_out");
+
+    if (kv_head_num != head_num) {
+        /* repeat K/V */
+        size_t len;
+        if (step == 0) {
+            len = seq_len;
+        } else {
+            len = step + 1;
+        }
+        auto k_repeat = allocateBuffer({datatype, {1, head_num, len, size_per_head}, AllocationType::HOST}, {});
+        auto v_repeat = allocateBuffer({datatype, {1, head_num, len, size_per_head}, AllocationType::HOST}, {});
+        auto n_rep = head_num / kv_head_num;
+        const int N = kv_head_num;
+        parallel_for(N, [&](int tid) {
+            for (int i = 0; i < n_rep; i++) {
+                memcpy(k_repeat->dataWithOffset((tid * n_rep + i) * len * size_per_head), k_out->dataWithOffset(tid * len * size_per_head), k_out->sizeBytes() / kv_head_num);
+                memcpy(v_repeat->dataWithOffset((tid * n_rep + i) * len * size_per_head), v_out->dataWithOffset(tid * len * size_per_head), v_out->sizeBytes() / kv_head_num);
+            }
+        });
+        k_out = std::move(k_repeat);
+        v_out = std::move(v_repeat);
+    }
 
     tStart = std::chrono::steady_clock::now();
     auto qk_output = gemm_acl({*q_output,
@@ -606,21 +623,18 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
     auto batch_size = params.common.context_batch_size;
     size_t past_seq = 0;
 
-    if (params.configs.head_num != params.configs.kv_head_num) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
-
-    if (params.input.type() == DataType::TYPE_FP32) {
-        for (int batch = 0; batch < batch_size; batch++) {
-            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(batch));
-            runOneBatchStride(params, past_seq, batch, context_len, 0);
-            past_seq += context_len;
-        }
-    } else if (params.input.type() == DataType::TYPE_FP16) {
-        std::cout << "[Warning] Attention performance could be suboptimal with FP16 input. Try FP32 input." << std::endl;
+    if ((params.configs.head_num != params.configs.kv_head_num) ||
+        (params.input.type() == DataType::TYPE_FP16)) {
+        // std::cout << "[Warning] Attention performance could be suboptimal with FP16 input. Try FP32 input." << std::endl;
         for (int batch = 0; batch < batch_size; batch++) {
             size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(batch));
             runOneBatch(params, past_seq, batch, context_len, 0);
+            past_seq += context_len;
+        }
+    } else if (params.input.type() == DataType::TYPE_FP32) {
+        for (int batch = 0; batch < batch_size; batch++) {
+            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(batch));
+            runOneBatchStride(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
     } else {
@@ -631,15 +645,16 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
 AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     auto batch_size = params.common.decoder_batch_size;
 
-    if (params.input.type() == DataType::TYPE_FP32) {
-        for (int batch = 0; batch < batch_size; batch++) {
-            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
-            runOneBatchStride(params, batch, batch, 1, step);
-        }
-    } else if (params.input.type() == DataType::TYPE_FP16) {
+    if ((params.configs.head_num != params.configs.kv_head_num) ||
+        (params.input.type() == DataType::TYPE_FP16)) {
         for (int batch = 0; batch < batch_size; batch++) {
             size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
             runOneBatch(params, batch, batch, 1, step);
+        }
+    } else if (params.input.type() == DataType::TYPE_FP32) {
+        for (int batch = 0; batch < batch_size; batch++) {
+            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
+            runOneBatchStride(params, batch, batch, 1, step);
         }
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

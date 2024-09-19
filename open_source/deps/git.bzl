@@ -121,7 +121,8 @@ def git_deps():
         shallow_since = "1704038400 +0800",
         patches=[
             "//patches/havenask:havenask.patch",
-            "//patches/havenask:0001-fix-PrometheusSink-need-header.patch"
+            "//patches/havenask:0001-fix-PrometheusSink-need-header.patch",
+	    "//patches/havenask:anet.patch"
         ],
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
     )
