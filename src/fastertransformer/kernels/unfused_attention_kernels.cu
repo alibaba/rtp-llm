@@ -1599,8 +1599,6 @@ __global__ void load_prefix_KVCache_kernel(T*                               q_bu
                                            const int   head_num_kv,
                                            const int   size_per_head)
 {
-    extern __shared__ __align__(sizeof(float2)) char smem_[];  // align on largest vector type
-
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
     constexpr int vec_size         = Vec_t<T>::size;
