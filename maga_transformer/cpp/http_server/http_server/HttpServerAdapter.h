@@ -1,6 +1,8 @@
 #ifndef HTTP_SERVER_HTTPSERVERADAPTER_H
 #define HTTP_SERVER_HTTPSERVERADAPTER_H
 
+#include <memory>
+
 #include "aios/network/anet/iserveradapter.h"
 #include "autil/Log.h"
 #include "http_server/HttpError.h"

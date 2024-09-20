@@ -1,6 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
 
 #include "aios/network/anet/httppacket.h"
@@ -18,18 +20,17 @@ public:
     ~HttpRequest();
 
 public:
-    HttpError Parse(anet::HTTPPacket *request);
-    std::string GetMethod() const { return _request->getMethodString(); }
-    std::string GetBody() const { return std::string(_request->getBody(), _request->getBodyLen()); }
-    std::string GetUri() const { return _request->getURI(); }
+    HttpError Parse(std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> request);
+    std::string GetMethod() const { return _request ? _request->getMethodString() : ""; }
+    std::string GetBody() const { return _request ? std::string(_request->getBody(), _request->getBodyLen()) : ""; }
+    std::string GetUri() const { return _request ? _request->getURI() : ""; }
     const std::string &GetEndpoint() const { return _endpoint; }
     const std::map<std::string, std::string> &GetUriParams() const { return _uriParams; }
-    anet::HTTPPacket *GetRawRequest() const { return _request; }
 
 private:
     std::string _endpoint;
     std::map<std::string, std::string> _uriParams;
-    anet::HTTPPacket *_request{nullptr};
+    std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> _request;
 };
 
 } // namespace http_server

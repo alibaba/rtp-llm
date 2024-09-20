@@ -6,21 +6,16 @@
 namespace http_server {
 
 HttpRequest::~HttpRequest() {
-    if (_request) {
-        _request->free();
-    }
+    _request.reset();
 }
 
-HttpError HttpRequest::Parse(anet::HTTPPacket *request) {
+HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> request) {
     if (!request) {
         return HttpError::BadRequest("http packet is nullptr");
     }
-    if (_request) {
-        _request->free();
-    }
-    _request = request;
+    _request = std::move(request);
 
-    std::string uri = request->getURI();
+    std::string uri = _request->getURI();
     std::vector<std::string> items = autil::StringUtil::split(uri, "?");
     if (items.size() == 0 || items.size() > 2) {
         return HttpError::BadRequest("invalid uri: " + uri);

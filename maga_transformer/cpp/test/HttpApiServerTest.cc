@@ -19,14 +19,16 @@ public:
     void TearDown() override {}
 
     std::shared_ptr<HttpRequest> CreateHttpRequest(const std::string& body) {
-        // packet will be released in HttpRequest
         ::anet::HTTPPacket* packet = new ::anet::HTTPPacket();
         packet->setURI("/test?a=b");
         packet->setMethod(::anet::HTTPPacket::HM_GET);
         packet->setBody(body.c_str(), body.length());
 
+        auto deleter = [](::anet::HTTPPacket* packet) { packet->free(); };
+        std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> packet_ptr(packet, deleter);
+
         auto request    = std::make_shared<HttpRequest>();
-        auto http_error = request->Parse(packet);
+        auto http_error = request->Parse(std::move(packet_ptr));
         EXPECT_TRUE(http_error.IsOK());
         return request;
     }

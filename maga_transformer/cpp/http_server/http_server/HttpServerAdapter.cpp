@@ -47,9 +47,11 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
         packet->free();
         return anet::IPacketHandler::FREE_CHANNEL;
     }
+    auto packetDeleter = [](anet::HTTPPacket* packet) { packet->free(); };
+    std::unique_ptr<anet::HTTPPacket, decltype(packetDeleter)> httpPacketPtr(httpPacket, packetDeleter);
 
     auto request = std::make_shared<HttpRequest>();
-    const auto parseError = request->Parse(httpPacket); // free packet in request
+    const auto parseError = request->Parse(std::move(httpPacketPtr));
     if (!parseError.IsOK()) {
         AUTIL_LOG(WARN, "parse http request failed. error: %s", parseError.ToString().c_str());
         sendErrorResponse(connection, parseError);
