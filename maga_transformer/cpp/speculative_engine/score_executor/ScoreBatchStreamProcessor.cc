@@ -13,7 +13,30 @@ namespace rtp_llm {
 
 absl::StatusOr<GptModelInputs> ScoreBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
     CHECK_AND_RETURN_REF(model_input, NormalBatchStreamProcessor::gatherModelInput(stream_groups));
-    model_input.need_all_logits = true;
+    size_t total_batch_size = stream_groups.totalScoreBatchSize();
+    model_input.lm_output_indexes =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    int* lm_output_indexes = (int*)model_input.lm_output_indexes->data();
+    int  batch_idx        = 0;
+    auto context_streams = stream_groups.contextStreams();
+    auto decode_streams  = stream_groups.decodeStreams();
+    for (const auto& stream : decode_streams) {
+        auto current_batch_size = stream->scoreLen();
+        for (auto i = 0; i < current_batch_size; ++i) {
+            lm_output_indexes[batch_idx] = batch_idx;
+            batch_idx++;
+        }
+    }
+    int cum_output_seq_len = batch_idx;
+    for (const auto& stream : context_streams) {
+        auto current_batch_size = stream->scoreLen();
+        auto input_tokens    = stream->currentExecuteTokens(0);
+        cum_output_seq_len += input_tokens.size();
+        for (auto i = 0; i < current_batch_size; ++i) {
+            lm_output_indexes[batch_idx] = cum_output_seq_len - current_batch_size + i;
+            batch_idx++;
+        }
+    }
     return model_input;
 }
 
@@ -65,12 +88,10 @@ ScoreBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_grou
     batch_idx = 0;
     device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
     batch_idx += total_decode_batch_size;
-    size_t offset = 0;
     for (auto& stream : context_streams) {
         size_t current_batch_size = stream->scoreLen();
-        offset += stream->contextLength();
         for (int i = 0; i < current_batch_size; ++i) {
-            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.all_logits->view(offset - current_batch_size + i, 1)});
+            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.logits->view( batch_idx, 1)});
             batch_idx += 1;
         }
     }
@@ -91,13 +112,12 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
     FT_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
     const size_t step = new_all_token_ids->shape()[1];
     size_t batch_idx = 0;
-    size_t offset = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
     for (auto& stream : stream_groups.allStreams()) {
         auto current_batch_size = stream->scoreLen();
         
-        auto batch_logits = model_output.all_logits->slice(offset, current_batch_size);
-        auto batch_hidden_states = model_output.all_hidden_states->slice(offset, current_batch_size);
+        auto batch_logits = model_output.logits->slice(batch_idx, current_batch_size);
+        auto batch_hidden_states = model_output.hidden_states->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
 
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1, (size_t)current_batch_size}, ft::AllocationType::HOST}, {});
@@ -107,7 +127,6 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         stream->updateOutput(new_tokens, batch_hidden_states, batch_logits, nullptr, all_probs);
-        offset += stream->contextLength();
     }
     FT_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
