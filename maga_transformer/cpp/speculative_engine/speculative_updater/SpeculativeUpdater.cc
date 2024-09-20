@@ -7,7 +7,6 @@ absl::Status SpeculativeUpdater::score_compact_kv_cache(const GenerateStreamPtr&
     if (!config_.score_compact_kv_cache) {
         return absl::OkStatus();
     }
-    // TODO(xyz): consider bonus tokens here
     RETURN_IF_STATUS_ERROR(stream->releaseSequenceKVCache(stream->seqLength() + stream_output.propose_step + 1, stream_output.propose_step + 1 - stream_output.accepted_token_nums));
     return absl::OkStatus();
 }
@@ -40,11 +39,11 @@ absl::Status SpeculativeUpdater::dispatch(const GenerateStreamPtr& stream, const
     const ft::BufferPtr& accepted_tokens = stream_output.accepted_tokens;
     const ft::BufferPtr& logits = stream_output.logits;
     const ft::BufferPtr& hidden_states = stream_output.hidden_states;
+    stream->step();
     stream->update(accepted_tokens, num_accepted_tokens, logits, hidden_states, nullptr, nullptr);
     stream->setReuseLength(stream->seqLength() - 1);
     stream->setFallbackPrefixLength(stream->reuseLength());
     stream->setAccepedBounsToken(stream_output.acceped_bouns_token);
-    stream->step();
     return absl::OkStatus();
 }
 

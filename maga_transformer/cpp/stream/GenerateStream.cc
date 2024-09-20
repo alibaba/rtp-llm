@@ -439,10 +439,13 @@ size_t GenerateStream::maxBlockSize() const {
     return stream_cache_resource_.maxBlockSize();
 }
 
+size_t GenerateStream::max_token_num() const {
+    return std::min(max_seq_len_,
+        generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+}
+
 bool GenerateStream::needFinish() {
-    return seq_length_ >= std::min(max_seq_len_,
-                                   generate_input_->generate_config->max_new_tokens + generate_input_->inputLength())
-           || needFinishBySPTokens();
+    return seq_length_ >= max_token_num() || needFinishBySPTokens();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -530,6 +533,11 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
     if (seq_length_ == generate_input_->inputLength()) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
+    size_t max_token_nums = max_token_num();
+    if (seq_length_ + num_new_tokens > max_token_nums) {
+        num_new_tokens = max_token_nums - seq_length_;
+    }
+
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,

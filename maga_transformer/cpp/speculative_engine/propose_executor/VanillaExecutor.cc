@@ -18,8 +18,16 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
         stream_index++;
     }
 
+    for (auto& stream: propose_streams) {
+        FT_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
     for (size_t i = 0; i < propose_step_; i++) {
         RETURN_IF_STATUS_ERROR(normal_executor_.process(propose_streams));
+    }
+
+    for (auto& stream: propose_streams) {
+        FT_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     FT_LOG_DEBUG("propose done");

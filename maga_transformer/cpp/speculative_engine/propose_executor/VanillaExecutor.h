@@ -29,7 +29,6 @@ public:
 
     void dynamicUpdateConfig(const ProposeDynamicConfig& config) override {}
 
-    // TODO(xyz): consider bonus tokens
     size_t reserveStep() const override {
         return propose_step_;
     }

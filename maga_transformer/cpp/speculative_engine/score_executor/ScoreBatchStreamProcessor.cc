@@ -47,7 +47,7 @@ ScoreBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_grou
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(0),
-                   (seq_len - current_batch_size + i) * sizeof(int));
+                   (seq_len - current_batch_size + i + 1) * sizeof(int));
             batch_idx += 1;
         }
 

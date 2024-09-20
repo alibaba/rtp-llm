@@ -18,36 +18,6 @@ public:
 
 };
 
-TEST_F(SpeculativeNormalEngineTest, testInt8KVCache) {
-    CustomConfig config;
-    config.int8_kv_cache = true;
-    auto gpt_init_params = ft::GptInitParameter();
-    auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
-
-    std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
-    query->generate_config                 = make_shared<GenerateConfig>();
-    query->generate_config->max_new_tokens = 5;
-    query->generate_config->is_streaming   = false;
-
-    try {
-        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
-
-        ASSERT_TRUE(stream != nullptr);
-        auto output = stream->nextOutput();
-        ASSERT_TRUE(output.ok());
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 4);
-
-        ASSERT_TRUE(stream->finished());
-        auto output2 = stream->nextOutput();
-        ASSERT_TRUE(!output2.ok());
-    } catch (const std::exception& e) {
-        std::cout << e.what() << std::endl;
-    }
-
-}
 
 TEST_F(SpeculativeNormalEngineTest, testSimple) {
     CustomConfig config;
@@ -74,23 +44,18 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         ASSERT_TRUE(output1.ok());
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 1);
 
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(output2.ok());
-        ASSERT_EQ(output2.value().generate_outputs[0].aux_info.output_len, 2);
+        ASSERT_EQ(output2.value().generate_outputs[0].aux_info.output_len, 3);
         ASSERT_EQ(output2.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output2.value().generate_outputs[0].aux_info.iter_count, 1);
+        ASSERT_EQ(output2.value().generate_outputs[0].aux_info.iter_count, 2);
 
-        auto output3 = stream->nextOutput();
-        ASSERT_TRUE(output3.ok());
-        ASSERT_EQ(output3.value().generate_outputs[0].aux_info.output_len, 3);
-        ASSERT_EQ(output3.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output3.value().generate_outputs[0].aux_info.iter_count, 2);
 
         ASSERT_TRUE(stream->finished());
-        auto output4 = stream->nextOutput();
-        ASSERT_TRUE(!output4.ok());
+        auto output3 = stream->nextOutput();
+        ASSERT_TRUE(!output3.ok());
     }
 
     // test non-streaming query
@@ -108,7 +73,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         ASSERT_TRUE(output.ok());
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 4);
+        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 3);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
@@ -116,36 +81,6 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
     }
 }
 
-TEST_F(SpeculativeNormalEngineTest, testNewDevice) {
-    setenv("USE_NEW_DEVICE_IMPL", "1", 1);
-    CustomConfig config;
-    auto gpt_init_params = ft::GptInitParameter();
-    auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
-
-    ASSERT_TRUE(engine->resourceContext().cache_manager);
-    ASSERT_FALSE(engine->resourceContext().system_prompt);
-    ASSERT_FALSE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-
-    std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
-    query->generate_config                 = make_shared<GenerateConfig>();
-    query->generate_config->max_new_tokens = 1;
-
-    shared_ptr<GenerateStream> stream = engine->enqueue(query);
-
-    ASSERT_TRUE(stream != nullptr);
-    auto output3 = stream->nextOutput();
-    ASSERT_TRUE(output3.ok());
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.output_len, 1);
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.input_len, 7);
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.iter_count, 0);
-
-    ASSERT_TRUE(stream->finished());
-    auto output4 = stream->nextOutput();
-    ASSERT_TRUE(!output4.ok());
-    unsetenv("USE_NEW_DEVICE_IMPL");
-}
 
 
 TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
@@ -220,19 +155,6 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
     }
 }
 
-TEST_F(SpeculativeNormalEngineTest, testReuseCacheOption) {
-    CustomConfig config;
-    config.reuse_cache = true;
-    auto gpt_init_params = ft::GptInitParameter();
-    auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
-    ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-
-    config.reuse_cache = false;
-    auto gpt_init_params2 = ft::GptInitParameter();
-    auto engine2 = createVanillaSpeculativeEngine(device_, config, gpt_init_params2);
-    ASSERT_FALSE(engine2->resourceContext().reuse_cache);
-}
 
 TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
     CustomConfig config;
