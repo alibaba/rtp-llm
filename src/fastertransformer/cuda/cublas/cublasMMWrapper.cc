@@ -72,21 +72,6 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            const void*       B,
                            const int         ldb,
                            void*             C,
-                           const int         ldc) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    Gemm(transa, transb, m, n, k, A, lda, B, ldb, C, ldc, 1.0f, 0.0f);
-}
-
-void cublasMMWrapper::Gemm(cublasOperation_t transa,
-                           cublasOperation_t transb,
-                           const int         m,
-                           const int         n,
-                           const int         k,
-                           const void*       A,
-                           const int         lda,
-                           const void*       B,
-                           const int         ldb,
-                           void*             C,
                            const int         ldc,
                            float             f_alpha,
                            float             f_beta) {
@@ -471,64 +456,6 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
     mu_->unlock();
 }
 
-void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
-                                         cublasOperation_t transb,
-                                         const int         m,
-                                         const int         n,
-                                         const int         k,
-                                         const float       f_alpha,
-                                         const void*       A,
-                                         cudaDataType_t    AType,
-                                         const int         lda,
-                                         const int64_t     strideA,
-                                         const void*       B,
-                                         cudaDataType_t    BType,
-                                         const int         ldb,
-                                         const int64_t     strideB,
-                                         const float       f_beta,
-                                         void*             C,
-                                         cudaDataType_t    CType,
-                                         const int         ldc,
-                                         const int64_t     strideC,
-                                         const int         batch_count,
-                                         cudaDataType_t    computeType) {
-    half h_alpha = (half)f_alpha;
-    half h_beta  = (half)f_beta;
-
-    mu_->lock();
-    int         is_fp16_computeType = computeType == CUDA_R_16F ? 1 : 0;
-    const void* alpha =
-        is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<const void*>(&f_alpha);
-    const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
-    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype_));
-
-    check_cuda_error(cublasGemmStridedBatchedEx(cublas_handle_,
-                                                transa,
-                                                transb,
-                                                m,
-                                                n,
-                                                k,
-                                                alpha,
-                                                A,
-                                                AType,
-                                                lda,
-                                                strideA,
-                                                B,
-                                                BType,
-                                                ldb,
-                                                strideB,
-                                                beta,
-                                                C,
-                                                CType,
-                                                ldc,
-                                                strideC,
-                                                batch_count,
-                                                computeType,
-                                                static_cast<cublasGemmAlgo_t>(info.algoId)));
-
-    mu_->unlock();
-}
-
 void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   cublasOperation_t  transb,
                                   const int          m,
@@ -540,56 +467,9 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   const int          ldb,
                                   void* const*       C,
                                   const int          ldc,
-                                  const int          batch_count) {
-    float f_alpha = static_cast<float>(1.0f);
-    float f_beta  = static_cast<float>(0.0f);
-
-    half h_alpha = (half)1.0f;
-    half h_beta  = (half)0.0f;
-
-    mu_->lock();
-    int         is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
-    const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
-    const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
-    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype_));
-
-    check_cuda_error(cublasGemmBatchedEx(cublas_handle_,
-                                         transa,
-                                         transb,
-                                         m,
-                                         n,
-                                         k,
-                                         alpha,
-                                         A,
-                                         Atype_,
-                                         lda,
-                                         B,
-                                         Btype_,
-                                         ldb,
-                                         beta,
-                                         C,
-                                         Ctype_,
-                                         ldc,
-                                         batch_count,
-                                         computeType_,
-                                         static_cast<cublasGemmAlgo_t>(info.algoId)));
-    mu_->unlock();
-}
-
-void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
-                                  cublasOperation_t  transb,
-                                  const int          m,
-                                  const int          n,
-                                  const int          k,
+                                  const int          batch_count,
                                   const float        alpha,
-                                  const void* const* A,
-                                  const int          lda,
-                                  const void* const* B,
-                                  const int          ldb,
-                                  const float        beta,
-                                  void* const*       C,
-                                  const int          ldc,
-                                  const int          batch_count) {
+                                  const float        beta) {
     float f_alpha = static_cast<float>(alpha);
     float f_beta  = static_cast<float>(beta);
 

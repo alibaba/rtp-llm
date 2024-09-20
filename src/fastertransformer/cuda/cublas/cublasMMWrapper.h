@@ -121,21 +121,9 @@ public:
               const void*       B,
               const int         ldb,
               void*             C,
-              const int         ldc);
-
-    void Gemm(cublasOperation_t transa,
-              cublasOperation_t transb,
-              const int         m,
-              const int         n,
-              const int         k,
-              const void*       A,
-              const int         lda,
-              const void*       B,
-              const int         ldb,
-              void*             C,
               const int         ldc,
-              float             f_alpha,
-              float             f_beta);
+              const float       f_alpha = 1.0f,
+              const float       f_beta = 0.0f);
 
     void Int8Gemm(const int     m,
                   const int     n,
@@ -203,28 +191,6 @@ public:
                             const float       f_alpha = 1.0f,
                             const float       f_beta  = 0.0f);
 
-    void stridedBatchedGemm(cublasOperation_t transa,
-                            cublasOperation_t transb,
-                            const int         m,
-                            const int         n,
-                            const int         k,
-                            const float       f_alpha,
-                            const void*       A,
-                            cudaDataType_t    AType,
-                            const int         lda,
-                            const int64_t     strideA,
-                            const void*       B,
-                            cudaDataType_t    BType,
-                            const int         ldb,
-                            const int64_t     strideB,
-                            const float       f_beta,
-                            void*             C,
-                            cudaDataType_t    CType,
-                            const int         ldc,
-                            const int64_t     strideC,
-                            const int         batch_count,
-                            cudaDataType_t    computeType);
-
     void batchedGemm(cublasOperation_t  transa,
                      cublasOperation_t  transb,
                      const int          m,
@@ -236,22 +202,9 @@ public:
                      const int          ldb,
                      void* const*       C,
                      const int          ldc,
-                     const int          batch_count);
-
-    void batchedGemm(cublasOperation_t  transa,
-                     cublasOperation_t  transb,
-                     const int          m,
-                     const int          n,
-                     const int          k,
-                     const float        alpha,
-                     const void* const* A,
-                     const int          lda,
-                     const void* const* B,
-                     const int          ldb,
-                     const float        beta,
-                     void* const*       C,
-                     const int          ldc,
-                     const int          batch_count);
+                     const int          batch_count,
+                     const float        f_alpha = 1.0f,
+                     const float        f_beta  = 0.0f);
 
     bool isFuseBatchGemm(const int batch_count, const int m, const int k, const int n);
 };

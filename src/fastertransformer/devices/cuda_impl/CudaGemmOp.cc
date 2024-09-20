@@ -259,27 +259,24 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     } else if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_3DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
+        cublas_mm_wrapper_->setGemmConfig(B_data_type, A_data_type, D_data_type, computeType);
         cublas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                a_op,
                                                arguments.n,
                                                arguments.m,
                                                arguments.k,
-                                               arguments.alpha,
                                                B,
-                                               B_data_type,
                                                arguments.ldb,
                                                arguments.stride_b,
                                                A,
-                                               A_data_type,
                                                arguments.lda,
                                                arguments.stride_a,
-                                               arguments.beta,
                                                D,
-                                               D_data_type,
                                                arguments.ldc,
                                                arguments.stride_c,
                                                arguments.batch_size,
-                                               computeType);
+                                               arguments.alpha,
+                                               arguments.beta);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
