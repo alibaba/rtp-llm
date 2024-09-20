@@ -350,6 +350,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         partial_sum,
         partial_max,
         block_counter,
+        params.configs.softmax_extra_scale,
         kv_block_array,
         stream);
 
