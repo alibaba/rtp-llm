@@ -4,6 +4,7 @@ import gc
 import logging
 import multiprocessing
 import torch
+import traceback
 import torch.serialization
 from typing import List, Set, Optional, Tuple, Any
 from typing_extensions import Self
@@ -218,7 +219,7 @@ class ModelWeightsLoader:
                     qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id=layer_id, datatype=torch.int32)
                     qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id)
                     qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
-                    qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor)
+                    qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor, bits=self._weights_info._quant_algo.getWeightBits())
                     qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
                     weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device,
                                                      self._weights_info._quant_algo.isGptq(),
@@ -228,7 +229,7 @@ class ModelWeightsLoader:
                     results.append((layer_id, qzero[0].name, zero))
                     results.append((layer_id, qscale[0].name, scale))
                 except Exception as e:
-                    logging.error(f'load groupwise layer_weight in layer {layer_id}.{qweight[0].name} failed: {e}')
+                    logging.error(f'load groupwise layer_weight in layer {layer_id}.{qweight[0].name} failed: {e} {traceback.format_exc(e)}')
                     raise e
 
         convert_weight(W.groupwise_attn_weights, self.preprocess_groupwise_weight_params)
@@ -629,7 +630,7 @@ class ModelWeightsLoader:
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):
         return self._sanitize(self._split_tensor(weight.name, tensor))
 
-    def _split_tensor(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+    def _split_tensor(self, name: str, tensor: torch.Tensor, bits=4) -> torch.Tensor:
         if self._tp_size <= 1:
             return tensor
         if (not self._tp_split_emb_and_lm_head and
@@ -646,7 +647,9 @@ class ModelWeightsLoader:
                        hidden_size=self._weights_info._hidden_size,
                        head_num=self._weights_info._head_num,
                        head_num_kv=self._weights_info._head_num_kv,
-                       size_per_head=self._weights_info._size_per_head)
+                       size_per_head=self._weights_info._size_per_head,
+                       bits=bits
+                       )
         return ts
 
     # 避免被 storage 影响多用显存

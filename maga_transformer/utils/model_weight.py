@@ -122,13 +122,14 @@ def get_sp_tensor(t: torch.Tensor, head_num: int, head_num_kv: int, size_per_hea
 
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
-def sp_head(t: torch.Tensor, hidden_size: int, head_num: int, head_num_kv: int, size_per_head: int,
+def sp_head(t: torch.Tensor, hidden_size: int, head_num: int, head_num_kv: int, size_per_head: int, bits: int,
             **kwargs: Any) -> torch.Tensor:
-    # int4
+    # quant
     if len(t.shape) == 2 and t.dtype == torch.int32:
+        nums = 32 // bits
         # awq
-        if t.shape[0] == hidden_size and t.shape[1] == ((head_num + head_num_kv * 2) * size_per_head) // 8:
-            size_per_head = size_per_head // 8
+        if t.shape[0] == hidden_size and t.shape[1] == ((head_num + head_num_kv * 2) * size_per_head) // nums:
+            size_per_head = size_per_head // nums
     return get_sp_tensor(t,
                          head_num=head_num,
                          head_num_kv=head_num_kv,
@@ -138,9 +139,10 @@ def sp_head(t: torch.Tensor, hidden_size: int, head_num: int, head_num_kv: int, 
 def sp_head_s(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return get_sp_tensor(t, **kwargs)
 
-def sp_head_z(t: torch.Tensor, size_per_head: int, **kwargs: Any) -> torch.Tensor:
-    size_per_head = size_per_head // 8
-    return get_sp_tensor(t, size_per_head=size_per_head, **kwargs)
+def sp_head_z(t: torch.Tensor, size_per_head: int, bits: int, **kwargs: Any) -> torch.Tensor:
+    size_per_head = size_per_head // (32 // bits)
+    z = get_sp_tensor(t, size_per_head=size_per_head, **kwargs)
+    return z
 
 def sp_head_b(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return get_sp_tensor(t, **kwargs)
