@@ -179,7 +179,7 @@ T_Tcache = [('uint16_t', 'uint16_t', '0'), ('__nv_bfloat16', '__nv_bfloat16', '0
             ('uint16_t', '__nv_fp8_e4m3', '1'), ('__nv_bfloat16', '__nv_fp8_e4m3', '1'),
             ('float', 'float', '0')]
 
-Dh = ['64', '96', '128', '256']
+Dh = ['64', '96', '128', '192', '256']
 DO_MULTI_BLOCK = ['true', 'false']
 ROPE_TYPE = ['RopeStyle::No', 'RopeStyle::Base', 'RopeStyle::Glm2', 'RopeStyle::DynamicNTK', 'RopeStyle::QwenDynamicNTK', 'RopeStyle::Yarn', 'RopeStyle::Llama3']
 

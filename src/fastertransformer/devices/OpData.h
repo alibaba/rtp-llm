@@ -378,6 +378,9 @@ struct AttentionConfigs {
     size_t nope_head_dim;
     size_t rope_head_dim;
     size_t v_head_dim;
+
+    // softmax config
+    float softmax_extra_scale;
 };
 
 using AttentionModuleOutput = void;

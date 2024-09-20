@@ -14,6 +14,7 @@ from .qwen_v2 import QWenV2
 from .falcon import Falcon
 from .mpt import Mpt
 from .phi import Phi
+from .deepseek_v2 import DeepSeekV2
 
 import platform
 if platform.processor() != 'aarch64':

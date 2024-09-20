@@ -192,7 +192,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                               params.configs.head_num,
                               params.configs.kv_head_num,
                               params.configs.size_per_head,
-                              params.configs.q_scaling,
+                              params.configs.q_scaling / params.configs.softmax_extra_scale, // div scale for DeepSeek V2
                               params.has_alibi_slopes,
                               paged_kv_fmha);
         bool trt_v2_fmha_support = !use_trtv2_fmha_paged && !use_trtv2_fmha ? false : cufmha_runner_->trtV2FmhaSupport();

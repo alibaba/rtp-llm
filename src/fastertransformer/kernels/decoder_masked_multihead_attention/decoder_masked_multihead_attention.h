@@ -253,6 +253,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         float*        partial_sum,
                                         float*        partial_max,
                                         int*          block_counter,
+                                        const float   softmax_extra_scale,
                                         KVCacheBuffer kv_cache_buffer,
                                         cudaStream_t  stream);
 

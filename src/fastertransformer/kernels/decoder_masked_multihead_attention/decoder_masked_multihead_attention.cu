@@ -89,6 +89,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
          FT_SWITCH_ONE_CASE(Dh, 64, __VA_ARGS__)        \
          FT_SWITCH_ONE_CASE(Dh, 96, __VA_ARGS__)        \
          FT_SWITCH_ONE_CASE(Dh, 128, __VA_ARGS__)       \
+         FT_SWITCH_ONE_CASE(Dh, 192, __VA_ARGS__)       \
          FT_SWITCH_ONE_CASE(Dh, 256,  __VA_ARGS__)      \
      default:                                           \
          FT_FAIL("unsupported head_size: %d", COND);    \
@@ -155,6 +156,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         float*        partial_sum,
                                         float*        partial_max,
                                         int*          block_counter,
+                                        const float   softmax_extra_scale,
                                         KVCacheBuffer kv_cache_buffer,
                                         cudaStream_t  stream)
 {
@@ -220,7 +222,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.rope_config                    = rope_config;
     params.position_ids                   = position_ids;
     // Note: keep norm factor (sqrt(K_dim)) when adopting megatron T5 structure (may adjust)
-    params.inv_sqrt_dh = 1.F / (sqrtf((float)size_per_head) * q_scaling);
+    params.inv_sqrt_dh = 1.F / (sqrtf((float)size_per_head) * q_scaling) * softmax_extra_scale;
     if (relative_attention_bias != nullptr) {
         params.relative_attention_bias = reinterpret_cast<const DataType*>(relative_attention_bias);
     }
@@ -286,6 +288,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      float*        partial_sum, \
                                                      float*        partial_max, \
                                                      int*          block_counter, \
+                                                     const float   softmax_extra_scale, \
                                                      KVCacheBuffer kv_cache_buffer, \
                                                      cudaStream_t  stream)
 

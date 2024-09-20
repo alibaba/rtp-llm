@@ -205,7 +205,7 @@ void cufmha::runTrtV2Fmha(void* input,
                                     output,
                                     stream_);
 
-        sync_check_cuda_error();        
+        sync_check_cuda_error();
     }
 }
 
@@ -222,14 +222,15 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
                                     size_t seq_size_per_block,
                                     size_t seq_len,
                                     void* workspace,
-                                    float* linear_bias_slopes)
+                                    float* linear_bias_slopes,
+                                    float softmax_extra_scale)
 {
    FT_CHECK_WITH_INFO(head_num_ % kv_head_num_ == 0, "Number of heads in key/value must divide number of heads in query");
    FT_CHECK_WITH_INFO(seq_size_per_block % 256 == 0, "open source fmha paged seq_size_per_block must be divided by 256");
     const auto seq_len_round = roundMultiple(seq_len, 32);
 
     FT_CHECK_WITH_INFO(block_table, "open source paged must have block_table");
-    Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_kv_seqlens, workspace, batch_size, seq_len, seq_size_per_block * block_table_batch_stride, linear_bias_slopes);
+    Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_kv_seqlens, workspace, batch_size, seq_len, seq_size_per_block * block_table_batch_stride, linear_bias_slopes, softmax_extra_scale);
     const int hidden_units_kv = kv_head_num_ * size_per_head_;
 
     // Set the pointers and strides.
@@ -268,9 +269,10 @@ void cufmha::runOpenSourceFmha(void* q,
                                size_t batch_size,
                                size_t seq_len,
                                void* workspace,
-                               float* linear_bias_slopes)
+                               float* linear_bias_slopes,
+                               float softmax_extra_scale)
 {
-    Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_seqlens, workspace, batch_size, seq_len, seq_len, linear_bias_slopes);
+    Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_seqlens, workspace, batch_size, seq_len, seq_len, linear_bias_slopes, softmax_extra_scale);
     run_mha_fwd(flash_fwd_params, stream_, false);
     sync_check_cuda_error();
 }
@@ -285,7 +287,8 @@ Flash_fwd_params cufmha::genFlashFwdParams(void* q,
                                            size_t batch_size,
                                            size_t seq_len_q,
                                            size_t seq_len_kv,
-                                           float* linear_bias_slopes) const
+                                           float* linear_bias_slopes,
+                                           float softmax_extra_scale) const
 {
     const int head_size_rounded = roundMultiple(size_per_head_, 32);
     const int seqlen_q_rounded  = roundMultiple(seq_len_q, 128);
@@ -336,7 +339,7 @@ Flash_fwd_params cufmha::genFlashFwdParams(void* q,
     flash_fwd_params.d_rounded        = head_size_rounded;
 
     // Set the different scale values.
-    float softmax_scale = (1.0f / sqrtf(size_per_head_ * 1.0f));
+    float softmax_scale = (1.0f / sqrtf(size_per_head_ * 1.0f)) * softmax_extra_scale;
     flash_fwd_params.scale_softmax      = softmax_scale;
     flash_fwd_params.scale_softmax_log2 = softmax_scale * M_LOG2E;
 

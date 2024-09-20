@@ -189,6 +189,17 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     attention_weights.smoother_weight = mayCreateDenseWeights(map,
                                                               W::attn_o_smoother);
 
+    // mla weights
+    attention_weights.q_weight = mayCreateDenseWeights(map, W::attn_q);
+    attention_weights.q_a_weight = mayCreateDenseWeights(map, W::attn_q_a);
+    attention_weights.q_b_weight = mayCreateDenseWeights(map, W::attn_q_b);
+    attention_weights.kv_a_weight = mayCreateDenseWeights(map, W::attn_kv_a);
+    attention_weights.k_nope_weight = mayCreateDenseWeights(map, W::attn_k_nope);
+    attention_weights.k_rope_weight = mayCreateDenseWeights(map, W::attn_k_rope);
+    attention_weights.v_weight = mayCreateDenseWeights(map, W::attn_v);
+    attention_weights.q_a_norm_weight = mayCreateLayerNormWeights(map, W::q_a_ln_gamma, W::q_a_ln_beta);
+    attention_weights.kv_a_norm_weight = mayCreateLayerNormWeights(map, W::kv_a_ln_gamma, W::kv_a_ln_beta);
+
     attention_weights.static_quant_weight = mayCreateDenseWeights(map, W::attention_output_s);
     attention_weights.static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::attention_output_sr);
 

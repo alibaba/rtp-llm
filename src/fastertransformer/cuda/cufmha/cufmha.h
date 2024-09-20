@@ -80,7 +80,7 @@ public:
                            bool mRemovePadding       = false,
                            bool is_alibi             = false,
                            bool is_alibi_with_sacle  = false);
-    
+
     void runOpenSourceFmha(void*  q,
                            void*  k,
                            void*  v,
@@ -89,7 +89,8 @@ public:
                            size_t batch_size,
                            size_t seq_len,
                            void   *workspace,
-                           float* linear_bias_slopes = nullptr);
+                           float* linear_bias_slopes = nullptr,
+                           float softmax_extra_scale = 1.0f);
 
     void runOpenSourceFmhaPaged(void*  q,
                                 void*  k,
@@ -103,7 +104,8 @@ public:
                                 size_t seq_size_per_block,
                                 size_t seq_len,
                                 void   *workspace,
-                                float* linear_bias_slopes = nullptr);
+                                float* linear_bias_slopes = nullptr,
+                                float softmax_extra_scale = 1.0f);
 
     size_t getOpenSourceWorkSpaceSize(size_t batch_size,
                                       size_t seq_len_q,
@@ -128,7 +130,8 @@ private:
                                        size_t batch_size,
                                        size_t seq_len_q,
                                        size_t seq_len_kv,
-                                       float* linear_bias_slopes = nullptr) const;
+                                       float* linear_bias_slopes = nullptr,
+                                       float softmax_extra_scale = 1.0f) const;
 private:
 
     std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2> trtv2_fmha_runner_;

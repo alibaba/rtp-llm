@@ -26,7 +26,16 @@ public:
                                 fastertransformer::AttentionMaskType::noMask,
             1.0,
             // if qk_norm or use embedding model, fuse add bias in gemm
-            params.qk_norm_ || (params.rotary_embedding_style_ == 0 && !params.use_kvcache_) ? false: true};
+            params.qk_norm_ || (params.rotary_embedding_style_ == 0 && !params.use_kvcache_) ? false: true,
+            false,
+            params.use_mla_,
+            (size_t)params.q_lora_rank_,
+            (size_t)params.kv_lora_rank_,
+            (size_t)params.nope_head_dim_,
+            (size_t)params.rope_head_dim_,
+            (size_t)params.v_head_dim_,
+            params.softmax_extra_scale_};
+
         auto moe_configs = params.moe_style_ ?
             (std::optional<ft::MoeConfigs>)ft::MoeConfigs({
                 (size_t)params.expert_num_,

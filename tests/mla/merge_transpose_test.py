@@ -23,18 +23,25 @@ class TestRope(unittest.TestCase):
                 k_nope = torch.rand(token_num, head_num, nope).cuda()
                 k_rope = torch.rand(token_num, 1, rope).cuda()
                 v = torch.rand(token_num, head_num, vhead).cuda()
-                qkv = torch.rand(token_num, head_num, 3 * (nope + rope)).cuda()
+                qkv = torch.rand(token_num, 3 * head_num, (nope + rope)).cuda()
                 self.merge_transpose_op.forward(q, k_nope, k_rope, v, qkv)
 
                 q_nope, q_rope = q.split([nope, rope], dim=-1)
                 q_rope = rope_transpose(q_rope)
                 k_rope = rope_transpose(k_rope)
-                qkv_expected = torch.zeros(token_num, head_num, 3 * (nope + rope)).cuda()
-                qkv_expected[:, :, :nope] = q_nope
-                qkv_expected[:, :, nope:nope+rope] = q_rope
-                qkv_expected[:, :, nope+rope:nope*2 + rope] = k_nope
-                qkv_expected[:, :, nope*2+rope:nope*2+rope*2] = k_rope
-                qkv_expected[:, :, nope*2+rope*2:nope*2+rope*2+vhead] = v
+
+                qkv_expected = torch.zeros(token_num, 3 * head_num, (nope + rope)).cuda()
+                query_states = q.new_empty(token_num, head_num, nope + rope)
+                query_states[:, :, :nope] = q_nope
+                query_states[:, :, nope:] = q_rope
+
+                key_state = k_nope.new_empty(token_num, head_num, nope + rope)
+                key_state[:, :, :nope] = k_nope
+                key_state[:, :, nope:] = k_rope
+
+                qkv_expected[:, :head_num, :] = query_states
+                qkv_expected[:, head_num:2 * head_num, :] = key_state
+                qkv_expected[:, 2 * head_num:, :vhead] = v
 
                 torch.testing.assert_close(qkv, qkv_expected, atol=1e-3, rtol=1e-5)
 

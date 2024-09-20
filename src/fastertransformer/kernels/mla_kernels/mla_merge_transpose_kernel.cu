@@ -17,8 +17,7 @@ __global__ void mla_merge_transpose_kernel(T*  q,
     // k_nope: [token_num, head_num, nope_dim]
     // k_rope: [token_num, 1, rope_dim]
     // v: [bs, head_num, vhead_dim]
-    // qkv: [token_num, head_num, 3 * (nope_dim + rope_dim)]
-
+    // qkv: [token_num, 3, head_num, (nope_dim + rope_dim)]
     // grid: (nope_dim + rope_dim, 1, 1)
     // block: (token_num, head_num, 1)
 
@@ -34,31 +33,32 @@ __global__ void mla_merge_transpose_kernel(T*  q,
     int bs_idx   = blockIdx.x;
     int head_idx = blockIdx.y;
     int rope_idx = tidx - nope_head_dim;
+    int hidden_size = head_num * nope_rope_dim;
 
     int q_offset      = bs_idx * head_num * nope_rope_dim + head_idx * nope_rope_dim + tidx;
     int k_nope_offset = bs_idx * head_num * nope_head_dim + head_idx * nope_head_dim + tidx;
     int k_rope_offset = bs_idx * rope_head_dim + rope_idx;  // broadcast to head_num
     int v_offset      = bs_idx * head_num * v_head_dim + head_idx * v_head_dim + tidx;
 
-    int dst_base_offset = bs_idx * head_num * 3 * nope_rope_dim + head_idx * 3 * nope_rope_dim + tidx;
+    int dst_base_offset = bs_idx * 3 * hidden_size + head_idx * nope_rope_dim + tidx;
 
     if (tidx < nope_head_dim) {
         qkv[dst_base_offset]                 = q[q_offset];
-        qkv[dst_base_offset + nope_rope_dim] = k_nope[k_nope_offset];
+        qkv[dst_base_offset + hidden_size] = k_nope[k_nope_offset];
     } else {
         int trans_idx    = rope_idx / 2;
         int trans_offset = trans_idx + (rope_idx % 2 ? 1 : 0) * rope_head_dim / 2 - tidx + nope_head_dim;
         int q_dst        = dst_base_offset + trans_offset;
-        int k_dst        = q_dst + nope_rope_dim;
+        int k_dst        = q_dst + hidden_size;
         qkv[q_dst]       = q[q_offset];
         qkv[k_dst]       = k_rope[k_rope_offset];
     }
 
     // padding 0 for v
     if (tidx < v_head_dim) {
-        qkv[dst_base_offset + 2 * nope_rope_dim] = v[v_offset];
+        qkv[dst_base_offset + 2 * hidden_size] = v[v_offset];
     } else {
-        qkv[dst_base_offset + 2 * nope_rope_dim] = 0;
+        qkv[dst_base_offset + 2 * hidden_size] = 0;
     }
 }
 

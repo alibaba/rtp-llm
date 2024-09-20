@@ -199,15 +199,15 @@ class TestRope(unittest.TestCase):
         headsize = 1
         batch_size = 8
         max_position_embeddings = 2048
-        mscale = 1.0
-        mscale_all_dim = 1.0
-        for scale in [1]:
+        mscale = 0.707
+        mscale_all_dim = 0.707
+        for scale in [1, 40]:
             for seq_len in [32, 128, 256]:
-                mscale = float(
+                real_mscale = float(
                     yarn_get_mscale(scale, mscale)
                     / yarn_get_mscale(scale, mscale_all_dim)
                 )
-                self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, scale, 5, 1)
+                self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, scale, 5, real_mscale)
                 self.Rope = DeepseekV2YarnRotaryEmbedding(
                     dim=dim,
                     max_position_embeddings=max_position_embeddings,

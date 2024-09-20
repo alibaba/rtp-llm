@@ -17,13 +17,12 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
     auto nope_rope_dim = nope_head_dim + rope_head_dim;
 
     auto qkv =
-        allocateBuffer({datatype, {token_num, head_num, nope_rope_dim * 3}, AllocationType::DEVICE}, {"mla_qkv"});
+        allocateBuffer({datatype, {token_num, head_num * nope_rope_dim * 3}, AllocationType::DEVICE}, {"mla_qkv"});
 
     // Q_a = input * W_qa
     // Q_a = normalize(Q_a)
     // Q = Q_a * W_qb
     BufferPtr q;
-    FT_LOG_INFO("q gemm");
     if (params.weights.q_a_weight) {
         auto q_a = gemm(GemmParams(input, *(params.weights.q_a_weight->kernel)));
 
@@ -49,7 +48,6 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
     // kv_a = normalize(kv_a)
     // knope = kv_a * W_knope
     // v = kv_a * W_v
-    FT_LOG_INFO("kv_a gemm");
     auto kv_a = gemm(GemmParams(input, *(params.weights.kv_a_weight->kernel)));
 
     allGather({{kv_a}});
@@ -65,14 +63,11 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
                               true,
                               false,
                               params.ln_params.norm_type));
-    FT_LOG_INFO("kv_nope gemm");
     auto k_nope = gemm(GemmParams(*kv_a, *(params.weights.k_nope_weight->kernel)));
 
-    FT_LOG_INFO("v gemm");
     auto v      = gemm(GemmParams(*kv_a, *(params.weights.v_weight->kernel)));
 
     // k_rope = input * W_krope
-    FT_LOG_INFO("k_rope gemm");
     auto k_rope = gemm(GemmParams(input, *(params.weights.k_rope_weight->kernel)));
 
     // invoke mla merge transpose
@@ -89,7 +84,7 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
                                      rope_head_dim,
                                      v_head_dim,
                                      stream_);
-
+    printBufferData(*qkv, "MLA QKV Gemm output");
     return qkv;
 }
 }  // namespace fastertransformer

@@ -1,16 +1,21 @@
-
 import functools
 from typing import List
 
 from maga_transformer.utils.chatglm2_quantization import extract_weight_to_half
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
-    ModelDeployWeightInfo, CkptWeightInfo, concat_1, identity, zeros, transpose
+from maga_transformer.utils.model_weight import (
+    W,
+    WeightInfo,
+    ModelWeightInfo,
+    ModelDeployWeightInfo,
+    CkptWeightInfo,
+    concat_1,
+    identity,
+    zeros,
+    transpose,
+    w_half1,
+    w_half2,
+)
 
-def w_half1(ts, inter_size):
-    return ts[0][:inter_size, ...].T.contiguous()
-
-def w_half2(ts, inter_size):
-    return ts[0][inter_size:, ...].T.contiguous()
 
 class GlmV2WeightInfo(ModelDeployWeightInfo):
     def _process_meta(self, meta_dicts, weight_keys):

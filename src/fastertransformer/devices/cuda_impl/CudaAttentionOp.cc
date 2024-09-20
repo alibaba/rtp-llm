@@ -146,7 +146,8 @@ void MHA(const AttentionModuleParams& params,
                 params.configs.tokens_per_block,
                 seq_len,
                 ws->data(),
-                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr);
+                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr,
+                params.configs.softmax_extra_scale);
             break;
         }
         case FMHAType::OPEN_SOURCE: {
@@ -164,7 +165,8 @@ void MHA(const AttentionModuleParams& params,
                 batch_size,
                 seq_len,
                 ws->data(),
-                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr);
+                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr,
+                params.configs.softmax_extra_scale);
             break;
         }
         case FMHAType::TRT_V1: {
@@ -191,7 +193,7 @@ void MHA(const AttentionModuleParams& params,
                                            TransposeOperation::TRANSPOSE});
             qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
             printBufferData(*qk_output, "qk_output: ");
-            float scale = (1.0f / sqrtf(size_per_head * 1.0f));
+            float scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
             // TODO(lidongjin): Only support float32(in)\float16(output).
             RUNTIME_ASSERT_OP_ARG(params.common.attention_mask,
                                   "attention_mask must be provided for default context attention implementation");
@@ -345,7 +347,11 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             stream_
         );
         sync_check_cuda_error();
-        printBufferData(params.input, "after invoke transpse");
+        // printBufferData(params.input, "after invoke transpse");
+        printBufferData(*q_output, "Q after invoke transpose");
+        printBufferData(*k_output, "K after invoke transpose");
+        printBufferData(*v_output, "V after invoke transpose");
+
     }
 
     MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
@@ -429,6 +435,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         partial_sum,
         partial_max,
         block_counter,
+        params.configs.softmax_extra_scale,
         kv_block_array,
         stream);
 

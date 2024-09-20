@@ -13,6 +13,12 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
 
+def w_half1(ts: List[torch.Tensor], inter_size: int):
+    return ts[0][:inter_size, ...].T.contiguous()
+
+def w_half2(ts: List[torch.Tensor], inter_size: int):
+    return ts[0][inter_size:, ...].T.contiguous()
+
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
@@ -280,7 +286,7 @@ class W:
     post_ln_beta = 'post_layernorm_weights.beta'
     linear_bias_slopes = "linear_bias_slopes"
 
-    #jina_bert
+    # jina_bert
     q_ln_gamma      = "self_attention_weights.q_layernorm.gamma"
     q_ln_beta       = "self_attention_weights.q_layernorm.beta"
     k_ln_gamma      = "self_attention_weights.k_layernorm.gamma"
@@ -288,6 +294,19 @@ class W:
 
     post_ln_2_gamma = 'post_layernorm_weights_2.gamma'
     post_ln_2_beta = 'post_layernorm_weights_2.beta'
+
+    # mla
+    mla_q_w = "self_attention_weights.query_weight.kernel"
+    mla_q_a_w = "self_attention_weights.query_a_weight.kernel"
+    mla_q_b_w = "self_attention_weights.query_b_weight.weight"
+    mla_kv_a_w = "self_attention_weights.key_value_a_weight.kernel"
+    mla_k_rope_w = "self_attention_weights.key_rope_weight.kernel"
+    mla_k_nope_w = "self_attention_weights.key_nope_weight.kernel"
+    mla_v_w = "self_attention_weights.value_weight.kernel"
+    mla_q_a_ln_gamma = "self_attention_weights.query_a_layernorm_weight.gamma"
+    mla_q_a_ln_beta = "self_attention_weights.query_a_layernorm_weight.beta"
+    mla_kv_a_ln_gamma = "self_attention_weights.key_value_a_layernorm_weight.gamma"
+    mla_kv_a_ln_beta = "self_attention_weights.key_value_a_layernorm_weight.beta"
 
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'
@@ -371,7 +390,7 @@ class W:
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
 
-    #per tensor quant
+    # per tensor quant
     pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
     pre_decoder_ln_static_quant_reciprocal = 'pre_decoder_layernorm.static_quant_reciprocal'
     pre_ln_static_quant = 'pre_layernorm_weights.static_quant'
@@ -858,6 +877,12 @@ class ModelDeployWeightInfo:
         self.tie_word_embeddings = config.tie_word_embeddings
         self.need_ffn_act_scale = config.need_ffn_act_scale
         self.use_expert_attention = config.use_expert_attention
+
+        # for mla
+        self.kv_lora_rank = config.kv_lora_rank
+        self.nope_head_dim = config.nope_head_dim
+        self.rope_head_dim = config.rope_head_dim
+        self.v_head_dim = config.v_head_dim
 
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:

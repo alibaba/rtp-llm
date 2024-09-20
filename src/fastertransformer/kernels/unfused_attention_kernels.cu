@@ -1586,7 +1586,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
             });
         });
     });
-  
+
 }
 
 template<typename T, typename Tcache>

@@ -111,6 +111,14 @@ public:
     int64_t num_valid_layer_        = 0;
     int64_t hidden_size_            = 0;
 
+    // mla extra params
+    bool    use_mla_       = false;
+    int64_t q_lora_rank_   = 0;
+    int64_t kv_lora_rank_  = 0;
+    int64_t nope_head_dim_ = 0;
+    int64_t rope_head_dim_ = 0;
+    int64_t v_head_dim_    = 0;
+
     // in sparse, those params might vary among layers
     bool                 is_sparse_head_           = false;
     std::vector<int64_t> layer_head_num_           = {};
@@ -140,6 +148,7 @@ public:
     // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
     double  input_embedding_scalar_    = 1;
     double  residual_scalar_    = 1;
+    float   softmax_extra_scale_       = 1.0f;
 
     bool    use_logn_attn_ = false;
     double  q_scaling_ = 1;

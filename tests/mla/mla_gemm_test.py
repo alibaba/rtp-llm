@@ -123,11 +123,10 @@ class MlaQKVGemm(nn.Module):
         key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
         key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
 
-        qkv_states = k_pe.new_zeros(bsz, self.num_heads, q_len, self.q_head_dim * 3)
-        qkv_states[:, :, :, : self.q_head_dim] = query_states
-        qkv_states[:, :, :, self.q_head_dim : 2 * self.q_head_dim] = key_states
-        qkv_states[:, :, :, 2 * self.q_head_dim : 2 * self.q_head_dim + self.v_head_dim] = value_states
-
+        qkv_states = k_pe.new_zeros(bsz, 3 * self.num_heads, q_len, self.q_head_dim)
+        qkv_states[:, :self.num_heads, :, :] = query_states
+        qkv_states[:, self.num_heads:2 * self.num_heads, :, :] = key_states
+        qkv_states[:, 2 * self.num_heads:, :, :self.v_head_dim] = value_states
         return qkv_states
 
 
@@ -192,7 +191,7 @@ class TestRope(unittest.TestCase):
 
                 q_layernorm = q_a_layernorm_weight.contiguous().cuda()
                 kv_layernorm = kv_a_layernorm_weight.contiguous().cuda()
-                output = torch.randn(batch_size, seq_len, head_num, 3 * (nope_dim + rope_dim)).contiguous().cuda()
+                output = torch.randn(batch_size, seq_len, 3 * head_num, (nope_dim + rope_dim)).contiguous().cuda()
                 hidden_states = hidden_states.reshape(batch_size * seq_len, hidden_size).contiguous().cuda()
                 print(hidden_states.shape, q_a.shape)
                 self.mla_qkv_gemm_op.forward(

@@ -272,8 +272,15 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(use_kvcache, use_kvcache_)                             \
     DEF_PROPERTY(use_expert_attention, use_expert_attention_)           \
     DEF_PROPERTY(local_rank, local_rank_)                               \
-    DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)    \
-    DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)
+    DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)     \
+    DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)     \
+    DEF_PROPERTY(use_mla, use_mla_)                                     \
+    DEF_PROPERTY(q_lora_rank, q_lora_rank_)                             \
+    DEF_PROPERTY(kv_lora_rank, kv_lora_rank_)                           \
+    DEF_PROPERTY(nope_head_dim, nope_head_dim_)                         \
+    DEF_PROPERTY(rope_head_dim, rope_head_dim_)                         \
+    DEF_PROPERTY(v_head_dim, v_head_dim_)                               \
+    DEF_PROPERTY(softmax_extra_scale, softmax_extra_scale_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num
