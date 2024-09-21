@@ -56,7 +56,8 @@ private:
 public:
     rocmMoeWrapper(/* args */) = default;
     ~rocmMoeWrapper()          = default;
-    void runCKMoe(const rocmMoeParams& params, DataType dtype, DataType wtype);
+    uint32_t runCKMoe(const rocmMoeParams& params, DataType dtype, DataType wtype, 
+                      void * gemm_desc_workspace, void * gemm_kernel_args_dev);
 };
 
 }  // namespace fastertransformer

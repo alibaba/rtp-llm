@@ -68,13 +68,16 @@ using Relu    = ck::tensor_operation::element_wise::Relu;
 using Sigmoid = ck::tensor_operation::element_wise::Sigmoid;
 
 template<typename InputT, typename WeightT>
-void MoeRunnerImpl(const rocmMoeParams& params) {
+uint32_t MoeRunnerImpl(const rocmMoeParams& params,
+                       void *               gemm_desc_workspace,
+                       void *               gemm_kernel_args_dev) {
     auto totlaM    = params.total_rows_before_expert_host[params.num_experts - 1];
     auto dtypeSize = sizeof(InputT);
 
     hipStream_t stream;
     hipStreamCreate(&stream);
 
+    uint32_t rslt = 0;
     // Lip: designed 2 stages,
     if (isGatedActivation(params.activation_type)) {
         // start stage1. do "input GEMM (gate_W, UP_W)", then "activation"
@@ -91,9 +94,9 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                    params.stream});
 
         if (params.isGate_RowMajor) {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsGate, params.activation_type);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsGate, params.activation_type,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsGate, params.activation_type);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsGate, params.activation_type,gemm_desc_workspace,gemm_kernel_args_dev);
         }
 
         auto gemmParamsUp = rocmGroupGEMMParams({params.input,
@@ -109,17 +112,17 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                  stream});
 
         if (params.isUp_RowMajor) {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, ActivationType::Identity);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, ActivationType::Identity);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         }
         hipStreamSynchronize(stream);
 
         // start stage2. do "gate_O*UP_O, then GEMM with down_W"
         if (params.isDown_RowMajor) {
-            MoeRunnerImpl_stage2<InputT, WeightT, true>(params);
+            rslt += MoeRunnerImpl_stage2<InputT, WeightT, true>(params,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
-            MoeRunnerImpl_stage2<InputT, WeightT, false>(params);
+            rslt += MoeRunnerImpl_stage2<InputT, WeightT, false>(params,gemm_desc_workspace,gemm_kernel_args_dev);
         }
     } else {
         // start stage1. do "input GEMM with UP_W", then "activation"
@@ -136,9 +139,9 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                  params.stream});
 
         if (params.isUp_RowMajor) {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, params.activation_type);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, params.activation_type,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, params.activation_type);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, params.activation_type,gemm_desc_workspace,gemm_kernel_args_dev);
         }
 
         // start stage2. do "GEMM with down_W"
@@ -154,45 +157,53 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                    params.N,
                                                    params.stream});
         if (params.isDown_RowMajor) {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsDown, ActivationType::Identity);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsDown, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
-            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsDown, ActivationType::Identity);
+            rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsDown, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         }
     }
     hipStreamDestroy(stream);
+    return rslt;
 }
 
 template<typename InputT, typename WeightT, bool isWeightRowMajor>
-void MoeRunnerImpl_groupGEMM_caller(const rocmGroupGEMMParams& params, ActivationType activation_type) {
+uint32_t MoeRunnerImpl_groupGEMM_caller(const rocmGroupGEMMParams& params, 
+                                          ActivationType       activation_type,
+                                          void *               gemm_desc_workspace,
+                                          void *               gemm_kernel_args_dev) {
+    uint32_t rslt = 0;                                            
     switch (activation_type) {
         case ActivationType::Gelu:
         case ActivationType::Geglu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         case ActivationType::Relu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Relu, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, Relu, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         case ActivationType::Silu:
         case ActivationType::Swiglu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Silu, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, Silu, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         case ActivationType::Sigmoid:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Sigmoid, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, Sigmoid, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         case ActivationType::Identity:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, PassThrough, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, PassThrough, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         case ActivationType::GeluNoneApproximate:
         case ActivationType::GeGluNoneApproximate:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params);
+            rslt = MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params,gemm_desc_workspace,gemm_kernel_args_dev);
             break;
         default:
             CK_FAIL("not support activation type");
     }
+    return rslt;
 }
 
 template<typename InputT, typename WeightT, typename ActiveT, bool isWeightRowMajor_>
-void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
+uint32_t MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params,
+    void * gemm_desc_workspace,
+    void * gemm_kernel_args_dev) {
     int K = params.K;
     int N = params.N;
 
@@ -278,14 +289,23 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
         CK_FAIL("device_gemm with the specified compilation parameters does not support this GEMM problem");
     }
 
-    DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
-    gemmRunner.SetWorkSpacePointer(&argument, gemm_desc_workspace.GetDeviceBuffer());
+    if(gemm_desc_workspace == nullptr)
+    {
+        return gemmRunner.GetWorkSpaceSize(&argument);
+    }
+
+    //DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
+    gemmRunner.SetWorkSpacePointer(&argument, gemm_desc_workspace);
 
     invoker.Run(argument, StreamConfig{params.stream, false});
+
+    return 0;
 }
 
 template<typename InputT, typename WeightT, bool isWeightRowMajor_>
-void MoeRunnerImpl_stage2(const rocmMoeParams& params){
+uint32_t MoeRunnerImpl_stage2(const rocmMoeParams& params,
+    void * gemm_desc_workspace,
+    void * gemm_kernel_args_dev){
     int N = params.K;
     int K = params.N;
     // stage 2, (Gate_O*UP_O), gemm down_W
@@ -384,37 +404,50 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
     if (!gemmRunner.IsSupportedArgument(argument)) {
         CK_FAIL("device_gemm with the specified compilation parameters does not support this GEMM problem");
     }
-    DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
-    gemmRunner.SetWorkSpacePointer(&argument, gemm_desc_workspace.GetDeviceBuffer());
 
-    DeviceMem gemm_kernel_args_dev(gemmRunner.GetDeviceKernelArgSize(&argument));
-    hip_check_error(hipMemcpy(gemm_kernel_args_dev.GetDeviceBuffer(),
+    if(gemm_desc_workspace == nullptr || gemm_kernel_args_dev == nullptr)
+    {
+        uint32_t malloc_size = gemmRunner.GetWorkSpaceSize(&argument);
+        malloc_size += gemmRunner.GetDeviceKernelArgSize(&argument);
+        return malloc_size;
+    }
+
+    //DeviceMem gemm_desc_workspace(gemmRunner.GetWorkSpaceSize(&argument));
+    gemmRunner.SetWorkSpacePointer(&argument, gemm_desc_workspace);
+
+    //DeviceMem gemm_kernel_args_dev(gemmRunner.GetDeviceKernelArgSize(&argument));
+    hip_check_error(hipMemcpy(gemm_kernel_args_dev,
                             grouped_gemm_kernel_args_.data(),
                             gemmRunner.GetDeviceKernelArgSize(&argument),
                             hipMemcpyHostToDevice));
-    gemmRunner.SetDeviceKernelArgs(argument, gemm_kernel_args_dev.GetDeviceBuffer());
+
+    gemmRunner.SetDeviceKernelArgs(argument, gemm_kernel_args_dev);
     gemmRunner.SetKBatch(argument, 1);
     gemmRunner.SetElementwiseOps(argument, a_element_op, b_element_op, c_element_op);
 
     invoker.Run(argument, StreamConfig{params.stream, false});
+    return 0;
 }
 
 
-void rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
+uint32_t rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
                               DataType           dtype,
-                              DataType           wtype) {
+                              DataType           wtype,
+                              void *             gemm_desc_workspace,
+                              void *             gemm_kernel_args_dev) {
+    uint32_t rslt = 0;
     if (dtype == DataType::TYPE_FP16 && wtype == DataType::TYPE_FP16) {
         using InputT = F16;
         using WeightT= F16;
-        MoeRunnerImpl<InputT, WeightT>(params);
+        rslt = MoeRunnerImpl<InputT, WeightT>(params, gemm_desc_workspace, gemm_kernel_args_dev);
     } else if (dtype == DataType::TYPE_BF16 && wtype == DataType::TYPE_BF16) {
         using InputT = BF16;
         using WeightT  = BF16;
-        MoeRunnerImpl<InputT, WeightT>(params);
+        rslt = MoeRunnerImpl<InputT, WeightT>(params, gemm_desc_workspace, gemm_kernel_args_dev);
     } else if (dtype == DataType::TYPE_FP32 && wtype == DataType::TYPE_FP32) {
         using InputT = F32;
         using WeightT = F32;
-        MoeRunnerImpl<InputT, WeightT>(params);
+        rslt = MoeRunnerImpl<InputT, WeightT>(params, gemm_desc_workspace, gemm_kernel_args_dev);
     // TODO: int8/int4 dequantization
     // } else if (dtype == DataType::TYPE_FP16 && wtype == DataType::TYPE_QINT8) {
     //     using InputT = F16;
@@ -427,6 +460,7 @@ void rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
     } else {
         CK_FAIL("input type %d and weights type %d not supported by CK", dtype, wtype);
     }
+    return rslt;
 }
 
 }  // namespace fastertransformer

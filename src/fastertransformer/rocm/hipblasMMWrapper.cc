@@ -9,7 +9,6 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
                                    IAllocator*       allocator):
     hipblas_handle_(hipblas_handle), hipblaslt_handle_(hipblaslt_handle), stream_(stream), allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-#define HIPBLAS_WORKSPACE_SIZE 33554432  // 32MB
     hipblas_workspace_ = allocator_->malloc(HIPBLAS_WORKSPACE_SIZE);
     const char* config_path = std::getenv("ROCM_HIPBLASLT_CONFIG");
     if (config_path == nullptr) {

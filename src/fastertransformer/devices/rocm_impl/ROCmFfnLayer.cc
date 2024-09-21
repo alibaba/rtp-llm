@@ -148,7 +148,12 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
                                     inter_dim,
                                     model_dim,
                                     stream_});
-    moe_runner_->runCKMoe(moeParams, compute_type, weights_type);
+    uint32_t ckmoe_workspace_sz = moe_runner_->runCKMoe(moeParams, compute_type, weights_type, nullptr, nullptr);
+
+    auto gemm_desc_workspace = allocateBuffer({DataType::TYPE_FP32, {ckmoe_workspace_sz}, AllocationType::DEVICE}, {"gemm_desc_workspace"});
+    auto gemm_kernel_args_dev = allocateBuffer({DataType::TYPE_FP32, {ckmoe_workspace_sz}, AllocationType::DEVICE}, {"gemm_kernel_args_dev"});
+
+    moe_runner_->runCKMoe(moeParams, compute_type, weights_type,gemm_desc_workspace->data(),gemm_kernel_args_dev->data());
 
     // std::cout << "1111gate" << weights.moe_gate_weight->kernel->debugStringMeta() << std::endl;
     // printBufferData(*((weights.moe_gate_weight->kernel->index(0))->slice(0, 6)), "moe_gate_weight");

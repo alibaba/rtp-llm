@@ -194,6 +194,24 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     const size_t hidden_units    = head_num * size_per_head;
     const size_t hidden_units_kv = kv_head_num * size_per_head;
+
+    uint32_t lse_acc_buf_sz =
+        fmha_runner_->runCKFmha(params.input.data(),
+                                params.input.dataWithOffset(hidden_units),
+                                params.input.dataWithOffset(hidden_units + hidden_units_kv),
+                                params.output.data(),
+                                nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
+                                batch_size,
+                                seq_len,
+                                // context_token_num,
+                                params.common.cu_seqlens->data(),
+                                params.common.cu_kv_seqlens->data(),
+                                nullptr,
+                                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
+                                nullptr);
+
+    auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {lse_acc_buf_sz}, AllocationType::DEVICE}, {"lse_acc_buf"});
+
     if (fmha_runner_->runCKFmha(params.input.data(),
                                 params.input.dataWithOffset(hidden_units),
                                 params.input.dataWithOffset(hidden_units + hidden_units_kv),
@@ -204,6 +222,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 // context_token_num,
                                 params.common.cu_seqlens->data(),
                                 params.common.cu_kv_seqlens->data(),
+                                lse_acc_buf->data(),
                                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
                                 nullptr)) {
 

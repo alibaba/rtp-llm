@@ -36,7 +36,7 @@ public:
         size_per_head_ = size_per_head;
         q_scaling_     = q_scaling;
     }
-    bool runCKFmha(void*  q,
+    uint32_t runCKFmha(void*  q,
                    void*  k,
                    void*  v,
                    void*  output,
@@ -45,6 +45,7 @@ public:
                    size_t seq_len,
                    void*  seqstart_q,
                    void*  seqstart_k,
+                   void*  lse_acc_buf,
                    void*  linear_bias_slopes = nullptr,
                    void*  biasBuffer         = nullptr);
 };

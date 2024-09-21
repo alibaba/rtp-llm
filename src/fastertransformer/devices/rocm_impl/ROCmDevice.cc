@@ -72,6 +72,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
     auto hostAllocator_ptr = new Allocator<AllocatorType::ROCM_HOST>();
 #endif
+
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         ROCM_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
@@ -82,8 +83,8 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         tracker_params.real_allocator     = allocator_ptr;
 #endif
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
-                                                params.device_reserve_memory_bytes :
-                                                free_bytes + params.device_reserve_memory_bytes;
+                                            params.device_reserve_memory_bytes :
+                                            free_bytes + params.device_reserve_memory_bytes - HIPBLAS_WORKSPACE_SIZE;
         tracker_params.align_size         = 16;
         FT_LOG_INFO("rocm device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                     device_id_,
@@ -209,8 +210,9 @@ void ROCmDevice::copy(const CopyParams& params) {
         copyType = hipMemcpyHostToHost;
     }
 
-    (void)hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
-    (void)hipStreamSynchronize(stream_);
+    (void)hipMemcpy(dst.data(), src.data(), src.sizeBytes(), copyType);
+    //(void)hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
+    //(void)hipStreamSynchronize(stream_);
 }
 
 TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
@@ -236,7 +238,8 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 }
 
 void ROCmDevice::syncAndCheck() {
-    ROCM_SYNC_AND_CHECK();
+    syncCommunication();
+    hipDeviceSynchronize();
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {

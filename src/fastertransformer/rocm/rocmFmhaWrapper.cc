@@ -8,7 +8,7 @@
 
 namespace fastertransformer {
 
-bool rocmFmhaWrapper::runCKFmha(void*  q,
+uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                 void*  k,
                                 void*  v,
                                 void*  output,
@@ -17,6 +17,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
                                 size_t seq_len,
                                 void*  seqstart_q,
                                 void*  seqstart_k,
+                                void*  lse_acc_buf,
                                 void*  linear_bias_slopes,
                                 void*  biasBuffer) {
 
@@ -118,7 +119,12 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     ck_tile::HostTensor<ck_tile::half_t> lse_acc_host(
         1 < num_splits ? std::array<ck_tile::index_t, 4>{num_splits, batch, nhead, max_seqlen_q} :
                          std::array<ck_tile::index_t, 4>{1, 1, 1, 1});
-    ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
+    if(lse_acc_buf == nullptr)
+    {
+        //printf("[CK] size = %d\n", lse_acc_host.get_element_space_size_in_bytes());
+        return lse_acc_host.get_element_space_size_in_bytes();
+    }
+    //ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
 
 
     auto fmha_traits = fmha_fwd_traits{hdim_q,
@@ -182,7 +188,8 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
                              nullptr,                        // randval_buf.GetDeviceBuffer(),
-                             lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
+                             //lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
+                             lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
                              nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
@@ -248,9 +255,9 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
     // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
     if (run_time < 0) {
-        return false;
+        return 0;
     } else {
-        return true;
+        return 1;
     }
 }
 
