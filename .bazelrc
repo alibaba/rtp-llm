@@ -102,6 +102,7 @@ build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
+build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 build:rocm --copt -Wno-tautological-compare # grpc
 build:rocm --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:$LD_LIBRARY_PATH

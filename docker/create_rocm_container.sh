@@ -54,7 +54,7 @@ useradd -l -u $USERID -G havenask -md /home/$USER -s /bin/bash $USER
 echo -e "\n$USER ALL=(ALL) NOPASSWD:ALL\n" >> /etc/sudoers
 echo "PS1='[\u@havenask \w]\\$'" > /etc/profile
 echo "export TERM='xterm-256color'" >> /etc/profile
-echo 'export LD_LIBRARY_PATH=/lib64:/opt/conda310/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
 EOF
 
 
@@ -83,7 +83,8 @@ fi
 
 echo "Begin initialize container:"
 docker exec $CONTAINER_NAME /bin/bash -c "$CONTAINER_DIR/initContainer.sh"
-docker exec $CONTAINER_NAME /bin/bash -c "sudo ln -s /opt/conda310/bin/python3 /usr/bin/python"
+#docker exec $CONTAINER_NAME /bin/bash -c "sudo ln -s /opt/conda310/bin/python3 /usr/bin/python"
+docker exec $CONTAINER_NAME /bin/bash -c "scl enable gcc-toolset-12 bash"
 
 
 
