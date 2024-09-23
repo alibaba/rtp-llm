@@ -590,7 +590,7 @@ class W:
 
         # mla
         mla_q_w: sp_neg1,
-        mla_q_a_w: sp_neg1,
+        mla_q_a_w: sp_id,
         mla_q_b_w: sp_neg1,
         mla_kv_a_w: sp_id,
         mla_k_rope_w: sp_id,
