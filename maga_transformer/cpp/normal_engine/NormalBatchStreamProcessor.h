@@ -22,6 +22,7 @@ class NormalBatchStreamProcessor {
 public:
     NormalBatchStreamProcessor(const ft::GptInitParameter& params):
         num_layers_(params.num_layers_),
+        vocab_size_(params.vocab_size_),
         use_int8_kv_cache_(params.int8_kv_cache_),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
@@ -43,6 +44,7 @@ protected:
 
 protected:
     size_t          num_layers_;
+    size_t          vocab_size_;
     bool            use_int8_kv_cache_;
     bool            has_positional_encoding_;
     bool            is_multimodal_;

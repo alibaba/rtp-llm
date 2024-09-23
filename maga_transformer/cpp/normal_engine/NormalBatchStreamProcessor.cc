@@ -87,6 +87,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         FT_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         for (auto i = 0; i < current_batch_size; ++i) {
             auto currentTokens      = stream->currentExecuteTokens(i);
+            if (currentTokens[0] >= vocab_size_) {
+                std::ostringstream error_msg;
+                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0] << " exceed vocab_size " << vocab_size_;
+                return absl::InvalidArgumentError(error_msg.str());
+            }
             merged_tokens[batch_idx] = currentTokens[0];
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
@@ -133,6 +138,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             auto input_tokens    = stream->currentExecuteTokens(i);
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += input_tokens.size();
+
+            for (auto token_id: input_tokens) {
+                if (token_id >= vocab_size_) {
+                    std::ostringstream error_msg;
+                    error_msg << "stream [" << stream->streamId() << "] token_id " << token_id << " exceed vocab_size " << vocab_size_;
+                    return absl::InvalidArgumentError(error_msg.str());
+                }
+            }
+
             input_lengths[batch_idx] = input_tokens.size();
             prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;

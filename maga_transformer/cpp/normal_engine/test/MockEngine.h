@@ -31,7 +31,7 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     params.size_per_head_ = 64;
     params.num_layers_ = 2;
     params.max_seq_len_ = 20;
-    params.vocab_size_ = 20;
+    params.vocab_size_ = 100;
     params.hidden_size_ = 128;
     params.head_num_kv_ = 2;
     params.block_nums_  = 100;
@@ -57,9 +57,9 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     device->copy({*data, *buf_host});
     
     auto word_embeddings =
-        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
+        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
     auto lm_head =
-        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
+        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
     std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
