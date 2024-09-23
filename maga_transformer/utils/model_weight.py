@@ -296,17 +296,17 @@ class W:
     post_ln_2_beta = 'post_layernorm_weights_2.beta'
 
     # mla
-    mla_q_w = "self_attention_weights.query_weight.kernel"
-    mla_q_a_w = "self_attention_weights.query_a_weight.kernel"
-    mla_q_b_w = "self_attention_weights.query_b_weight.weight"
-    mla_kv_a_w = "self_attention_weights.key_value_a_weight.kernel"
-    mla_k_rope_w = "self_attention_weights.key_rope_weight.kernel"
-    mla_k_nope_w = "self_attention_weights.key_nope_weight.kernel"
-    mla_v_w = "self_attention_weights.value_weight.kernel"
-    mla_q_a_ln_gamma = "self_attention_weights.query_a_layernorm_weight.gamma"
-    mla_q_a_ln_beta = "self_attention_weights.query_a_layernorm_weight.beta"
-    mla_kv_a_ln_gamma = "self_attention_weights.key_value_a_layernorm_weight.gamma"
-    mla_kv_a_ln_beta = "self_attention_weights.key_value_a_layernorm_weight.beta"
+    mla_q_w = "self_attention_weights.mla.query_weight.kernel"
+    mla_q_a_w = "self_attention_weights.mla.query_a_weight.kernel"
+    mla_q_b_w = "self_attention_weights.mla.query_b_weight.weight"
+    mla_kv_a_w = "self_attention_weights.mla.key_value_a_weight.kernel"
+    mla_k_rope_w = "self_attention_weights.mla.key_rope_weight.kernel"
+    mla_k_nope_w = "self_attention_weights.mla.key_nope_weight.kernel"
+    mla_v_w = "self_attention_weights.mla.value_weight.kernel"
+    mla_q_a_ln_gamma = "self_attention_weights.mla.query_a_layernorm_weight.gamma"
+    mla_q_a_ln_beta = "self_attention_weights.mla.query_a_layernorm_weight.beta"
+    mla_kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma"
+    mla_kv_a_ln_beta = "self_attention_weights.mla.key_value_a_layernorm_weight.beta"
 
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'

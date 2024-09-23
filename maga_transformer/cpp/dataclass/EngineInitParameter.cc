@@ -171,6 +171,11 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
                                                          W::attn_qkv_s,
                                                          W::attn_qkv_z);
 
+    // some model doesn't have qkv weight, so we need to create a empty weight.
+    if (!attention_weights.qkv_weight) {
+        attention_weights.qkv_weight = std::unique_ptr<const DenseWeights>(new DenseWeights());
+    }
+
     attention_weights.q_norm_weight = mayCreateLayerNormWeights(map, W::q_ln_gamma, W::q_ln_beta);
     attention_weights.k_norm_weight = mayCreateLayerNormWeights(map, W::k_ln_gamma, W::k_ln_beta);
 
