@@ -588,6 +588,19 @@ class W:
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
 
+        # mla
+        mla_q_w: sp_neg1,
+        mla_q_a_w: sp_neg1,
+        mla_q_b_w: sp_neg1,
+        mla_kv_a_w: sp_id,
+        mla_k_rope_w: sp_id,
+        mla_k_nope_w: sp_neg1,
+        mla_v_w: sp_neg1,
+        mla_q_a_ln_gamma: sp_id,
+        mla_q_a_ln_beta: sp_id,
+        mla_kv_a_ln_gamma: sp_id,
+        mla_kv_a_ln_beta: sp_id,
+
         cross_attn_pre_ln_gamma: sp_id,
         cross_attn_pre_ln_beta: sp_id,
         cross_attn_qkv_w: sp_head,

@@ -57,6 +57,9 @@ def mla_pad_t(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_he
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
 
+    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+        super().__init__(config, tp_size, tp_rank)
+
     def _process_meta(self, meta_dict, weight_keys):
         if "model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
@@ -135,7 +138,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         ]
         for layer in range(self._num_layers):
             layer_weights.append(self._get_hf_layer_weight_info(layer))
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
 
 class DeepSeekV2(GPT):

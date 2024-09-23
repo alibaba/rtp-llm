@@ -25,9 +25,6 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
     BufferPtr q;
     if (params.weights.q_a_weight) {
         auto q_a = gemm(GemmParams(input, *(params.weights.q_a_weight->kernel)));
-
-        allGather({{q_a}});
-
         layernorm(LayernormParams(q_a,
                                 q_a,
                                 mayGetRef(params.weights.q_a_norm_weight),
@@ -49,9 +46,6 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
     // knope = kv_a * W_knope
     // v = kv_a * W_v
     auto kv_a = gemm(GemmParams(input, *(params.weights.kv_a_weight->kernel)));
-
-    allGather({{kv_a}});
-
     layernorm(LayernormParams(kv_a,
                               kv_a,
                               mayGetRef(params.weights.kv_a_norm_weight),
@@ -64,7 +58,6 @@ BufferPtr CudaDevice::mlaQKVGemm(const AttentionLayerParams& params) {
                               false,
                               params.ln_params.norm_type));
     auto k_nope = gemm(GemmParams(*kv_a, *(params.weights.k_nope_weight->kernel)));
-
     auto v      = gemm(GemmParams(*kv_a, *(params.weights.v_weight->kernel)));
 
     // k_rope = input * W_krope
