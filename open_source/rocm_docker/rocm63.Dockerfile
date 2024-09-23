@@ -6,7 +6,7 @@ MAINTAINER wangyin.yx
 ADD functions /etc/rc.d/init.d/functions
 
 RUN echo "ALL ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
-    groupadd sdev
+    groupadd sdev && touch /root/.bashrc
 
 RUN dnf install -y \
         unzip wget which findutils rsync tar \
@@ -27,14 +27,14 @@ RUN wget $AMD_BKC_URL -O /tmp/bkc.tar.gz && \
         composablekernel-devel-1.1.0.6030001-16.el8.x86_64.rpm \
         rocthrust-devel-3.0.1.6030001-16.el8.x86_64.rpm \
         hipcub-devel-3.2.0.6030001-16.el8.x86_64.rpm && \
+    yum config-manager --disable local-rocm && \
     rm -rf /tmp/bkc /tmp/bkc.tar.gz
 
 RUN git config --system core.hooksPath .githooks && \
     git lfs install
 
-ENV PATH $PATH:/opt/conda310/bin:/opt/rocm/bin
-ENV LD_LIBRARY_PATH $LD_LIBRARY_PATH:/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/
-RUN scl enable gcc-toolset-12 bash
+ENV PATH /opt/rh/gcc-toolset-12/root/usr/bin:$PATH:/opt/conda310/bin:/opt/rocm/bin
+ENV LD_LIBRARY_PATH /opt/rh/gcc-toolset-12/root/usr/lib64:$LD_LIBRARY_PATH:/lib64:/opt/conda310/lib/
 
 ARG CONDA_URL
 RUN wget $CONDA_URL -O /tmp/conda.sh && \
@@ -43,8 +43,9 @@ RUN wget $CONDA_URL -O /tmp/conda.sh && \
 
 ARG PYPI_URL
 ADD deps /tmp/deps
+
 RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
-    rm -rf /tmp/deps && pip cache purge
+    rm -rf /tmp/deps && /opt/conda310/bin/pip cache purge
 
 ARG BAZELISK_URL
 RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
