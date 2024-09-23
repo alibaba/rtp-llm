@@ -166,10 +166,8 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
         auto config_and_algoIndex = parseRow(line);
         
         if (!config_and_algoIndex.ok()) {
-            FT_LOG_ERROR(config_and_algoIndex.status().ToString().c_str());
-            fflush(stderr);
-            fflush(stdout);
-            std::abort();
+            // std::printf("%s\n", config_and_algoIndex.status().ToString().c_str());
+            continue;
         }
 
         hipblasLtMatmulDesc_t   opDesc;
