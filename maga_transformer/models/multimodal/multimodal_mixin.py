@@ -74,7 +74,7 @@ class BaseMultiModalWeightInfo:
 # 继承MultiModalMixin时，需要把声明写在GPT前以正确顺序构造，详情看super().__init__含义
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
-        
+
     def init_multimodal(self, config: GptInitModelParameters) -> None:
         raise NotImplementedError
 
@@ -202,7 +202,7 @@ class MultiModalMixin:
 
         except Exception as e:
             raise RuntimeError(f"init multimodal trt error: {e}")
-        
+
     def gc_mm_part(self, vit_params: VitParameters):
         del self.mm_part
         self.mm_part = None
@@ -211,11 +211,6 @@ class MultiModalMixin:
         torch.cuda.empty_cache()
 
     def load_mm_weight(self, ctype: str, device: str):
-        # reserve mem for runtime mm part
-        device_reserve_mem_bytes = int(os.environ.get("DEVICE_RESERVE_MEMORY_BYTES", "-1"))
-        if device_reserve_mem_bytes > -1024000000 and device_reserve_mem_bytes < 0:
-            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "-1024000000"
-
         # wait rank0 finish loading weight, otherwise gang_server will die
         nccl_op_ = NcclOp()
         if g_parallel_info.tp_size > 1:
@@ -237,7 +232,7 @@ class MultiModalMixin:
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
             t = self.weight.steal_pytorch_weight(fname)
             if t is None:
-                raise Exception(f"failed to get tensor from name {fname}")            
+                raise Exception(f"failed to get tensor from name {fname}")
             param.data = t.reshape(param.data.shape).to(ctype).to(device)
         for w in weight_names:
             w_name = ft_prefix + w
