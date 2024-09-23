@@ -114,6 +114,12 @@ RopeConfig GptInitParameter::getRopeConfig() const {
     rope_config.factor2      = rotary_factor2_;
     rope_config.mscale       = rotary_embedding_mscale_;
     rope_config.offset       = rotary_embedding_offset_;
+    rope_config.index_factor = position_id_len_factor_;
+    if (rope_config.style == RopeStyle::Mrope) {
+        rope_config.mrope_dim1   = mrope_section_[0];
+        rope_config.mrope_dim2   = mrope_section_[1];
+        rope_config.mrope_dim3   = mrope_section_[2];
+    }
     return rope_config;
 }
 
@@ -211,11 +217,13 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(rotary_embedding_dim, rotary_embedding_dim_)           \
     DEF_PROPERTY(rotary_embedding_style, rotary_embedding_style_)       \
     DEF_PROPERTY(position_ids_style, position_ids_style_)               \
+    DEF_PROPERTY(position_id_len_factor, position_id_len_factor_)       \
     DEF_PROPERTY(rotary_embedding_base, rotary_embedding_base_)         \
     DEF_PROPERTY(rotary_embedding_scale, rotary_embedding_scale_)       \
     DEF_PROPERTY(org_embedding_max_pos, org_embedding_max_pos_)         \
     DEF_PROPERTY(rotary_factor1, rotary_factor1_)                       \
     DEF_PROPERTY(rotary_factor2, rotary_factor2_)                       \
+    DEF_PROPERTY(mrope_section, mrope_section_)                         \
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)       \
     DEF_PROPERTY(residual_scalar, residual_scalar_)                     \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)     \

@@ -13,6 +13,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -31,7 +32,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     size_t         multimodal_features_len  = stream_groups.mmFeaturesLen();
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
-    const bool need_cal_position_id = (has_multimodal_input && mm_position_ids_style_ != positionIdsStyle::DEFAULT) || has_positional_encoding_;
+    const bool need_cal_position_id = (mm_position_ids_style_ != positionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
@@ -54,7 +55,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_context_batch_size}, ft::AllocationType::HOST}, {});
     if (need_cal_position_id) {
         model_input.combo_position_ids =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size * position_id_len_factor_}, ft::AllocationType::HOST}, {});
     }
     if (has_multimodal_input) {
         model_input.text_tokens_mask =
@@ -96,7 +97,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             if (need_cal_position_id) {
-                stream->generateNextPositionId(combo_position_ids + batch_idx);
+                stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_);
             }
             lora_ids[batch_idx]         = stream->loraId();
             lora_input_lengths[batch_idx] = 1;
@@ -155,16 +156,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 }
                 auto text_token_mask = stream->textTokensMask();
                 memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
+    
                 for (int i = 0;i < mm_locs->size(); ++i) {
                     *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx;
                     mm_feature_index++;
                 }
             } 
+
             if (need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds(device_);
-                memcpy(combo_position_ids + token_idx - stream->reuseLength(), 
-                        context_pos_ids->dataWithOffset(stream->reuseLength()), 
-                        (context_pos_ids->size() - stream->reuseLength()) * context_pos_ids->typeSize());
+                memcpy(combo_position_ids + (token_idx - stream->reuseLength()) * position_id_len_factor_, 
+                        context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_), 
+                        (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_) * context_pos_ids->typeSize());
             }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];

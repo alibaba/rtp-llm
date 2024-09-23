@@ -79,6 +79,7 @@ requirement([
     "nest_asyncio",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
+    "flash_attn",
 ] + tensorrt)
 
 
@@ -386,6 +387,7 @@ whl_reqs = [
     "nest_asyncio",
     "librosa",
     "matplotlib",
+    "flash_attn"
 ] + whl_deps() + platform_deps() + xft_dep
 
 # target for wheel

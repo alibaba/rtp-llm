@@ -1429,8 +1429,19 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             v      = add(v, v_bias);
         }
     }
-
-    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
+    int position_id = -1;
+    if (rope_config.style == RopeStyle::Mrope) {
+        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
+        int now_idx = tidx % rope_dim, now_dim = 0;
+        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
+            now_dim = 2;
+        } else if (now_idx >= rope_config.mrope_dim1) {
+            now_dim = 1;
+        }
+        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
+    } else if (position_ids) {
+        position_id = position_ids[token_idx * rope_config.index_factor];
+    }
     const int pre_len = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(

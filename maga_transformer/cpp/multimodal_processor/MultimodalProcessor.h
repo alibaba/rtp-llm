@@ -156,7 +156,6 @@ private:
             new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
             old_loc_idx = loc.second;
         }
-
         if (expanded_ids->shape()[0] - new_loc_idx != token_ids->shape()[0] - old_loc_idx) {
             throw std::runtime_error("expanded length calculate error");
         }
@@ -231,11 +230,10 @@ public:
         return absl::OkStatus();
     }
 
-
     absl::StatusOr<MultimodalFeature> get_mm_features(const ft::BufferPtr& input_ids, const std::vector<MultimodalInput> &mm_inputs) {
         MultimodalFeature mm_features;
-        CHECK_AND_RETURN_REF(features, mm_embedding(mm_inputs));
-        mm_features.features = std::move(features);
+        CHECK_AND_RETURN_REF(mm_embedding_res, mm_embedding(mm_inputs));
+        mm_features.features = std::move(mm_embedding_res.mm_features);
         CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(mm_features.features, input_ids, mm_inputs));
         mm_features.expanded_ids = expanded_ids.expanded_ids;
         mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;

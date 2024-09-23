@@ -1498,7 +1498,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     }
     const int input_len            = (params.input_lengths == nullptr) ? 0 : params.input_lengths[batch_beam_idx];
     int       prefix_prompt_length = (params.prefix_prompt_lengths == nullptr) ? 0 : params.prefix_prompt_lengths[batch_beam_idx];
-    const int position_id = params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx];
+    const int position_id = params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx * params.rope_config.index_factor];
     attention_rope<T, Qk_vec_k, ROPE_STYLE>(
             params.rope_config,
             q,

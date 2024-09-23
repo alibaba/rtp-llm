@@ -13,6 +13,7 @@ enum class RopeStyle {
     QwenDynamicNTK = 4,
     Yarn = 5,
     Llama3 = 6,
+    Mrope = 7,
 };
 
 // low_freq_factor, high_freq_factor for llama3
@@ -30,6 +31,10 @@ struct RopeConfig {
     float extrapolation_factor = 1.0;
     float mscale               = 1.0;
     int   offset               = 0;
+    int   index_factor         = 1;
+    int   mrope_dim1           = 0;
+    int   mrope_dim2           = 0;
+    int   mrope_dim3           = 0;
 };
 
 #define FT_ROPE_SWITCH(COND, CONST_NAME, ...)                           \
@@ -42,6 +47,7 @@ struct RopeConfig {
             FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::QwenDynamicNTK, __VA_ARGS__) \
             FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Yarn, __VA_ARGS__) \
             FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Llama3, __VA_ARGS__) \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Mrope, __VA_ARGS__) \
         }                                                               \
     }()
 

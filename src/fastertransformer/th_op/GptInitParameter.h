@@ -149,6 +149,7 @@ public:
     double  input_embedding_scalar_    = 1;
     double  residual_scalar_    = 1;
     float   softmax_extra_scale_       = 1.0f;
+    std::vector<int64_t> mrope_section_ = {};
 
     bool    use_logn_attn_ = false;
     double  q_scaling_ = 1;
@@ -203,6 +204,7 @@ public:
     std::vector<std::vector<int64_t>> mm_sep_tokens_ = {};
     bool                 include_sep_tokens_ = false;
     int64_t              mm_position_ids_style_ = 0; // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    int64_t              position_id_len_factor_ = 1;
 
     bool     int8_kv_cache_       = false;
     bool     pre_allocate_op_mem_ = true;

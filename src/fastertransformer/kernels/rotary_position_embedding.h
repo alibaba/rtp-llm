@@ -718,6 +718,9 @@ __device__ inline void apply_rope(RopeConfig rope_config,
                     Llama3Rope{rope_config.factor1, rope_config.factor2, rope_config.scale,
                         rope_config.max_pos});
         break;
+    case RopeStyle::Mrope:
+        normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
+        break;
     default:
         break;
     }
@@ -725,17 +728,17 @@ __device__ inline void apply_rope(RopeConfig rope_config,
 
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void context_rope(RopeConfig rope_config,
-                                    vector_t& q,
-                                    vector_t& k,
-                                    scalar_t* smem,
-                                    int       tidx,
-                                    int       seqidx,
-                                    int       position_id,
-                                    int       seq_len,
-                                    int       input_len,
-                                    bool      PREFIX_PROMPT,
-                                    int       prefix_prompt_length,
-                                    int       count_length)
+                                    vector_t&  q,
+                                    vector_t&  k,
+                                    scalar_t*  smem,
+                                    int        tidx,
+                                    int        seqidx,
+                                    int        position_id,
+                                    int        seq_len,
+                                    int        input_len,
+                                    bool       PREFIX_PROMPT,
+                                    int        prefix_prompt_length,
+                                    int        count_length)
 {
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
@@ -744,7 +747,7 @@ __device__ inline void context_rope(RopeConfig rope_config,
     if (position_id > 0) {
         seqidx = position_id;
     }
-
+    
     apply_rope<scalar_t, vector_t, ROPE_STYLE>(
             rope_config, q, smem, tidx, seqidx, seq_len);
 
