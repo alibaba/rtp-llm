@@ -142,9 +142,9 @@ SIGLIP_PRETRAINED_MODEL_ARCHIVE_LIST = [
     # See all SigLIP models at https://huggingface.co/models?filter=siglip
 ]
 
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+# if is_flash_attn_2_available():
+#     from flash_attn import flash_attn_func, flash_attn_varlen_func
+#     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data

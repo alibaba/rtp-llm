@@ -27,6 +27,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_cpu",
+    values = {"define": "using_cpu=true"},
+)
+
+config_setting(
     name = "xft_use_icx",
     values = {"define": "xft_use_icx=true"},
 )

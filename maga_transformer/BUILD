@@ -80,6 +80,7 @@ requirement([
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
     "flash_attn",
+    "av",
 ] + tensorrt)
 
 
@@ -168,6 +169,7 @@ py_library(
         #":decord",
         ":nest_asyncio",
         ":matplotlib",
+        ":av",
     ] + arch_dep + select({
         "//:using_cuda12": tensorrt,
         "//conditions:default": []
@@ -179,6 +181,12 @@ py_library(
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
+    }) + select({
+        "//:using_cuda11": [],
+        "//:using_arm": [],
+        "//:using_rocm": [],
+        "//:using_cpu": [],
+        "//conditions:default": ["flash_attn"]
     }),
 )
 
@@ -387,7 +395,7 @@ whl_reqs = [
     "nest_asyncio",
     "librosa",
     "matplotlib",
-    "flash_attn"
+    "av",
 ] + whl_deps() + platform_deps() + xft_dep
 
 # target for wheel

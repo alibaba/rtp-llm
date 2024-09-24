@@ -1,4 +1,5 @@
 import math
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -9,7 +10,22 @@ import torch.utils.checkpoint
 from torch.nn import CrossEntropyLoss, LayerNorm
 
 from maga_transformer.models.qwen2_vl.activations import ACT2FN
-from flash_attn import flash_attn_varlen_func
+
+default_attn_impl = "sdpa"
+try:
+    from flash_attn import flash_attn_varlen_func
+    import pynvml
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    name = pynvml.nvmlDeviceGetName(handle)
+    pynvml.nvmlShutdown()
+    if not any(gpu in name for gpu in ['V100', 'T4', 'RTX 6000']):
+        default_attn_impl = "flash_attention_2"
+    else:
+        raise Exception(f"cannot use flash_attn in {name}")
+    logging.info(f'initialize flash_attn success, using flash_attn in qwen2 vl vit')
+except Exception as e:
+    logging.info(f'initialize flash_attn failed, exception {e}')
 
 class PatchEmbed(nn.Module):
     def __init__(
@@ -212,7 +228,7 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
 }
 
 class Qwen2VLVisionBlock(nn.Module):
-    def __init__(self, config, attn_implementation: str = "flash_attention_2") -> None:
+    def __init__(self, config, attn_implementation: str = default_attn_impl) -> None:
         super().__init__()
         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
