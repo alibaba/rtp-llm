@@ -11,6 +11,7 @@
 #include "maga_transformer/cpp/embedding_engine/arpc/ArpcServiceCreator.h"
 #include "maga_transformer/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "maga_transformer/cpp/HttpApiServer.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;
@@ -36,6 +37,7 @@ private:
     // need to be shared to pass into rpc service
     std::shared_ptr<rtp_llm::EmbeddingEngine> embedding_engine_;
     std::unique_ptr<rtp_llm::ArpcServerWrapper> embedding_rpc_service_;
+    std::unique_ptr<rtp_llm::HttpApiServer http_server_;
     std::unique_ptr<rtp_llm::MultimodalProcessor> mm_processor_ = nullptr;
 
     std::atomic<bool>            is_server_shutdown_{false};

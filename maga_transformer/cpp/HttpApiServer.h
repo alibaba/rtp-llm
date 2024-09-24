@@ -5,8 +5,6 @@
 #include "maga_transformer/cpp/http_server/http_server/HttpServer.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
-#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
-#include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 
@@ -26,19 +24,26 @@ private:
 
 class HttpApiServer: public std::enable_shared_from_this<HttpApiServer> {
 public:
-    HttpApiServer(std::shared_ptr<EngineBase> engine, ft::GptInitParameter params, py::object token_processor):
-        engine_(engine), params_(params), pipeline_(Pipeline(token_processor)) {
+    // normal engine
+    HttpApiServer(std::shared_ptr<EngineBase> engine,
+                  const ft::GptInitParameter& params,
+                  py::object                  token_processor):
+            engine_(engine), params_(params), pipeline_(Pipeline(token_processor)) {
 
-        bool block = autil::EnvUtil::getEnv("CONCURRENCY_WITH_BLOCK", false);
-        if (params.tp_rank_ == 0) {
-            int limit = autil::EnvUtil::getEnv("CONCURRENCY_LIMIT", 32);
-            FT_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
-            controller_ = std::make_shared<ConcurrencyController>(limit, block);
-        } else /* if (params.tp_size_ != 1) */ {
-            FT_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
-            controller_ = std::make_shared<ConcurrencyController>(99, block);
-        }
+        init_controller(params);
     }
+
+    // embedding engine
+    HttpApiServer(std::shared_ptr<EmbeddingEngine> embedding_engine,
+                  const ft::GptInitParameter&      gpt_init_params,
+                  py::object                       py_render):
+            embedding_engine_(embedding_engine), py_render_(py_render), params_(params) {
+
+        init_controller(params);
+    }
+
+    ~HttpApiServer();
+
 
     bool start(std::string addrSpec) {
         return http_server_.Start(addrSpec);
@@ -53,8 +58,12 @@ public:
     }
 
 private:
+    void init_controller(const ft::GptInitParameter& params);
+
+private:
     bool registerRoot();
     bool registerHealth();
+    bool registerEmbedding();
     bool registerV1Model();
     bool registerSetLogLevel();
     bool registerTokenizerEncode();
@@ -65,9 +74,10 @@ private:
 private:
     http_server::HttpServer http_server_;
 
-    // attach params and engine to HttpApiServer in RtpLLMOp.cc
     std::shared_ptr<EngineBase> engine_;
-    ft::GptInitParameter        params_;
+    std::shared_ptr<EmbeddingEngine> embedding_engine_;
+    py::object py_render_;
+    ft::GptInitParameter params_;
 
     Pipeline                               pipeline_;
     std::shared_ptr<ConcurrencyController> controller_;

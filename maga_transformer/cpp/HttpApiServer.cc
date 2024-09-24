@@ -3,9 +3,11 @@
 #include "autil/AtomicCounter.h"
 #include "autil/legacy/json.h"
 #include "autil/legacy/jsonizable.h"
+#include "autil/EnvUtil.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
 
 namespace torch_ext {
 extern bool setLogLevel(const std::string& log_level);
@@ -114,7 +116,7 @@ inline std::string CreateErrorResponseJsonString(int error_code, const std::stri
     ErrorResponse response;
     response.error_code = error_code;
     response.error_msg  = error_msg;
-    return ToJsonString(response, true);
+    return ToJsonString(response, /*isCompact=*/true);
 }
 
 class ParallelInfo {
@@ -262,6 +264,18 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     controller_->decrement();
 }
 
+void HttpApiServer::init_controller() {
+    bool block = autil::EnvUtil::getEnv("CONCURRENCY_WITH_BLOCK", false);
+    if (params.tp_rank_ == 0) {
+        int limit = autil::EnvUtil::getEnv("CONCURRENCY_LIMIT", 32);
+        FT_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
+        controller_ = std::make_shared<ConcurrencyController>(limit, block);
+    } else /* if (params.tp_size_ != 1) */ {
+        FT_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
+        controller_ = std::make_shared<ConcurrencyController>(99, block);
+    }
+}
+
 void HttpApiServer::registerResponses() {
     // TODO: register other routes
     registerRoot();
@@ -289,6 +303,52 @@ bool HttpApiServer::registerRoot() {
         writer->Write(R"({"status":"home"})");
     };
     return http_server_.RegisterRoute("GET", "/", callback);
+}
+
+bool HttpApiServer::registerEmbedding() {
+    auto shared_this = shared_from_this();
+    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                     const http_server::HttpRequest&                  request) -> void {
+
+        // formated_request = await self.custom_model_.renderer.render_request(request)
+        // batch_input = self.custom_model_.renderer.create_input(formated_request)
+        // batch_output = await self.decoder_engine_.decode(batch_input)
+        // response = await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)
+        // logable_response = await self.custom_model_.renderer.render_log_response(response)
+        // return response, logable_response
+
+        auto batch_input = PyCustomModuleRender(request.GetBody()); // render input
+
+        std::vector<rtp_llm::MultimodalInput> multimodal_inputs;
+        for (const auto& input : batch_input.multimodal_inputs) {
+            multimodal_inputs.emplace_back({input.url, static_case<int>(input.mm_type)});
+        }
+        auto results = embedding_engine_->decode(batch_input.token_ids,
+                                                 batch_input.token_type_ids,
+                                                 batch_input.input_lengths,
+                                                 /*request_id=*/0,
+                                                 multimodal_inputs)
+        EngineOutputs batch_output;
+        batch_output.outputs = results;
+        batch_output.input_length = batch_input.input_length;
+
+        auto response = PyCustomModuleRender(batch_output); // render output
+
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
+        if (shared_this->isStopped()) {
+            FT_LOG_WARNING("http api server has been shutdown!");
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"this server has been shutdown"})");
+            return;
+        }
+        writer->Write(ToJsonString(response), /*isCompact=*/true);
+    };
+
+    return http_server_.RegisterRoute("POST", "/v1/embeddings", callback)
+           && http_server_.RegisterRoute("POST", "/v1/embeddings/similarity", callback)
+           && http_server_.RegisterRoute("POST", "/v1/classifier", callback)
+           && http_server_.RegisterRoute("POST", "/v1/reranker", callback)
 }
 
 bool HttpApiServer::registerHealth() {
@@ -422,7 +482,7 @@ bool HttpApiServer::registerTokenizerEncode() {
                 writer->Write(msg);
                 return;
             }
-            auto response_json_str = ToJsonString(*tokenizer_response, true);
+            auto response_json_str = ToJsonString(*tokenizer_response, /*isCompact=*/true);
             writer->Write(response_json_str);
             return;
         } catch (const std::exception& e) {
@@ -521,7 +581,7 @@ bool HttpApiServer::registerWorkerStatus() {
         worker_status_response.available_concurrency = available_concurrency;
         worker_status_response.load_balance_info     = load_balance_info;
         worker_status_response.alive                 = true;
-        auto response_json_str                       = ToJsonString(worker_status_response, true);
+        auto response_json_str                       = ToJsonString(worker_status_response, /*isCompact=*/true);
         writer->Write(response_json_str);
         return;
     };
@@ -534,9 +594,12 @@ void HttpApiServer::stop() {
     while (active_request_count_.load() > 0) {
         FT_LOG_DEBUG("http api server stop called, wait active request processed. active request count: %d",
                      active_request_count_.load());
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     http_server_.Stop();
+}
+void HttpApiServer::~HttpApiServer() {
+    stop();
 }
 
 // ------------------------------- Pipeline -------------------------------

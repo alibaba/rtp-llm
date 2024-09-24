@@ -32,7 +32,11 @@ class EmbeddingCppEngine(BaseEngine):
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         try:
             multimodal_inputs = [MultimodalInputCpp(i.url, int(i.mm_type)) for i in inputs.multimodal_inputs]
-            results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0, multimodal_inputs)
+            results = self.cpp_engine.decode(inputs.token_ids,
+                                             inputs.token_type_ids,
+                                             inputs.input_lengths,
+                                             0,
+                                             multimodal_inputs)
             outputs.outputs = results
             outputs.input_length = inputs.input_length
         except Exception as e:

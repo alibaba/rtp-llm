@@ -25,15 +25,22 @@ namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
 
-void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object propose_model, py::object token_processor) {
+void RtpLLMOp::init(py::object model,
+                    py::object mm_process_engine,
+                    py::object propose_model,
+                    py::object token_processor) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     rtp_llm::EngineInitParams params = initModel(model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_, params.gpt_init_parameter.http_port_,
-        std::move(params), std::move(mm_process_engine), std::move(propose_params), std::move(token_processor));
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_,
+                                                              params.gpt_init_parameter.http_port_,
+                                                              std::move(params),
+                                                              std::move(mm_process_engine),
+                                                              std::move(propose_params),
+                                                              std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -67,7 +74,9 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
         std::string sp_type = propose_model.attr("sp_type").cast<std::string>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gpt_init_params, std::move(*gpt_weight));
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,
+                                                                             gpt_init_params,
+                                                                             std::move(*gpt_weight));
         } else if (sp_type == "prompt_lookup") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type);
         } else if (sp_type == "eagle") {
@@ -131,9 +140,9 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
         http_server_->registerResponses();
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         if (http_server_->start(http_server_address)) {
-            FT_LOG_INFO("HTTP Server listening on %s", http_server_address.c_str());
+            FT_LOG_INFO("normal HTTP Server listening on %s", http_server_address.c_str());
         } else {
-            FT_LOG_ERROR("HTTP Server start fail.");
+            FT_LOG_ERROR("normal HTTP Server start fail.");
         }
     }
     grpc_server_->Wait();
@@ -146,7 +155,7 @@ void RtpLLMOp::stop() {
             grpc_server_->Shutdown();
         }
         model_rpc_server_.reset();
-        http_server_->stop();
+        http_server_.reset();
     }
 }
 

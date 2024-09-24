@@ -36,6 +36,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
                 params.gpt_init_parameter.max_seq_len_));
         }
         startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
+        startHttpServer(embedding_engine_, gpt_init_parameter, py_render);
     } catch (const std::exception& e) {
         FT_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
@@ -45,24 +46,44 @@ void RtpEmbeddingOp::stop() {
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
     }
+    http_server_.reset();
     if (!is_server_shutdown_ && embedding_engine_) {
         (void)embedding_engine_->stop();
         is_server_shutdown_ = true;
     }
 }
 
-void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params, py::object py_render, kmonitor::MetricsReporterPtr reporter) {
+void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine> embedding_engine,
+                                     const ft::GptInitParameter&               gpt_init_params,
+                                     py::object                                py_render) {
+    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, gpt_init_parameter, py_render));
+    http_server_->registerResponses();
+    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(gpt_init_parameter.http_port_));
+    if (http_server_->start(http_server_address)) {
+        FT_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
+    } else {
+        FT_LOG_ERROR("embedding HTTP Server start fail.");
+    }
+}
+void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params,
+                                    py::object py_render,
+                                    kmonitor::MetricsReporterPtr reporter) {
     auto arpc_service = std::move(createEmbeddingArpcService(gpt_init_params, py_render, embedding_engine_, reporter));
     if (arpc_service) {
         FT_LOG_INFO("creating arpc service");
-        embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service), gpt_init_params.model_rpc_port_));
+        embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service),
+                                                                    gpt_init_params.model_rpc_port_));
         embedding_rpc_service_->start();
     } else {
         FT_LOG_INFO("Embedding RPC not supported, skip");
     }
 }
 
-th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::vector<rtp_llm::MultimodalInput> multimodal_inputs) {
+th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids,
+                                  th::Tensor token_type_ids,
+                                  th::Tensor input_lengths,
+                                  int64_t    request_id,
+                                  std::vector<rtp_llm::MultimodalInput> multimodal_inputs) {
     if (is_server_shutdown_) {
         throw std::runtime_error("server is shut down, can't handle request");
     }
