@@ -46,7 +46,7 @@ static const std::string k_ln_beta       = "self_attention_weights.k_layernorm.b
 // mla
 static const std::string attn_q      = "self_attention_weights.mla.query_weight.kernel";
 static const std::string attn_q_a    = "self_attention_weights.mla.query_a_weight.kernel";
-static const std::string attn_q_b    = "self_attention_weights.mla.query_b_weight.weight";
+static const std::string attn_q_b    = "self_attention_weights.mla.query_b_weight.kernel";
 static const std::string attn_kv_a   = "self_attention_weights.mla.key_value_a_weight.kernel";
 static const std::string attn_k_rope = "self_attention_weights.mla.key_rope_weight.kernel";
 static const std::string attn_k_nope = "self_attention_weights.mla.key_nope_weight.kernel";
@@ -55,6 +55,14 @@ static const std::string q_a_ln_gamma  = "self_attention_weights.mla.query_a_lay
 static const std::string q_a_ln_beta   = "self_attention_weights.mla.query_a_layernorm_weight.beta";
 static const std::string kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma";
 static const std::string kv_a_ln_beta  = "self_attention_weights.mla.key_value_a_layernorm_weight.beta";
+
+static const std::string attn_q_s = "self_attention_weights.mla.query_weight.weight_only_quant_scale";
+static const std::string attn_q_a_s = "self_attention_weights.mla.query_a_weight.weight_only_quant_scale";
+static const std::string attn_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale";
+static const std::string attn_kv_a_s = "self_attention_weights.mla.key_value_a_weight.weight_only_quant_scale";
+static const std::string attn_k_rope_s = "self_attention_weights.mla.key_rope_weight.weight_only_quant_scale";
+static const std::string attn_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale";
+static const std::string attn_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale";
 
 
 static const std::string ffn_w1       = "ffn_weights.intermediate_weight.kernel";

@@ -401,7 +401,7 @@ class GptInitModelParameters:
             self.layer_weight_param_count * layer_param_bytes + \
                 self.gpt_init_params.hidden_size * layer_param_bytes + \
                 self.word_emb_param_count * 2  # maybe some model donot have lm_head
-        
+
         kv_cache_mem_size = self._eval_kv_cache_mem_size()
         runtime_buffer = self._eval_runtime_buffer_mem_size()
         total_size = model_size  + kv_cache_mem_size + runtime_buffer
@@ -414,7 +414,7 @@ class GptInitModelParameters:
         kv_cache_bytes = 1 if self.int8_kv_cache else 2
         kv_cache_size = 2 * self.layer_num * self.head_num_kv * self.size_per_head * kv_cache_bytes * self.max_seq_len
         return kv_cache_size
-    
+
     def _eval_runtime_buffer_mem_size(self):
         input_buffer = self.max_seq_len * self.gpt_init_params.hidden_size
         qkv_gemm_buffer_size = self.max_seq_len * (self.head_num_kv*2 + self.head_num_kv) * self.size_per_head

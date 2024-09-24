@@ -308,10 +308,7 @@ class ModelWeightsLoader:
                 qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
                 scale_name = weight_list[1]
                 if len(qweight) == 0:
-                    if self._weights_info._is_sparse_head:
-                        continue
-                    else:
-                        raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
+                    continue
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:

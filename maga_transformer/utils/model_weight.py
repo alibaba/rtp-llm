@@ -298,7 +298,7 @@ class W:
     # mla
     mla_q_w = "self_attention_weights.mla.query_weight.kernel"
     mla_q_a_w = "self_attention_weights.mla.query_a_weight.kernel"
-    mla_q_b_w = "self_attention_weights.mla.query_b_weight.weight"
+    mla_q_b_w = "self_attention_weights.mla.query_b_weight.kernel"
     mla_kv_a_w = "self_attention_weights.mla.key_value_a_weight.kernel"
     mla_k_rope_w = "self_attention_weights.mla.key_rope_weight.kernel"
     mla_k_nope_w = "self_attention_weights.mla.key_nope_weight.kernel"
@@ -307,6 +307,14 @@ class W:
     mla_q_a_ln_beta = "self_attention_weights.mla.query_a_layernorm_weight.beta"
     mla_kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma"
     mla_kv_a_ln_beta = "self_attention_weights.mla.key_value_a_layernorm_weight.beta"
+
+    mla_q_s = "self_attention_weights.mla.query_weight.weight_only_quant_scale"
+    mla_q_a_s = "self_attention_weights.mla.query_a_weight.weight_only_quant_scale"
+    mla_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale"
+    mla_kv_a_s = "self_attention_weights.mla.key_value_a_weight.weight_only_quant_scale"
+    mla_k_rope_s = "self_attention_weights.mla.key_rope_weight.weight_only_quant_scale"
+    mla_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale"
+    mla_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale"
 
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'
@@ -441,7 +449,14 @@ class W:
         attn_i_smoother,
         attn_o_smoother,
         attn_o_shift,
-        ffn_smoother
+        ffn_smoother,
+        mla_q_w,
+        mla_q_a_w,
+        mla_q_b_w,
+        mla_kv_a_w,
+        mla_k_rope_w,
+        mla_k_nope_w,
+        mla_v_w
     ])
 
     groupwise_quant_params = set([
@@ -502,6 +517,13 @@ class W:
     int8_attn_weights = [
         [attn_qkv_w, attn_qkv_s],
         [attn_o_w, attn_o_s],
+        [mla_q_w, mla_q_s],
+        [mla_q_a_w, mla_q_a_s],
+        [mla_q_b_w, mla_q_b_s],
+        [mla_kv_a_w, mla_kv_a_s],
+        [mla_k_rope_w, mla_k_rope_s],
+        [mla_k_nope_w, mla_k_nope_s],
+        [mla_v_w, mla_v_s],
     ]
 
     int8_attn_vision_weights = [
@@ -600,6 +622,13 @@ class W:
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
         mla_kv_a_ln_beta: sp_id,
+        mla_q_s: sp_neg1,
+        mla_q_a_s: sp_id,
+        mla_q_b_s: sp_neg1,
+        mla_kv_a_s: sp_id,
+        mla_k_rope_s: sp_id,
+        mla_k_nope_s: sp_neg1,
+        mla_v_s: sp_neg1,
 
         cross_attn_pre_ln_gamma: sp_id,
         cross_attn_pre_ln_beta: sp_id,

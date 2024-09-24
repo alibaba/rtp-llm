@@ -9,7 +9,7 @@ from typing import List, Any
 
 from maga_transformer.models.gpt import GPT
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, ModelWeightInfo, WeightInfo,\
-    CkptWeightInfo, identity, transpose, stack_, w_half1, w_half2, zeros
+    CkptWeightInfo, identity, transpose, stack_, w_half1, w_half2, zeros, transpose_pad
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 
@@ -108,12 +108,14 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
+        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+
         if layer_id in self.moe_layer_index_:
             return [
                 WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], transpose),
-                WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.gate_proj.weight', identity)], transpose),
-                WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.down_proj.weight', identity)], transpose),
-                WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.up_proj.weight', identity)], transpose),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.gate_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+                WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
                 WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) \
                                         for expert_id in range(self.expert_num_)], stack_),
                 WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight', identity) \
@@ -123,9 +125,12 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             ]
         else:
             return [
-                WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], transpose),
-                WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], transpose),
-                WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], transpose),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
+                           functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+                WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)],
+                           functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)],
+                           functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
             ]
 
     def _get_weight_info(self):
@@ -219,6 +224,15 @@ class DeepSeekV2(GPT):
             moe_step = config_json['moe_layer_freq']
             first_k_dense_replace = config_json['first_k_dense_replace']
             config.moe_layer_index = [i for i in range(config.layer_num) if i >= first_k_dense_replace and i % moe_step == 0]
+
+            ffn_inter_size = config_json.get('intermediate_size', config.inter_size)
+            layer_inter_size = []
+            for i in range(config.layer_num):
+                if i in config.moe_layer_index:
+                    layer_inter_size.append(config.inter_size)
+                else:
+                    layer_inter_size.append(ffn_inter_size)
+            config.layer_inter_size = layer_inter_size
 
     @staticmethod
     def get_weight_cls():
