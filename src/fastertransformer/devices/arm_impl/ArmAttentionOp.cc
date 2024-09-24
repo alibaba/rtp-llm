@@ -397,8 +397,8 @@ void getPerHeadArray(void *qkv, void *k_seen, void *v_seen, void **q_array, void
     const int N = 1 * num_heads;
     parallel_for(N, [&](int tid) {
         q_array[tid] = (T*)qkv + tid * head_size;
-        k_array[tid] = (T*)k_seen + tid * head_size;
-        v_array[tid] = (T*)v_seen + tid * head_size;
+        k_array[tid] = (T*)k_seen + tid * kv_num_heads / num_heads * head_size;
+        v_array[tid] = (T*)v_seen + tid * kv_num_heads / num_heads * head_size;
     });
 }
 
@@ -621,20 +621,20 @@ void ArmCpuDevice::runOneBatchStride(const AttentionModuleParams& params, size_t
 
 AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams& params) {
     auto batch_size = params.common.context_batch_size;
+    auto decoder_batch = params.common.decoder_batch_size;
     size_t past_seq = 0;
 
-    if ((params.configs.head_num != params.configs.kv_head_num) ||
-        (params.input.type() == DataType::TYPE_FP16)) {
-        // std::cout << "[Warning] Attention performance could be suboptimal with FP16 input. Try FP32 input." << std::endl;
+    if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(batch));
-            runOneBatch(params, past_seq, batch, context_len, 0);
+            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
+            runOneBatchStride(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
-    } else if (params.input.type() == DataType::TYPE_FP32) {
+    } else if (params.input.type() == DataType::TYPE_FP16) {
+        std::cout << "[Warning] Attention performance could be suboptimal with FP16 input. Try FP32 input." << std::endl;
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(batch));
-            runOneBatchStride(params, past_seq, batch, context_len, 0);
+            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
+            runOneBatch(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
     } else {
@@ -645,16 +645,15 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
 AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     auto batch_size = params.common.decoder_batch_size;
 
-    if ((params.configs.head_num != params.configs.kv_head_num) ||
-        (params.input.type() == DataType::TYPE_FP16)) {
-        for (int batch = 0; batch < batch_size; batch++) {
-            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
-            runOneBatch(params, batch, batch, 1, step);
-        }
-    } else if (params.input.type() == DataType::TYPE_FP32) {
+    if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
             size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
             runOneBatchStride(params, batch, batch, 1, step);
+        }
+    } else if (params.input.type() == DataType::TYPE_FP16) {
+        for (int batch = 0; batch < batch_size; batch++) {
+            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
+            runOneBatch(params, batch, batch, 1, step);
         }
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
