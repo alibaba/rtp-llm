@@ -118,7 +118,8 @@ class GptInitModelParameters:
         "task_type",
         "add_special_tokens",
         "template_type",
-        "build_position_ids"
+        "build_position_ids",
+        "routed_scaling_factor"
     }
 
     def __init__(self,
@@ -164,6 +165,7 @@ class GptInitModelParameters:
         self.template_type = TemplateType.chat
         self.build_position_ids = False
         self.local_rank = g_parallel_info.local_rank
+        self.routed_scaling_factor = 1.0
 
         for k, v in kwargs.items():
             setattr(self, k, v)

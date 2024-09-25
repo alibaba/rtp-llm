@@ -78,6 +78,10 @@ def identity(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
             raise Exception("ts is empty")
     return ts[0].contiguous()
 
+def multipy_identity(ts: List[torch.Tensor], scale: float) -> torch.Tensor:
+    t = identity(ts)
+    return t * scale
+
 def tolerate_failed(ts: List[torch.Tensor], origin_func: Callable[[List[torch.Tensor]], torch.Tensor]) -> torch.Tensor:
     try:
         return origin_func(ts)
@@ -925,6 +929,7 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = config.nope_head_dim
         self.rope_head_dim = config.rope_head_dim
         self.v_head_dim = config.v_head_dim
+        self.routed_scaling_factor = config.routed_scaling_factor
 
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:

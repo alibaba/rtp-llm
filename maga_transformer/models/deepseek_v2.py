@@ -8,8 +8,21 @@ import json
 from typing import List, Any
 
 from maga_transformer.models.gpt import GPT
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, ModelWeightInfo, WeightInfo,\
-    CkptWeightInfo, identity, transpose, stack_, w_half1, w_half2, zeros, transpose_pad
+from maga_transformer.utils.model_weight import (
+    W,
+    ModelDeployWeightInfo,
+    ModelWeightInfo,
+    WeightInfo,
+    CkptWeightInfo,
+    identity,
+    transpose,
+    stack_,
+    w_half1,
+    w_half2,
+    zeros,
+    transpose_pad,
+    multipy_identity
+)
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 
@@ -118,7 +131,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
                 WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) \
                                         for expert_id in range(self.expert_num_)], stack_),
-                WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight', identity) \
+                WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight',
+                                                     functools.partial(multipy_identity, scale=self.routed_scaling_factor)) \
                                         for expert_id in range(self.expert_num_)], stack_),
                 WeightInfo(W.moe_w3, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) \
                                         for expert_id in range(self.expert_num_)], stack_),
@@ -210,6 +224,7 @@ class DeepSeekV2(GPT):
             config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
             # MOE config
+            config.routed_scaling_factor = config_json['routed_scaling_factor']
             config.moe_k = config_json['num_experts_per_tok']
             config.expert_num = config_json['n_routed_experts']
             config.moe_inter_padding_size=config_json['moe_intermediate_size']
