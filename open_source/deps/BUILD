@@ -53,3 +53,12 @@ compile_pip_requirements(
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )
+
+compile_pip_requirements(
+    name = "requirements_cpu_arm",
+    src = "requirements_cpu_arm.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//open_source/deps:requirements_base.txt"],
+    requirements_txt = "requirements_lock_torch_arm.txt",
+    tags = ["manual"],
+)
