@@ -18,10 +18,10 @@ class FakeMultimodalProcessor: public MultimodalProcessor {
     FakeMultimodalProcessor(std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int max_seq_len): 
         MultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len) {}
 
-    absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
-        auto res = std::vector<torch::Tensor>();
+    absl::StatusOr<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+        MMEmbeddingRes res = MMEmbeddingRes();
         for (auto& mm_input: mm_inputs) {
-            res.push_back(torch::randn({std::stoi(mm_input.url), 2}));
+            res.mm_features.push_back(torch::randn({std::stoi(mm_input.url), 2}));
         }
         return res;
     }
@@ -36,7 +36,7 @@ TEST_F(MultimodalProcessorTest, testSimple) {
     auto mm_inputs = std::vector<MultimodalInput>();
     mm_inputs.emplace_back("3");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.update_mm_features(input);
+    auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
     
     auto input_ids = input->input_ids->data<int32_t>();
@@ -73,7 +73,7 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
     mm_inputs.emplace_back("3");
     mm_inputs.emplace_back("2");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.update_mm_features(input);
+    auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
     
     EXPECT_EQ(input->input_ids->size(), 8);
@@ -102,12 +102,12 @@ TEST_F(MultimodalProcessorTest, testWrongMMTag) {
     auto mm_inputs = std::vector<MultimodalInput>();
     mm_inputs.emplace_back("2");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.update_mm_features(input);
+    auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
     EXPECT_EQ(res.ToString(), "INTERNAL: more than 2 sep tokens or no sep tokens for multimodal model is not supported");
 
     processor.sep_token_ids_ = {{3, 5}};
-    res = processor.update_mm_features(input);
+    res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
     EXPECT_EQ(res.ToString(), "INTERNAL: unclosed multimodal tag pairs");
 }
@@ -119,7 +119,7 @@ TEST_F(MultimodalProcessorTest, testTooLongInput) {
     auto mm_inputs = std::vector<MultimodalInput>();
     mm_inputs.emplace_back("10");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.update_mm_features(input);
+    auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
     EXPECT_EQ(res.ToString(), "INTERNAL: input after multimodal process is 14 > max_seq_len(10)");
 }
@@ -131,7 +131,7 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     auto mm_inputs = std::vector<MultimodalInput>();
     mm_inputs.emplace_back("2");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.get_mm_features(input->input_ids, mm_inputs).value();
+    auto res = processor.getMultimodallFeatures(input->input_ids, mm_inputs).value();
     EXPECT_EQ(res.features.size(), 1);
     EXPECT_EQ(res.text_tokens_mask->size(), 6);
     EXPECT_EQ(res.locs->size(), 1);

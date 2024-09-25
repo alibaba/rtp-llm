@@ -236,7 +236,7 @@ protected:
     std::shared_ptr<std::mutex>         output_mutex_;
 
     std::optional<ft::BufferPtr>        context_position_ids_;
-    positionIdsStyle                    mm_position_ids_style_;
+    PositionIdsStyle                    mm_position_ids_style_;
 
     // just for bool test
     bool perf_test_ = false;

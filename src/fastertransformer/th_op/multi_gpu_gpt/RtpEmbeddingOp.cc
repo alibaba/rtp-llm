@@ -94,7 +94,7 @@ th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids,
     }
     std::optional<rtp_llm::MultimodalFeature> multimodal_features = std::nullopt;
     if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
-        auto mm_res = mm_processor_->get_mm_features(ft::torchTensor2Buffer(token_ids), multimodal_inputs);
+        auto mm_res = mm_processor_->getMultimodallFeatures(ft::torchTensor2Buffer(token_ids), multimodal_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.status().ToString());
         }

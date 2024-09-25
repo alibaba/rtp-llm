@@ -28,7 +28,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
-    , mm_position_ids_style_(positionIdsStyle(params.mm_position_ids_style_))
+    , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
 
 {
     updatePrefix(resource_context.system_prompt);
@@ -352,7 +352,7 @@ vector<int> GenerateStream::textTokensMask() const {
 }
 
 ft::BufferPtr GenerateStream::generateContextPositionIds(ft::DeviceBase* device) {
-    context_position_ids_ = PositionIdsGenerator::generate_position_ids(device, generate_input_->inputLength(), 
+    context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(), 
         mm_position_ids_style_, generate_input_->mm_locs, generate_input_->mm_position_ids);
     return context_position_ids_.value();
 }
@@ -361,7 +361,7 @@ void GenerateStream::generateNextPositionId(int32_t* now_pos) {
     if (!context_position_ids_) {
         return;
     }
-    PositionIdsGenerator::generate_next_pos_id(now_pos, seq_length_, mm_position_ids_style_, context_position_ids_.value());
+    PositionIdsGenerator::generateNextPositionId(now_pos, seq_length_, mm_position_ids_style_, context_position_ids_.value());
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {

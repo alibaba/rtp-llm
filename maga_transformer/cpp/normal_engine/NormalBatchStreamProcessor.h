@@ -26,7 +26,7 @@ public:
         use_int8_kv_cache_(params.int8_kv_cache_),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
-        mm_position_ids_style_((positionIdsStyle)params.mm_position_ids_style_),
+        mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),
         position_id_len_factor_(params.position_id_len_factor_),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     virtual absl::Status                   dispatch(const StreamGroups&                  stream_groups,
@@ -49,7 +49,7 @@ protected:
     bool             use_int8_kv_cache_;
     bool             has_positional_encoding_;
     bool             is_multimodal_;
-    positionIdsStyle mm_position_ids_style_;
+    PositionIdsStyle mm_position_ids_style_;
     size_t           position_id_len_factor_;
     ft::DeviceBase*  device_;
 };

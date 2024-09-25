@@ -655,7 +655,7 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
         }
         token_ids = py::cast<th::Tensor>(batch_input.attr("token_ids"));
         if (mm_processor_ != nullptr && !mm_inputs.empty()) {
-            auto mm_res = mm_processor_->get_mm_features(ft::torchTensor2Buffer(token_ids), mm_inputs);
+            auto mm_res = mm_processor_->getMultimodallFeatures(ft::torchTensor2Buffer(token_ids), mm_inputs);
             if (!mm_res.ok()) {
                 throw std::runtime_error(mm_res.status().ToString());
             }

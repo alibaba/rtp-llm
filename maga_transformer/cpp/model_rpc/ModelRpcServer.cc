@@ -65,7 +65,7 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
     auto input = QueryConverter::transQuery(request);
 
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->update_mm_features(input);
+        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
             return grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
         }
