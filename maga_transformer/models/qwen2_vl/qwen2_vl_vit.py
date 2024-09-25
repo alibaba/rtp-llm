@@ -122,7 +122,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         return image
         
     def load_video(self, data, **kwargs):
-        with tempfile.NamedTemporaryFile(suffix='.mp4') as tmpfile:
+        with tempfile.NamedTemporaryFile() as tmpfile:
             tmpfile.write(data.getbuffer())
             tmpfile_name = tmpfile.name
             video, audio, info = io.read_video(
@@ -187,7 +187,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         self,
         grid_thw: torch.Tensor = None
     ) -> torch.Tensor:
-        spatial_merge_size = self.config["spatial_merge_size"]
+        spatial_merge_size = self.config.get("spatial_merge_size", 2)
         
         t, h, w = (
             grid_thw[0][0].item(),

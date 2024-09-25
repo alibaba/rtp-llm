@@ -129,13 +129,11 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.eos_token_id = config_json["eos_token_id"]
         
-        if config_json.get("rope_scaling"):
-            if config_json["rope_scaling"].get("type", "") == "mrope":
-                config.rotary_embedding_style = 7
-                config.mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
-                config.mm_position_ids_style = 2
-                config.position_id_len_factor = len(config.mrope_section)
-                config.rotary_embedding_dim = 128
+        config.rotary_embedding_style = 7
+        config.mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
+        config.mm_position_ids_style = 2
+        config.position_id_len_factor = len(config.mrope_section)
+        config.rotary_embedding_dim = 128
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
@@ -156,13 +154,13 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
     def eval_vit_param_count(config: GptInitModelParameters):
         vit_config = config.mm_related_params.config
-        embed_dim = vit_config["embed_dim"]
-        hidden_size = vit_config["hidden_size"]
-        vit_size = vit_config["temporal_patch_size"] * vit_config["spatial_patch_size"] ** 2 * vit_config["in_chans"] * embed_dim
-        patch_merger_size = embed_dim * vit_config["spatial_merge_size"] ** 2
+        embed_dim = vit_config.get("embed_dim", 1280)
+        hidden_size = vit_config.get("hidden_size", 3584)
+        vit_size = vit_config.get("temporal_patch_size", 2) * vit_config.get("spatial_patch_size", 14) ** 2 * vit_config.get("in_chans", 3) * embed_dim
+        patch_merger_size = embed_dim * vit_config.get("spatial_merge_size", 2) ** 2
         vit_size += patch_merger_size ** 2 + patch_merger_size * hidden_size + embed_dim
-        mlp_hidden_dim = embed_dim * vit_config["mlp_ratio"]
-        vit_size += vit_config["depth"] * (embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4)
+        mlp_hidden_dim = embed_dim * vit_config.get("mlp_ratio", 4)
+        vit_size += vit_config.get("depth", 32) * (embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4)
 
         return vit_size
 

@@ -62,7 +62,7 @@ class Qwen2VLRenderer(CustomChatRenderer):
         final_messages = []
         for message in messages:
             if isinstance(message.content, str):
-                final_messages.append({"role": message.role.value, "content": messages.content})
+                final_messages.append({"role": message.role.value, "content": message.content})
             elif isinstance(message.content, list):
                 now_message = {"role": message.role.value}
                 now_content = []

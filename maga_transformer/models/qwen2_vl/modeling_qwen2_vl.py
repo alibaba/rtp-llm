@@ -282,7 +282,7 @@ class Qwen2VLVisionConfig:
         self.hidden_act = hidden_act
         self.mlp_ratio = mlp_ratio
         self.num_heads = num_heads
-        self.in_channels = in_channels
+        self.in_channels = kwargs.get("in_chans", in_channels)
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
