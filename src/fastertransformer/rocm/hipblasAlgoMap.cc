@@ -17,14 +17,18 @@ namespace rocm {
 constexpr absl::string_view COLUMN_HEADER = "trans_a, trans_b, m, n, k, A_data_type, lda, stride_a, "
                                             "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
                                             "compute_type, batch_count, algo_index";
+constexpr absl::string_view COLUMN_HEADER_V2 = "trans_a, trans_b, m, n, k, A_data_type, lda, stride_a, "
+                                            "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
+                                            "compute_type, batch_count, epilogue, algo_index";
 
 static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const std::string& row) {
-    constexpr size_t                                  numFields = 17;
+    constexpr size_t                                  numFields = 18;
     absl::InlinedVector<absl::string_view, numFields> fields    = absl::StrSplit(row, ',');
 
-    if (fields.size() != numFields) {
+    if (fields.size() != numFields && fields.size() != numFields - 1) {
         return absl::InvalidArgumentError("Invalid number of fields in row: " + row);
     }
+    bool has_epilogue = fields.size() == numFields;
 
     hipblasLtAlgoConfig config;
     int32_t             algoIndex;
@@ -34,6 +38,20 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
             return HIPBLAS_OP_T;
         } else if (field == "N") {
             return HIPBLAS_OP_N;
+        } else {
+            return absl::InvalidArgumentError("Invalid hipblasOperation_t value: " + std::string(field));
+        }
+    };
+
+    auto parseEpilogue = [](const absl::string_view& field) -> absl::StatusOr<hipblasLtEpilogue_t> {
+        if (field == "none") {
+            return HIPBLASLT_EPILOGUE_DEFAULT ;
+        } else if (field == "gelu_bias") {
+            return HIPBLASLT_EPILOGUE_GELU_BIAS;
+        } else if (field == "relu_bias") {
+            return HIPBLASLT_EPILOGUE_RELU_BIAS;
+        } else if (field == "bias") {
+            return HIPBLASLT_EPILOGUE_BIAS;
         } else {
             return absl::InvalidArgumentError("Invalid hipblasOperation_t value: " + std::string(field));
         }
@@ -89,7 +107,16 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
     ATOI(fields[13], config.stride_c);
     ASSIGN(config.compute_type, parseComputeType(fields[14]));
     ATOI(fields[15], config.batch_count);
-    ATOI(fields[16], algoIndex);
+    if(has_epilogue)
+    {
+        ASSIGN(config.epilogue, parseEpilogue(fields[16]));
+        ATOI(fields[17], algoIndex);
+    }
+    else
+    {
+        config.epilogue = HIPBLASLT_EPILOGUE_DEFAULT;
+        ATOI(fields[16], algoIndex);
+    }
 
 #undef ASSIGN
 #undef ATOI
@@ -146,12 +173,12 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
     file.open(filename);
 
     if (!std::getline(file, line)) {
-        std::printf("Gemm config not find: %s \n", filename.c_str());
+        std::printf("[BLAS] Gemm config not find: %s \n", filename.c_str());
         return ;
     }
 
-    if (line != COLUMN_HEADER) {
-        std::printf("MISMATCH %s | %s\n", line.c_str(), std::string(COLUMN_HEADER).c_str());
+    if (line != COLUMN_HEADER && line != COLUMN_HEADER_V2) {
+        std::printf("[BLAS] MISMATCH %s | %s\n", line.c_str(), std::string(COLUMN_HEADER).c_str());
         abort();
     }
 
@@ -178,6 +205,13 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
         hipblasLtMatmulDescCreate(&opDesc, config.compute_type, HIP_R_32F);
         hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &config.trans_a, sizeof(int32_t));
         hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &config.trans_b, sizeof(int32_t));
+        if(config.epilogue != HIPBLASLT_EPILOGUE_DEFAULT)
+        {
+            hipblasLtEpilogue_t epilogue_ = config.epilogue;
+            hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_));
+            int32_t bias_data_type = config.C_data_type;
+            hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type));
+        }
 
         hipblasLtMatrixLayoutCreate(&ADesc,
                                     config.A_data_type,
@@ -224,7 +258,8 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                                                    const int32_t              ldc,
                                                    const int64_t              stride_c,
                                                    const hipblasComputeType_t compute_type,
-                                                   const int32_t              batch_count) {
+                                                   const int32_t              batch_count,
+                                                   const hipblasLtEpilogue_t  epilogue) {
     hipblasLtAlgoConfig config{trans_a,
                                trans_b,
                                m,
@@ -240,7 +275,8 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                                ldc,
                                stride_c,
                                compute_type,
-                               batch_count};
+                               batch_count,
+                               epilogue};
 
     auto iter = algo_map_.find(config);
     if (iter != algo_map_.end()) {
@@ -279,8 +315,20 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                 return "<?>";
         }
     };
+
+    auto epilogueToString = [](hipblasLtEpilogue_t t) -> const char* {
+        switch (t) {
+            case HIPBLASLT_EPILOGUE_DEFAULT: return "none";
+            case HIPBLASLT_EPILOGUE_GELU_BIAS: return "gelu_bias";
+            case HIPBLASLT_EPILOGUE_RELU_BIAS: return "relu_bias";
+            case HIPBLASLT_EPILOGUE_BIAS: return "bias";
+            default:
+                return "<?>";
+        }
+    };
     
-    /*FT_LOG_WARNING("MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
+    /*printf("[ALGO] map size = %u\n", algo_map_.size());
+    printf("[ALGO] MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d,%d\n",
                    opToString(trans_a),
                    opToString(trans_b),
                    m,
@@ -296,7 +344,8 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                    ldc,
                    stride_c,
                    computeTypeToString(compute_type),
-                   batch_count);*/
+                   batch_count,
+                   epilogueToString(epilogue));*/
 
     return nullptr;
 }

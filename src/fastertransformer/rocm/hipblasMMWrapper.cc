@@ -16,10 +16,18 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
         config_path = "gemm_config.csv";
     }
     hipblas_algo_map_.loadGemmConfig(config_path, hipblaslt_handle);
+
+    int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
+    hipblasLtMatmulPreferenceCreate(&blasLtPrefer);
+    hipblasLtMatmulPreferenceSetAttribute(blasLtPrefer,
+                                          HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                          &workspaceSize,
+                                          sizeof(workspaceSize));
 }
 
 hipblasMMWrapper::~hipblasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    hipblasLtMatmulPreferenceDestroy(blasLtPrefer);
     allocator_->free((void**)(&hipblas_workspace_));
 }
 
@@ -114,7 +122,8 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                                  ldc,
                                                  0,
                                                  HIPBLAS_COMPUTE_32F,
-                                                 1);
+                                                 1,
+                                                 HIPBLASLT_EPILOGUE_DEFAULT);
     static bool disable_hipblasLt = []() {
         auto env = std::getenv("ROCM_DISABLE_HIPBLASLT");
         return env != nullptr && std::strcmp(env, "1") == 0;
@@ -124,7 +133,6 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
 
     if (info && !disable_hipblasLt) {
-        //printf("DEBUG -> Calling the hipblasLtMatmul\n");
         hipblasLtMatmul(hipblaslt_handle_,
                         info->opDesc.get(),
                         alpha,
@@ -216,6 +224,132 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
                                                 batch_count,
                                                 computeType,
                                                 HIPBLAS_GEMM_DEFAULT));
+}
+
+void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
+                            hipblasOperation_t transb,
+                            const int          m,
+                            const int          n,
+                            const int          k,
+                            const void*        A,
+                            const int          lda,
+                            const void*        B,
+                            const int          ldb,
+                            void*              C,
+                            const int          ldc,
+                            const void*        bias,
+                            const hipblasLtEpilogue_t epilogue) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    float f_alpha(1.0);
+    float f_beta(0.0);
+    half  h_alpha = (half)(f_alpha);
+    half  h_beta  = (half)(f_beta);
+
+    int  is_fp16_computeType = computeType_ == HIPBLAS_R_16F ? 1 : 0;
+    bool using_hipblasLt     = (Atype_ == HIPBLAS_R_16F) ? true : false;
+    int  batch_count         = 1;
+
+    void* workSpace     = hipblas_workspace_;
+    int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
+
+    const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
+    const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
+
+    const auto* info = hipblas_algo_map_.getAlgo(transa,
+                                                 transb,
+                                                 m,
+                                                 n,
+                                                 k,
+                                                 getHipDataType(Atype_),
+                                                 lda,
+                                                 0,
+                                                 getHipDataType(Btype_),
+                                                 ldb,
+                                                 0,
+                                                 getHipDataType(Ctype_),
+                                                 ldc,
+                                                 0,
+                                                 HIPBLAS_COMPUTE_32F,
+                                                 1,
+                                                 epilogue);
+
+    if(info)
+    {
+        hipblasLtMatmulDescSetAttribute(info->opDesc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*));
+
+        hipblasLtMatmul(hipblaslt_handle_,
+                        info->opDesc.get(),
+                        alpha,
+                        A,
+                        info->ADesc.get(),
+                        B,
+                        info->BDesc.get(),
+                        beta,
+                        C,
+                        info->CDesc.get(),
+                        C,
+                        info->CDesc.get(),
+                        &info->algo,
+                        workSpace,
+                        workspaceSize,
+                        stream_);
+    }
+    else
+    {
+        hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
+        hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), m, k, lda);
+        hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), k, n, ldb);
+        hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc);
+
+        hipblasLtMatmulDesc_t matmul;
+        hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+        hipblasOperation_t trans_a = transa;
+        hipblasOperation_t trans_b = transb;
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t));
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t));
+
+        hipblasLtEpilogue_t epilogue_ = epilogue;
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_));
+        int32_t bias_data_type = getHipDataType(Ctype_);
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type));
+        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*));
+        
+        const int                        request_solutions = 1;
+        hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
+        int                              returnedAlgoCount = 0;
+        hipblasLtMatmulAlgoGetHeuristic(hipblaslt_handle_,
+                                        matmul,
+                                        ADesc,
+                                        BDesc,
+                                        CDesc,
+                                        CDesc,
+                                        blasLtPrefer,
+                                        request_solutions,
+                                        heuristicResult,
+                                        &returnedAlgoCount); 
+
+        hipblasLtMatmul(hipblaslt_handle_,
+                        matmul,
+                        alpha,
+                        A,
+                        ADesc,
+                        B,
+                        BDesc,
+                        beta,
+                        C,
+                        CDesc,
+                        C,
+                        CDesc,
+                        &heuristicResult[0].algo,
+                        workSpace,
+                        workspaceSize,
+                        stream_);
+
+        hipblasLtMatrixLayoutDestroy(ADesc);
+        hipblasLtMatrixLayoutDestroy(BDesc);
+        hipblasLtMatrixLayoutDestroy(CDesc);
+        hipblasLtMatmulDescDestroy(matmul);
+    }
 }
 
 }  // namespace rocm

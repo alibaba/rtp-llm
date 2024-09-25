@@ -29,7 +29,7 @@ hipblasOperation_t opConvert(TransposeOperation op) {
     }
 };
 
-hipblasDatatype_t dtypeConvert(DataType dtype) {
+static hipblasDatatype_t dtypeConvert(DataType dtype) {
     switch (dtype) {
         case DataType::TYPE_BF16: 
             return hipblasDatatype_t::HIPBLAS_R_16B;

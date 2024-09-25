@@ -46,7 +46,7 @@ public:
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params) override;
     DeviceStatus getDeviceStatus() override;
-
+    BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     void syncCommunication(bool timeout = true) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
@@ -80,7 +80,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
-
+    
     // fmha
     std::unique_ptr<rocmFmhaWrapper>      fmha_runner_;
     bool use_openSource_fmha    = true;

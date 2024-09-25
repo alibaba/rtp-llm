@@ -28,6 +28,8 @@ protected:
     IAllocator* allocator_         = nullptr;
     void*       hipblas_workspace_ = nullptr;
 
+    hipblasLtMatmulPreference_t blasLtPrefer;
+
     // friend class cublasINT8MMWrapper;
 
     void _Int8Gemm(const int     m,
@@ -63,6 +65,20 @@ public:
               const int          ldb,
               void*              C,
               const int          ldc);
+              
+    void GemmBiasAct(hipblasOperation_t transa,
+                     hipblasOperation_t transb,
+                     const int          m,
+                     const int          n,
+                     const int          k,
+                     const void*        A,
+                     const int          lda,
+                     const void*        B,
+                     const int          ldb,
+                     void*              C,
+                     const int          ldc,
+                     const void*        bias,
+                     const hipblasLtEpilogue_t epilogue);
 
     void setFP32GemmConfig();
     void setFP16GemmConfig();

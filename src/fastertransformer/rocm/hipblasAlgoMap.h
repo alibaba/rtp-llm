@@ -42,13 +42,15 @@ struct hipblasLtAlgoConfig {
     int64_t              stride_c;
     hipblasComputeType_t compute_type;
     int32_t              batch_count;
+    hipblasLtEpilogue_t  epilogue;
 
     friend bool operator==(const hipblasLtAlgoConfig& a, const hipblasLtAlgoConfig& b) {
         return a.trans_a == b.trans_a && a.trans_b == b.trans_b && a.m == b.m && a.n == b.n && a.k == b.k
                && a.A_data_type == b.A_data_type && a.lda == b.lda && a.stride_a == b.stride_a
                && a.B_data_type == b.B_data_type && a.ldb == b.ldb && a.stride_b == b.stride_b
                && a.C_data_type == b.C_data_type && a.ldc == b.ldc && a.stride_c == b.stride_c
-               && a.compute_type == b.compute_type && a.batch_count == b.batch_count;
+               && a.compute_type == b.compute_type && a.batch_count == b.batch_count
+               && a.epilogue == b.epilogue;
     }
 
     template<typename H>
@@ -95,7 +97,8 @@ public:
                                        const int32_t              ldc,
                                        const int64_t              stride_c,
                                        const hipblasComputeType_t compute_type,
-                                       const int32_t              batch_count);
+                                       const int32_t              batch_count,
+                                       const hipblasLtEpilogue_t  epilogue);
 };
 
 }  // namespace rocm
