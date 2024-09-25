@@ -10,6 +10,17 @@ namespace rtp_llm {
 
 class TokenizerEncodeResponse;
 
+class EmbeddingEndpoint {
+public:
+    EmbeddingEngine(std::shared_ptr<EmbeddingEngine> embedding_engine, py::object py_render):
+        py_render_(py_render), embedding_engine_(embedding_engine) {
+    }
+    std::pair<EngineOutputs, std::optional<EngineOutputs>> handle(const std::string& body);
+private:
+    py::object py_render_;
+    std::shared_ptr<EmbeddingEngine> embedding_engine_;
+};
+
 class Pipeline {
 public:
     Pipeline(py::object token_processor): token_processor_(token_processor) {}
@@ -37,7 +48,7 @@ public:
     HttpApiServer(std::shared_ptr<EmbeddingEngine> embedding_engine,
                   const ft::GptInitParameter&      gpt_init_params,
                   py::object                       py_render):
-            embedding_engine_(embedding_engine), py_render_(py_render), params_(params) {
+            params_(params), embedding_endpoint_(EmbeddingEndpoint(embedding_engine, py_render)) {
 
         init_controller(params);
     }
@@ -75,9 +86,8 @@ private:
     http_server::HttpServer http_server_;
 
     std::shared_ptr<EngineBase> engine_;
-    std::shared_ptr<EmbeddingEngine> embedding_engine_;
-    py::object py_render_;
     ft::GptInitParameter params_;
+    std::optional<EmbeddingEndpoint> embedding_endpoint_;
 
     Pipeline                               pipeline_;
     std::shared_ptr<ConcurrencyController> controller_;

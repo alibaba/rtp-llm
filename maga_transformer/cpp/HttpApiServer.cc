@@ -310,29 +310,16 @@ bool HttpApiServer::registerEmbedding() {
     auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                      const http_server::HttpRequest&                  request) -> void {
 
-        // formated_request = await self.custom_model_.renderer.render_request(request)
-        // batch_input = self.custom_model_.renderer.create_input(formated_request)
-        // batch_output = await self.decoder_engine_.decode(batch_input)
-        // response = await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)
-        // logable_response = await self.custom_model_.renderer.render_log_response(response)
-        // return response, logable_response
 
-        auto batch_input = PyCustomModuleRender(request.GetBody()); // render input
-
-        std::vector<rtp_llm::MultimodalInput> multimodal_inputs;
-        for (const auto& input : batch_input.multimodal_inputs) {
-            multimodal_inputs.emplace_back({input.url, static_case<int>(input.mm_type)});
+        if (!embedding_endpoint_.has_value()) {
+            FT_LOG_WARNING("non-embedding model can't handle embedding request!");
+            return;
         }
-        auto results = embedding_engine_->decode(batch_input.token_ids,
-                                                 batch_input.token_type_ids,
-                                                 batch_input.input_lengths,
-                                                 /*request_id=*/0,
-                                                 multimodal_inputs)
-        EngineOutputs batch_output;
-        batch_output.outputs = results;
-        batch_output.input_length = batch_input.input_length;
-
-        auto response = PyCustomModuleRender(batch_output); // render output
+        const auto& embedding_endpoint = embedding_endpoint_.value();
+        auto [response, logable_response] = embedding_endpoint.handle(request.GetBody());
+        if (logable_response.has_value()) {
+            // TODO: access log response
+        }
 
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
@@ -600,6 +587,54 @@ void HttpApiServer::stop() {
 }
 void HttpApiServer::~HttpApiServer() {
     stop();
+}
+
+// ------------------------------- EmbeddingEndpoint -------------------------------
+
+std::pair<EngineOutputs, std::optional<EngineOutputs>> EmbeddingEndpoint::handle(const std::string& body) {
+
+    // if isinstance(request, str):
+    //     request = json.loads(request)
+    // formated_request = await self.custom_model_.renderer.render_request(request)
+    // batch_input = self.custom_model_.renderer.create_input(formated_request)
+    // batch_output = await self.decoder_engine_.decode(batch_input)
+    // response = await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)
+    // logable_response = await self.custom_model_.renderer.render_log_response(response)
+    // return response, logable_response
+
+    try {
+        py::gil_scoped_acquire gil;
+        py::module json = py::module::import("json");
+        py::object request = json.attr("loads")(body);
+    } catch (const py::error_already_set& e) {
+        FT_LOG_WARNING("embedding endpoint handle request failed, found python exception: %s", e.what());
+    } catch (const std::exception& e) {
+        FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
+    }
+
+    auto formated_request = py_render_.attr("render_request")(request)
+    auto batch_input = py_render_.attr("create_input")(formated_request);
+
+    std::vector<MultimodalInput> mm_inputs;
+    auto py_mm_inputs = batch_input.attr("multimodal_inputs");
+    if (!py::isinstance<py::list>(py_mm_inputs)) {
+        throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(py_mm_inputs)));
+    }
+    py::list py_list = py::reinterpret_borrow<py::list>(py_mm_inputs);
+    for (const auto& item : py_list) {
+        mm_inputs.emplace_back({py::cast<std::string>(item.attr("url")),
+                                        py::cast<int>(item.attr("mm_type"))});
+    }
+    auto results = embedding_engine_->decode(py::cast<th::Tensor>(batch_input.attr("token_ids")),
+                                             py::cast<th::Tensor>(batch_input.attr("token_type_ids")),
+                                             py::cast<th::Tensor>(batch_input.attr("input_lengths")),
+                                             /*request_id=*/0,
+                                             mm_inputs);
+    py::module embedding_interface = py::module::import("maga_transformer.async_decoder_engine.embedding.interface");
+    py::object batch_output = embedding_interface.attr("EngineOutputs")(results, batch_input.attr("input_length"));
+    batch_output.attr("outputs") = results;
+    batch_output.input_length = batch_input.input_length;
+    auto response = py_render_.attr("render_response")(formated_request, batch_input, batch_output);
 }
 
 // ------------------------------- Pipeline -------------------------------

@@ -41,3 +41,7 @@ class EngineInputs():
 class EngineOutputs(PyDanticModelBase):
     outputs: Optional[torch.Tensor]
     input_length: int
+
+    def __init__(out: torch.Tensor, length: int):
+        self.outputs = out
+        self.input_length = length

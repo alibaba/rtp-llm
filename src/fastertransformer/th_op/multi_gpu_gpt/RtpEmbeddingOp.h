@@ -29,9 +29,15 @@ public:
     ~RtpEmbeddingOp();
     void init(py::object model, py::object mm_process_engine);
     void stop();
-    void startRpcServer(const ft::GptInitParameter& gpt_init_params, py::object py_render, kmonitor::MetricsReporterPtr reporter);
+    void startRpcServer(const ft::GptInitParameter& gpt_init_params,
+                        py::object py_render,
+                        kmonitor::MetricsReporterPtr reporter);
 
-    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::vector<rtp_llm::MultimodalInput> multimodal_inputs = {});
+    th::Tensor decode(th::Tensor token_ids,
+                      th::Tensor token_type_ids,
+                      th::Tensor input_lengths,
+                      int64_t request_id,
+                      std::vector<rtp_llm::MultimodalInput> multimodal_inputs = {});
 
 private:
     // need to be shared to pass into rpc service
