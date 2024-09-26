@@ -12,11 +12,9 @@ from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateConfigPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import MulitmodalInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputsPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
 from maga_transformer.distribute.worker_info import g_master_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
@@ -103,6 +101,7 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     reuse_len=output_pb.aux_info.reuse_len,
                                     prefix_len=output_pb.aux_info.prefix_len,
                                     output_len=output_pb.aux_info.output_len,
+                                    step_output_len=output_pb.aux_info.step_output_len,
                                     fallback_tokens=output_pb.aux_info.fallback_tokens,
                                     fallback_times=output_pb.aux_info.fallback_times
                                     )

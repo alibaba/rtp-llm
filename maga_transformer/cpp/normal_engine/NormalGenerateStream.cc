@@ -91,6 +91,7 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
         generate_output.aux_info.output_len   = seq_length_ - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len = output_len;;
         generate_output.aux_info.reuse_len    = reuse_length_;
 
         generate_output.aux_info.cum_log_probs =

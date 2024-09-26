@@ -64,6 +64,7 @@ class AuxInfo(PyBaseModel):
     input_len: int = 0
     reuse_len: int = 0
     output_len: int = 0
+    step_output_len: int = 0
     fallback_tokens: int = 0
     fallback_times: int = 0
     cum_log_probs: List[float] = []

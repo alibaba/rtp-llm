@@ -75,6 +75,7 @@ message AuxInfoPB {
     int32 fallback_tokens = 7;
     int32 fallback_times = 8;
     TensorPB cum_log_probs = 9;
+    int32 step_output_len = 10;
 }
 
 message GenerateOutputPB {

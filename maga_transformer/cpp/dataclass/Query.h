@@ -88,6 +88,7 @@ public:
     int                                              output_len     = 0;
     int                                              fallback_tokens = 0;
     int                                              fallback_times  = 0;
+    int                                              step_output_len = 0;
     std::optional<ft::ConstBufferPtr>                cum_log_probs;
 };
 

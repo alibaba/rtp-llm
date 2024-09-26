@@ -210,14 +210,17 @@ class InferenceServer(object):
                 last_iterate_time = current_time_ms()
                 first_token = True
                 iter_count = 0
-                all_responses = []
                 async for x in response_generator:
                     end_time = current_time_ms()
                     if first_token:
                         first_token = False
                         kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, end_time - last_iterate_time)
                     else:
-                        kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, end_time - last_iterate_time)
+                        step_output_len = 1
+                        if hasattr(x, 'aux_info'):
+                            step_output_len = max(x.aux_info.get('step_output_len', 1), step_output_len)
+                        
+                        kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, (end_time - last_iterate_time) / step_output_len)
                     kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
                     last_iterate_time = end_time
                     iter_count += 1

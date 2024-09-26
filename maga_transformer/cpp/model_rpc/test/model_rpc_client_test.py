@@ -10,9 +10,7 @@ from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.models.base_model import GenerateInput, GenerateOutput, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 
 
 class FakeStub:
@@ -22,7 +20,6 @@ class FakeStub:
         output_ids = res.output_ids
         output_ids.data_type = TensorPB.DataType.INT32
         output_ids.shape.extend([1, 0])
-        # res.aux_info = AuxInfoPB()
         res.aux_info.iter_count = 1
         for i in range(2):
             res.aux_info.iter_count += 1

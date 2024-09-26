@@ -118,6 +118,7 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_reuse_len(response.aux_info.reuse_len);
         aux_info->set_prefix_len(response.aux_info.prefix_len);
         aux_info->set_output_len(response.aux_info.output_len);
+        aux_info->set_step_output_len(response.aux_info.step_output_len);
         if (response.aux_info.cum_log_probs.has_value()) {
             transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }
