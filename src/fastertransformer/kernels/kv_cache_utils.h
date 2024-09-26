@@ -107,7 +107,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
     // Enable one more block to save the kv tokens
     bool mEnableOneMoreBlock;
     bool int8_mode = false;
-    DataType* scale = nullptr;
+    void* scale = nullptr;
     int mScaleBytesPerBlock = 1;
     void* pagedKVBlockOffsetsOnHost;
 
@@ -191,22 +191,16 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
         // NOTE: we have remapped K layout as the same of V.
         return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
     }
-    
-    __host__ __device__ inline DataType const* getScaleRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
-        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
-        // seqIdx is in range [0; B]
-        return scale + seqIdx * mMaxBlocksPerSeq * 2 + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq;
-    }
 
     __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx) const
     {
         auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
         return reinterpret_cast<void*>(
-            reinterpret_cast<char*>(getPoolPtr(offset)) + offset.get() * static_cast<uint64_t>(mScaleBytesPerBlock));
+                reinterpret_cast<char*>(scale) + offset.get() * static_cast<uint64_t>(mScaleBytesPerBlock));
     }
 
     __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
-        return getScaleBlockPtr(getScaleRowPtr(kvIdx, seqIdx), tokenIdx);
+        return getScaleBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx);
     }
 
     __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {

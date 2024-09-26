@@ -1494,26 +1494,22 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 float* v_scale_ptr = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
                 const int inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
                 const int inScaleIdx  = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
-                const int size_per_head_div_vec_size = size_per_head / vec_size;
+                float local_max[2];
+                __shared__ float s_max[2];
+                local_max[0] = vector_abs_max(k);
+                local_max[1] = vector_abs_max(v);
+                blockReduceMaxV2<float, 2>(local_max);
+                if (threadIdx.x == 0) {
+                    s_max[0] = local_max[0];
+                    s_max[1] = local_max[1];
+                }
+                __syncthreads();
 
-                float k_per_head_max = vector_abs_max(k);
-        #pragma unroll
-                for (int mask = size_per_head_div_vec_size / 2; mask >= 1; mask /= 2) {
-                    k_per_head_max = fmaxf(k_per_head_max, __shfl_xor_sync(uint32_t(-1), k_per_head_max, mask));
-                }
-                store_8bits_kv_cache_vec(k_cache, k, inBlockIdx, float(1 << (8 - 1)) / k_per_head_max);
+                store_8bits_kv_cache_vec(k_cache, k, inBlockIdx, float(1 << (8 - 1)) / s_max[0]);
+                store_8bits_kv_cache_vec(v_cache, v, inBlockIdx, float(1 << (8 - 1)) / s_max[1]);
                 if (tidx == 0) {
-                    *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = k_per_head_max / float(1 << (8 - 1));
-                }
-
-                float v_per_head_max = vector_abs_max(v);
-        #pragma unroll
-                for (int mask = size_per_head_div_vec_size / 2; mask >= 1; mask /= 2) {
-                    v_per_head_max = fmaxf(v_per_head_max, __shfl_xor_sync(uint32_t(-1), v_per_head_max, mask));
-                }
-                store_8bits_kv_cache_vec(v_cache, v, inBlockIdx, float(1 << (8 - 1)) / v_per_head_max);
-                if (tidx == 0) {
-                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = v_per_head_max / float(1 << (8 - 1));
+                    *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = s_max[0] / float(1 << (8 - 1));
+                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = s_max[1] / float(1 << (8 - 1));
                 }
             } else  {
                 const int inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);

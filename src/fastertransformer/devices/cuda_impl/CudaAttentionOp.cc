@@ -60,10 +60,9 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
                               "v scale buffer should has value when use k scale buffer has value");
-        kv_cache_buffer.scale =
-            (fastertransformer::KVBlockArrayForContextFMHA::DataType*)(kv_cache_offset_pointers.data());
         kv_cache_buffer.int8_mode = true;
         const auto& k_scale = *(kv_cache->k_scale_buffer);
+        kv_cache_buffer.scale = k_scale.data();
         kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
     sync_check_cuda_error();
