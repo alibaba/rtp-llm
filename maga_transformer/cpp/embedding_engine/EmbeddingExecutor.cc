@@ -4,15 +4,19 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/utils/python_utils.h"
 #include "maga_transformer/cpp/models/GptModel.h"
-#include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
-#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include <ATen/TensorIndexing.h>
+#include <torch/extension.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <algorithm>
 
 using namespace std;
+using namespace at::indexing;
 using namespace fastertransformer;
 
 namespace rtp_llm {
@@ -25,6 +29,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
 {
     model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
     init_position_ids(params_.max_seq_len_);
+    py::gil_scoped_acquire acquire; 
+    torch_type_ = py::module::import("torch").attr("Tensor");
 }
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
@@ -139,26 +145,80 @@ unique_ptr<GptModelOutputs> EmbeddingExecutor::copyResultToCPU(th::Tensor gpu_ou
     return output;
 }
 
-absl::Status EmbeddingExecutor::updateStreams(th::Tensor gpu_outputs, const std::list<EmbeddingStreamPtr>& streams) const {
-    auto cpu_output = copyResultToCPU(gpu_outputs);
+absl::Status EmbeddingExecutor::sliceTensor(py::object                           tensor,
+                                            const std::list<EmbeddingStreamPtr>& streams,
+                                            int                                  total_batch_size) const {
+    auto gpu_tensors = py::cast<torch::Tensor>(tensor);
+    auto cpu_tensors = gpu_tensors.cpu();
+    if (total_batch_size != cpu_tensors.size(0)) {
+        std::ostringstream error_msg;
+        error_msg << "total batch size not equal to output tensor at dim 0: " << total_batch_size << " vs "
+                  << cpu_tensors.size(0);
+        return absl::InternalError(error_msg.str());
+    }
     int index = 0;
-    for (auto& stream: streams) {
-        auto hidden_states_buf = (*cpu_output->hidden_states).view(index, stream->batchSize());
-        auto new_buffer_ptr = device_->allocateBuffer({hidden_states_buf.type(), hidden_states_buf.shape(), AllocationType::HOST});
-        device_->copy({*new_buffer_ptr, hidden_states_buf});
-        stream->updateOutput(new_buffer_ptr);
+    for (auto& stream : streams) {
+        if (index + stream->batchSize() > cpu_tensors.size(0)) {
+            std::ostringstream error_msg;
+            error_msg << "current index exceed output tensor at dim 0: " << index << ":" << index + stream->batchSize()
+                      << "tensor size: " << cpu_tensors.size(0);
+            return absl::InternalError(error_msg.str());
+        }
+        torch::Tensor sliced_tensor = cpu_tensors.slice(0, index, index + stream->batchSize(), 1);
+        stream->updateTensorOutput(sliced_tensor);
         index += stream->batchSize();
     }
     return absl::OkStatus();
 }
 
-absl::StatusOr<th::Tensor> EmbeddingExecutor::postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs) {
-    py::gil_scoped_acquire acquire;
+absl::Status EmbeddingExecutor::slicePyList(py::object                           gpu_outputs,
+                                            const std::list<EmbeddingStreamPtr>& streams,
+                                            int                                  total_batch_size) const {
+    auto output_list = py::cast<py::list>(gpu_outputs);
+    if (total_batch_size != output_list.size()) {
+        std::ostringstream error_msg;
+        error_msg << "total batch size not equal to output list: " << total_batch_size << " vs " << output_list.size();
+        return absl::InternalError(error_msg.str());
+    }
+    int index = 0;
+    for (auto& stream : streams) {
+        if (index + stream->batchSize() > output_list.size()) {
+            std::ostringstream error_msg;
+            error_msg << "current index exceed output list max index: " << index << ":" << index + stream->batchSize()
+                      << "list size: " << output_list.size();
+            return absl::InternalError(error_msg.str());
+        }
+        py::slice slice(index, index + stream->batchSize(), 1);
+        auto res = pyListToTensorMapVec(output_list[slice]);
+        stream->updateMapOutput(res);
+        index += stream->batchSize();
+    }
+    return absl::OkStatus();
+}
+
+// embedding postprocess output has two vaild values:
+// 1. tensor, which shape is [total_batch_size, ...]
+// 2. list<map<str, tensor>, which shape is [total_batch_size]
+absl::Status EmbeddingExecutor::updateStreams(py::object                           post_process_output,
+                                              const std::list<EmbeddingStreamPtr>& streams,
+                                              int                                  total_batch_size) const {
+    if (pybind11::isinstance<py::list>(post_process_output)) {
+        return slicePyList(post_process_output, streams, total_batch_size);
+    // need use python class type to check
+    } else if (py::isinstance(post_process_output, torch_type_)) {
+        return sliceTensor(post_process_output, streams, total_batch_size);
+    } else {
+        return absl::InternalError("unknown output type");
+    }
+}
+
+absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&    model_request,
+                                                          const GptModelOutputs& gpu_outputs) {
     try {
         torch::Tensor hidden_states = Buffer2torchTensor(gpu_outputs.all_hidden_states, false);
         torch::Tensor input_lengths = Buffer2torchTensor(model_request.input_lengths, false);
         torch::Tensor input_ids = Buffer2torchTensor(model_request.combo_tokens, false);
-        torch::Tensor output = handler_.attr("forward")(input_ids, hidden_states, input_lengths).cast<th::Tensor>();
+        py::object output = handler_.attr("forward")(input_ids, hidden_states, input_lengths);
         return output;
     } catch (const exception& e) {
         return absl::InternalError("meet error when run handler " + std::string(e.what()));
@@ -171,9 +231,11 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto         merged_output        = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest model_request = generateOldModelRequest(model_input);
+    auto total_batch_size = model_request.context_batch_size;
     model_output = std::move(model_->forward(model_input));
+    py::gil_scoped_acquire acquire;
     CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
-    return updateStreams(post, streams);
+    return updateStreams(post, streams, total_batch_size);
 }
 
 void EmbeddingExecutor::reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const {

@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
+#include "src/fastertransformer/utils/python_utils.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;
@@ -80,7 +81,7 @@ void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params,
     }
 }
 
-th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids,
+py::object RtpEmbeddingOp::decode(th::Tensor token_ids,
                                   th::Tensor token_type_ids,
                                   th::Tensor input_lengths,
                                   int64_t    request_id,
@@ -97,7 +98,15 @@ th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids,
         token_ids = ft::Buffer2torchTensor(mm_res.value().expanded_ids, true);
         multimodal_features.emplace(mm_res.value());
     }
-    return embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    auto embedding_output = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    py::gil_scoped_acquire acquire;
+    if (embedding_output->output.isTensor) {
+        FT_CHECK_WITH_INFO(embedding_output->output.t.has_value(), "embedding output has null tensor value");
+        return rtp_llm::ConvertTensorToObject(embedding_output->output.t.value());
+    } else {
+        FT_CHECK_WITH_INFO(embedding_output->output.map.has_value(), "embedding output has null map value");
+        return rtp_llm::ConvertTensorMapVectorToObject(embedding_output->output.map.value());
+    }
 }
 
 RtpEmbeddingOp::~RtpEmbeddingOp() {

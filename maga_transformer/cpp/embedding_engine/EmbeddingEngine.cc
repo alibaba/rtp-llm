@@ -49,12 +49,12 @@ void EmbeddingEngine::loop() {
     }
 }
 
-th::Tensor EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features) {
+std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features) {
     auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
     embedding_stream->waitFinish();
-    return rtp_llm::EmbeddingQueryConverter::convertEmbeddingOutputs(embedding_stream);
+    return embedding_stream->embeddingOutput();
 }
 
 absl::Status EmbeddingEngine::trySaveStepError() const {
@@ -73,7 +73,13 @@ absl::Status EmbeddingEngine::step() {
         return absl::OkStatus();
     }
     try {
-        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        auto status = executor_->process(streams);
+        if (!status.ok()) {
+            for (auto& stream: streams) {
+                stream->setError(status.ToString());
+                FT_LOG_WARNING("error_stream_info: length: %d, exception: %s", stream->inputLength(), status.ToString().c_str());
+            }
+        }
     } catch (const exception& e) {
         FT_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), e.what());
         for (auto& stream: streams) {

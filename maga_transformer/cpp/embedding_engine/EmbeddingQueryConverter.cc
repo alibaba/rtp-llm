@@ -41,8 +41,4 @@ EmbeddingStreamPtr EmbeddingQueryConverter::convertEmbeddingInputs(
     return std::make_shared<EmbeddingStream>(input);
 }
 
-th::Tensor EmbeddingQueryConverter::convertEmbeddingOutputs(EmbeddingStreamPtr stream) {
-    return Buffer2torchTensor(stream->embeddingOutput()->output);
-}
-
 } // namespace rtp_llm

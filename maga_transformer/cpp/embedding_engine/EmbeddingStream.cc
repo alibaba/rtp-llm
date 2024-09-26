@@ -77,9 +77,17 @@ void EmbeddingStream::setStart() {
     generate_state_ = GenerateState::RUNNING;
 }
 
-void EmbeddingStream::updateOutput(ft::BufferPtr& output) {
+void EmbeddingStream::updateTensorOutput(torch::Tensor t) {
     lock_guard<mutex> lock(lock_);
-    embedding_output_->setOutput(output, 0);
+    embedding_output_->setTensorOutput(t);
+    generate_state_ = GenerateState::FINISHED;
+    reportMetrics();
+    cond_.notify_all();
+}
+
+void EmbeddingStream::updateMapOutput(std::vector<std::map<std::string, torch::Tensor>>& map) {
+    lock_guard<mutex> lock(lock_);
+    embedding_output_->setMapOutput(map);
     generate_state_ = GenerateState::FINISHED;
     reportMetrics();
     cond_.notify_all();

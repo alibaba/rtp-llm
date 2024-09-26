@@ -36,7 +36,8 @@ public:
 
     int64_t batchSize() const;
 
-    void updateOutput(ft::BufferPtr& output);
+    void updateTensorOutput(torch::Tensor t);
+    void updateMapOutput(std::vector<std::map<std::string, torch::Tensor>>& map);
 
     void setMetricReporter(const kmonitor::MetricsReporterPtr& metric_reporter);
 

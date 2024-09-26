@@ -35,14 +35,4 @@ void EmbeddingInput::checkVaild() {
     }
 }
 
-void EmbeddingOutput::setOutput(ft::BufferPtr& model_outputs, int64_t length) {
-    output = std::move(model_outputs);
-    input_length = length;
-}
-
-void EmbeddingOutput::setError(const std::string& error) {
-    this->error_info.has_error = true;
-    this->error_info.error_message = error;
-}
-
 }  // namespace rtp_llm

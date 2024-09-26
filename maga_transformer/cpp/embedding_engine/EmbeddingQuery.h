@@ -41,15 +41,37 @@ public:
     }
 };
 
-class EmbeddingOutput {
+class TypedOutput {
 public:
-    void setOutput(fastertransformer::BufferPtr& model_outputs, int64_t length);
-    void setError(const std::string& error);
+    void setTensorOuput(torch::Tensor t) {
+        isTensor = true;
+        this->t  = t;
+    }
+    void setMapOutput(std::vector<std::map<std::string, at::Tensor>>& m) {
+        isTensor  = false;
+        this->map = std::move(m);
+    }
 
-    ft::ConstBufferPtr output;
-    int64_t            input_length;
-    ErrorInfo          error_info;
+    bool                                             isTensor;
+    std::optional<at::Tensor>                        t;
+    std::optional<std::vector<std::map<std::string, at::Tensor>>> map;
 };
 
+class EmbeddingOutput {
+public:
+    void setTensorOutput(torch::Tensor t) {
+        output.setTensorOuput(t);
+    }
+    void setMapOutput(std::vector<std::map<std::string, torch::Tensor>>& m) {
+        output.setMapOutput(m);
+    }
+    void setError(const std::string& error) {
+        this->error_info.has_error     = true;
+        this->error_info.error_message = error;
+    }
+
+    TypedOutput output;
+    ErrorInfo   error_info;
+};
 
 }  // namespace rtp_llm

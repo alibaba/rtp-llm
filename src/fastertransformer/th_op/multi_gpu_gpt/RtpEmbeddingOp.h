@@ -29,7 +29,7 @@ public:
     ~RtpEmbeddingOp();
     void init(py::object model, py::object mm_process_engine);
     void stop();
-    th::Tensor decode(th::Tensor token_ids,
+    py::object decode(th::Tensor token_ids,
                       th::Tensor token_type_ids,
                       th::Tensor input_lengths,
                       int64_t request_id,
