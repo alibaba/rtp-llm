@@ -6,14 +6,20 @@ import traceback
 from filelock import FileLock, Timeout
 from typing import Tuple, Any, List
 from contextlib import ExitStack
+import platform
 
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
-        self.total_gpus = list(range(torch.cuda.device_count()))
-        gpus = os.environ.get('CUDA_VISIBLE_DEVICES')
-        if gpus is not None:
-            self.total_gpus = [int(id) for id in gpus.split(',')]
+
+        if platform.processor() != 'aarch64':
+            self.total_gpus = list(range(torch.cuda.device_count()))
+            gpus = os.environ.get('CUDA_VISIBLE_DEVICES')
+            if gpus is not None:
+                self.total_gpus = [int(id) for id in gpus.split(',')]
+        else:
+            # TODO: for arm cpu device, how to simulate gpu ?
+            self.total_gpus = [0, 1]
         logging.info(f"total gpu: {self.total_gpus}")
         self.gpu_ids = []
         self.gpu_locks = ExitStack()
