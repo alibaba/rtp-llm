@@ -46,7 +46,7 @@ class TestFuser(unittest.TestCase):
     @patch('requests.post')
     def test_umount_fuse_dir_success(self, mock_post):
         # Mock successful HTTP response and a previous successful mount
-        self.fuser._mount_src_map['/mnt/fuse/dummyhash'] = '/path/to/dir'
+        self.fuser._mount_src_map['/mnt/fuse/dummyhash'] = ('/path/to/dir', 1)
         mock_post.return_value = self.mock_response
 
         # Call the method
@@ -59,7 +59,7 @@ class TestFuser(unittest.TestCase):
     def test_umount_fuse_dir_failure(self, mock_post):
         # Mock failure HTTP response
         self.mock_response.json.return_value = {'errorCode': 1}
-        self.fuser._mount_src_map['/mnt/fuse/dummyhash'] = '/path/to/dir'
+        self.fuser._mount_src_map['/mnt/fuse/dummyhash'] = ('/path/to/dir',1)
         mock_post.return_value = self.mock_response
 
         with self.assertRaises(Exception) as cm:
@@ -71,16 +71,17 @@ class TestFuser(unittest.TestCase):
     def test_umount_all(self):
         # Setup some mounts
         self.fuser._mount_src_map = {
-            '/mnt/fuse/hash1': '/path/to/dir1',
-            '/mnt/fuse/hash2': '/path/to/dir2',
+            '/mnt/fuse/hash1': ('/path/to/dir1', 1),
+            '/mnt/fuse/hash2': ('/path/to/dir2', 1),
         }
 
         # Mock the umount_fuse_dir method to just remove the key from the map
-        def mock_umount(mnt_path):
+        def mock_umount(mnt_path: str, force: bool = False):
             self.fuser._mount_src_map.pop(mnt_path, None)
 
+
         with patch.object(Fuser, 'umount_fuse_dir', wraps=Fuser.umount_fuse_dir) as mock_func:
-            mock_func.side_effect = mock_umount
+            mock_func.side_effect = lambda mnt_path, force: mock_umount(mnt_path, force)
             # Call the method
             self.fuser.umount_all()
 

@@ -1,19 +1,19 @@
 import os
-import time
-import json
+import hashlib
 import logging
 import requests
-import hashlib
 import atexit
+import time
 import functools
-
-from urllib.parse import urlparse
 from typing import Optional
+from urllib.parse import urlparse
+import threading
 
 class RetryableError(Exception):
     pass
 
-def retry_with_timeout(timeout_seconds: int = 300, retry_interval: float = 1.0, exceptions: tuple = (requests.exceptions.RequestException, RetryableError)):
+def retry_with_timeout(timeout_seconds: int = 300, retry_interval: float = 1.0, 
+                       exceptions: tuple = (requests.exceptions.RequestException, RetryableError)):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -30,13 +30,12 @@ def retry_with_timeout(timeout_seconds: int = 300, retry_interval: float = 1.0, 
         return wrapper
     return decorator
 
-# Fuser is a wrapper class for c2 sidecar fuse.
-# see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
 class Fuser:
     def __init__(self) -> None:
         self._fuse_uri = "http://0:28006"
         self._fuse_path_prefix = "/mnt/fuse"
-        self._mount_src_map = {}
+        self._mount_src_map = {}  # Maps mount path to (original path, ref count)
+        self.lock = threading.RLock()  # 使用重入锁
         atexit.register(self.umount_all)
 
     @retry_with_timeout()
@@ -44,7 +43,7 @@ class Fuser:
         mnt_path = os.path.join(self._fuse_path_prefix, hashlib.md5(path.encode("utf-8")).hexdigest())
         req_json = {
             "uri": path,
-            "mountDir":mnt_path
+            "mountDir": mnt_path
         }
         logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")
         mount_result = requests.post(f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600).json()
@@ -52,12 +51,19 @@ class Fuser:
         if error_code != 0:
             raise RetryableError(f"mount {path} -> {mnt_path} failed: {mount_result}")
         logging.info(f"mount dir success: {path} -> {mnt_path}")
-        self._mount_src_map[mnt_path] = path
+        
+        with self.lock:
+            if mnt_path in self._mount_src_map:
+                # Increment reference count if already mounted
+                original_path, count = self._mount_src_map[mnt_path]
+                self._mount_src_map[mnt_path] = (original_path, count + 1)
+            else:
+                # Initialize reference count if first mount
+                self._mount_src_map[mnt_path] = (path, 1)
+
         return mnt_path
 
-    def umount_fuse_dir(self, mnt_path: str) -> bool:
-        if mnt_path not in self._mount_src_map:
-            raise Exception(f'{mnt_path} not mounted')
+    def _perform_umount(self, mnt_path: str) -> None:
         req_json = {
             "mountDir": mnt_path
         }
@@ -66,12 +72,38 @@ class Fuser:
         if error_code != 0:
             raise Exception(f"umount {mnt_path} failed: {umount_result}")
         logging.info(f"umount dir success: {mnt_path}")
-        mount_src = self._mount_src_map[mnt_path]
-        del self._mount_src_map[mnt_path]
 
-    def umount_all(self) -> None:
-        for mnt_path in self._mount_src_map.copy().keys():
-            self.umount_fuse_dir(mnt_path)
+    def umount_fuse_dir(self, mnt_path: str, force: bool = False) -> bool:
+        with self.lock:  # Ensure exclusive access to the mount source map
+            if mnt_path not in self._mount_src_map:
+                logging.info(f"{mnt_path} is not mounted.")
+                return
+
+            # If force is True, remove the entry regardless of the reference count
+            if force:
+                logging.info(f"Force unmounting {mnt_path}.")
+                self._perform_umount(mnt_path)
+                del self._mount_src_map[mnt_path]  # Remove the entry
+                return True
+            
+            # Decrease the reference count if not forcing
+            original_path, count = self._mount_src_map[mnt_path]
+            count -= 1
+            if count > 0:
+                # Still references left, do not umount
+                self._mount_src_map[mnt_path] = (original_path, count)
+                logging.info(f"Reference count for {mnt_path} is still {count}, skipping umount.")
+                return True
+
+            # Perform umount if reference count is zero
+            self._perform_umount(mnt_path)
+            del self._mount_src_map[mnt_path]  # Remove the entry once unmounted
+
+    def umount_all(self, force: bool = True) -> None:
+        # Only allow unmounting when there's no other operation ongoing
+        with self.lock:
+            for mnt_path in list(self._mount_src_map.keys()):
+                self.umount_fuse_dir(mnt_path, force=force)
 
 _fuser = Fuser()
 
@@ -81,3 +113,6 @@ def fetch_remote_file_to_local(path: str):
         return path
     else:
         return _fuser.mount_dir(path)
+
+def umount_file(path: str, force: bool = False):
+    _fuser.umount_fuse_dir(path, force=force)

@@ -9,7 +9,7 @@ from maga_transformer.models.base_model import ModelConfig
 from maga_transformer.tools.api.utils import handler_error
 from maga_transformer.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.fuser import fetch_remote_file_to_local
+from maga_transformer.utils.fuser import fetch_remote_file_to_local, umount_file
 from maga_transformer.tools.api.hf_model_helper import HF_MODEL_INFO_HELPER, HfModelInfo, HfModelInfoHelper
 
 def eval_model_size(env_params, model_type, model_path, ptuning_path):
@@ -56,7 +56,12 @@ def cacl_ft_model_size(req: Dict[str, Any]) -> int:
     if not model_type or not model_path:
         return handler_error(Exception.ERROR_INPUT_FORMAT_ERROR, "bad_input")
 
-    return eval_model_size(env_params, model_type, model_path, ptuning_path)
+    res = eval_model_size(env_params, model_type, model_path, ptuning_path)
+    if model_path:
+        umount_file(model_path)
+    if ptuning_path:
+        umount_file(ptuning_path)
+    return res
 
 
 from fastapi import APIRouter

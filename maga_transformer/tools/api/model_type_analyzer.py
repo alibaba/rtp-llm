@@ -9,7 +9,7 @@ from maga_transformer.tools.api.hf_model_helper import HF_MODEL_INFO_HELPER, HfM
 from maga_transformer.model_factory_register import ModelDict
 from maga_transformer.tools.api.utils import handler_error
 
-from maga_transformer.utils.fuser import fetch_remote_file_to_local
+from maga_transformer.utils.fuser import fetch_remote_file_to_local, umount_file
 
 
 GENERAL_HF_MODEL = "HuggingFacePipeline"
@@ -42,6 +42,8 @@ def _analyze_model_type(model_path):
         res = parse_hf_model_type(model_path)
     else:
         model_path = fetch_remote_file_to_local(model_path)
+        if model_path:
+            umount_file(model_path)
         res =  parse_ft_model_type(model_path)
 
     return {k: v for k, v in res.items() if v is not None}
