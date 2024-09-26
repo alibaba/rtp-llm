@@ -7,7 +7,6 @@
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
 
 namespace torch_ext {
 extern bool setLogLevel(const std::string& log_level);
@@ -264,7 +263,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     controller_->decrement();
 }
 
-void HttpApiServer::init_controller() {
+void HttpApiServer::init_controller(const ft::GptInitParameter& params) {
     bool block = autil::EnvUtil::getEnv("CONCURRENCY_WITH_BLOCK", false);
     if (params.tp_rank_ == 0) {
         int limit = autil::EnvUtil::getEnv("CONCURRENCY_LIMIT", 32);
@@ -309,17 +308,13 @@ bool HttpApiServer::registerEmbedding() {
     auto shared_this = shared_from_this();
     auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                      const http_server::HttpRequest&                  request) -> void {
-
-
-        if (!embedding_endpoint_.has_value()) {
+        if (!shared_this->embedding_endpoint_.has_value()) {
             FT_LOG_WARNING("non-embedding model can't handle embedding request!");
+                writer->SetStatus(503, "Service Unavailable");
+                writer->Write(R"({"detail":"this server has been shutdown"})");
             return;
         }
-        const auto& embedding_endpoint = embedding_endpoint_.value();
-        auto [response, logable_response] = embedding_endpoint.handle(request.GetBody());
-        if (logable_response.has_value()) {
-            // TODO: access log response
-        }
+        auto& embedding_endpoint = shared_this->embedding_endpoint_.value();
 
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
@@ -329,13 +324,29 @@ bool HttpApiServer::registerEmbedding() {
             writer->Write(R"({"detail":"this server has been shutdown"})");
             return;
         }
-        writer->Write(ToJsonString(response), /*isCompact=*/true);
+
+        try {
+            auto [response, logable_response] = embedding_endpoint.handle(request.GetBody());
+            if (logable_response.has_value()) {
+                // TODO: access log response
+                FT_LOG_WARNING("TODO: access log embedding model response");
+            }
+            writer->Write(response);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("embedding endpoint handle request failed, found python exception: %s", e.what());
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"embedding endpoint handle request failed"})");
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
+            writer->SetStatus(503, "Service Unavailable");
+            writer->Write(R"({"detail":"embedding endpoint handle request failed"})");
+        }
     };
 
     return http_server_.RegisterRoute("POST", "/v1/embeddings", callback)
            && http_server_.RegisterRoute("POST", "/v1/embeddings/similarity", callback)
            && http_server_.RegisterRoute("POST", "/v1/classifier", callback)
-           && http_server_.RegisterRoute("POST", "/v1/reranker", callback)
+           && http_server_.RegisterRoute("POST", "/v1/reranker", callback);
 }
 
 bool HttpApiServer::registerHealth() {
@@ -585,13 +596,14 @@ void HttpApiServer::stop() {
     }
     http_server_.Stop();
 }
-void HttpApiServer::~HttpApiServer() {
+
+HttpApiServer::~HttpApiServer() {
     stop();
 }
 
 // ------------------------------- EmbeddingEndpoint -------------------------------
 
-std::pair<EngineOutputs, std::optional<EngineOutputs>> EmbeddingEndpoint::handle(const std::string& body) {
+std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(const std::string& body) {
 
     // if isinstance(request, str):
     //     request = json.loads(request)
@@ -602,17 +614,11 @@ std::pair<EngineOutputs, std::optional<EngineOutputs>> EmbeddingEndpoint::handle
     // logable_response = await self.custom_model_.renderer.render_log_response(response)
     // return response, logable_response
 
-    try {
-        py::gil_scoped_acquire gil;
-        py::module json = py::module::import("json");
-        py::object request = json.attr("loads")(body);
-    } catch (const py::error_already_set& e) {
-        FT_LOG_WARNING("embedding endpoint handle request failed, found python exception: %s", e.what());
-    } catch (const std::exception& e) {
-        FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
-    }
+    py::gil_scoped_acquire gil;
+    py::module json = py::module::import("json");
+    py::object request = json.attr("loads")(body);
 
-    auto formated_request = py_render_.attr("render_request")(request)
+    auto formated_request = py_render_.attr("render_request")(request);
     auto batch_input = py_render_.attr("create_input")(formated_request);
 
     std::vector<MultimodalInput> mm_inputs;
@@ -622,19 +628,40 @@ std::pair<EngineOutputs, std::optional<EngineOutputs>> EmbeddingEndpoint::handle
     }
     py::list py_list = py::reinterpret_borrow<py::list>(py_mm_inputs);
     for (const auto& item : py_list) {
-        mm_inputs.emplace_back({py::cast<std::string>(item.attr("url")),
-                                        py::cast<int>(item.attr("mm_type"))});
+        mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
+                               py::cast<int>(item.attr("mm_type")));
     }
-    auto results = embedding_engine_->decode(py::cast<th::Tensor>(batch_input.attr("token_ids")),
+    std::optional<MultimodalFeature> multimodal_features = std::nullopt;
+    auto token_ids = py::cast<th::Tensor>(batch_input.attr("token_ids"));
+    if (mm_processor_ != nullptr && !mm_inputs.empty()) {
+        auto mm_res = mm_processor_->get_mm_features(ft::torchTensor2Buffer(token_ids), mm_inputs);
+        if (!mm_res.ok()) {
+            throw std::runtime_error(mm_res.status().ToString());
+        }
+        token_ids = ft::Buffer2torchTensor(mm_res.value().expanded_ids, true);
+        multimodal_features.emplace(mm_res.value());
+    }
+    auto results = embedding_engine_->decode(token_ids,
                                              py::cast<th::Tensor>(batch_input.attr("token_type_ids")),
                                              py::cast<th::Tensor>(batch_input.attr("input_lengths")),
                                              /*request_id=*/0,
-                                             mm_inputs);
+                                             multimodal_features);
+
     py::module embedding_interface = py::module::import("maga_transformer.async_decoder_engine.embedding.interface");
-    py::object batch_output = embedding_interface.attr("EngineOutputs")(results, batch_input.attr("input_length"));
-    batch_output.attr("outputs") = results;
-    batch_output.input_length = batch_input.input_length;
+    py::object batch_output = embedding_interface.attr("EngineOutputs")();
+    batch_output.attr("outputs") = py::cast(results);
+    batch_output.attr("input_length") = batch_input.attr("input_length");
+
     auto response = py_render_.attr("render_response")(formated_request, batch_input, batch_output);
+    auto logable_response = py_render_.attr("render_log_response")(response);
+    if (logable_response.is_none()) {
+        auto json_response = json.attr("dumps")(response);
+        return std::make_pair(py::cast<std::string>(json_response), std::nullopt);
+    } else {
+        auto json_response = json.attr("dumps")(response);
+        auto json_logable_response = json.attr("dumps")(logable_response);
+        return std::make_pair(py::cast<std::string>(json_response), py::cast<std::string>(logable_response));
+    }
 }
 
 // ------------------------------- Pipeline -------------------------------

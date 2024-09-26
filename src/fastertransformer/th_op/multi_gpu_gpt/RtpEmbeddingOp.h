@@ -29,22 +29,26 @@ public:
     ~RtpEmbeddingOp();
     void init(py::object model, py::object mm_process_engine);
     void stop();
-    void startRpcServer(const ft::GptInitParameter& gpt_init_params,
-                        py::object py_render,
-                        kmonitor::MetricsReporterPtr reporter);
-
     th::Tensor decode(th::Tensor token_ids,
                       th::Tensor token_type_ids,
                       th::Tensor input_lengths,
                       int64_t request_id,
                       std::vector<rtp_llm::MultimodalInput> multimodal_inputs = {});
+private:
+    void startRpcServer(const ft::GptInitParameter& gpt_init_params,
+                        py::object py_render,
+                        kmonitor::MetricsReporterPtr reporter);
 
+    void startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,
+                         std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
+                         const ft::GptInitParameter&                   gpt_init_params,
+                         py::object                                    py_render);
 private:
     // need to be shared to pass into rpc service
     std::shared_ptr<rtp_llm::EmbeddingEngine> embedding_engine_;
     std::unique_ptr<rtp_llm::ArpcServerWrapper> embedding_rpc_service_;
-    std::unique_ptr<rtp_llm::HttpApiServer http_server_;
-    std::unique_ptr<rtp_llm::MultimodalProcessor> mm_processor_ = nullptr;
+    std::unique_ptr<rtp_llm::HttpApiServer> http_server_;
+    std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor_ = nullptr;
 
     std::atomic<bool>            is_server_shutdown_{false};
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

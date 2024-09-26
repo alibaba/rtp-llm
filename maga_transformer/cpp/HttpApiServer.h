@@ -4,7 +4,10 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/http_server/http_server/HttpServer.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
+#include "maga_transformer/cpp/embedding_engine/EmbeddingEngine.h"
+#include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
 
 namespace rtp_llm {
 
@@ -12,17 +15,21 @@ class TokenizerEncodeResponse;
 
 class EmbeddingEndpoint {
 public:
-    EmbeddingEngine(std::shared_ptr<EmbeddingEngine> embedding_engine, py::object py_render):
-        py_render_(py_render), embedding_engine_(embedding_engine) {
+    EmbeddingEndpoint(std::shared_ptr<EmbeddingEngine>     embedding_engine,
+                      std::shared_ptr<MultimodalProcessor> mm_processor,
+                      py::object                           py_render):
+        py_render_(py_render), embedding_engine_(embedding_engine), mm_processor_(mm_processor) {
     }
-    std::pair<EngineOutputs, std::optional<EngineOutputs>> handle(const std::string& body);
+    std::pair<std::string, std::optional<std::string>> handle(const std::string& body);
 private:
     py::object py_render_;
     std::shared_ptr<EmbeddingEngine> embedding_engine_;
+    std::shared_ptr<MultimodalProcessor> mm_processor_ = nullptr;
 };
 
 class Pipeline {
 public:
+    Pipeline() = default;
     Pipeline(py::object token_processor): token_processor_(token_processor) {}
     std::string        decode(std::vector<int> token_ids);
     std::vector<int>   encode(std::string prompt);
@@ -45,10 +52,11 @@ public:
     }
 
     // embedding engine
-    HttpApiServer(std::shared_ptr<EmbeddingEngine> embedding_engine,
-                  const ft::GptInitParameter&      gpt_init_params,
-                  py::object                       py_render):
-            params_(params), embedding_endpoint_(EmbeddingEndpoint(embedding_engine, py_render)) {
+    HttpApiServer(std::shared_ptr<EmbeddingEngine>              embedding_engine,
+                  std::shared_ptr<MultimodalProcessor> mm_processor,
+                  const ft::GptInitParameter&                   params,
+                  py::object                                    py_render):
+            params_(params), embedding_endpoint_(EmbeddingEndpoint(embedding_engine, mm_processor, py_render)) {
 
         init_controller(params);
     }
@@ -59,13 +67,14 @@ public:
     bool start(std::string addrSpec) {
         return http_server_.Start(addrSpec);
     }
-    void               stop();
-    void               registerResponses();
-    static std::string SseResponse(std::string& response) {
-        return "data: " + response + "\n\n";
-    }
+    void stop();
     bool isStopped() const {
         return is_stopped_.load();
+    }
+
+    void registerResponses();
+    static std::string SseResponse(std::string& response) {
+        return "data: " + response + "\n\n";
     }
 
 private:

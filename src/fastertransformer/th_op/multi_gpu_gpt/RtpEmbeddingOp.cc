@@ -36,7 +36,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
                 params.gpt_init_parameter.max_seq_len_));
         }
         startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
-        startHttpServer(embedding_engine_, gpt_init_parameter, py_render);
+        startHttpServer(embedding_engine_, mm_processor_, gpt_init_params, py_render);
     } catch (const std::exception& e) {
         FT_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
@@ -53,12 +53,14 @@ void RtpEmbeddingOp::stop() {
     }
 }
 
-void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine> embedding_engine,
-                                     const ft::GptInitParameter&               gpt_init_params,
-                                     py::object                                py_render) {
-    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, gpt_init_parameter, py_render));
+void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,
+                                     std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
+                                     const ft::GptInitParameter&                   gpt_init_params,
+                                     py::object                                    py_render) {
+
+    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, mm_processor, gpt_init_params, py_render));
     http_server_->registerResponses();
-    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(gpt_init_parameter.http_port_));
+    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(gpt_init_params.http_port_));
     if (http_server_->start(http_server_address)) {
         FT_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
     } else {
@@ -93,7 +95,7 @@ th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids,
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.status().ToString());
         }
-        token_ids = fastertransformer::Buffer2torchTensor(mm_res.value().expanded_ids, true);
+        token_ids = ft::Buffer2torchTensor(mm_res.value().expanded_ids, true);
         multimodal_features.emplace(mm_res.value());
     }
     return embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
