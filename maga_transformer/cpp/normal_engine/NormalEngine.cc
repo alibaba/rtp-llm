@@ -98,7 +98,7 @@ void NormalEngine::initLoadBalance() {
     fake_input->generate_config->max_new_tokens = 3;
     fake_input->generate_config->top_k = 1;
     auto stream = enqueue(fake_input);
-    while(!stream->finished()) {
+    while(!stream->finished() && !stream->stopped()) {
         FT_LOG_INFO("wait load balance int run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -188,7 +188,7 @@ absl::Status NormalEngine::step() {
     if (device_->getDeviceProperties().tp_rank == 0) {
         if (scheduler_->empty() || step_recorder_.empty()) {
             step_recorder_.reset();
-            step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
+            step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
         }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
@@ -205,7 +205,7 @@ absl::Status NormalEngine::step() {
                 step_recorder_.addStepCount(stream->iterCount());
             }
         }
-        step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
+        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
     }
     return status;
 }

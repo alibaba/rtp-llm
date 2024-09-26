@@ -30,6 +30,7 @@ public:
 
 private:
     size_t       warmUp();
+    void         initLoadBalance();
     absl::Status step();
     absl::Status startLoop();
     void         loop();
@@ -40,7 +41,9 @@ private:
                                int64_t                         propose_begin_time_us,
                                int64_t                         score_begin_time_us,
                                int64_t                         sampler_begin_time_us,
-                               int64_t                         update_begin_time_us);
+                               int64_t                         update_begin_time_us,
+                               int64_t                         total_propose_token_num,
+                               int64_t                         total_accepted_token_num);
 
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;
@@ -58,6 +61,7 @@ private:
     std::thread       loop_thread_;
     std::atomic<bool> running_{false};
     ResourceContext   resource_context_;
+    StepRecorder      step_recorder_;
 };
 
 }  // namespace rtp_llm

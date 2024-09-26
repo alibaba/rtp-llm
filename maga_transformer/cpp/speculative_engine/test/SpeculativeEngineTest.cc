@@ -9,7 +9,6 @@
 #include <memory>
 
 using namespace std;
-namespace W  = ft::W;
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
@@ -162,7 +161,7 @@ TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 98);
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
         query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);

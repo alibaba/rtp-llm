@@ -33,17 +33,22 @@ absl::Status SpeculativeEngine::init() {
     if (score_model_params_.gpt_init_parameter.warm_up_) {
         // warm up
         const ft::GptInitParameter& score_gpt_params = score_model_params_.gpt_init_parameter;
-        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", score_gpt_params.max_context_batch_size_, score_gpt_params.max_seq_len_, int(score_gpt_params.warm_up_with_loss_));
+        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
+                    score_gpt_params.max_context_batch_size_,
+                    score_gpt_params.max_seq_len_,
+                    int(score_gpt_params.warm_up_with_loss_));
         max_left_free_bytes = warmUp();
         if (max_left_free_bytes > 1024L * 1024 * 1024) {
-            max_left_free_bytes -= 128L * 1024 * 1024; // just reserve 128M for other, maybe can rm
+            max_left_free_bytes -= 128L * 1024 * 1024;  // just reserve 128M for other, maybe can rm
         }
-        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld", max_left_free_bytes, device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes);
+        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld",
+                    max_left_free_bytes,
+                    device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes);
     }
     RETURN_IF_STATUS_ERROR(initCacheManager());
     FT_LOG_INFO("create cache manager done");
-    propose_executor_ =
-        createProposeExecutor(propose_model_params_, device_, resource_context_.propose_cache_manager, getLoraManager());
+    propose_executor_ = createProposeExecutor(
+        propose_model_params_, device_, resource_context_.propose_cache_manager, getLoraManager());
     FT_LOG_INFO("create speculative executor done");
     score_executor_.reset(
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
@@ -55,12 +60,37 @@ absl::Status SpeculativeEngine::init() {
     FT_LOG_INFO("create online adaptor");
     speculative_sampler_ = createSpeculativeSampler(propose_model_params_, device_);
     FT_LOG_INFO("create speculative sampler");
-    speculative_updater_.reset(new SpeculativeUpdater(resource_context_, createSpeculativeUpdaterConfig(propose_model_params_)));
-    return startLoop();
+    speculative_updater_.reset(
+        new SpeculativeUpdater(resource_context_, createSpeculativeUpdaterConfig(propose_model_params_)));
+    RETURN_IF_STATUS_ERROR(startLoop());
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        initLoadBalance();
+    }
+    return absl::OkStatus();
 }
 
-absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
-    std::shared_ptr<GenerateStream> score_stream = std::make_shared<NormalGenerateStream>(generate_input, score_model_params_.gpt_init_parameter, resource_context_, nullptr);
+void SpeculativeEngine::initLoadBalance() {
+    FT_LOG_INFO("init load balance start");
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
+    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
+    fake_input->generate_config                 = make_shared<GenerateConfig>();
+    fake_input->generate_config->max_new_tokens = 3;
+    fake_input->generate_config->top_k          = 1;
+    auto stream                                 = enqueue(fake_input);
+    while (!stream->finished() && !stream->stopped()) {
+        FT_LOG_INFO("wait load balance int run over for 1s");
+        this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
+                step_recorder_.getStepPerMin(),
+                step_recorder_.getStepLatency());
+}
+
+absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
+                                                            preRunMode                            mode) {
+    std::shared_ptr<GenerateStream> score_stream = std::make_shared<NormalGenerateStream>(
+        generate_input, score_model_params_.gpt_init_parameter, resource_context_, nullptr);
     std::shared_ptr<GenerateStream> propose_stream = nullptr;
     if (mode == preRunMode::warm_up) {
         score_stream->setPerfTest(true);
@@ -91,7 +121,8 @@ absl::Status SpeculativeEngine::initCacheManager() {
         auto scorer_cache_config        = std::get<0>(config);
         auto proposer_cache_config      = std::get<1>(config);
         resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, metrics_reporter_);
-        resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config, device_, metrics_reporter_);
+        resource_context_.propose_cache_manager =
+            make_shared<CacheManager>(proposer_cache_config, device_, metrics_reporter_);
     } else {
         CHECK_AND_RETURN_CONST_REF(config, CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter));
         resource_context_.cache_manager = make_shared<CacheManager>(config, device_, metrics_reporter_);
@@ -100,13 +131,14 @@ absl::Status SpeculativeEngine::initCacheManager() {
 }
 
 size_t SpeculativeEngine::warmUp() {
-    const ft::GptInitParameter& socre_gpt_params = score_model_params_.gpt_init_parameter;
-    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)socre_gpt_params.max_seq_len_ - 1}, ft::AllocationType::HOST});
+    const ft::GptInitParameter&    socre_gpt_params = score_model_params_.gpt_init_parameter;
+    std::shared_ptr<GenerateInput> fake_input       = make_shared<GenerateInput>();
+    fake_input->input_ids                           = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {(size_t)socre_gpt_params.max_seq_len_ - 1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
-    fake_input->generate_config               = make_shared<GenerateConfig>();
+    fake_input->generate_config                       = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = socre_gpt_params.max_context_batch_size_;
-    fake_input->generate_config->calculate_loss = int(socre_gpt_params.warm_up_with_loss_);
+    fake_input->generate_config->calculate_loss       = int(socre_gpt_params.warm_up_with_loss_);
     device_->setTraceMemory(true);
 
     score_executor_.reset(new ScoreExecutor(score_model_params_, device_, nullptr, nullptr, true));
@@ -128,8 +160,9 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
         return absl::OkStatus();
     }
     resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
-    CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(
-        score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
+    CHECK_AND_RETURN_REF(system_prompt_param,
+                         SystemPromptConstructor::construct(
+                             score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
     if (!system_prompt_param.empty()) {
         resource_context_.reuse_cache = true;
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
@@ -139,14 +172,11 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
 
 LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo() {
     auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
-    return LoadBalanceInfo{
-        (int64_t)0,
-        (int64_t)0,
-        (int64_t)0,
-        (int64_t)kv_cache_info.available_kv_cache,
-        (int64_t)kv_cache_info.total_kv_cache
-    };
-
+    return LoadBalanceInfo{(int64_t)step_recorder_.getStepLatency(),
+                           (int64_t)step_recorder_.getStepCount(),
+                           (int64_t)step_recorder_.getStepPerMin(),
+                           (int64_t)kv_cache_info.available_kv_cache,
+                           (int64_t)kv_cache_info.total_kv_cache};
 }
 
 absl::Status SpeculativeEngine::startLoop() {
@@ -197,18 +227,23 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr
 
 absl::Status SpeculativeEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+
     // dynamic adjust propose_executor
     online_adaptor_->dynamicUpdateProposerConfig(propose_executor_, scheduler_);
 
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
+        if (scheduler_->empty() || step_recorder_.empty()) {
+            step_recorder_.reset();
+            step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), propose_executor_->reserveStep() / 2);
+        }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(propose_executor_->reserveStep()));
         if (streams.empty()) {
             return absl::OkStatus();
         }
     }
 
-    for (auto& stream: streams) {
+    for (auto& stream : streams) {
         FT_LOG_DEBUG("pre stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
@@ -228,36 +263,62 @@ absl::Status SpeculativeEngine::step() {
         int64_t update_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         RETURN_IF_STATUS_ERROR(speculative_updater_->update(streams, sampler_output));
 
-        for (auto& stream: streams) {
-           FT_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        for (auto& stream : streams) {
+            FT_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
         }
-        reportMetrics(sampler_output, propose_begin_time_us, score_begin_time_us, sampler_begin_time_us, update_begin_time_us);
+
+        int64_t total_propose_token_num  = 0;
+        int64_t total_accepted_token_num = 0;
+        for (const auto& output : sampler_output.outputs) {
+            total_propose_token_num += output.propose_step;
+            total_accepted_token_num += output.accepted_token_nums;
+        }
+
+        reportMetrics(sampler_output,
+                      propose_begin_time_us,
+                      score_begin_time_us,
+                      sampler_begin_time_us,
+                      update_begin_time_us,
+                      total_propose_token_num,
+                      total_accepted_token_num);
+
+        for (auto& stream : streams) {
+            if (stream->finished()) {
+                step_recorder_.addStepCount(stream->iterCount());
+            }
+        }
+        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), total_accepted_token_num / streams.size());
     }
 
     return absl::OkStatus();
 }
 
-void SpeculativeEngine::reportMetrics(const SpeculativeSamplerOutput& sampler_output, int64_t propose_begin_time_us, int64_t score_begin_time_us, int64_t sampler_begin_time_us, int64_t update_begin_time_us) {
+void SpeculativeEngine::reportMetrics(const SpeculativeSamplerOutput& sampler_output,
+                                      int64_t                         propose_begin_time_us,
+                                      int64_t                         score_begin_time_us,
+                                      int64_t                         sampler_begin_time_us,
+                                      int64_t                         update_begin_time_us,
+                                      int64_t                         total_propose_token_num,
+                                      int64_t                         total_accepted_token_num) {
     if (!metrics_reporter_) {
         return;
     }
 
-    int64_t        total_propose_token_num = 0;
-    int64_t        total_accepted_token_num = 0;
-
-    for (const auto& output : sampler_output.outputs) {
-        total_propose_token_num += output.propose_step;
-        total_accepted_token_num += output.accepted_token_nums;
-    }
-
-    int64_t current_time = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t propose_time = score_begin_time_us - propose_begin_time_us;
-    int64_t score_time = sampler_begin_time_us - score_begin_time_us;
-    int64_t sampler_time = update_begin_time_us - sampler_begin_time_us;
-    int64_t update_time = current_time - update_begin_time_us;
-    int64_t total_step_time = current_time - propose_begin_time_us;
-    RtpLLMSpeculativeEngineMetricsCollector collector{total_step_time, propose_time, score_time, sampler_time, update_time, total_propose_token_num, total_accepted_token_num};
-    metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(nullptr, &collector);
+    int64_t                                 current_time    = autil::TimeUtility::currentTimeInMicroSeconds();
+    int64_t                                 propose_time    = score_begin_time_us - propose_begin_time_us;
+    int64_t                                 score_time      = sampler_begin_time_us - score_begin_time_us;
+    int64_t                                 sampler_time    = update_begin_time_us - sampler_begin_time_us;
+    int64_t                                 update_time     = current_time - update_begin_time_us;
+    int64_t                                 total_step_time = current_time - propose_begin_time_us;
+    RtpLLMSpeculativeEngineMetricsCollector collector{total_step_time,
+                                                      propose_time,
+                                                      score_time,
+                                                      sampler_time,
+                                                      update_time,
+                                                      total_propose_token_num,
+                                                      total_accepted_token_num};
+    metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(nullptr,
+                                                                                                       &collector);
 }
 
 }  // namespace rtp_llm

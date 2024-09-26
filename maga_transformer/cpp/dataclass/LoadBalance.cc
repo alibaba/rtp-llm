@@ -36,19 +36,18 @@ void PIController::reset() {
 
 size_t StepRecorder::getStepPerMin() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (step_time_records_.size() < 2) {
+    if (step_records_.size() < 2) {
         return STEP_RECORDS_TIME_RANGE / min_step_latency_;
     }
-    const auto range = step_time_records_.back() - step_time_records_.front();
-    return (step_time_records_.size() - 1) * STEP_RECORDS_TIME_RANGE / range;
+    return STEP_RECORDS_TIME_RANGE / getIntervalPerStepLatency();
 }
 
 size_t StepRecorder::getStepLatency() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (step_time_records_.size() < 2) {
+    if (step_records_.size() < 2) {
         return min_step_latency_;
     }
-    return (step_time_records_.back() - step_time_records_.front()) / (step_time_records_.size() - 1);
+    return getIntervalPerStepLatency();
 }
 
 size_t StepRecorder::getStepCount() {
@@ -61,37 +60,41 @@ void StepRecorder::addStepCount(size_t step_count) {
     step_count_controller_.addTarget(step_count);
 }
 
-void StepRecorder::addStepTime(size_t step_time_us) {
+void StepRecorder::registerStep(size_t step_time_us, size_t batch_avg_gen_num) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!step_time_records_.empty()) {
-        if (step_time_us < step_time_records_.back()) {
+    if (!step_records_.empty()) {
+        if (step_time_us < step_records_.back().time_us) {
             FT_LOG_ERROR("step time not in order");
             return;
         }
-        min_step_latency_ = std::min(min_step_latency_, step_time_us - step_time_records_.back());
+        min_step_latency_ = std::min(
+            min_step_latency_,
+            (size_t)((step_time_us - step_records_.back().time_us) * 1.0 / ((batch_avg_gen_num + step_records_.back().batch_avg_gen_num) / 2.0)));
     }
-    step_time_records_.push(step_time_us);
-    while (step_time_records_.size() > STEP_RECORDS_MAX_SIZE
-           || step_time_us - step_time_records_.front() > STEP_RECORDS_TIME_RANGE) {
-        step_time_records_.pop();
+    step_records_.push({step_time_us, batch_avg_gen_num});
+    queue_total_gen_num_ += batch_avg_gen_num;
+    while (step_records_.size() > STEP_RECORDS_MAX_SIZE
+           || step_time_us - step_records_.front().time_us > STEP_RECORDS_TIME_RANGE) {
+        queue_total_gen_num_ -= step_records_.front().batch_avg_gen_num;
+        step_records_.pop();
     }
-    if (step_time_records_.size() > 1) {
-        avg_latency_controller_.addTarget((step_time_records_.back() - step_time_records_.front()) * 1.0
-                                          / step_time_records_.size());
+    if (step_records_.size() > 1) {
+        avg_latency_controller_.addTarget(getIntervalPerStepLatency());
     }
 }
 
 void StepRecorder::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
-    while (!step_time_records_.empty()) {
-        step_time_records_.pop();
+    while (!step_records_.empty()) {
+        step_records_.pop();
     }
+    queue_total_gen_num_ = 0;
     avg_latency_controller_.reset();
 }
 
 bool StepRecorder::empty() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return step_time_records_.empty();
+    return step_records_.empty();
 }
 
 void registerLoadBalanceInfo(const py::module& m) {
