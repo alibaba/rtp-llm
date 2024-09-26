@@ -321,10 +321,6 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
     return ffnout;
 }
 
-void CpuDevice::sampleGreedy(const GreedyParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 void CpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
