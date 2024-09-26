@@ -73,7 +73,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     } else {
         checkUseTrtV1FMHA();
         checkUseTrtV2FMHA();
-        checkUseOpenSourceFMHA();
+        checkUseOpenSourceFMHA(params.tokens_per_block);
     }
     checkUseMultiBlockMode();
     checkUseGroupGemm();
@@ -180,6 +180,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
+    fmha_type_ = FMHAType::NONE;
     if (params.dtype == DataType::TYPE_FP32) {
         fmha_type_ = FMHAType::NONE;
         output.need_mask = true;
@@ -232,7 +233,7 @@ void CudaDevice::bufMemset(Buffer& buf, int val) {
     }
 }
 
-void CudaDevice::checkUseOpenSourceFMHA() {
+void CudaDevice::checkUseOpenSourceFMHA(size_t tokens_per_block) {
     if (!(is_sm8x() || is_sm90())) {
         FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
         return;
@@ -249,6 +250,10 @@ void CudaDevice::checkUseOpenSourceFMHA() {
     char* paged_fmha_env = std::getenv("ENABLE_PAGED_OPEN_SOURCE_FMHA");
     if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
         FT_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
+        return;
+    }
+    if (tokens_per_block % 256 != 0) {
+        FT_LOG_INFO("Paged open source FMHA is disabled since tokens_per_block % 256 != 0");
         return;
     }
     FT_LOG_INFO("use opensource fmha paged");

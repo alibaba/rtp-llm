@@ -20,6 +20,7 @@ void EngineBase::initDevices(const EngineInitParams& params) {
     default_device_params.device_id   = params.gpt_init_parameter.local_rank_;
     default_device_params.master_ip   = params.gpt_init_parameter.nccl_ip_;
     default_device_params.master_port = params.gpt_init_parameter.nccl_port_;
+    default_device_params.tokens_per_block = params.gpt_init_parameter.seq_size_per_block_;
     int max_batch_size =
         params.gpt_init_parameter.max_context_batch_size_ + params.gpt_init_parameter.max_generate_batch_size_;
     default_device_params.max_batch_size =
