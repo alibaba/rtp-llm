@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
@@ -26,14 +27,22 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
         // warm up
         FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
         max_left_free_bytes = warmUp(params);
+        size_t max_runtime_buffer = device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes;
+        size_t other_reserve_mem = 0;
+        size_t sample_need_mem = (size_t)params_.max_generate_batch_size_ * params_.vocab_size_ * 4 * 8; // just estimated value
+        if (sample_need_mem > max_runtime_buffer) {
+            other_reserve_mem = std::min(sample_need_mem - max_runtime_buffer, (size_t)2048 * 1024 * 1024); // not allow to large than 2G
+        }
         if (max_left_free_bytes > 1024L * 1024 * 1024) {
             if (params_.is_multimodal_) {
-                max_left_free_bytes -= 1024L * 1024 * 1024; // just reserve 1024M for vit
+                other_reserve_mem += 1024L * 1024 * 1024; // just reserve 1024M for vit
             } else {
-                max_left_free_bytes -= 128L * 1024 * 1024; // just reserve 128M for other, maybe can rm
+                other_reserve_mem += (size_t)128 * 1024 * 1024; // just reserve 128M for other, maybe can rm
             }
         }
-        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld", max_left_free_bytes, device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes);
+        FT_CHECK_WITH_INFO(max_left_free_bytes > other_reserve_mem, "max_left_free_bytes %ld need to be larger than other_reserve_mem %ld", max_left_free_bytes, other_reserve_mem);
+        max_left_free_bytes -= other_reserve_mem;
+        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld", max_left_free_bytes, other_reserve_mem + max_runtime_buffer);
     }
     initCacheManager(max_left_free_bytes);
     FT_LOG_INFO("create cache manager done");
