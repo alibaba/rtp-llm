@@ -6,11 +6,6 @@ import threading
 from enum import IntEnum
 from io import BytesIO
 from typing import Any, Callable, Optional
-try:
-    from decord import VideoReader, cpu
-except ModuleNotFoundError:
-    VideoReader = None
-    cpu = None
 from PIL import Image
 
 from maga_transformer.utils.lru_dict import LruDict
@@ -40,15 +35,25 @@ class MultimodalInput:
 
 
 def get_bytes_io_from_url(url: str):
-    if url.startswith("http") or url.startswith("https"):
-        return BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)
-    elif url.startswith("oss"):
-        return get_bytes_io_from_oss_path(url)
+    cached_res = url_data_cache_.check_cache(url)
+    if cached_res is None:
+        try:
+            if url.startswith("http") or url.startswith("https"):
+                res = BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)
+            elif url.startswith("oss"):
+                res = get_bytes_io_from_oss_path(url)
+            else:
+                # treat url as local path
+                with open(url, "rb") as fh:
+                    buf = BytesIO(fh.read())
+                res = buf
+        except Exception as e:
+            raise Exception(f"download and load {url} error, exception {e}")
+        url_data_cache_.insert_cache(url, res)
+        return res
     else:
-        # treat url as local path
-        with open(url, "rb") as fh:
-            buf = BytesIO(fh.read())
-        return buf
+        cached_res.seek(0)
+        return cached_res
 
 class MMDataCache(object):
     def __init__(self, cache_size: int = 10):
@@ -74,34 +79,3 @@ class MMDataCache(object):
 
 vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '10')))
 url_data_cache_ = MMDataCache(100)
-
-def encode_video(video_path, max_num_frames: int = 32):
-    def uniform_sample(l, n):
-        gap = len(l) / n
-        idxs = [int(i * gap + gap / 2) for i in range(n)]
-        return [l[i] for i in idxs]
-
-    vr = VideoReader(video_path, ctx=cpu(0))
-    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
-    frame_idx = [i for i in range(0, len(vr), sample_fps)]
-    if len(frame_idx) > max_num_frames:
-        frame_idx = uniform_sample(frame_idx, max_num_frames)
-    frames = vr.get_batch(frame_idx).asnumpy()
-    frames = [Image.fromarray(v.astype('uint8')) for v in frames]
-    return frames
-
-def get_url_data_with_cache(url: str, type: MMUrlType):
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
-        try:
-            bytes_io = get_bytes_io_from_url(url)
-            if type == MMUrlType.IMAGE:
-                data = Image.open(bytes_io).convert("RGB")
-            else:
-                data = encode_video(bytes_io)
-        except Exception as e:
-            raise Exception(f"download and load {url} error, exception {e}")
-        url_data_cache_.insert_cache(url, data)
-        return data
-    else:
-        return cached_res

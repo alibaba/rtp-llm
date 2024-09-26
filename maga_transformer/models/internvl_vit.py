@@ -1,7 +1,11 @@
 from typing import List, Optional, Tuple, Union, Dict, Any
 
 from PIL import Image
-from decord import VideoReader, cpu
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
 
 import os
 import copy

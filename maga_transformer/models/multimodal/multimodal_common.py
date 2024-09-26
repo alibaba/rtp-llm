@@ -14,6 +14,9 @@ from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
                                                     get_bytes_io_from_url,
                                                     MMUrlType)
 
+import threading
+mm_lock = threading.Lock()
+
 class ImageTransform:
 
     def __init__(self, image_size: int):
@@ -45,7 +48,8 @@ class MultiModalEmbeddingInterface:
                 mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type)
             except Exception as e:
                 raise Exception(f"multimodal process for {url} error, exception {e}")
-            features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs)
+            with mm_lock:
+                features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs)
             if isinstance(features, tuple):
                 features = (features[0].to(dtype).contiguous(), features[1].contiguous())
             else:

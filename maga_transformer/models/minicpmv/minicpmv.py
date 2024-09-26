@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Tuple, Union
 
 import torch
+from PIL import Image
 from transformers import AutoTokenizer, AutoProcessor
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
@@ -10,13 +11,33 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
-from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface, mm_lock 
 from maga_transformer.utils.multimodal_util import MMUrlType
 from maga_transformer.models.minicpmv.modeling_navit_siglip import SiglipVisionTransformer, SiglipVisionConfig
 from maga_transformer.models.minicpmv.resampler import Resampler
 from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
-from maga_transformer.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_url_data_with_cache
+from maga_transformer.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_bytes_io_from_url
 
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
+
+def encode_video(video_path, max_num_frames: int = 32):
+    def uniform_sample(l, n):
+        gap = len(l) / n
+        idxs = [int(i * gap + gap / 2) for i in range(n)]
+        return [l[i] for i in idxs]
+
+    vr = VideoReader(video_path, ctx=cpu(0))
+    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
+    frame_idx = [i for i in range(0, len(vr), sample_fps)]
+    if len(frame_idx) > max_num_frames:
+        frame_idx = uniform_sample(frame_idx, max_num_frames)
+    frames = vr.get_batch(frame_idx).asnumpy()
+    frames = [Image.fromarray(v.astype('uint8')) for v in frames]
+    return frames
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
@@ -41,17 +62,25 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
-            cached_url_res = get_url_data_with_cache(url, mm_type)
-            features = self.mm_process(cached_url_res,
-                                       device,
-                                       mm_type=mm_type,
-                                       **kwargs)
+            cached_url_res = get_bytes_io_from_url(url)
+            cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
+            with mm_lock:
+                features = self.mm_process(cached_url_res,
+                                        device,
+                                        mm_type=mm_type,
+                                        **kwargs)
             if isinstance(features, list):
-                features = [f.to(dtype).contiguous() for f in features]
+                features = torch.stack(features).to(dtype).contiguous()
             vit_emb_cache_.insert_cache(url, features)
             return features
         else:
             return cached_res
+        
+    def _mm_preprocess(self, data, type, **kwargs):
+        if type == MMUrlType.IMAGE:
+            return Image.open(data).convert("RGB")
+        elif type == MMUrlType.VIDEO:
+            return encode_video(data)
 
     @torch.inference_mode()
     def mm_process(self, mm_input, device, **kwargs):

@@ -1,5 +1,6 @@
 import copy
 from typing import List
+from PIL import Image
 from transformers import PreTrainedTokenizerBase, AutoProcessor
 
 from maga_transformer.openai.api_datatype import (ChatMessage,
@@ -10,7 +11,8 @@ from maga_transformer.openai.renderers.custom_renderer import (
     CustomChatRenderer, RendererParams, RenderedInputs)
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.multimodal_util import (MMUrlType,
-                                                    get_url_data_with_cache)
+                                                    get_bytes_io_from_url)
+from maga_transformer.models.minicpmv.minicpmv import encode_video
 
 
 class MiniCPMVConversation():
@@ -41,19 +43,18 @@ class MiniCPMVConversation():
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         urls.append(content_part.image_url.url)
-                        data = get_url_data_with_cache(
-                            content_part.image_url.url, MMUrlType.IMAGE)
+                        data = get_bytes_io_from_url(content_part.image_url.url)
+                        data = Image.open(data).convert("RGB")
                         images.append(data)
                         cur_msgs.append("(<image>./</image>)")
                         types.append(MMUrlType.IMAGE)
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert (content_part.video_url != None)
                         urls.append(content_part.video_url.url)
-                        data = get_url_data_with_cache(
-                            content_part.video_url.url, MMUrlType.VIDEO)
+                        data = get_bytes_io_from_url(content_part.video_url.url)
+                        data = encode_video(data)
                         images.extend(data)
-                        cur_msgs.extend(
-                            ["(<image>./</image>)" for _ in range(len(data))])
+                        cur_msgs.extend(["(<image>./</image>)" for _ in range(len(data))])
                         types.append(MMUrlType.VIDEO)
                 msgs.append({
                     "role": message.role,

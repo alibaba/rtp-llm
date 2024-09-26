@@ -1,11 +1,14 @@
 import os
 import torch
 import asyncio
-from typing import List, Optional
+from io import BytesIO
+from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, Future
 
 from maga_transformer.utils.util import to_torch_dtype
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
+                                                    get_bytes_io_from_url,
+                                                    MMUrlType)
 
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []

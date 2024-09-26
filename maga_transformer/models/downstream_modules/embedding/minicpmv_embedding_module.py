@@ -17,7 +17,7 @@ from maga_transformer.async_decoder_engine.embedding.interface import EngineInpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.utils.multimodal_util import (MMUrlType,
-                                                    get_url_data_with_cache)
+                                                    get_bytes_io_from_url)
 import torch.nn.functional as F
 
 from maga_transformer.models.downstream_modules.embedding.api_datatype import SimilarityRequest, OpenAIEmbeddingRequest, EmbeddingResponseType, EmbeddingResponseFormat, ContentPart, ContentPartTypeEnum
@@ -222,7 +222,8 @@ class MiniCPMVInputGenerator(object):
 
     def _render_image(self, url: str):
         content = ''
-        image = get_url_data_with_cache(url, MMUrlType.IMAGE)
+        image = get_bytes_io_from_url(url)
+        image = Image.open(image).convert("RGB")
         if self.slice_mode:
             _, final_placeholder = self.get_slice_image_placeholder(
                 image
