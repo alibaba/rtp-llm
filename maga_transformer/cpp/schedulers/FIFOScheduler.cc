@@ -127,11 +127,11 @@ void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                          const GenerateStreamPtr&       new_stream) const {
     if (!enable_fast_gen_) {
-        int total_token_size = new_stream->contextLength() + running_streams_.size();
+        int max_token_size = new_stream->contextLength();
         for (auto& stream : streams) {
-            total_token_size += stream->contextLength();
+            max_token_size = std::max(max_token_size, stream->contextLength());
         }
-        return total_token_size < int(max_seq_len_ * max_context_batch_size_);
+        return max_token_size * streams.size() + running_streams_.size() < int(max_seq_len_ * max_context_batch_size_);
     } else {
         return true;
     }
