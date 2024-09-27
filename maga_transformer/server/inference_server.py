@@ -218,7 +218,12 @@ class InferenceServer(object):
                     else:
                         step_output_len = 1
                         if hasattr(x, 'aux_info'):
-                            step_output_len = max(x.aux_info.get('step_output_len', 1), step_output_len)
+                            if isinstance(x.aux_info, list):
+                                step_output_len = 0
+                                for info in x.aux_info:
+                                    step_output_len += info.get('step_output_len', 1)
+                            elif isinstance(x.aux_info, dict):
+                                step_output_len = max(x.aux_info.get('step_output_len', 1), step_output_len)
                         
                         kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, (end_time - last_iterate_time) / step_output_len)
                     kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
