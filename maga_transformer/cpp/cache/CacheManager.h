@@ -60,7 +60,9 @@ public:
     const KVCacheBuffer&   kvCacheBuffer() const;
 
     std::tuple<bool, KVCacheBlockAddr> malloc(int nums = 1);
-    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids, bool need_loss = false);
+    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids, 
+                                                       const std::vector<std::vector<int>>& mm_bounds = {}, 
+                                                       bool need_loss = false);
     int                                match(const std::vector<int>& token_ids);
     void                               reserveBlocks(int nums);
     void                               incrBlockRefCounter(const std::vector<int>& indices);
@@ -82,10 +84,10 @@ private:
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndTpSync();
     void                                    initKvCache();
-    MatchInfo                               matchImpl(const std::vector<int>& token_ids);
+    MatchInfo                               matchImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
-    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids, bool need_loss = false);
+    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds = {}, bool need_loss = false);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);

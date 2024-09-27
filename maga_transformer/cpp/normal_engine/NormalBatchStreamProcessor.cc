@@ -136,13 +136,14 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         // TODO(xinfei.sxf) deal with adjusted common seq len.
         for (auto i = 0; i < current_batch_size; ++i) {
             auto input_tokens    = stream->currentExecuteTokens(i);
+            auto input_masks     = stream->textTokensMask();
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += input_tokens.size();
 
-            for (auto token_id: input_tokens) {
-                if (token_id >= vocab_size_) {
+            for (int index = 0; index < input_tokens.size(); ++index) {
+                if (input_tokens[index] >= vocab_size_ && input_masks[index]) {
                     std::ostringstream error_msg;
-                    error_msg << "stream [" << stream->streamId() << "] token_id " << token_id << " exceed vocab_size " << vocab_size_;
+                    error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index] << " exceed vocab_size " << vocab_size_;
                     return absl::InvalidArgumentError(error_msg.str());
                 }
             }
@@ -152,15 +153,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
 
             if (has_multimodal_input) {
-                auto& mm_features = stream->multimodalFeatures().value();
-                auto& mm_locs = stream->multimodalLocations().value();
+                int mm_reuse_length = stream->multimodalReuseIndex();
+                std::vector<torch::Tensor>& mm_features = stream->multimodalFeatures().value();
+                mm_features = std::vector<torch::Tensor>(mm_features.begin() + mm_reuse_length, mm_features.end());
+                ft::BufferPtr mm_locs = stream->multimodalLocations().value();
+                mm_locs = mm_locs->slice(mm_reuse_length, mm_locs->size() - mm_reuse_length);
                 for (auto& mm_feature: mm_features) {
                     gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
                 }
                 auto text_token_mask = stream->textTokensMask();
                 memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
                 for (int i = 0;i < mm_locs->size(); ++i) {
-                    *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx;
+                    *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
                     mm_feature_index++;
                 }
 

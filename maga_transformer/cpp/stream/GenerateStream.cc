@@ -243,15 +243,19 @@ int GenerateStream::prefixLength() const {
 }
 
 int GenerateStream::reuseLength() const {
-    if (multimodalFeatures().has_value()) {
-        // prompt with multimodal input cannot use reuse cache for now
-        return 0;
-    }
     return reuse_length_;
 }
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+    if (generate_input_->mm_locs) {
+        auto& locs = generate_input_->mm_locs.value();
+        for (int i = locs->size() - 1; i >= 0; --i) {
+            if (reuse_length_ > *locs->dataWithOffset<int32_t>(i)) {
+                reuse_mm_length_ = i + 1;
+            }
+        }
+    }
 }
 
 int GenerateStream::fallbackPrefixLength() const {
@@ -297,6 +301,10 @@ vector<int> GenerateStream::contextTokens(int batch_idx) const {
             (*complete_token_ids_)[batch_idx].view(prefixLength(), contextLength()));
 }
 
+int GenerateStream::multimodalReuseIndex() const {
+    return reuse_mm_length_;
+}
+
 std::optional<std::vector<torch::Tensor>>& GenerateStream::multimodalFeatures() const {
     return generate_input_->multimodal_features;
 }
@@ -304,13 +312,26 @@ std::optional<std::vector<torch::Tensor>>& GenerateStream::multimodalFeatures() 
 int GenerateStream::multimodalFeaturesLength() const {
     auto& features = multimodalFeatures();
     if (features) {
-        return features.value().size() * batchSize();
+        return (features.value().size() - reuse_mm_length_) * batchSize();
     }
     return 0;
 }
 
 std::optional<ft::BufferPtr>& GenerateStream::multimodalLocations() const {
     return generate_input_->mm_locs;
+}
+
+vector<vector<int>> GenerateStream::multimodalIntervals() const {
+    if (!generate_input_->mm_locs && !generate_input_->multimodal_features) {
+        return {};
+    }
+    vector<vector<int>> res;
+    auto locs = generate_input_->mm_locs.value();
+    auto features = generate_input_->multimodal_features.value();
+    for (int i = 0;i < locs->size();++i) {
+        res.emplace_back(vector<int>({*locs->dataWithOffset<int>(i), int(features[i].sizes()[0])}));
+    }
+    return res;
 }
 
 vector<int> GenerateStream::textTokensMask() const {

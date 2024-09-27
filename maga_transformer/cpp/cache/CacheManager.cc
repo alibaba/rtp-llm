@@ -151,11 +151,11 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
     return kv_cache_;
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCache(const std::vector<int>& token_ids, bool need_loss) {
-    return mallocWithCacheImpl(token_ids, need_loss);
+CacheManager::MatchInfo CacheManager::mallocWithCache(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
+    return mallocWithCacheImpl(token_ids, mm_bounds, need_loss);
 }
 
-CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_ids) {
+CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds) {
     auto match_result = block_cache_.match(token_ids);
     int cache_block_num = match_result.block_indices.size();
     int reuse_length    = std::min(match_result.matched_len, static_cast<size_t>(token_ids.size()) - 1);
@@ -165,6 +165,13 @@ CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_id
         reuse_block_num -= 1;
     }
     reuse_length        = reuse_block_num * config_.seq_size_per_block;
+    for (int i = mm_bounds.size() - 1; i >= 0; --i) {
+        auto& bound = mm_bounds[i];
+        if (reuse_length >= bound[0] && reuse_length < bound[0] + bound[1]) {
+            reuse_length = bound[0] / config_.seq_size_per_block * config_.seq_size_per_block;
+        }
+    }
+    reuse_block_num = reuse_length / config_.seq_size_per_block;
 
     FT_CHECK_WITH_INFO((reuse_block_num <= cache_block_num),
                        "reuse block nums[%d] is less than need block nums[%d]",
@@ -197,8 +204,8 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     }
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids, bool need_loss) {
-    auto match_info = matchImpl(token_ids);
+CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
+    auto match_info = matchImpl(token_ids, mm_bounds);
     if (match_info.loss.empty() && need_loss) {
         return {0, {}, {}};
     }

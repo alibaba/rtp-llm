@@ -112,9 +112,11 @@ public:
 
     void step();
 
+    int multimodalReuseIndex() const;
     std::optional<std::vector<torch::Tensor>>& multimodalFeatures() const;
     int multimodalFeaturesLength() const;
     std::optional<ft::BufferPtr>& multimodalLocations() const;
+    std::vector<std::vector<int>> multimodalIntervals() const;
 
     void checkTimeout();
     bool checkTokenId(int token_id);
@@ -203,6 +205,7 @@ protected:
     size_t                              iter_count_             = 0;
     size_t                              last_output_pos_        = 0;
     int                                 reuse_length_           = 0;
+    int                                 reuse_mm_length_        = 0;
     int                                 fallback_blocks_        = 0;
     int                                 fallback_times_         = 0;
     int                                 fallback_prefix_length_ = 0;

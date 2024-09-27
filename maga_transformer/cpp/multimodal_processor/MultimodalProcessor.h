@@ -63,9 +63,13 @@ private:
         }
     }
 
-    absl::StatusOr<ExpandedOutput> expand_token_ids(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids) {
+    absl::StatusOr<ExpandedOutput> expand_token_ids(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids, const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_embedding.size() == 0) {
             return ExpandedOutput(token_ids);
+        }
+        std::vector<std::string> urls;
+        for (auto& mm_input: mm_inputs) {
+            urls.push_back(mm_input.url);
         }
 
         assert(token_ids->shape().size() == 1);
@@ -106,8 +110,12 @@ private:
             auto& loc = locs[i];
             int copy_len = loc.first - old_loc_idx;
             memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx), token_ids->dataWithOffset<int32_t>(old_loc_idx), token_ids->typeSize() * copy_len);
-            memset(token_masks->dataWithOffset<int32_t>(loc.first), 0, (loc.second - loc.first) * token_masks->typeSize());
+            memset(token_masks->dataWithOffset<int32_t>(new_loc_idx + copy_len), 0, mm_embedding[i].sizes()[0] * token_masks->typeSize());
             *(new_locs->dataWithOffset<int32_t>(i)) = copy_len + new_loc_idx;
+
+            int url_id_len = std::min(int(mm_embedding[i].sizes()[0]), int(urls[i].length() / 4));
+            memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i].c_str(), url_id_len * token_ids->typeSize());
+
             new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
             old_loc_idx = loc.second;
         }
@@ -178,7 +186,7 @@ public:
     absl::Status update_mm_features(std::shared_ptr<rtp_llm::GenerateInput>& input) {
         CHECK_AND_RETURN_REF(mm_features, mm_embedding(input->multimodal_inputs.value()));
         input->multimodal_features = std::move(mm_features);
-        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(input->multimodal_features.value(), input->input_ids));
+        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
         input->input_ids = expanded_ids.expanded_ids;
         input->text_tokens_mask = expanded_ids.text_tokens_mask;
         input->mm_locs = expanded_ids.locs;
@@ -190,7 +198,7 @@ public:
         MultimodalFeature mm_features;
         CHECK_AND_RETURN_REF(features, mm_embedding(mm_inputs));
         mm_features.features = std::move(features);
-        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(mm_features.features, input_ids));
+        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(mm_features.features, input_ids, mm_inputs));
         mm_features.expanded_ids = expanded_ids.expanded_ids;
         mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
         mm_features.locs = expanded_ids.locs;

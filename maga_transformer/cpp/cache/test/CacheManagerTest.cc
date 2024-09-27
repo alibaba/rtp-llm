@@ -107,7 +107,7 @@ TEST_F(CacheManagerTest, testLossCache) {
     auto match_info = mallocWithCache(cache_manager, {1000, 2000, 3000});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     cache_manager.freeWithCache(match_info.cache_blocks, {1000, 2000, 3000});
-    match_info = cache_manager.mallocWithCacheImpl({1000, 2000, 3000}, true);
+    match_info = cache_manager.mallocWithCacheImpl({1000, 2000, 3000}, {}, true);
     ASSERT_EQ(match_info.reuse_length, 0);
     ASSERT_EQ(match_info.cache_blocks.size(), 0);
     ASSERT_EQ(match_info.loss.size(), 0);
@@ -118,7 +118,7 @@ TEST_F(CacheManagerTest, testLossCache) {
     ASSERT_EQ(index, std::vector<int>({1, 2, 3}));
     cache_manager.freeWithCache(index, {1000, 2000, 3000}, {0.1, 0.2});
     ASSERT_EQ(cache_manager.freeBlockNums(), 1);
-    match_info = cache_manager.mallocWithCacheImpl({1000, 2000, 3000}, true);
+    match_info = cache_manager.mallocWithCacheImpl({1000, 2000, 3000}, {}, true);
     ASSERT_EQ(match_info.reuse_length, 1);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1}));
     ASSERT_EQ(match_info.loss, std::vector<float>({0.1}));

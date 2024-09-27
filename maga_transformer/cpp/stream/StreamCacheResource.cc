@@ -80,7 +80,8 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
 
     if (resource_context_.reuse_cache) {
         auto common_tokens_vec = stream_->commonCompleteTokenIdsVec();
-        auto match_info = resource_context_.cache_manager->mallocWithCache(common_tokens_vec);
+        auto mm_bounds_vec = stream_->multimodalIntervals();
+        auto match_info = resource_context_.cache_manager->mallocWithCache(common_tokens_vec, mm_bounds_vec);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
