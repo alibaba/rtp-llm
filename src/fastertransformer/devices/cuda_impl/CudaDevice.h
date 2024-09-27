@@ -47,7 +47,7 @@ public:
     bool useGroupGemm() const override;
 
 private:
-    void checkUseOpenSourceFMHA(size_t tokens_per_block);
+    void checkUseOpenSourceFMHA();
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();

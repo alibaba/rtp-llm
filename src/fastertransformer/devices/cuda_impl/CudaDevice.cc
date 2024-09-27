@@ -73,7 +73,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     } else {
         checkUseTrtV1FMHA();
         checkUseTrtV2FMHA();
-        checkUseOpenSourceFMHA(params.tokens_per_block);
+        checkUseOpenSourceFMHA();
     }
     checkUseMultiBlockMode();
     checkUseGroupGemm();
@@ -233,7 +233,7 @@ void CudaDevice::bufMemset(Buffer& buf, int val) {
     }
 }
 
-void CudaDevice::checkUseOpenSourceFMHA(size_t tokens_per_block) {
+void CudaDevice::checkUseOpenSourceFMHA() {
     if (!(is_sm8x() || is_sm90())) {
         FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
         return;
@@ -252,7 +252,7 @@ void CudaDevice::checkUseOpenSourceFMHA(size_t tokens_per_block) {
         FT_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         return;
     }
-    if (tokens_per_block % 256 != 0) {
+    if (init_params_.tokens_per_block % 256 != 0) {
         FT_LOG_INFO("Paged open source FMHA is disabled since tokens_per_block % 256 != 0");
         return;
     }
