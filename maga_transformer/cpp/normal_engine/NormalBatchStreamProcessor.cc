@@ -398,12 +398,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
+        BufferPtr loss = nullptr;
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto tokens = stream->currentExecuteTokens(0);
             ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
-            ft::BufferPtr loss = device_->loss({all_logits, *label});
-            stream->setLoss(*loss);
+            loss = device_->loss({all_logits, *label});
         }
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
@@ -411,7 +411,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs);
+        stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
         offset += batch;
         token_offset += token_size;
     }

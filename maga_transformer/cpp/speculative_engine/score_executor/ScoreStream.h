@@ -42,7 +42,8 @@ public:
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs) override {
+                      const ft::BufferPtr& all_probs,
+                      const ft::BufferPtr& loss) override {
         device_->copy({(*output_buffer_->tokens)[0], (*new_tokens)[0]});
 
         // TODO(xyz): optimize deepclone
@@ -56,6 +57,10 @@ public:
 
         if (generate_input_->generate_config->return_hidden_states) {
             output_buffer_->hidden_states = device_->clone({*hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
+        }
+
+        if (loss) {
+            output_buffer_->loss = device_->clone({*loss, ft::AllocationType::DEVICE, {"score_loss"}});
         }
     }
 

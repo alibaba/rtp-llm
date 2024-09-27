@@ -24,8 +24,13 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                                         const ft::BufferPtr& hidden_states,
                                         const ft::BufferPtr& logits,
                                         const ft::BufferPtr& cum_log_probs,
-                                        const ft::BufferPtr& all_probs) {
+                                        const ft::BufferPtr& all_probs,
+                                        const ft::BufferPtr& loss) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    if (loss) {
+        setLoss(*loss);
+    }
+
     bool finished = needFinish();
     if (finished) {
         setFinishedWithoutLock();
@@ -76,7 +81,7 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                 generate_output.hidden_states = device_->clone({hidden_states->view(i, 1), ft::AllocationType::HOST});
             }
         }
-        if (loss_) {
+        if (loss) {
             FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1, "loss index should be input len [%d] - 1 but is [%d]", inputLength(), loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {

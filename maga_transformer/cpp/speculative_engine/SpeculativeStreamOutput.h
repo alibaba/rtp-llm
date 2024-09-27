@@ -31,6 +31,7 @@ public:
     ft::BufferPtr tokens        = nullptr;  // selected tokens
     ft::BufferPtr logits        = nullptr;
     ft::BufferPtr hidden_states = nullptr;
+    ft::BufferPtr loss          = nullptr;
     ft::BufferPtr all_probs     = nullptr;
 };
 
@@ -41,12 +42,14 @@ public:
                                    ft::BufferPtr accepted_tokens,
                                    ft::BufferPtr logits,
                                    ft::BufferPtr hidden_states,
+                                   ft::BufferPtr loss,
                                    bool          accepted_bouns_token = false):
         propose_step(propose_step),
         accepted_token_nums(accepted_token_nums),
         accepted_tokens(accepted_tokens),
         logits(logits),
         hidden_states(hidden_states),
+        loss(loss),
         acceped_bouns_token(accepted_bouns_token) {}
 
     std::string debugString() const {
@@ -70,6 +73,7 @@ public:
     ft::BufferPtr accepted_tokens = nullptr;
     ft::BufferPtr logits = nullptr;
     ft::BufferPtr hidden_states = nullptr;
+    ft::BufferPtr loss = nullptr;
     bool          acceped_bouns_token = false;
 };
 

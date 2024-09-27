@@ -33,14 +33,16 @@ public:
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs) = 0;
+                      const ft::BufferPtr& all_probs,
+                      const ft::BufferPtr& loss) = 0;
 
     void update(const ft::BufferPtr&    new_tokens,
                 int   num_new_tokens,
                 const ft::BufferPtr& hidden_states,
                 const ft::BufferPtr& logits,
                 const ft::BufferPtr& cum_log_probs,
-                const ft::BufferPtr& all_probs);
+                const ft::BufferPtr& all_probs,
+                const ft::BufferPtr& loss);
 
     void update(const GptModelOutputs& gpt_model_outputs,
                 SamplerOutput&   sampler_output);
@@ -156,7 +158,7 @@ public:
         return stream_cache_resource_.releaseSequenceKVCache(total_seq_len, release_seq_len);
     }
 
-    void CopyOnWrite(const GenerateStream& other_stream);
+    void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true);
 
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;

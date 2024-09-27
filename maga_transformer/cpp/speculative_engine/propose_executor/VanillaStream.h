@@ -17,7 +17,7 @@ public:
         GenerateStream(stream), output_buffer_(stream_output), propose_step_(propose_step) {
         // WARNING: VanillaStream currently only support batch_size = 1
         FT_CHECK(tileNum() == 1);
-        CopyOnWrite(stream);
+        CopyOnWrite(stream, false);
         setMetricsReporter(nullptr);
         allocateOutputBuffer(propose_step);
         setNeedReleaseResource(false);
@@ -36,7 +36,8 @@ public:
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs) override {
+                      const ft::BufferPtr& all_probs,
+                      const ft::BufferPtr& loss) override {
         // TODO(xyz): optimize deepclone
         if (all_probs) {
             // lazy allocate buffer

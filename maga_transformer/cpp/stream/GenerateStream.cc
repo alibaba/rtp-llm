@@ -524,7 +524,8 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
                             const ft::BufferPtr& hidden_states,
                             const ft::BufferPtr& logits,
                             const ft::BufferPtr& cum_log_probs,
-                            const ft::BufferPtr& all_probs) {
+                            const ft::BufferPtr& all_probs,
+                            const ft::BufferPtr& loss) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
@@ -556,7 +557,7 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
-    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs);
+    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);
 }
 
 
@@ -656,11 +657,13 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
     return stream_cache_resource_;
 }
 
-void GenerateStream::CopyOnWrite(const GenerateStream& other_stream) {
+void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss) {
     complete_token_ids_ = device_->clone({*other_stream.complete_token_ids_, ft::AllocationType::HOST});
     cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, ft::AllocationType::HOST});
-    if (other_stream.calculateLoss()) {
+    if (other_stream.calculateLoss() && copy_loss) {
         loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
+    } else {
+        loss_ = nullptr;
     }
     stream_cache_resource_.setStream(this);
     generate_input_->generate_config = std::make_shared<GenerateConfig>(*other_stream.generate_input_->generate_config);

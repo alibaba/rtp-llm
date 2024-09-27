@@ -34,7 +34,8 @@ public:
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs) override;
+                      const ft::BufferPtr& all_probs,
+                      const ft::BufferPtr& loss) override;
 
 protected:
     std::shared_ptr<GenerateOutputs>          generate_outputs_;

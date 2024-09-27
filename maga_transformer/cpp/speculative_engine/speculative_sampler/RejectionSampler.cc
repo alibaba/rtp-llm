@@ -46,6 +46,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
 
         ft::BufferPtr logits        = nullptr;
         ft::BufferPtr hidden_states = nullptr;
+        ft::BufferPtr loss          = nullptr;
 
         // TODO(xyz): optimize deepclone
         if (stream->generateConfig()->return_logits) {
@@ -57,8 +58,11 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
                                             ft::AllocationType::HOST,
                                             {"return_hidden_states"}});
         }
+        if (scorer_stream_output->loss) {
+            loss = device_->clone({*scorer_stream_output->loss, ft::AllocationType::HOST, {"return_loss"}});
+        }
         sampler_output.outputs.emplace_back(
-            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), accepted_len > propose_step);
+            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), accepted_len > propose_step);
         stream_index++;
     }
     FT_LOG_DEBUG("speculative sample done");
