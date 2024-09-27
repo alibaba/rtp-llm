@@ -39,6 +39,12 @@ def whl_deps():
         "//conditions:default": ["torch==2.1.2"],
     })
 
+def platform_deps():
+    return select({
+        "//:using_arm": [],
+        "//conditions:default": ["decord==0.6.0"],
+    })
+
 def torch_deps():
     deps = select({
         "@//:using_rocm": [

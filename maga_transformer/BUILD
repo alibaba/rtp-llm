@@ -1,8 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
+load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps")
+load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load(
@@ -373,7 +374,7 @@ whl_reqs = [
     "xfastertransformer_devel==1.8.1.1",
     "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
-    "decord==0.6.0",
+    #"decord==0.6.0",
     "accelerate==0.25.0",
     "oss2",
     "orjson",
@@ -385,7 +386,7 @@ whl_reqs = [
     "nest_asyncio",
     "librosa",
     "matplotlib",
-] + whl_deps() + xft_dep
+] + whl_deps() + platform_deps() + xft_dep
 
 # target for wheel
 py_wheel(
@@ -414,6 +415,12 @@ py_wheel(
     requires = whl_reqs + [
         "kserve",
     ] + xft_dep + arch_with_version_dep,
+)
+
+rename_wheel_aarch64(
+    name = "maga_transformer_aarch64",
+    package_name = "maga_transformer-0.2.0",
+    src = ":maga_transformer_whl",
 )
 
 rename_wheel(

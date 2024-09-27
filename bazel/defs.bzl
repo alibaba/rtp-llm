@@ -119,6 +119,22 @@ def rename_wheel(name, package_name, src):
         visibility = ["//visibility:public"],
     )
 
+def rename_wheel_aarch64(name, package_name, src):
+    native.genrule(
+        name = name,
+        srcs = [src],
+        outs = [package_name + "-cp310-cp310-linux_aarch64.whl"],
+        cmd = "bash -c 'set -xe;" +
+            "cp $(locations %s) $(OUTS);" % (src) +
+            "chmod a+w $(OUTS);" +
+            "'",
+        tags = [
+            "local",
+            "manual",
+        ],
+        visibility = ["//visibility:public"],
+    )
+
 def rpm_library(
         name,
         hdrs,
