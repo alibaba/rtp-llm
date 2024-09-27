@@ -47,7 +47,7 @@ private:
     // need to be shared to pass into rpc service
     std::shared_ptr<rtp_llm::EmbeddingEngine> embedding_engine_;
     std::unique_ptr<rtp_llm::ArpcServerWrapper> embedding_rpc_service_;
-    std::unique_ptr<rtp_llm::HttpApiServer> http_server_;
+    std::shared_ptr<rtp_llm::HttpApiServer> http_server_;
     std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor_ = nullptr;
 
     std::atomic<bool>            is_server_shutdown_{false};

@@ -34,7 +34,7 @@ private:
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> initProposeModel(py::object propose_model);
 
 private:
-    std::unique_ptr<rtp_llm::HttpApiServer>       http_server_;
+    std::shared_ptr<rtp_llm::HttpApiServer>       http_server_;
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> model_rpc_server_ = nullptr;
     std::unique_ptr<grpc::Server>                 grpc_server_ = nullptr;
     std::thread                                   grpc_server_thread_;

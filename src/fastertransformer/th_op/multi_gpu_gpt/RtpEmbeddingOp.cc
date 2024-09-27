@@ -46,7 +46,9 @@ void RtpEmbeddingOp::stop() {
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
     }
-    http_server_.reset();
+    if (http_server_) {
+        http_server_->stop();
+    }
     if (!is_server_shutdown_ && embedding_engine_) {
         (void)embedding_engine_->stop();
         is_server_shutdown_ = true;
@@ -67,6 +69,7 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
         FT_LOG_ERROR("embedding HTTP Server start fail.");
     }
 }
+
 void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params,
                                     py::object py_render,
                                     kmonitor::MetricsReporterPtr reporter) {

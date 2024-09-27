@@ -52,16 +52,16 @@ public:
     }
 
     // embedding engine
-    HttpApiServer(std::shared_ptr<EmbeddingEngine>              embedding_engine,
+    HttpApiServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
-                  const ft::GptInitParameter&                   params,
-                  py::object                                    py_render):
+                  const ft::GptInitParameter&          params,
+                  py::object                           py_render):
             params_(params), embedding_endpoint_(EmbeddingEndpoint(embedding_engine, mm_processor, py_render)) {
 
         init_controller(params);
     }
 
-    ~HttpApiServer();
+    // ~HttpApiServer();
 
 
     bool start(std::string addrSpec) {

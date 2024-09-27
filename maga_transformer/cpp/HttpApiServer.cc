@@ -279,6 +279,7 @@ void HttpApiServer::registerResponses() {
     // TODO: register other routes
     registerRoot();
     registerHealth();
+    registerEmbedding();
     registerV1Model();
     registerSetLogLevel();
     registerTokenizerEncode();
@@ -597,9 +598,9 @@ void HttpApiServer::stop() {
     http_server_.Stop();
 }
 
-HttpApiServer::~HttpApiServer() {
-    stop();
-}
+// HttpApiServer::~HttpApiServer() {
+//     stop();
+// }
 
 // ------------------------------- EmbeddingEndpoint -------------------------------
 
@@ -619,7 +620,12 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
     py::object request = json.attr("loads")(body);
 
     auto formated_request = py_render_.attr("render_request")(request);
-    auto batch_input = py_render_.attr("create_input")(formated_request);
+
+    py::object asyncio = py::module::import("asyncio");
+    py::object result = asyncio.attr("run")(formated_request);
+
+    FT_LOG_WARNING("%d", __LINE__);
+    auto batch_input = py_render_.attr("create_input")(result);
 
     std::vector<MultimodalInput> mm_inputs;
     auto py_mm_inputs = batch_input.attr("multimodal_inputs");
@@ -641,11 +647,13 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
         token_ids = ft::Buffer2torchTensor(mm_res.value().expanded_ids, true);
         multimodal_features.emplace(mm_res.value());
     }
+    FT_LOG_WARNING("%d", __LINE__);
     auto results = embedding_engine_->decode(token_ids,
                                              py::cast<th::Tensor>(batch_input.attr("token_type_ids")),
                                              py::cast<th::Tensor>(batch_input.attr("input_lengths")),
                                              /*request_id=*/0,
                                              multimodal_features);
+    FT_LOG_WARNING("%d", __LINE__);
 
     py::module embedding_interface = py::module::import("maga_transformer.async_decoder_engine.embedding.interface");
     py::object batch_output = embedding_interface.attr("EngineOutputs")();

@@ -155,7 +155,9 @@ void RtpLLMOp::stop() {
             grpc_server_->Shutdown();
         }
         model_rpc_server_.reset();
-        http_server_.reset();
+        if (http_server_) {
+            http_server_->stop();
+        }
     }
 }
 

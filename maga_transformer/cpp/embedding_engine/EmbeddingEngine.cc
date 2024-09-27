@@ -53,7 +53,9 @@ th::Tensor EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_i
     auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
+    FT_LOG_WARNING("%d", __LINE__);
     embedding_stream->waitFinish();
+    FT_LOG_WARNING("%d", __LINE__);
     return rtp_llm::EmbeddingQueryConverter::convertEmbeddingOutputs(embedding_stream);
 }
 
