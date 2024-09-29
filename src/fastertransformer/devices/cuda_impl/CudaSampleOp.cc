@@ -111,23 +111,22 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             vocab_size_padded,
             stream_);
     }
-
     const auto decoder_batch_size = params.sequence_lengths.shape()[0];
-    if (decoder_batch_size) {
-        auto sequence_lengths = clone({params.sequence_lengths});
-        auto input_lengths = clone({params.input_lengths});
-
-        if (step > 1 && params.repetition_penalty && decoder_batch_size) {
-            auto& repetition_penalty = params.repetition_penalty->get();
-            if (std::any_of(repetition_penalty.data<float>(),
-                            repetition_penalty.data<float>() + batch_size,
-                            [&](auto t) { return t != 1.0f; }))
-            {
-                const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-                auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-                auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-                copy({*repetition_penalty_buf, repetition_penalty});
-                invokeBatchApplyRepetitionPenalty(
+    if (params.repetition_penalty) {
+        auto& repetition_penalty = params.repetition_penalty->get();
+        if (std::any_of(repetition_penalty.data<float>(),
+                        repetition_penalty.data<float>() + batch_size,
+                        [&](auto t) { return t != 1.0f; }))
+        {
+            auto sequence_lengths = clone({params.input_lengths});
+            if (decoder_batch_size) {
+                copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
+            }
+            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
+            auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+            auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
+            copy({*repetition_penalty_buf, repetition_penalty});
+            invokeBatchApplyRepetitionPenalty(
                     logits.data<float>(),
                     penalty_logits->data<float>(),
                     repetition_penalty_buf->data<float>(),
@@ -140,9 +139,13 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                     step + 1, // step
                     repetition_penalty_type,
                     stream_);
-                // NOTE: here step is max_len - 1
-            }
+            // NOTE: here step is max_len - 1
         }
+    }
+
+    if (decoder_batch_size) {
+        auto sequence_lengths = clone({params.sequence_lengths});
+        auto input_lengths = clone({params.input_lengths});
 
         if (params.min_lengths && params.eos_ids) {
             auto min_lengths_buf = clone({params.min_lengths.value().get()});
