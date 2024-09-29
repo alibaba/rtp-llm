@@ -54,6 +54,9 @@ class InferenceServer(object):
         self._atomic_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
         self._init_controller()
+        # just rank 0 report metric
+        if g_parallel_info.world_rank == 0:
+            kmonitor.init()
 
     def start(self):
         self._gang_server.start()

@@ -7,8 +7,8 @@ class AccMetrics(Enum):
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
     ERROR_QPS_METRIC = "py_rtp_framework_error_qps"
-    CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"    
-    ITER_QPS_METRIC = "py_rtp_response_iterate_qps"    
+    CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"
+    ITER_QPS_METRIC = "py_rtp_response_iterate_qps"
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
@@ -31,12 +31,7 @@ class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
-
-        for metric in AccMetrics:
-            self._matic_map[metric.value] = self._kmon.register_acc_metric(metric.value)
-
-        for metric in GaugeMetrics:
-            self._matic_map[metric.value] = self._kmon.register_gauge_metric(metric.value)
+        self._inited = False
 
     def report(self, metric: Union[AccMetrics,GaugeMetrics], value: float = 1, tags: Dict[str, Any] = {}):
         kmon_metric = self._matic_map.get(metric.value, None)
@@ -47,3 +42,12 @@ class MetricReporter(object):
 
     def flush(self) -> None:
         self._kmon.flush()
+
+    def init(self):
+        if not self._inited:
+            self._inited = True
+            for metric in AccMetrics:
+                self._matic_map[metric.value] = self._kmon.register_acc_metric(metric.value)
+
+            for metric in GaugeMetrics:
+                self._matic_map[metric.value] = self._kmon.register_gauge_metric(metric.value)
