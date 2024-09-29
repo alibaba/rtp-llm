@@ -1,5 +1,5 @@
 import torch
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Callable
 from pydantic import BaseModel
 
 from transformers import PreTrainedTokenizerBase
@@ -19,6 +19,12 @@ class CustomModule(object):
         
     def create_cpp_handler(self) -> Any:
         raise NotImplementedError("not support cpp handler")
+    
+    def get_renderer(self, request: Dict[str, Any]) -> 'CustomRenderer':
+        return self.renderer
+    
+    def get_handler(self) -> 'CustomHandler':
+        return self.handler
 
 # Class for c++
 class CustomHandler(object):    
@@ -33,17 +39,19 @@ class CustomHandler(object):
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:
         pass
-    # 输出
+
+    # 输入:
     # input_ids: [token_len]
     # hidden_states: [token_len, hidden_size]
-    # seq_len: [batch_size]
-    # config: 根据custom model需求进行render
-    
-    # 输出: 
+    # input_lengths: [batch_size]
+    # 输出:
     # [batch_size], 由endpoint格式化返回
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> Union[torch.Tensor, List[Any]]:
         raise NotImplementedError
     
+    def post_process(self, request: Any, batch_output: EngineOutputs) -> EngineOutputs:
+        return batch_output
+
 class CustomRenderer(object):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
         self.config_ = config

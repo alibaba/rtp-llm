@@ -55,6 +55,8 @@ void GptInitParameter::setTaskType(std::string task) {
         task_type_ = TaskType::RERANKER;
     } else if (task == "LINEAR_SOFTMAX") {
         task_type_ = TaskType::LINEAR_SOFTMAX;
+    } else if (task == "BGE_M3") {
+        task_type_ = TaskType::BGE_M3;
     } else {
         FT_CHECK_WITH_INFO(false, "unkown task type: " + task);
     }

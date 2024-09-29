@@ -19,7 +19,8 @@ enum TaskType {
     LANGUAGE_MODEL     = 4,
     SEQ_CLASSIFICATION = 5,
     RERANKER           = 6,
-    LINEAR_SOFTMAX     = 7
+    LINEAR_SOFTMAX     = 7,
+    BGE_M3             = 8
 };
 
 struct RoleSpecialTokens {

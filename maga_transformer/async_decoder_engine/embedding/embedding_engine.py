@@ -43,7 +43,7 @@ class EmbeddingCppEngine(BaseEngine):
             raise Exception("failed to run query, error: ", e)
 
     @override
-    async def decode(self, input: EngineInputs) -> AsyncGenerator[EngineOutputs, None]:
+    async def decode(self, input: EngineInputs) -> EngineOutputs:
         output = EngineOutputs(outputs=None, input_length=0)
         await asyncio.to_thread(self.decode_sync, input, output)
         return output

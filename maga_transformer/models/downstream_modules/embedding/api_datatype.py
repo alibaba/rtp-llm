@@ -85,3 +85,6 @@ class SimilarityResponse(PyDanticModelBase):
 
 class SparseEmbeddingRequest(OpenAIEmbeddingRequest):
     return_decoded: bool = True
+
+class ColbertEmbeddingRequest(OpenAIEmbeddingRequest):
+    pass

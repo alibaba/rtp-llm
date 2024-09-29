@@ -54,12 +54,6 @@ class EmbeddingRendererBase(CustomRenderer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 
-    async def render_request(self, request_json: Dict[str, Any]):
-        if 'left' in request_json:
-            return SimilarityRequest(**request_json)
-        else:
-            return OpenAIEmbeddingRequest(**request_json)
-
     def create_input(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest]):
         if isinstance(request, OpenAIEmbeddingRequest):
             engine_inputs = self.generator.generate(request.input, tokenizer_config=request.extra_configs.tokenizer_config)

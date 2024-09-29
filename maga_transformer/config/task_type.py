@@ -16,6 +16,7 @@ class TaskType(Enum):
     RERANKER                  = "RERANKER"
     LINEAR_SOFTMAX            = "LINEAR_SOFTMAX"
     PLUGIN_TASK               = "PLUGIN_TASK"
+    BGE_M3                    = "BGE_M3"
     
     @staticmethod
     def from_str(task_type: str):

@@ -39,5 +39,5 @@ class EngineInputs():
 
 
 class EngineOutputs(PyDanticModelBase):
-    outputs: Optional[torch.Tensor]
+    outputs: Optional[Union[List[Dict[str, torch.Tensor]], torch.Tensor, List[torch.Tensor]]]
     input_length: int

@@ -15,7 +15,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.utils.tensor_utils import get_last_token_from_combo_tokens, get_first_token_from_combo_tokens
 from maga_transformer.models.downstream_modules.embedding.misc import combo_to_batch, EmbeddingRendererBase
-from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseType, EmbeddingResponseFormat
+from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseType, EmbeddingResponseFormat, OpenAIEmbeddingRequest, SimilarityRequest
 
 class DenseEmbeddingModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
@@ -32,6 +32,12 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(*args, ** kwargs)
         self.embedding_type = EmbeddingResponseType.DENSE
 
+    async def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
+        if 'left' in request_json:
+            return SimilarityRequest(**request_json)
+        else:
+            return OpenAIEmbeddingRequest(**request_json)
+
     def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
         return float(torch.tensor(left.embedding) @ torch.tensor(right.embedding).T)
 
@@ -44,7 +50,6 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
         if 'data' in log_response:
             del log_response['data']
         return log_response
-
 
 class NormalHandler(CustomHandler):
     def __init__(self, config: GptInitModelParameters):
@@ -87,6 +92,9 @@ class SentenceTransformerHandler(CustomHandler):
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[Any]:
         batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
+        return self.forward_internal(batch_input_ids, batch_hidden_states, batch_attention_mask)
+    
+    def forward_internal(self, batch_input_ids: torch.Tensor, batch_hidden_states: torch.Tensor, batch_attention_mask: torch.Tensor):
         input =  {
             "token_embeddings": batch_hidden_states,
             "attention_mask": batch_attention_mask

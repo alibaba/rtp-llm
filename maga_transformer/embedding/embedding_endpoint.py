@@ -15,9 +15,12 @@ class EmbeddingEndpoint(object):
     async def handle(self, request: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         if isinstance(request, str):
             request = json.loads(request)
-        formated_request = await self.custom_model_.renderer.render_request(request)
-        batch_input = self.custom_model_.renderer.create_input(formated_request)
+        renderer = self.custom_model_.get_renderer(request)        
+        handler = self.custom_model_.get_handler()
+        formated_request = await renderer.render_request(request)
+        batch_input = renderer.create_input(formated_request)
         batch_output = await self.decoder_engine_.decode(batch_input)
-        response = await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)
-        logable_response = await self.custom_model_.renderer.render_log_response(response)
+        batch_output = handler.post_process(formated_request, batch_output)
+        response = await renderer.render_response(formated_request, batch_input, batch_output)        
+        logable_response = await renderer.render_log_response(response)
         return response, logable_response

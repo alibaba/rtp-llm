@@ -101,6 +101,7 @@ filegroup(
     ] + select({
         "//:using_cuda": [
             "src/fastertransformer/th_op/th_utils.cc",
+            "src/fastertransformer/th_op/common/GptOps.cc",
             "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
         ],
