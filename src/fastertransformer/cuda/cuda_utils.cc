@@ -737,7 +737,10 @@ std::string getDriverVersion() {
     if (NVML_SUCCESS != result) {
         throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
     }
-    result = nvmlDeviceGetHandleByIndex(0, &device);
+
+    char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+    check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
+    result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
     if (NVML_SUCCESS != result) {
         throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
     }
@@ -774,12 +777,16 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
             size_t device_id1 = device_ids[i];
             size_t device_id2 = device_ids[j];
 
-            result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
+           char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
-            result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
+            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id1));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
             }
@@ -816,13 +823,17 @@ bool checkOnSameNumaNodes(std::vector<int> device_ids) {
         for (size_t j = i + 1; j < device_ids.size(); j++) {
             size_t device_id1 = device_ids[i];
             size_t device_id2 = device_ids[j];
-
-            result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
+            
+            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
-            result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
+            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
             }
