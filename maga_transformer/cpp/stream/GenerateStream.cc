@@ -31,7 +31,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
 {
-    updatePrefix(resource_context.system_prompt);
+    if (!updatePrefix(resource_context.system_prompt)) {
+        return;
+    }
     seq_length_ = generate_input_->inputLength();
     start_check_seq_length_ = seq_length_;
     last_output_pos_ = seq_length_;
@@ -209,13 +211,20 @@ bool GenerateStream::calculateLoss() const {
     return loss_ && loss_index_ < inputLength() - 1;
 }
 
-void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
+bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
     if (system_prompt) {
         prompt_param_ = system_prompt->getPromptParams(*generate_input_->generate_config);
         if (!prompt_param_.prompt_token.empty()) {
+            auto total_input_len = inputLength() + prompt_param_.prompt_token.size();
+            if (total_input_len >= max_seq_len_) {
+                setStop("after update prefix, total input len " + std::to_string(total_input_len) 
+                    + " is greater than max seq len " + std::to_string(max_seq_len_));
+                return false;
+            }
             generate_input_->updatePrefix(prompt_param_.prompt_token);
         }
     }
+    return true;
 }
 
 size_t GenerateStream::maxSeqLen() const {

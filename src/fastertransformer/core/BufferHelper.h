@@ -21,7 +21,7 @@ BufferPtr vector2Buffer(const std::vector<T>& vec) {
 template<typename T>
 std::vector<T> buffer2vector(const Buffer& src, size_t num) {
     FT_CHECK_WITH_INFO((num <= src.size()),
-        "buffer num[%d] is less than num", src.size(), num);
+        "buffer num[%d] is less than num [%d]", src.size(), num);
     FT_CHECK_WITH_INFO((sizeof(T) == src.typeSize()),
         "Buffer type size %d is not equal to %d", src.typeSize(), sizeof(T));
     std::vector<T> dst;

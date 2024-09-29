@@ -88,7 +88,7 @@ public:
     int numReturnSequences() const;
     bool calculateLoss() const;
 
-    void updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
+    bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
     int inputLength() const;
     int seqLength() const;

@@ -13,12 +13,15 @@ void StreamCacheResource::init(int batch_size) {
 
 void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
     if (blocks.size() == batch_block_addr_.blockSize(batch_id) && resource_context_.reuse_cache) {
-        auto tokens_id = stream_->completeTokenIdsVec(batch_id);
-        vector<float> loss;
-        if (stream_->getLoss()) {
-            loss = ft::buffer2vector<float>(*(stream_->getLoss()));
+        // TODO(xinfei.sxf) 一些场景调用了cancel的地方，其实并没有错误，也应该free with cache
+        if (stream_->finished()) {
+            auto tokens_id = stream_->completeTokenIdsVec(batch_id);
+            vector<float> loss;
+            if (stream_->getLoss()) {
+                loss = ft::buffer2vector<float>(*(stream_->getLoss()));
+            }
+            resource_context_.cache_manager->freeWithCache(blocks, tokens_id, loss);
         }
-        resource_context_.cache_manager->freeWithCache(blocks, tokens_id, loss);
     } else {
         resource_context_.cache_manager->free(blocks);
     }
