@@ -131,7 +131,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
         for (auto& stream : streams) {
             max_token_size = std::max(max_token_size, stream->contextLength());
         }
-        return max_token_size * streams.size() + running_streams_.size() < int(max_seq_len_ * max_context_batch_size_);
+        return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_seq_len_ * max_context_batch_size_);
     } else {
         return true;
     }
