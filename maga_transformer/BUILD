@@ -373,7 +373,6 @@ whl_reqs = [
     "xfastertransformer_devel==1.8.1.1",
     "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
-    "decord==0.6.0",
     "accelerate==0.25.0",
     "oss2",
     "orjson",
@@ -385,7 +384,7 @@ whl_reqs = [
     "nest_asyncio",
     "librosa",
     "matplotlib",
-] + whl_deps() + xft_dep
+] + whl_deps() + xft_dep + arch_with_version_dep
 
 # target for wheel
 py_wheel(
