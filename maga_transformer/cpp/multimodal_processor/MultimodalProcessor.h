@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -36,7 +37,23 @@ private:
     bool include_sep_tokens_;
     int64_t max_seq_len_;
 
-    absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    absl::Status get_str_hash(int32_t* token_ids, std::string& url, int mm_emb_len) {
+        int url_len = url.length(), data_size_scale = std::max(int(sizeof(size_t) / sizeof(int32_t)), 1);
+        if (mm_emb_len / data_size_scale <= 0) {
+            return absl::InternalError("length of multimodal input is too short");
+        }
+        int substr_len = (url_len - 1) / (mm_emb_len / data_size_scale) + 1;
+        int now_idx = 0;
+        std::hash<std::string> hasher;
+        while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
+            size_t hash_res = hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
+            memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(size_t));
+            now_idx++;
+        }
+        return absl::OkStatus();
+    }
+
+    virtual absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_inputs.size() == 0) {
             return std::vector<torch::Tensor>();
         } else if (!mm_process_engine_.is_none()) {
@@ -106,6 +123,8 @@ private:
         std::fill(token_masks->data<int32_t>(), token_masks->dataWithOffset<int32_t>(token_masks->size()), 1);
 
         int new_loc_idx = 0, old_loc_idx = 0;
+        // TODO: repeat urls embedding length times to make sure a url -> multi mmembedding correct
+        bool hash_urls = urls.size() == mm_num;
         for (int i = 0;i < mm_num;i++) {
             auto& loc = locs[i];
             int copy_len = loc.first - old_loc_idx;
@@ -113,8 +132,9 @@ private:
             memset(token_masks->dataWithOffset<int32_t>(new_loc_idx + copy_len), 0, mm_embedding[i].sizes()[0] * token_masks->typeSize());
             *(new_locs->dataWithOffset<int32_t>(i)) = copy_len + new_loc_idx;
 
-            int url_id_len = std::min(int(mm_embedding[i].sizes()[0]), int(urls[i].length() / 4));
-            memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i].c_str(), url_id_len * token_ids->typeSize());
+            if (hash_urls) {
+                THROW_IF_STATUS_ERROR(get_str_hash(expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i], mm_embedding[i].sizes()[0]));
+            }
 
             new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
             old_loc_idx = loc.second;
