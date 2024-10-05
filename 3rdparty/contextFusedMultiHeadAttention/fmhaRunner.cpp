@@ -16,6 +16,7 @@
 
 #include "fmhaRunner.h"
 #include "fused_multihead_attention_v2.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 #include <cassert>
 #include <cstring>
@@ -108,8 +109,8 @@ public:
         cudaGetDevice(&device_id);
         cudaDeviceGetAttribute(&mLaunchParams.multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
         cudaDeviceGetAttribute(&mLaunchParams.device_l2_cache_size, cudaDevAttrL2CacheSize, device_id);
-        // auto const [free_memory, total_memory] = tensorrt_llm::common::getDeviceMemoryInfo(false);
-        // mLaunchParams.total_device_memory = total_memory;
+        auto const [free_memory, total_memory] = fastertransformer::getDeviceMemoryInfo(false);
+        mLaunchParams.total_device_memory = total_memory;
     }
 
     ~mhaImpl() {}

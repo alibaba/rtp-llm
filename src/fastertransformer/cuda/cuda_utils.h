@@ -35,6 +35,16 @@
 #include <cuda_bf16.h>
 #endif
 
+#ifndef _WIN32 // Linux
+#include <sys/sysinfo.h>
+#endif         // not WIN32
+#include <vector>
+#ifdef _WIN32  // Windows
+#include <windows.h>
+#undef ERROR   // A Windows header file defines ERROR as 0, but it's used in our logger.h enum. Logging breaks without
+               // this undef.
+#endif         // WIN32
+
 namespace fastertransformer {
 
 #define MAX_CONFIG_NUM 20
@@ -401,6 +411,40 @@ inline int getDeviceCount() {
     int count = 0;
     check_cuda_error(cudaGetDeviceCount(&count));
     return count;
+}
+
+/// Get the memory info
+/// \return The free and total amount of memory in bytes
+inline std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm)
+{
+    if (useUvm)
+    {
+        size_t freeSysMem, totalSysMem;
+#ifndef _WIN32 // Linux
+        struct sysinfo info;
+        sysinfo(&info);
+        totalSysMem = info.totalram * info.mem_unit;
+        freeSysMem = info.freeram * info.mem_unit;
+#else  // Windows
+        MEMORYSTATUSEX memInfo;
+        memInfo.dwLength = sizeof(memInfo);
+        GlobalMemoryStatusEx(&memInfo);
+        totalSysMem = memInfo.ullTotalPhys;
+        freeSysMem = memInfo.ullAvailPhys;
+#endif // WIN32
+
+        FT_LOG_INFO("Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+            ((double) totalSysMem / 1e9), ((double) freeSysMem / 1e9));
+        return {freeSysMem, totalSysMem};
+    }
+    else
+    {
+        size_t free, total;
+        check_cuda_error(cudaMemGetInfo(&free, &total));
+        FT_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+            ((double) total / 1e9), ((double) free / 1e9));
+        return {free, total};
+    }
 }
 
 std::string getDriverVersion();
