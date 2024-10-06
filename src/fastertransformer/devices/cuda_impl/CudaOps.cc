@@ -265,7 +265,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 
     // if custom allreduce fails, fallback to the default ncclAllReduce
     if (custom_allreduce_comm_ && nccl_op == ncclSum
-        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
+        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
         custom_allreduce_comm_->allReduce(
@@ -288,8 +288,8 @@ PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams
 
     auto& buffer = params.buffer;
     if (custom_allreduce_comm_ && static_cast<ncclRedOp_t>(params.op) == ncclSum &&
-        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
-        void* custom_ar_buf_ptr = custom_allreduce_comm_->peer_comm_buffer_ptr();
+        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
+        void* custom_ar_buf_ptr = custom_allreduce_comm_->peerCommBufferPtr();
         return PrepareAllReduceOutput{
             BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
                 buffer->type(),

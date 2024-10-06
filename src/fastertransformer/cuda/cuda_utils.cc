@@ -763,7 +763,7 @@ int getCudaVersion() {
     return cuda_driver_version;
 }
 
-bool checkAllNVLinks(std::vector<int> device_ids) {
+bool checkAllNVLinks(std::vector<size_t> device_ids) {
     nvmlReturn_t result;
     nvmlDevice_t deviceHandles[2];
 
@@ -810,7 +810,7 @@ bool checkAllNVLinks(std::vector<int> device_ids) {
     return true;
 }
 
-bool checkOnSameNumaNodes(std::vector<int> device_ids) {
+bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
     nvmlReturn_t result;
     nvmlDevice_t deviceHandles[2];
 

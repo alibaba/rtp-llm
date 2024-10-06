@@ -28,16 +28,18 @@
 
 #include <iostream>
 
-
-#define CUSTOM_AR_SIZE_THRESHOLD 50331648
 #define MAX_ALL_REDUCE_BLOCKS 24
 #define FLAG(a) ((uint32_t)((a) % 0x146))
 #define MAX_RANKS_PER_NODE 8
 #define WARP_SIZE 32
 #define DEFAULT_BLOCK_SIZE 1024
-#define DEFALUT_ALGO_AR_SIZE_THRESHOLD 393216
 
 namespace fastertransformer {
+
+enum AllReduceStrategyType {
+    ONESHOT,
+    TWOSHOT,
+};
 
 typedef struct bf168 {
     __nv_bfloat162 x;
@@ -47,23 +49,38 @@ typedef struct bf168 {
 } bf168;
 
 struct CustomAllReduceParameters {
-    size_t    elts_total;
-    size_t    elts_per_rank;
-    size_t    elts_per_block;
-    size_t    rank_offset;
-    size_t    rank, local_rank;
-    uint32_t  barrier_flag;
-    uint32_t* peer_barrier_ptrs[MAX_RANKS_PER_NODE];
-    void*        peer_comm_buffer_ptrs[MAX_RANKS_PER_NODE];
-    void*        local_output_buffer_ptr;
+    size_t                elts_total_num;
+    size_t                data_type_size;
+    size_t                elts_per_rank;
+    size_t                elts_per_block;
+    size_t                rank_offset;
+    size_t                rank, local_rank;
+    size_t                ranks_per_node;
+    size_t                max_elts_total_size;
+    uint32_t              barrier_flag;
+    uint32_t*             peer_barrier_ptrs[MAX_RANKS_PER_NODE];
+    void*                 peer_comm_buffer_ptrs[MAX_RANKS_PER_NODE];
+    void*                 local_output_buffer_ptr;
+    AllReduceStrategyType kernel_algo;
 };
 
-template<typename T, int RANKS_PER_NODE>
+template<typename T1, typename T2>
+inline size_t divUp(const T1& a, const T2& n) {
+    size_t tmp_a = static_cast<size_t>(a);
+    size_t tmp_n = static_cast<size_t>(n);
+    return (tmp_a + tmp_n - 1) / tmp_n;
+}
+
+inline size_t roundUp(size_t a, size_t n) {
+    return divUp(a, n) * n;
+}
+
+template<typename T, size_t RANKS_PER_NODE>
 void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, cudaStream_t stream);
 
 template<typename T>
-void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_t stream, size_t world_size);
+void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_t stream);
 
-void kernelLaunchConfig(int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, int ranks_per_node);
+void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_grid, size_t& threads_per_block);
 
 }  // namespace fastertransformer

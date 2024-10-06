@@ -88,41 +88,44 @@ DeviceBase* initTestDevices(const size_t rank, const size_t world_size, const si
 void baseTest(const size_t rank, const size_t world_size, const size_t port, const size_t m) {
     auto device = initTestDevices(rank, world_size, port);
 
-    // test castom all reduce
-    const float begin = 0.0;
-    const float end   = 1.0;
-    const float step  = (end - begin) / m;
+    for (size_t i = 1; i < 4096; i++) {
+        // test castom all reduce
+        const float begin = 0.0;
+        const float end   = 1.0;
+        const float step  = (end - begin) / (i * m);
 
-    const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
-    auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
-    buf               = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
-    copy_tensor_to_buffer(tensor, buf);
-    buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
-    device->syncAndCheck();
-    auto out = bufferToTensor(*buf, device);
-    device->syncAndCheck();
+        const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
+        auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
+        buf               = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+        copy_tensor_to_buffer(tensor, buf);
+        buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
+        device->syncAndCheck();
+        auto out = bufferToTensor(*buf, device);
+        device->syncAndCheck();
 
-    auto expected = torch::arange(begin, end, step, torch::kFloat32)
-                    * (((int32_t)world_size * ((int32_t)world_size - 1) / 2) + (int32_t)world_size);
-    CHECK_TRUE(checkTensorClose(expected, out, 1e-6, 1e-6));
+        auto expected = torch::arange(begin, end, step, torch::kFloat32)
+                        * (((int32_t)world_size * ((int32_t)world_size - 1) / 2) + (int32_t)world_size);
+        CHECK_TRUE(checkTensorClose(expected, out, 1e-6, 1e-6));
+    }
 }
 
-void executeBenchmarkRun(DeviceBase*  device,
-                         const size_t rank,
-                         const size_t world_size,
-                         const size_t warm_iter,
-                         const size_t iter_num,
-                         const size_t m,
-                         bool         custom_ar = true,
-                         bool         log       = true) {
+size_t executeBenchmarkRun(DeviceBase*  device,
+                           const size_t rank,
+                           const size_t world_size,
+                           const size_t warm_iter,
+                           const size_t iter_num,
+                           const size_t m,
+                           bool         custom_ar = true,
+                           bool         log       = true) {
 
-    const auto tensor = torch::ones({int(m)}, torch::kFloat32) * 0.01 * ((int32_t)rank + 1);
-    auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {m}});
+    const auto tensor = torch::ones({int(m)}, torch::kFloat16) * 0.01 * ((int32_t)rank + 1);
+    auto       buf    = device->allocateBuffer({DataType::TYPE_FP16, {m}});
     device->syncAndCheck();
 
+    buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+    copy_tensor_to_buffer(tensor, buf);
     for (size_t i = 0; i < warm_iter; ++i) {
-        buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
-        copy_tensor_to_buffer(tensor, buf);
+
         buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
     }
     device->syncAndCheck();
@@ -135,75 +138,93 @@ void executeBenchmarkRun(DeviceBase*  device,
     }
     device->syncAndCheck();
     auto end_time = std::chrono::high_resolution_clock::now();
-    if (rank == 0 && log) {
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-        FT_LOG_INFO("[%s] Benchmark, world size %d, data size %d, time %d us",
-                    custom_ar ? "CUSTOM_AR" : "NCCL",
-                    world_size,
-                    m,
-                    duration.count() / iter_num);
-    }
 
-    fflush(stdout);
-    fflush(stderr);
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+
+    return duration.count() / max((size_t)1, iter_num);
 }
 
-void benchmark(const size_t rank, const size_t world_size, size_t port, size_t port2) {
-    vector<unsigned long> batch_size  = {1, 8, 16, 32};
-    vector<unsigned long> seq_length  = {2048, 4096};
-    vector<unsigned long> hidden_size = {4096, 5120, 8192};
+void benchmark(const size_t rank, const size_t world_size, size_t port) {
+    vector<unsigned long> seq_length;
+    vector<unsigned long> hidden_size = {768, 896, 1024, 1536, 2048, 3584, 5120, 8192};
     vector<unsigned long> sz_vec;
-    for (auto h : hidden_size) {
-        for (auto b : batch_size) {
-            sz_vec.push_back(b * h / world_size);
-        }
+    for (size_t i = 1; i < 4096; i++) {
+        seq_length.push_back(i);
     }
+
+    vector<size_t> custom_ar_times;
+    vector<size_t> nccl_times;
+    size_t         k     = 0;
+    size_t         port2 = port - 10000;
+
     for (auto h : hidden_size) {
+
+        vector<size_t>        part_custom_ar_times;
+        vector<size_t>        part_nccl_times;
+        vector<unsigned long> part_sz_vec;
+
         for (auto s : seq_length) {
-            sz_vec.push_back(s * h / world_size);
+            sz_vec.push_back(s * h);
+            part_sz_vec.push_back(s * h);
         }
+
+        setenv("FT_DISABLE_CUSTOM_AR", "0", 1);
+        auto device = initTestDevices(rank, world_size, port2 + k);
+        FT_LOG_INFO("[Custom AR] Start hot run");
+        executeBenchmarkRun(device, rank, world_size, 100, 0, 1024, false, false);
+        for (auto m : part_sz_vec) {
+            size_t time = executeBenchmarkRun(device, rank, world_size, 5, 100, m);
+            if (rank == 0) {
+                FT_LOG_INFO("[Custom AR] %d size,%d us", m, time);
+            }
+            custom_ar_times.push_back(time);
+            part_custom_ar_times.push_back(time);
+        }
+
+        setenv("FT_DISABLE_CUSTOM_AR", "1", 1);
+
+        device = initTestDevices(rank, world_size, port + k);
+        FT_LOG_INFO("[NCCL] Start hot run");
+        executeBenchmarkRun(device, rank, world_size, 100, 0, 1024, false, false);
+        for (auto m : part_sz_vec) {
+            size_t time = executeBenchmarkRun(device, rank, world_size, 5, 100, m, false);
+            if (rank == 0) {
+                FT_LOG_INFO("[NCCL] %d size, %d us", m, time);
+            }
+            nccl_times.push_back(time);
+            part_nccl_times.push_back(time);
+        }
+
+        if (rank == 0) {
+            double avg_speed_up = 0;
+            for (size_t i = 0; i < part_sz_vec.size(); i++) {
+                FT_LOG_INFO("[AR] %d us, [NCCL] %d us, speed up %f x, Data size %d",
+                            part_custom_ar_times[i],
+                            part_nccl_times[i],
+                            (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0,
+                            part_sz_vec[i]);
+                avg_speed_up += (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0;
+            }
+
+            FT_LOG_INFO("Average speed up %lf x", avg_speed_up / part_sz_vec.size());
+        }
+        k += 10;
     }
 
-    setenv("FT_DISABLE_CUSTOM_AR", "1", 1);
+    if (rank == 0) {
+        double avg_speed_up = 0;
+        for (size_t i = 0; i < sz_vec.size(); i++) {
+            avg_speed_up += (nccl_times[i] * 1.0 / custom_ar_times[i]) - 1.0;
+        }
 
-    auto device = initTestDevices(rank, world_size, port);
-
-    // cold run (ncclAllReduce)
-    FT_LOG_INFO("[NCCL] Start cold run");
-    executeBenchmarkRun(device, rank, world_size, 5, 0, 100, false, false);
-    for (auto m : sz_vec) {
-        executeBenchmarkRun(device, rank, world_size, 0, 1, m, false);
-    }
-
-    // hot run (ncclAllReduce)
-    FT_LOG_INFO("[NCCL] Start hot run");
-    executeBenchmarkRun(device, rank, world_size, 5, 0, 100, false, false);
-    for (auto m : sz_vec) {
-        executeBenchmarkRun(device, rank, world_size, 5, 100, m, false);
-    }
-
-    unsetenv("FT_DISABLE_CUSTOM_AR");
-    device = initTestDevices(rank, world_size, port2);
-    // cold run (custom all redcue)
-    FT_LOG_INFO("[Custom AR] Start cold run");
-    executeBenchmarkRun(device, rank, world_size, 5, 0, 100, false, false);
-    for (auto m : sz_vec) {
-        executeBenchmarkRun(device, rank, world_size, 0, 1, m);
-    }
-
-    // hot run (custom all redcue)
-    FT_LOG_INFO("[Custom AR] Start hot run");
-    executeBenchmarkRun(device, rank, world_size, 5, 0, 100, false, false);
-    for (auto m : sz_vec) {
-        executeBenchmarkRun(device, rank, world_size, 5, 100, m);
+        FT_LOG_INFO("Average speed up %lf x", avg_speed_up / sz_vec.size());
     }
 }
 
-void parse_arguments(
-    int argc, char* argv[], int* run_benchmark, size_t* rank, size_t* world_size, int* port, int* port2) {
+void parse_arguments(int argc, char* argv[], int* run_benchmark, size_t* rank, size_t* world_size, int* port) {
     if (argc != 6) {
         FT_LOG_INFO("argc %d\n", argc);
-        FT_LOG_INFO("Usage: %s <run_benchmark> <rank> <world_size> <port> <port2>", argv[0]);
+        FT_LOG_INFO("Usage: %s <run_benchmark> <rank> <world_size> <port>", argv[0]);
         exit(EXIT_FAILURE);
     }
 
@@ -211,7 +232,6 @@ void parse_arguments(
     *rank          = (size_t)strtoul(argv[2], NULL, 10);
     *world_size    = (size_t)strtoul(argv[3], NULL, 10);
     *port          = atoi(argv[4]);
-    *port2         = atoi(argv[5]);
 }
 
 int main(int argc, char* argv[]) {
@@ -219,23 +239,20 @@ int main(int argc, char* argv[]) {
     size_t rank          = 0;
     size_t world_size    = 0;
     int    port          = 0;
-    int    port2         = 0;
 
-    parse_arguments(argc, argv, &run_benchmark, &rank, &world_size, &port, &port2);
+    parse_arguments(argc, argv, &run_benchmark, &rank, &world_size, &port);
 
     FT_LOG_INFO("run_benchmark: %d", run_benchmark);
     FT_LOG_INFO("world_size: %zu", world_size);
     FT_LOG_INFO("rank: %zu", rank);
     FT_LOG_INFO("port: %d", port);
-    FT_LOG_INFO("port2: %d", port2);
 
     fflush(stdout);
 
     if (run_benchmark == 1) {
-        benchmark(rank, world_size, port, port2);
+        benchmark(rank, world_size, port);
     } else {
-        baseTest(rank, world_size, port, 128);
-        baseTest(rank, world_size, port2, 1048576);
+        baseTest(rank, world_size, port, 896);
     }
 
     return 0;

@@ -451,9 +451,9 @@ std::string getDriverVersion();
 
 int getCudaVersion();
 
-bool checkAllNVLinks(std::vector<int> device_ids);
+bool checkAllNVLinks(std::vector<size_t> device_ids);
 
-bool checkOnSameNumaNodes(std::vector<int> device_ids);
+bool checkOnSameNumaNodes(std::vector<size_t> device_ids);
 
 int getVisibleDeviceNum();
 

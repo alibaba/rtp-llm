@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,49 +36,50 @@ namespace fastertransformer {
 
 class CustomAllReduceComm {
 public:
-    CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank);
+    CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index);
 
     ~CustomAllReduceComm();
 
     void init(const NcclParam& nccl_para, cudaStream_t stream);
 
-    void allReduce(void* input_ptr, void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream);
+    void allReduce(void* input_ptr, void* output_ptr, size_t elts_total_num, DataType data_type, cudaStream_t stream);
 
-    bool checkAllReduceAvailable(size_t elts, DataType data_type);
+    bool checkAllReduceAvailable(size_t elts_total_num, DataType data_type, size_t world_size);
 
-    static size_t comm_buffer_size() {
-        return CUSTOM_AR_SIZE_THRESHOLD;
-    }
+    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank);
 
-    static size_t barrier_buffer_size(size_t world_size) {
-        return (MAX_ALL_REDUCE_BLOCKS + 1) * sizeof(uint32_t) * world_size * 2;
-    }
-
-    static size_t ipc_handle_buffer_size(size_t world_size) {
-        return CUDA_IPC_HANDLE_SIZE * world_size;
-    }
-
-    static bool shouldCustomAR(const std::vector<int>& tp_ranks, int rank);
-
-    void* peer_comm_buffer_ptr() {
+    void* peerCommBufferPtr() {
         return param_.peer_comm_buffer_ptrs[rank_];
     }
 
 private:
+    static size_t getCommBufThreshold(size_t world_size);
+
+    size_t barrierBufSize(size_t world_size) const {
+        return (MAX_ALL_REDUCE_BLOCKS + 1) * sizeof(uint32_t) * world_size * 2;
+    }
+
+    size_t IPChandleBufSize(size_t world_size) const {
+        return CUDA_IPC_HANDLE_SIZE * world_size;
+    }
+
+    AllReduceStrategyType select_kernel_algo(bool support_nv_link, size_t elts_total_size, size_t ranks_per_node) const;
     std::vector<cudaIpcMemHandle_t> prepareP2PBuffer_(const NcclParam& nccl_para,
                                                       size_t           local_buffer_size,
                                                       void*&           local_buffer_ptr,
                                                       cudaStream_t     stream);
 
     CustomAllReduceParameters       param_;
-    const int                       rank_ = 0;
-    int                             rank_index_ = 0;
-    const int                       world_size_ = 0;
-    std::vector<int>                tp_ranks_;
+    const size_t                    rank_               = 0;
+    const size_t                    rank_index_         = 0;
+    const size_t                    world_size_         = 0;
+    const size_t                    comm_buf_threshold_ = 0;
+    bool                            support_nv_link_    = false;
+    std::vector<size_t>             tp_ranks_;
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream);
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, cudaStream_t stream);
 
 }  // namespace fastertransformer

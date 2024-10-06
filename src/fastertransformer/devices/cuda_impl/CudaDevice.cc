@@ -82,7 +82,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
     if (nccl_param_.world_size_ > 1) {
         FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
-        std::vector<int> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
+        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
         custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
     }
 

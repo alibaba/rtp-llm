@@ -22,9 +22,6 @@ public:
         const auto port = getFreePort();
         FT_LOG_INFO("found free port %d", port);
 
-        const auto port2 = getFreePort();
-        FT_LOG_INFO("found free port2 %d", port2);
-
         posix_spawn_file_actions_t action;
         posix_spawnattr_t          attr;
 
@@ -35,25 +32,20 @@ public:
 
         // Spawn child processes
         for (size_t i = 0; i < world_size; ++i) {
-            char benchmark[32], i_str[32], world_size_str[32], port_str[32], port2_str[32];
+            char benchmark[32], i_str[32], world_size_str[32], port_str[32];
             snprintf(benchmark, sizeof(benchmark), "%d", run_benchmark);
             snprintf(i_str, sizeof(i_str), "%zu", i);
             snprintf(world_size_str, sizeof(world_size_str), "%zu", world_size);
             snprintf(port_str, sizeof(port_str), "%ld", port);
-            snprintf(port2_str, sizeof(port2_str), "%ld", port2);
 
-            char* argv[] = {(char*)custom_ar_test_executable_path.c_str(),
-                            benchmark,
-                            i_str,
-                            world_size_str,
-                            port_str,
-                            port2_str,
-                            nullptr};
+            char* argv[] = {
+                (char*)custom_ar_test_executable_path.c_str(), benchmark, i_str, world_size_str, port_str, nullptr};
 
             std::string ld_library_path = "LD_LIBRARY_PATH=";
             ld_library_path += std::getenv("LD_LIBRARY_PATH");
             std::vector<std::string> custom_env_vars = {"TEST_USING_DEVICE=CUDA", ld_library_path};
 
+            custom_env_vars.push_back("CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7");
             std::vector<char*> envp;
             for (const std::string& env_var : custom_env_vars) {
                 envp.push_back(const_cast<char*>(env_var.c_str()));
@@ -103,8 +95,8 @@ TEST_F(CudaCustomAllReduceTest, base) {
 TEST_F(CudaCustomAllReduceTest, benchmark) {
     if (getenv("BENCHMARK_AR_TEST")) {
         FT_LOG_INFO("CustomAllReduce benchmark");
-        testForWorldSizeMultiProcess(2, true);
         testForWorldSizeMultiProcess(4, true);
+        testForWorldSizeMultiProcess(2, true);
         return;
     }
 }

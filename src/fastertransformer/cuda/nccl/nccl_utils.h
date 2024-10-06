@@ -109,7 +109,7 @@ void ftNcclInitialize(NcclParam& tensor_para,
                       const int  tensor_para_size,
                       const int  pipeline_para_size);
 
-std::vector<int> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream);
+std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream);
 
 size_t getLocalBatchSize(const size_t batch_size, const size_t seq_len, const size_t pipeline_para_size);
 
