@@ -35,12 +35,13 @@ CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, si
     rank_(rank),
     rank_index_(rank_index),
     world_size_(tp_ranks.size()),
-    comm_buf_threshold_(getCommBufThreshold(world_size_)),
-    support_nv_link_(checkAllNVLinks(tp_ranks_)), tp_ranks_(std::move(tp_ranks)) {
+    support_nv_link_(checkAllNVLinks(tp_ranks)), 
+    comm_buf_threshold_(getCommBufThreshold(support_nv_link_, world_size_)), tp_ranks_(std::move(tp_ranks)) {
     param_.barrier_flag        = 0;
     param_.rank                = rank_;
     param_.local_rank          = rank_;
     param_.max_elts_total_size = comm_buf_threshold_;
+    param_.ranks_per_node      = world_size_;
 }
 
 CustomAllReduceComm::~CustomAllReduceComm() {
@@ -247,16 +248,21 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
     return true;
 }
 
-size_t CustomAllReduceComm::getCommBufThreshold(size_t world_size) {
+size_t CustomAllReduceComm::getCommBufThreshold(bool support_nv_link, size_t world_size) {
+    size_t custom_ar_size_threshold = 0;
     if (world_size <= 2) {
-        return 16 * 1000 * 1000;
+        if (support_nv_link) {
+            custom_ar_size_threshold = 16 * 1000 * 1000;
+        } else {
+            custom_ar_size_threshold = 2 * 1000 * 1000;
+        }
     } else {
         constexpr size_t elts_per_thread = 8;
         size_t           mod = elts_per_thread * world_size * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS * 2;
-        size_t           custom_ar_size_threshold = 8 * 1000 * 1000;
-        return custom_ar_size_threshold + custom_ar_size_threshold % mod == 0 ? 0 :
-                                                                                (mod - custom_ar_size_threshold % mod);
+        custom_ar_size_threshold = 8 * 1000 * 1000;
+        custom_ar_size_threshold += (custom_ar_size_threshold % mod) == 0 ? 0 : (mod - (custom_ar_size_threshold % mod));
     }
+    return custom_ar_size_threshold;
 }
 
 AllReduceStrategyType

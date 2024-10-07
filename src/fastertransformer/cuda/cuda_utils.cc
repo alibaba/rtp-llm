@@ -777,7 +777,7 @@ bool checkAllNVLinks(std::vector<size_t> device_ids) {
             size_t device_id1 = device_ids[i];
             size_t device_id2 = device_ids[j];
 
-           char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
             check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
@@ -785,7 +785,7 @@ bool checkAllNVLinks(std::vector<size_t> device_ids) {
             }
 
             char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id1));
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));

@@ -94,6 +94,27 @@ void baseTest(const size_t rank, const size_t world_size, const size_t port, con
         const float end   = 1.0;
         const float step  = (end - begin) / (i * m);
 
+        const auto tensor = torch::arange(begin, end, step, torch::kFloat16) * ((int32_t)rank + 1);
+        auto       buf    = device->allocateBuffer({DataType::TYPE_FP16, {static_cast<unsigned long>(tensor.size(0))}});
+        buf               = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+        copy_tensor_to_buffer(tensor, buf);
+        buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
+        device->syncAndCheck();
+        auto out = bufferToTensor(*buf, device);
+        device->syncAndCheck();
+
+        auto expected = torch::arange(begin, end, step, torch::kFloat16)
+                        * (((int32_t)world_size * ((int32_t)world_size - 1) / 2) + (int32_t)world_size);
+        CHECK_TRUE(checkTensorClose(expected, out, 1e-3, 1e-3));
+    }
+
+
+    for (size_t i = 1; i < 4096; i++) {
+        // test castom all reduce
+        const float begin = 0.0;
+        const float end   = 1.0;
+        const float step  = (end - begin) / (i * m);
+
         const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
         auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
         buf               = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
@@ -122,10 +143,9 @@ size_t executeBenchmarkRun(DeviceBase*  device,
     auto       buf    = device->allocateBuffer({DataType::TYPE_FP16, {m}});
     device->syncAndCheck();
 
-    buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
-    copy_tensor_to_buffer(tensor, buf);
     for (size_t i = 0; i < warm_iter; ++i) {
-
+        buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+        copy_tensor_to_buffer(tensor, buf);
         buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
     }
     device->syncAndCheck();
@@ -198,7 +218,7 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
         if (rank == 0) {
             double avg_speed_up = 0;
             for (size_t i = 0; i < part_sz_vec.size(); i++) {
-                FT_LOG_INFO("[AR] %d us, [NCCL] %d us, speed up %f x, Data size %d",
+                FT_LOG_INFO("[AR] %d us, [NCCL] %d us, speed up %f x, Data num %d",
                             part_custom_ar_times[i],
                             part_nccl_times[i],
                             (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0,
@@ -222,7 +242,7 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
 }
 
 void parse_arguments(int argc, char* argv[], int* run_benchmark, size_t* rank, size_t* world_size, int* port) {
-    if (argc != 6) {
+    if (argc != 5) {
         FT_LOG_INFO("argc %d\n", argc);
         FT_LOG_INFO("Usage: %s <run_benchmark> <rank> <world_size> <port>", argv[0]);
         exit(EXIT_FAILURE);

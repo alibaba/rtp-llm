@@ -334,40 +334,43 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
             param->elts_per_block = roundUp(divUp(elts_total_num, blocks_per_grid), elts_per_thread);
 
             // std::stringstream string_stream;
-            // string_stream  << "elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << "
-            // total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: "
-            // << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // string_stream  << "[ONE] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // FT_LOG_INFO(string_stream.str());
             break;
         }
         case AllReduceStrategyType::TWOSHOT: {  // two stage all reduce algo
             size_t mod    = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS;
             size_t remain = param->elts_total_num % mod;
+            bool half_mod = false;
             if (remain != 0) {
                 size_t max_elts_num = param->max_elts_total_size / data_type_bytes;
                 assert(max_elts_num % mod == 0);
-                if (elts_total_num < remain * 2) {
-                    elts_total_num += (mod - remain) / 2;
-                } else {
-                    elts_total_num += mod - remain;
+                if (elts_total_num < mod * 2) {
+                    mod = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS / 2;
+                    remain = param->elts_total_num % mod;
+                    half_mod = true;
                 }
+                elts_total_num        += (mod - remain);
                 elts_total_num        = std::min(elts_total_num, max_elts_num);
                 param->elts_total_num = elts_total_num;
             }
 
             assert(elts_total_num / (elts_per_thread * ranks_per_node) == 0);
-            size_t const total_threads = roundUp(elts_total_num / (elts_per_thread * ranks_per_node), WARP_SIZE);
+            size_t const total_threads = elts_total_num / (elts_per_thread * ranks_per_node);
 
             threads_per_block = DEFAULT_BLOCK_SIZE;
-            blocks_per_grid   = total_threads / threads_per_block;
+            blocks_per_grid   = MAX_ALL_REDUCE_BLOCKS;
+            if (half_mod) {
+                blocks_per_grid = MAX_ALL_REDUCE_BLOCKS / 2;
+            }
 
             param->elts_per_rank  = elts_total_num / ranks_per_node;
             param->rank_offset    = param->rank * param->elts_per_rank;
             param->elts_per_block = roundUp(divUp(param->elts_per_rank, blocks_per_grid), elts_per_thread);
 
             // std::stringstream string_stream;
-            // string_stream  << "elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << "
-            // total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: "
-            // << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // string_stream  << "[TWO] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // FT_LOG_INFO(string_stream.str());
             break;
         }
     }

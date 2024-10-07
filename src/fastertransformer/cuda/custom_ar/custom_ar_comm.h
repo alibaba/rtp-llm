@@ -53,7 +53,7 @@ public:
     }
 
 private:
-    static size_t getCommBufThreshold(size_t world_size);
+    static size_t getCommBufThreshold(bool support_nv_link, size_t world_size);
 
     size_t barrierBufSize(size_t world_size) const {
         return (MAX_ALL_REDUCE_BLOCKS + 1) * sizeof(uint32_t) * world_size * 2;
@@ -73,8 +73,8 @@ private:
     const size_t                    rank_               = 0;
     const size_t                    rank_index_         = 0;
     const size_t                    world_size_         = 0;
-    const size_t                    comm_buf_threshold_ = 0;
     bool                            support_nv_link_    = false;
+    const size_t                    comm_buf_threshold_ = 0;
     std::vector<size_t>             tp_ranks_;
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
