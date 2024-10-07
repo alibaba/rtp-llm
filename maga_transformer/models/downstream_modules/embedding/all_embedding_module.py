@@ -1,6 +1,6 @@
 import torch
 import copy
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 
 import torch.nn as nn
 from transformers import PreTrainedTokenizerBase
@@ -10,7 +10,7 @@ from maga_transformer.async_decoder_engine.embedding.interface import EngineInpu
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.models.downstream_modules.embedding.misc import EmbeddingRendererBase, hidden_combo_to_batch
 from maga_transformer.models.downstream_modules.embedding.api_datatype import OpenAIEmbeddingRequest, \
-    Usage, ALLEmbeddingResponseFormat, ALLEmbeddingResponse, EmbeddingResponseType, OpenAIEmbeddingResponse
+    Usage, ALLEmbeddingResponseFormat, ALLEmbeddingResponse, EmbeddingResponseType, OpenAIEmbeddingResponse, SimilarityRequest
     
 class ALLEmbeddingModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
@@ -27,6 +27,12 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
     def render_cpp(self, input: List[str]):
         out = self.create_input(OpenAIEmbeddingRequest(input=input))
         return [out.token_ids, out.token_type_ids, out.input_lengths]
+    
+    async def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
+        if 'left' in request_json:
+            return SimilarityRequest(**request_json)
+        else:
+            return OpenAIEmbeddingRequest(**request_json)
     
     async def render_response(self, request: OpenAIEmbeddingRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
