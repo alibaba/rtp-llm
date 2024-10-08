@@ -62,11 +62,21 @@ struct GemmParamKey {
   int n;
   int k;
   int hashkey;
+  int e = 0; //expert num for moe
   GemmParamKey(int m_, int n_, int k_) {
     memset(this, 0, sizeof(*this));
     m = m_;
     n = n_;
     k = k_;
+    hashkey = 0;
+    hashkey = checksumCRC32(reinterpret_cast<const uint8_t*>(this), sizeof(GemmParamKey));
+  }
+  GemmParamKey(int m_, int n_, int k_, int e_) {
+    memset(this, 0, sizeof(*this));
+    m = m_;
+    n = n_;
+    k = k_;
+    e = e_;
     hashkey = 0;
     hashkey = checksumCRC32(reinterpret_cast<const uint8_t*>(this), sizeof(GemmParamKey));
   }
@@ -113,6 +123,18 @@ inline void print_config_file(CutlassGemmConfig config, int m, int n, int k, flo
     std::string config_to_string = convert_config_to_string(tile_config.block_m, tile_config.block_n, tile_config.block_k, tile_config.warp_m, tile_config.warp_n, tile_config.warp_k);
     if (outFile) {
         outFile << "{{" << m << "," << n << "," << k << "}, {CutlassGemmConfig(" << config_to_string << "," << config.split_k_factor << "," << config.stages << "), " <<time <<"}},"<< std::endl;
+    } else {
+        throw std::runtime_error(std::string("[FT][ERROR] Cannot open file: ") + file + "\n");
+    }
+}
+
+// {{1,4096,4096,64}, {CutlassGemmConfig(CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64,2,3),0.0203264}},
+inline void print_config_file(CutlassGemmConfig config, int m, int n, int k, int e, float time, const char* file, std::ios::openmode open_mode) {
+    TileConfig tile_config = get_tile_config_from_config(config.tile_config);
+    std::ofstream outFile(file, open_mode);
+    std::string config_to_string = convert_config_to_string(tile_config.block_m, tile_config.block_n, tile_config.block_k, tile_config.warp_m, tile_config.warp_n, tile_config.warp_k);
+    if (outFile) {
+        outFile << "{{" << m << "," << n << "," << k << "," << e << "}, {CutlassGemmConfig(" << config_to_string << "," << config.split_k_factor << "," << config.stages << "), " <<time <<"}},"<< std::endl;
     } else {
         throw std::runtime_error(std::string("[FT][ERROR] Cannot open file: ") + file + "\n");
     }

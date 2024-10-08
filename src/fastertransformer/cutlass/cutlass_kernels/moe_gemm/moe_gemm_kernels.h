@@ -20,6 +20,7 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 
 #include <array>
 #include <cuda_runtime_api.h>
@@ -194,6 +195,16 @@ public:
 
     [[nodiscard]] int getSM() const;
 
+    template <typename EpilogueTag>
+    std::vector<cutlass_extensions::CutlassGemmConfig> getValidConfigs(T const* A, WeightType const* B,
+        ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size,
+        ScaleBiasType const* biases, bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert,
+        HopperGroupedGemmInput layout_info, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
+        bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream);
+
+    cutlass_extensions::CutlassGemmConfig getChosenConfig(
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, cudaStream_t stream);
+
 private:
     template <typename EpilogueTag>
     void dispatchToArch(T const* A, WeightType const* B, ScaleBiasType const* weight_scales,
@@ -215,6 +226,7 @@ private:
     mutable int num_experts_ = 0;
     mutable size_t gemm_workspace_size_ = 0;
     size_t calcMaxWorkspaceSize(int num_experts) const;
+    const kernels::cutlass_kernels::GemmLut* gemm_lut_;
 };
 
 } // namespace tensorrt_llm

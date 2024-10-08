@@ -80,7 +80,7 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
         TLLM_THROW("Could not construct the mixture of experts plugin with the requested input combination");
     }
 
-    mMOERunner->setTactic(mMOERunner->getTactics()[0], mMOERunner->getTactics()[0]);
+    // mMOERunner->setTactic(mMOERunner->getTactics()[0], mMOERunner->getTactics()[0]);
 }
 
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
@@ -118,6 +118,7 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, v
     MOEParallelismConfig parallelism_config = getParallelismConfig();
     LoraParams lora_params;
 
+    mMOERunner->setTactic(num_rows, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, stream);
     mMOERunner->runMoe(input, // const void*
         moe_gates, fc1_expert_weight, fc1_expert_bias, mActivationType, fc2_expert_weight, fc2_expert_bias,
         QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize), num_rows,

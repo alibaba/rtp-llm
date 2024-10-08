@@ -582,11 +582,10 @@ std::vector<tc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<float, WeightType, Q
     return configs;
 }
 
-template<typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-tc::CutlassGemmConfig
-CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
-        const void* biases, void* C, int m, int n, int k, const int group_size,
-        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+tc::CutlassGemmConfig CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getChosenConfig(void const* A,
+    void const* B, void const* weight_scales, void const* weight_zero_points, void const* biases, void* C, int m, int n,
+    int k, int const group_size, char* workspace_ptr, size_t const workspace_bytes, cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
     tc::CutlassGemmConfig config;

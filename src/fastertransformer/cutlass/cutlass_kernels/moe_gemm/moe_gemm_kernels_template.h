@@ -509,6 +509,90 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getConfigs(int
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
     typename ScaleBiasType>
+template <typename EpilogueTag>
+std::vector<cutlass_extensions::CutlassGemmConfig>
+MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getValidConfigs(T const* A, WeightType const* B,
+    ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases,
+    bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input,
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,
+    float const** alpha_scale_ptr_array, cudaStream_t stream)
+{
+
+    static constexpr int workspace_bytes = 0; // No workspace for MoE GEMMs.
+    static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
+
+    auto candidate_configs = getConfigs();
+    std::vector<cutlass_extensions::CutlassGemmConfig> valid_splitk_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(
+                total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
+        {
+            valid_splitk_configs.push_back(candidate_configs[i]);
+        }
+    }
+    std::vector<int> occupancies(valid_splitk_configs.size());
+
+    for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
+    {
+        dispatchToArch<EpilogueTag>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
+            total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts,
+            valid_splitk_configs[ii], use_fused_moe, alpha_scale_ptr_array, stream, &occupancies[ii]);
+    }
+
+    std::vector<cutlass_extensions::CutlassGemmConfig> valid_configs
+        = tensorrt_llm::kernels::cutlass_kernels::get_valid_config_from_occupancies(valid_splitk_configs, occupancies);
+
+    return valid_configs;
+}
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
+cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getChosenConfig(
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, cudaStream_t stream)
+{
+    kernels::cutlass_kernels::GemmParamKey cur_key{(int) total_rows, (int) gemm_n, (int) gemm_k, num_experts};
+    if (gemm_lut_ != nullptr)
+    {
+        auto iter = gemm_lut_->find({cur_key});
+        if (iter != gemm_lut_->end())
+        {
+            cutlass_extensions::CutlassGemmConfig specified_config = iter->second;
+            return specified_config;
+        }
+    }
+
+    static constexpr int workspace_bytes = 0; // No workspace for MoE GEMMs.
+    static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
+
+    auto candidate_configs = getConfigs();
+    std::vector<cutlass_extensions::CutlassGemmConfig> valid_splitk_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(
+                total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
+        {
+            valid_splitk_configs.push_back(candidate_configs[i]);
+        }
+    }
+    std::vector<int> occupancies(valid_splitk_configs.size());
+
+    HopperGroupedGemmInput hopper_input{};
+    for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
+    {
+        dispatchToArch<cutlass_extensions::EpilogueOpDefault>(nullptr, nullptr, nullptr, nullptr, gemm_k, nullptr,
+            false, nullptr, nullptr, hopper_input, total_rows, gemm_n, gemm_k, num_experts, valid_splitk_configs[ii],
+            false, nullptr, stream, &occupancies[ii]);
+    }
+    cutlass_extensions::CutlassGemmConfig chosen_config
+        = tensorrt_llm::kernels::cutlass_kernels::estimate_best_config_from_occupancies(
+            valid_splitk_configs, occupancies, total_rows, gemm_n, gemm_k, multi_processor_count_);
+
+    return chosen_config;
+}
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
 std::vector<cutlass_extensions::CutlassGemmConfig>
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getAmpereConfigs(int sm)
 {
@@ -611,6 +695,7 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::MoeGemmRunner(
     check_cuda_error(cudaGetDevice(&device));
     sm_ = ft::get_sm();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    gemm_lut_ = kernels::cutlass_kernels::get_gemm_lut<T, WeightType, true>();
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
@@ -812,10 +897,10 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::runGemm(T
     ScaleBiasType const* weight_scales, ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases,
     bool bias_is_broadcast, void* C, int64_t const* total_tokens_including_expert, HopperGroupedGemmInput hopper_input,
     int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,
-    float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_conf)
+    float const** alpha_scale_ptr_array, cudaStream_t stream, cutlass_extensions::CutlassGemmConfig chosen_config)
 {
     dispatchToArch<EpilogueTag>(A, B, weight_scales, weight_zeros, group_size, biases, bias_is_broadcast, C,
-        total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, chosen_conf,
+        total_tokens_including_expert, hopper_input, total_rows, gemm_n, gemm_k, num_experts, chosen_config,
         use_fused_moe, alpha_scale_ptr_array, stream, nullptr);
 }
 
