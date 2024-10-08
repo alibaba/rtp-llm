@@ -46,9 +46,11 @@ cc_library(
         "CudaQuantizeOp.cc",
         "CudaSampleOp.cc",
         "CudaSoftmaxOp.cc",
+        "CudaBeamSearchOp.cc",
     ]),
     deps = [
         ":cuda_base",
+        "//src/fastertransformer/devices/torch_impl:torch_beam_search_op_impl",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

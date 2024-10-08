@@ -223,3 +223,16 @@ cc_test(
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "beam_search_op_test",
+    srcs = [
+        "CudaBeamSearchOpTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'A10'},
+)
+

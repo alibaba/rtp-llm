@@ -480,21 +480,13 @@ struct GreedyParams {
 
 struct BeamSearchParams {
     const Buffer& logits;
-    const Buffer& sequence_lengths;  // shape: [batch_size]
-    const size_t step;               // typically largest sequence length in the batch
-
-    const size_t num_beams;
-    const size_t batch_size;
-
     Buffer& token_ids;
-    OptionalBufferRef cum_log_probs;
-    OptionalBufferRef output_log_probs;
+    Buffer& input_lengths;
+    Buffer& sequence_lengths;
+    Buffer& cum_log_probs;
+    Buffer& beam_index;
 };
 
-struct BeamSearchOutput {
-    BufferPtr token_ids;
-    BufferPtr cum_log_probs;
-};
 
 struct BroadcastParams {
     const std::vector<BufferPtr>& buffers;
