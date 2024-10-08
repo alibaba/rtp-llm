@@ -34,17 +34,16 @@ fi
 # render more build args
 TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
 # TODO: check arm
-PLATFORM=x86_64
-if [[ $CPUARCH == "arm" ]]; then
-    PLATFORM=aarch64
+if [[ $PLATFORM == "aarch64" ]]; then
+    WHEEL_TARGET=//maga_transformer:maga_transformer_aarch64
+    WHEEL_OS=linux
+else
+    PLATFORM=x86_64
+    WHEEL_TARGET=//maga_transformer:maga_transformer
+    WHEEL_OS=manylinux1
 fi
 VERSION=`cat $DIR/../../open_source/version`
-WHL_FILE=maga_transformer-$VERSION-cp310-cp310-manylinux1_$PLATFORM.whl
-if [[ $CPUARCH == "arm" ]]; then
-    WHL_FILE=maga_transformer-$VERSION-cp310-cp310-linux_$PLATFORM.whl
-else
-    WHL_FILE=maga_transformer-$VERSION-cp310-cp310-manylinux1_$PLATFORM.whl
-fi
+WHL_FILE=maga_transformer-$VERSION-cp310-cp310-$WHEEL_OS_$PLATFORM.whl
 
 # create temp container
 TEMP_CONTAINER_NAME=packaging_temp_$TAG
@@ -62,12 +61,7 @@ docker cp $DIR/../.. $TEMP_CONTAINER_NAME:/FasterTransformer
 docker cp ~/.ssh $TEMP_CONTAINER_NAME:/root/.ssh
 docker exec -i $TEMP_CONTAINER_NAME chown -R root:root /root/.ssh
 docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "ssh-keyscan gitlab.alibaba-inc.com >> ~/.ssh/known_hosts"
-#docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG //maga_transformer:maga_transformer"
-if [[ $CPUARCH == "arm" ]]; then
-    docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG //maga_transformer:maga_transformer_aarch64"
-else
-    docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG //maga_transformer:maga_transformer"
-fi
+docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG $WHEEL_TARGET"
 rm $DIR/$WHL_FILE -f
 docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/maga_transformer/$WHL_FILE $DIR/
 

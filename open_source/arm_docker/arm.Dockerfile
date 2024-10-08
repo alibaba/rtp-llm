@@ -16,7 +16,8 @@ RUN dnf install -y \
 
 RUN dnf install -y \
         emacs-nox git git-lfs openblas-devel \
-    	docker nfs-utils && \
+        https://mirrors.aliyun.com/docker-ce/linux/centos/8/aarch64/stable/Packages/docker-ce-cli-26.1.3-1.el8.aarch64.rpm \
+    	nfs-utils && \
     dnf clean all
 
 RUN dnf install -y \
