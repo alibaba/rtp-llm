@@ -7,7 +7,12 @@ namespace rtp_llm {
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& param) {
     int local_head_num_kv = (param.head_num_kv_ > 1) ? param.head_num_kv_ / param.tp_size_ : param.head_num_kv_;
+#if defined(__aarch64__)
+    // Arm attention operator support FP32 data type only
+    auto dtype = param.int8_kv_cache_ ? ft::TYPE_INT8 : ft::TYPE_FP32;
+#else
     auto dtype = param.int8_kv_cache_ ? ft::TYPE_INT8 : ft::TYPE_FP16;
+#endif
     return CacheConfig((uint)param.num_layers_, (uint)0, (uint)local_head_num_kv, (uint)param.size_per_head_, (uint)param.seq_size_per_block_, dtype);
 }
 
