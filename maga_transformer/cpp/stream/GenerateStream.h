@@ -112,10 +112,9 @@ public:
 
     void step();
 
-    int multimodalReuseIndex() const;
-    std::optional<std::vector<torch::Tensor>>& multimodalFeatures() const;
+    std::vector<torch::Tensor> multimodalFeatures() const;
     int multimodalFeaturesLength() const;
-    std::optional<ft::BufferPtr>& multimodalLocations() const;
+    ft::BufferPtr multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;
 
     void checkTimeout();

@@ -98,7 +98,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (need_cal_position_id) {
                 if (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) {
                     int feature_len = 0;
-                    for (auto& feature: stream->multimodalFeatures().value()) {
+                    for (auto& feature: stream->multimodalFeatures()) {
                         // used in chatglm4v: image position id => [x, x + 1 , x + 1, ..., x + 1, x + 2]
                         feature_len += feature.sizes()[0] - 3;
                     }
@@ -153,20 +153,17 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
 
             if (has_multimodal_input) {
-                int mm_reuse_length = stream->multimodalReuseIndex();
-                std::vector<torch::Tensor>& mm_features = stream->multimodalFeatures().value();
-                mm_features = std::vector<torch::Tensor>(mm_features.begin() + mm_reuse_length, mm_features.end());
-                ft::BufferPtr mm_locs = stream->multimodalLocations().value();
-                mm_locs = mm_locs->slice(mm_reuse_length, mm_locs->size() - mm_reuse_length);
+                std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
+                ft::BufferPtr mm_locs = stream->multimodalLocations();
+                for (int i = 0;i < mm_locs->size(); ++i) {
+                    mm_features_locs[mm_feature_index] = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
+                    mm_feature_index++;
+                }
                 for (auto& mm_feature: mm_features) {
                     gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
                 }
                 auto text_token_mask = stream->textTokensMask();
                 memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
-                for (int i = 0;i < mm_locs->size(); ++i) {
-                    *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
-                    mm_feature_index++;
-                }
 
                 if (!cal_mm_tokens_in_rotary_emb_) {
                     int position_index = 0, mm_index = 0;

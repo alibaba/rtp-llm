@@ -253,6 +253,7 @@ void GenerateStream::setReuseLength(int reuse_length) {
         for (int i = locs->size() - 1; i >= 0; --i) {
             if (reuse_length_ > *locs->dataWithOffset<int32_t>(i)) {
                 reuse_mm_length_ = i + 1;
+                break;
             }
         }
     }
@@ -301,24 +302,25 @@ vector<int> GenerateStream::contextTokens(int batch_idx) const {
             (*complete_token_ids_)[batch_idx].view(prefixLength(), contextLength()));
 }
 
-int GenerateStream::multimodalReuseIndex() const {
-    return reuse_mm_length_;
-}
-
-std::optional<std::vector<torch::Tensor>>& GenerateStream::multimodalFeatures() const {
-    return generate_input_->multimodal_features;
+std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
+    if (generate_input_->multimodal_features) {
+        auto& features = generate_input_->multimodal_features.value();
+        return std::vector<torch::Tensor>(features.begin() + reuse_mm_length_, features.end());
+    } else {
+        return std::vector<torch::Tensor>();
+    }
 }
 
 int GenerateStream::multimodalFeaturesLength() const {
-    auto& features = multimodalFeatures();
-    if (features) {
-        return (features.value().size() - reuse_mm_length_) * batchSize();
-    }
-    return 0;
+    return multimodalFeatures().size() * batchSize();
 }
 
-std::optional<ft::BufferPtr>& GenerateStream::multimodalLocations() const {
-    return generate_input_->mm_locs;
+ft::BufferPtr GenerateStream::multimodalLocations() const {
+    if (!generate_input_->mm_locs) {
+        return nullptr;
+    }
+    auto& mm_locs = generate_input_->mm_locs.value();
+    return mm_locs->slice(reuse_mm_length_, mm_locs->size() - reuse_mm_length_);
 }
 
 vector<vector<int>> GenerateStream::multimodalIntervals() const {
