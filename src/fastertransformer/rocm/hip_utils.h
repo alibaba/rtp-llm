@@ -156,8 +156,10 @@ static void throwRocmError(const char* const file, int const line, std::string c
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
-    abort();
-    throw std::exception();
+    if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+        abort();
+    }
+    throw NEW_FT_EXCEPTION(error_msg);
 }
 
 template<typename T>
