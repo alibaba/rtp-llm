@@ -180,6 +180,8 @@ def InvokeNvcc(argv, log=False):
   host_compiler_options = GetHostCompilerOptions(argv)
   nvcc_compiler_options = GetNvccOptions(argv)
   opt_option = GetOptionValue(argv, '-O')
+  llvm_options_value = GetOptionValue(argv, '-mllvm')
+  llvm_options = ''.join([' -mllvm ' + llvm_option for llvm_option in llvm_options_value])
   m_options = GetOptionValue(argv, '-m')
   m_options = ''.join([' -m' + m for m in m_options if m in ['32', '64']])
   include_options = GetOptionValue(argv, '-I')
@@ -248,6 +250,7 @@ def InvokeNvcc(argv, log=False):
   nvccopts += warning_options
   nvccopts += fatbin_options
   nvccopts += mcmodel_options
+  nvccopts += llvm_options
 
   if depfiles:
     # Generate the dependency file
