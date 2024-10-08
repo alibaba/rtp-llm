@@ -50,8 +50,11 @@ void EmbeddingEngine::loop() {
 }
 
 th::Tensor EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features) {
+    FT_LOG_WARNING("%d", __LINE__);
     auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    FT_LOG_WARNING("%d", __LINE__);
     embedding_stream->setMetricReporter(metrics_reporter_);
+    FT_LOG_WARNING("%d", __LINE__);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
     FT_LOG_WARNING("%d", __LINE__);
     embedding_stream->waitFinish();
