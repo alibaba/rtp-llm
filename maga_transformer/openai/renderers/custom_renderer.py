@@ -15,7 +15,7 @@ from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
-    RoleEnum, RendererInfo
+    RoleEnum, RendererInfo, PromptTokensDetails
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput
@@ -162,7 +162,7 @@ class CustomChatRenderer():
         delta_output_string = ""
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
 
-        def generate_stream_response(index: int, output_str: str, input_token_length: int, output_token_length: int):
+        def generate_stream_response(index: int, output_str: str, input_token_length: int, output_token_length: int, reuse_length: int):
             return StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
                         index=index,
@@ -173,7 +173,8 @@ class CustomChatRenderer():
                     usage=UsageInfo(
                         prompt_tokens=input_token_length,
                         total_tokens=input_token_length + output_token_length,
-                        completion_tokens=output_token_length
+                        completion_tokens=output_token_length,
+                        prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
                     )
                 )
 
@@ -195,6 +196,7 @@ class CustomChatRenderer():
             output = outputs.generate_outputs[0]
             # all model incremental return output_ids
             input_token_length = output.aux_info.input_len
+            reuse_length = output.aux_info.reuse_len
             output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
             output.output_ids = output_tokens_list
             output_ids = output.output_ids
@@ -215,14 +217,14 @@ class CustomChatRenderer():
                 last_token_length = len(output_ids) - len(responded_output_ids)
                 responded_output_ids = output_ids
                 responded_string += delta_output_string
-                stream_response = generate_stream_response(index, delta_output_string, input_token_length, output_token_length)
+                stream_response = generate_stream_response(index, delta_output_string, input_token_length, output_token_length, reuse_length)
                 delta_output_string = ""
                 yield stream_response
 
         trunc_string = truncate_response_with_stop_words(delta_output_string, generate_config.stop_words_str)
         if len(delta_output_string) > 0 and trunc_string == delta_output_string:
             responded_string += delta_output_string
-            yield generate_stream_response(index, delta_output_string, input_token_length, output_token_length)
+            yield generate_stream_response(index, delta_output_string, input_token_length, output_token_length, reuse_length)
 
         if finish_reason == None:
             logging.debug(f"output [{responded_string}] found no stop reason! use stop as default.")
@@ -239,7 +241,8 @@ class CustomChatRenderer():
             usage=UsageInfo(
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
-                completion_tokens=output_token_length
+                completion_tokens=output_token_length,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
             ),
             aux_info=output.aux_info if request.aux_info else None
         )

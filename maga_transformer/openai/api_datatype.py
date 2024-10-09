@@ -112,10 +112,20 @@ class ChatCompletionRequest(BaseModel):
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
 
+class CompletionTokensDetails(BaseModel):
+    audio_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+
+class PromptTokensDetails(BaseModel):
+    audio_tokens: Optional[int] = None
+    cached_tokens: Optional[int] = None
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
 
 class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
