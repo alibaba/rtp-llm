@@ -4,7 +4,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-LOG_PATH_KEY='PY_LOG_PATH'
+LOG_PATH_KEY='LOG_PATH'
 
 def get_handler(file_name: str) -> Optional[logging.Handler]:
     log_path = os.getenv(LOG_PATH_KEY, None)

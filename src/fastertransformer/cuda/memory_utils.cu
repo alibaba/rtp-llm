@@ -312,7 +312,7 @@ template<typename T>
 std::vector<T> loadWeightFromBinHelper(std::vector<size_t> shape, std::string filename)
 {
     if (shape.size() > 2) {
-        printf("[ERROR] shape should have less than two dims \n");
+        FT_LOG_ERROR("shape should have less than two dims \n");
         return std::vector<T>();
     }
     size_t dim0 = shape[0], dim1 = 1;

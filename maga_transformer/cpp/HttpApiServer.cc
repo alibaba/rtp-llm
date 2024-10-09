@@ -9,7 +9,6 @@
 
 namespace torch_ext {
 extern void setDebugLogLevel(bool debug);
-extern void setDebugPrintLevel(bool debug);
 }  // namespace torch_ext
 
 namespace rtp_llm {
@@ -269,7 +268,6 @@ void HttpApiServer::registerResponses() {
     registerHealth();
     registerV1Model();
     registerSetDebugLog();
-    registerSetDebugPrint();
     registerTokenizerEncode();
     registerInference();
     registerInferenceInternal();
@@ -370,36 +368,6 @@ bool HttpApiServer::registerSetDebugLog() {
         }
     };
     return http_server_.RegisterRoute("POST", "/set_debug_log", callback);
-}
-
-bool HttpApiServer::registerSetDebugPrint() {
-    auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                       const http_server::HttpRequest&                  request) -> void {
-        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        writer->AddHeader("Content-Type", "application/json");
-        const auto body = request.GetBody();
-        try {
-            auto body_map = AnyCast<JsonMap>(ParseJson(body));
-            auto it       = body_map.find("debug");
-            if (it == body_map.end()) {
-                FT_LOG_WARNING("set debug print level failed, request has no debug info. request body: %s",
-                               body.c_str());
-                writer->Write(R"({"error":"set debug print level failed, request has no debug info"})");
-                return;
-            }
-            auto value = AnyCast<bool>(it->second);
-            torch_ext::setDebugPrintLevel(value);
-            writer->Write(R"({"status":"ok"})");
-            return;
-        } catch (const std::exception& e) {
-            FT_LOG_WARNING("set debug print level failed, found exception. request body: %s, exception: [%s]",
-                           body.c_str(),
-                           e.what());
-            writer->Write(R"({"error":"set debug print level failed, exception occurred when parse request"})");
-            return;
-        }
-    };
-    return http_server_.RegisterRoute("POST", "/set_debug_print", callback);
 }
 
 bool HttpApiServer::registerTokenizerEncode() {

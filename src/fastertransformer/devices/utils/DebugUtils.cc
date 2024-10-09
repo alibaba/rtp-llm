@@ -1,3 +1,4 @@
+#include <sstream>
 #include <torch/torch.h>
 
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
@@ -9,12 +10,12 @@ namespace fastertransformer {
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print) {
     if (!force_print) {
-        if (!enableDebugPrint()) {
+        if (!Logger::getEngineLogger().isTraceMode()) {
             return;
         }
 
         if (buffer.isQBuffer()) {
-            printf("skip QBuffer [%s]: %s \n", hint.c_str(), buffer.debugString().c_str());
+            FT_LOG_INFO("skip QBuffer [%s]: %s", hint.c_str(), buffer.debugString().c_str());
             return;
         }
     }
@@ -35,8 +36,9 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
         c10::TensorOptions().device(torch::Device(torch::kCPU))
                             .dtype(dataTypeToTorchType(buffer.type()))
     );
-
-    std::cout << "Buffer " << hint << " : " << tensor << std::endl;
+    std::stringstream ss;
+    ss << "Buffer " << hint << " : " << tensor;
+    FT_LOG_TRACE("%s", ss.str().c_str());
 }
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {

@@ -631,7 +631,7 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
             past_seq += context_len;
         }
     } else if (params.input.type() == DataType::TYPE_FP16) {
-        std::cout << "[Warning] Attention performance could be suboptimal with FP16 input. Try FP32 input." << std::endl;
+        FT_LOG_WARNING("Attention performance could be suboptimal with FP16 input. Try FP32 input.");
         for (int batch = 0; batch < batch_size; batch++) {
             size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
             runOneBatch(params, past_seq, batch, context_len, 0);

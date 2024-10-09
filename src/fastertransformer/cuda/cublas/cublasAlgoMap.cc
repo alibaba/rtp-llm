@@ -40,7 +40,7 @@ void cublasAlgoMap::loadGemmConfig() {
     fd = fopen(config_filename_.c_str(), "r");
     if (fd == NULL) {
         if (!log_flag) {
-            std::cout << "[WARNING] " << config_filename_ << " is not found; using default GEMM algo" << std::endl;
+            FT_LOG_WARNING("%s is not found; using default GEMM algo", config_filename_.c_str());
             log_flag = true;
         }
         return;
@@ -52,7 +52,7 @@ void cublasAlgoMap::loadGemmConfig() {
     float exec_time;
     char  tmp[1024];
     if (!fgets(tmp, 1024, fd)) {
-        printf("[ERROR] fgets fail at %s:%d \n", __FILE__, __LINE__);
+        FT_LOG_ERROR("fgets fail at %s:%d \n", __FILE__, __LINE__);
         exit(-1);
     }
     while (fscanf(fd,
@@ -79,7 +79,7 @@ void cublasAlgoMap::loadGemmConfig() {
            != EOF) {
         if (dataType != FLOAT_DATATYPE && dataType != HALF_DATATYPE && dataType != BFLOAT16_DATATYPE
             && dataType != INT8_DATATYPE && dataType != FP8_DATATYPE) {
-            printf("[WARNING][readAlgoFromConfig] wrong dataType %d!\n", dataType);
+            FT_LOG_WARNING("[readAlgoFromConfig] wrong dataType %d!\n", dataType);
             continue;
         }
         cublasAlgoConfig_t markStr{batchCount2, m2, n2, k2, static_cast<CublasDataType>(dataType)};
@@ -132,7 +132,7 @@ void cublasAlgoMap::loadSpGemmConfig() {
     }
     FILE* fd = fopen(sp_config_filename_.c_str(), "r");
     if (fd == NULL) {
-        printf("[WARNING] %s is not found; using SPGEMM algo id 0\n", sp_config_filename_.c_str());
+        FT_LOG_WARNING("%s is not found; using SPGEMM algo id 0\n", sp_config_filename_.c_str());
         return;
     }
     sp_algo_map_.clear();
@@ -141,7 +141,7 @@ void cublasAlgoMap::loadSpGemmConfig() {
     float exec_time;
     char  tmp[1024];
     if (!fgets(tmp, 1024, fd)) {
-        printf("[ERROR] fgets fail at %s:%d \n", __FILE__, __LINE__);
+        FT_LOG_ERROR("fgets fail at %s:%d \n", __FILE__, __LINE__);
         exit(-1);
     }
     while (fscanf(fd,

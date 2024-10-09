@@ -133,9 +133,6 @@ class MlaQKVGemm(nn.Module):
 class TestRope(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        # os.environ['PY_LOG_LEVEL'] = "DEBUG"
-        # os.environ['FT_DEBUG_PRINT_LEVEL'] = "DEBUG"
-        # os.environ['FT_DEBUG_LEVEL']='DEBUG'
         self.config = MlaConfig()
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
         self.mla_qkv_gemm_op = torch.classes.unittest.MlaQKVGemmOP(

@@ -22,8 +22,6 @@ def local_rank_start():
     app = None
     try:
         # avoid multiprocessing load failed
-        if os.environ.get('FT_SERVER_TEST', None) is None:
-            logging.config.dictConfig(LOGGING_CONFIG)
         # reload for multiprocessing.start_method == fork
         g_parallel_info.reload()
         g_worker_info.reload()
@@ -71,7 +69,7 @@ def main():
     if g_parallel_info.world_size % torch.cuda.device_count() != 0 and g_parallel_info.world_size > torch.cuda.device_count():
         raise Exception(f'result: {g_parallel_info.world_size % torch.cuda.device_count()} \
             not support WORLD_SIZE {g_parallel_info.world_size} for {torch.cuda.device_count()} local gpu')
-        
+
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
         return multi_rank_start()
     else:
@@ -79,6 +77,4 @@ def main():
 
 if __name__ == '__main__':
     os.makedirs('logs', exist_ok=True)
-    if os.environ.get('FT_SERVER_TEST', None) is None:
-        logging.config.dictConfig(LOGGING_CONFIG)
     main()

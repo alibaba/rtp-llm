@@ -5,6 +5,7 @@ from decord import VideoReader, cpu
 
 import os
 import copy
+import logging
 import warnings
 import numpy as np
 import torch
@@ -17,7 +18,6 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
 
 from transformers.configuration_utils import PretrainedConfig
 from torchvision.transforms.functional import InterpolationMode
@@ -32,10 +32,8 @@ try:
         flash_attn_varlen_qkvpacked_func
     has_flash_attn = True
 except:
-    print('FlashAttention2 is not installed.')
+    logging.info('FlashAttention2 is not installed.')
     has_flash_attn = False
-
-logger = logging.get_logger(__name__)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -329,7 +327,7 @@ class InternVisionConfig(PretrainedConfig):
             config_dict = config_dict['vision_config']
 
         if 'model_type' in config_dict and hasattr(cls, 'model_type') and config_dict['model_type'] != cls.model_type:
-            logger.warning(
+            logging.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f'{cls.model_type}. This is not supported for all configurations of models and can yield errors.'
             )
@@ -420,12 +418,12 @@ try:
 
     InternRMSNorm = FusedRMSNorm  # noqa
 
-    logger.info('Discovered apex.normalization.FusedRMSNorm - will use it instead of InternRMSNorm')
+    logging.info('Discovered apex.normalization.FusedRMSNorm - will use it instead of InternRMSNorm')
 except ImportError:
     # using the normal InternRMSNorm
     pass
 except Exception:
-    logger.warning('discovered apex but it failed to load, falling back to InternRMSNorm')
+    logging.warning('discovered apex but it failed to load, falling back to InternRMSNorm')
     pass
 
 
@@ -489,7 +487,7 @@ class InternAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.use_flash_attn = config.use_flash_attn and has_flash_attn
         if config.use_flash_attn and not has_flash_attn:
-            print('Warning: Flash Attention is not available, use_flash_attn is set to False.')
+            logging.info('Warning: Flash Attention is not available, use_flash_attn is set to False.')
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
@@ -689,7 +687,7 @@ class InternVisionModel(PreTrainedModel):
         pos_emb = torch.cat([cls_emb, pos_emb], dim=1)
         self.embeddings.position_embedding = nn.Parameter(pos_emb)
         self.embeddings.image_size = new_size
-        logger.info('Resized position embeddings from {} to {}'.format(old_size, new_size))
+        logging.info('Resized position embeddings from {} to {}'.format(old_size, new_size))
 
     def get_input_embeddings(self):
         return self.embeddings

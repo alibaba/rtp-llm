@@ -27,7 +27,7 @@
 | `FT_DISABLE_CUSTOM_AR` | `int`, optional | 是否关闭Custom All Reduce(1:关闭，其他打开) |
 
 ## 注意事项
-1. 默认模型运行时的 log_level=WARNING，可以添加环境变量`PY_LOG_LEVEL=INFO` 显示更多日志
+1. 默认模型运行时的 log_level=WARNING，可以添加环境变量`LOG_LEVEL=INFO` 显示更多日志
 2. 可以配置环境变量`LOAD_CKPT_NUM_PROCESS=x`多进程加载模型。多进程加载的时候需要使用`if __name__ == '_main__':`作为入口，因为默认程序会使用spawn的方式起多进程；同时进程数过多可能会导致cuda out of memory
 
 # ModelConfig

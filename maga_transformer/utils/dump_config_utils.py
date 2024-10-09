@@ -15,7 +15,7 @@ def dump_config_to_table(title: str, config_map: Dict[str, Any]):
     table.field_names = ["Options", "Values"]
     for option, value in config_map.items():
         table.add_row([option, value])    
-    print(table, flush=True)
+    logging.info(table)
 
 def dump_lora_infos_to_table(title: str, lora_infos: List[NamedTuple]):
     if len(lora_infos) == 0:

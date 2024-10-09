@@ -47,7 +47,7 @@ BufferPtr ArmCpuDevice::gemm_acl(const GemmParams& params) {
 
     auto data_type = params.compute_type == DataType::TYPE_INVALID ? params.A.type() : params.compute_type;
     if (data_type != params.A.type()) {
-        std::cout << "[Warning] GEMM compute type differs from input type. Not supported" << std::endl;
+        FT_LOG_WARNING("GEMM compute type differs from input type. Not supported");
         data_type = params.A.type();
     }
     arm_compute::DataType acl_data_type = getAclDataType(data_type);

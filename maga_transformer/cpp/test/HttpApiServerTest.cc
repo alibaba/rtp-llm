@@ -84,17 +84,6 @@ TEST_F(HttpApiServerTest, testRegisterSetDebugLog) {
     MockRouteCallback("POST", "/set_debug_log", request);
 }
 
-TEST_F(HttpApiServerTest, testRegisterSetDebugPrint) {
-    EXPECT_TRUE(server_->registerSetDebugPrint());
-    const std::string body    = R"del(
-{
-    "debug": true
-}
-)del";
-    auto              request = CreateHttpRequest(body);
-    MockRouteCallback("POST", "/set_debug_print", request);
-}
-
 TEST_F(HttpApiServerTest, testRegisterTokenizerEncode) {
     EXPECT_TRUE(server_->registerTokenizerEncode());
     // json 中没有 prompt 字段, 这样就不会调用到 python 方法, 否则程序会崩溃

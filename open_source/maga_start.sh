@@ -24,15 +24,15 @@ ls $LOG_DIR | grep -Ev '[0-9]{4}_[0-9]{2}_[0-9]{2}__' | \
 xargs -I {} bash -c 'mv ${LOG_DIR}/{} ${LOG_DIR}/`date -r ${LOG_DIR}/{} +"%Y_%m_%d__%H_%M_%S__"`{}';
 ls ${LOG_DIR} -t | tail -n +${PY_RTP_LOG_KEEP_COUNT} | xargs -I {} rm -rf ${LOG_DIR}/{};
 
-# $PY_LOG_PATH used for py_inference `get_handler` func, do not remove
-export PY_LOG_PATH=$LOG_DIR
+# $LOG_PATH used for py_inference `get_handler` func, do not remove
+export LOG_PATH=$LOG_DIR
 
-export PYTHON_STDOUT_FILE=$LOG_DIR/stdout
-export PYTHON_STDERR_FILE=$LOG_DIR/stderr
-export PY_ENV_FILE=$LOG_DIR/env.txt
+export STDOUT_FILE=$LOG_DIR/stdout
+export STDERR_FILE=$LOG_DIR/stderr
+export ENV_FILE=$LOG_DIR/env.txt
 
 #logging level
-export PY_LOG_LEVEL="INFO"
+export LOG_LEVEL="INFO"
 
 # pyfsutil
 export HADOOP_HOME=$HIPPO_APP_INST_ROOT/usr/local/hadoop/hadoop;
@@ -94,11 +94,11 @@ echo "START_PORT=${START_PORT}";
 
 export PY_INFERENCE_LOG_RESPONSE=1
 
-printenv > "$PY_ENV_FILE";
+printenv > "$ENV_FILE";
 if [ "${CMD}" ]; then
     echo "use cmd mode"
-    ${CMD} >> "$PYTHON_STDOUT_FILE" 2>> "$PYTHON_STDERR_FILE";
+    ${CMD} >> "$STDOUT_FILE" 2>> "$STDERR_FILE";
 else
     echo "use default mode"
-    /opt/conda310/bin/python3 -m maga_transformer.start_server >> "$PYTHON_STDOUT_FILE" 2>> "$PYTHON_STDERR_FILE"
+    /opt/conda310/bin/python3 -m maga_transformer.start_server >> "$STDOUT_FILE" 2>> "$STDERR_FILE"
 fi

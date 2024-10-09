@@ -1,4 +1,3 @@
-import torch
 import pathlib
 import os
 import sys
@@ -31,7 +30,7 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     # for debug useage, read in bazel-bin and bazel-bin's subdir
     bazel_bin_dir = os.path.join(parent_dir, "../bazel-bin")
     so_path = find_th_transformer(bazel_bin_dir)
-print("so path: ", so_path)
+logging.info(f"so path: {so_path}")
 sys.path.append(so_path)
 
 # load intel xft lib

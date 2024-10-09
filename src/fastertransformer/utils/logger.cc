@@ -18,20 +18,15 @@
 
 namespace fastertransformer {
 
-Logger::Logger() {
-    level_ = getLevelfromstr("FT_DEBUG_LEVEL");
-    print_level_ = getLevelfromstr("FT_DEBUG_PRINT_LEVEL");
-}
-
-Logger::Level Logger::getLevelfromstr(const char* s) {
+uint32_t Logger::getLevelfromstr(const char* s) {
     char* level_name = std::getenv(s);
     if (level_name != nullptr) {
-        std::map<std::string, Level> name_to_level = {
-            {"TRACE", TRACE},
-            {"DEBUG", DEBUG},
-            {"INFO", INFO},
-            {"WARNING", WARNING},
-            {"ERROR", ERROR},
+        std::map<std::string, uint32_t> name_to_level = {
+            {"TRACE", alog::LOG_LEVEL_TRACE1},
+            {"DEBUG", alog::LOG_LEVEL_DEBUG},
+            {"INFO", alog::LOG_LEVEL_INFO},
+            {"WARNING", alog::LOG_LEVEL_WARN},
+            {"ERROR", alog::LOG_LEVEL_ERROR},
         };
         auto level = name_to_level.find(level_name);
         if (level != name_to_level.end()) {
@@ -42,12 +37,7 @@ Logger::Level Logger::getLevelfromstr(const char* s) {
             level_name = nullptr;
         }
     }    
-    return Logger::DEFAULT_LOG_LEVEL;
-}
-
-void Logger::log(std::exception const& ex, Logger::Level level)
-{
-    log(level, "%s: %s", FTException::demangle(typeid(ex).name()).c_str(), ex.what());
+    return base_log_level_;
 }
 
 }  // namespace fastertransformer

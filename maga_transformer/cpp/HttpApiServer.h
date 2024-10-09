@@ -57,7 +57,6 @@ private:
     bool registerHealth();
     bool registerV1Model();
     bool registerSetDebugLog();
-    bool registerSetDebugPrint();
     bool registerTokenizerEncode();
     bool registerInference();
     bool registerInferenceInternal();

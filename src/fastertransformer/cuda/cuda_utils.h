@@ -185,7 +185,7 @@ void check(T result, char const* const func, const char* const file, int const l
 #define check_cuda_error_2(val, file, line) fastertransformer::check((val), #val, file, line)
 
 inline void syncAndCheck(const char* const file, int const line) {
-    if (Logger::getLogger().getLevel() == Logger::DEBUG) {
+    if (Logger::getEngineLogger().isDebugMode()) {
         cudaDeviceSynchronize();
         cudaError_t result = cudaGetLastError();
         if (result) {
@@ -338,7 +338,7 @@ inline void print_mem_usage(std::string time = "after allocation") {
     float free  = static_cast<float>(free_bytes) / 1024.0 / 1024.0 / 1024.0;
     float total = static_cast<float>(total_bytes) / 1024.0 / 1024.0 / 1024.0;
     float used  = total - free;
-    printf("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
+    FT_LOG_INFO("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
 }
 
 inline int getSMVersion() {
@@ -796,14 +796,12 @@ static inline bool shared_mem_sufficient(int smem_size) {
 }
 
 static inline bool should_print() {
-    return Logger::getLogger().getPrintLevel() == Logger::DEBUG;
-
     static char* tp_rank = std::getenv("WORLD_RANK");
     if (tp_rank && (strcmp(tp_rank, "0") != 0)) {
         return false;
     }
 
-    return true;
+    return Logger::getEngineLogger().isTraceMode();
 }
 
 template<typename T>

@@ -12,7 +12,7 @@ cc_library(
         "string_utils.h",
         "exception.h"
     ],
-    deps = [],
+    deps = ["@havenask//aios/alog:alog"],
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

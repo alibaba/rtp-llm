@@ -16,12 +16,17 @@
 
 #pragma once
 
+#include <cstdint>
 #include <exception>
 #include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <pthread.h>
 #include <string>
+#include <string>
+
+#include "alog/Appender.h"
+#include "alog/Logger.h"
 
 #include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/string_utils.h"
@@ -29,120 +34,156 @@
 namespace fastertransformer {
 
 class Logger {
-
 public:
-    enum Level {
-        TRACE   = 0,
-        DEBUG   = 10,
-        INFO    = 20,
-        WARNING = 30,
-        ERROR   = 40
-    };
-
-    static Logger& getLogger() {
-        static Logger instance;
-        return instance;
+    static Logger& getEngineLogger() {
+        static Logger engine_logger_("engine");
+        return engine_logger_;
     }
+
+    static Logger& getAccessLogger() {
+        static Logger access_logger_("access");
+        return access_logger_;
+    }
+
+    Logger(const std::string& submodule_name) {
+        logger_ = alog::Logger::getLogger(submodule_name.c_str());
+        if (logger_ == nullptr) {
+            throw std::runtime_error("getLogger should not be nullptr");
+        }
+        alog::Logger::MAX_MESSAGE_LENGTH = 102400;
+
+        bool use_console_append = getEnvWithDefault("FT_SERVER_TEST", "false") == "true";
+        if (use_console_append) {
+            console_appender_ = (alog::ConsoleAppender*)alog::ConsoleAppender::getAppender();
+            logger_->setAppender(console_appender_);
+        } else {
+            std::string file_appender_path = getEnvWithDefault("LOG_PATH", "logs") + "/" + submodule_name + ".log";
+            file_appender_ = (alog::FileAppender*)alog::FileAppender::getAppender(file_appender_path.c_str());
+            file_appender_->setCacheLimit(1024);
+            file_appender_->setHistoryLogKeepCount(5);
+            file_appender_->setAsyncFlush(false);
+            file_appender_->setFlushIntervalInMS(1000);
+            file_appender_->setFlushThreshold(1000);
+            logger_->setAppender(file_appender_);
+        }
+
+        logger_->setInheritFlag(false);
+        base_log_level_ = getLevelfromstr("LOG_LEVEL");
+        logger_->setLevel(base_log_level_);
+    }
+
     Logger(Logger const&) = delete;
     void operator=(Logger const&) = delete;
 
-    template<typename... Args>
-    void log(const Level level, const std::string format, const Args&... args) {
-        if (level_ <= level) {
-            std::string fmt    = getPrefix(level) + format + "\n";
-            FILE*       out    = level_ < WARNING ? stdout : stderr;
-            std::string logstr = fmtstr(fmt, args...);
-            fprintf(out, "%s", logstr.c_str());
-        }
+    void setBaseLevel(const uint32_t base_level) {
+        base_log_level_ = base_level;
+        logger_->setLevel(base_log_level_);
+        log(alog::LOG_LEVEL_INFO,
+            __FILE__,
+            __LINE__,
+            __PRETTY_FUNCTION__,
+            "Set logger level to: [%s]",
+            getLevelName(base_level).c_str());
     }
 
     template<typename... Args>
-    void log(const Level level, const int rank, const std::string format, const Args&... args) {
-        if (level_ <= level) {
-            std::string fmt    = getPrefix(level, rank) + format + "\n";
-            FILE*       out    = level_ < WARNING ? stdout : stderr;
+    void log(uint32_t          level,
+             const std::string file,
+             int               line,
+             const std::string func,
+             const std::string format,
+             const Args&... args) {
+        if (logger_->isLevelEnabled(level)) {
+            std::string fmt    = getPrefix(file, line, func) + format;
             std::string logstr = fmtstr(fmt, args...);
-            fprintf(out, "%s", logstr.c_str());
+            logger_->log(level, "%s", logstr.c_str());
+            tryFlush(level);
         }
     }
 
-    void log(std::exception const& ex, Level level = Level::ERROR);
-
-    void setLevel(const Level level)
-    {
-        level_ = level;
-        log(INFO, "Set logger level to: [%s]", getLevelName(level).c_str());
+    void log(std::exception const& ex, uint32_t level = alog::LOG_LEVEL_ERROR) {
+        log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__,"%s: %s", FTException::demangle(typeid(ex).name()).c_str(), ex.what());
     }
 
-    void setPrintLevel(const Level level) {
-        print_level_ = level;
-        log(INFO, "Set debug print logger level to: [%s]", getLevelName(level).c_str());
+    void setRank(int32_t rank) {
+        rank_ = rank;
     }
 
-    int getPrintLevel() const {
-        return print_level_;
+    inline bool isDebugMode() {
+        return base_log_level_ >= alog::LOG_LEVEL_DEBUG;
     }
 
-    int getLevel() const {
-        return level_;
+    inline bool isTraceMode() {
+        return base_log_level_ >= alog::LOG_LEVEL_TRACE1;
     }
 
 private:
-    const std::string                              PREFIX      = "[FT]";
-    const std::map<const Level, const std::string> level_name_ = {
-        {TRACE, "TRACE"}, {DEBUG, "DEBUG"}, {INFO, "INFO"}, {WARNING, "WARNING"}, {ERROR, "ERROR"}};
+    inline std::string getEnvWithDefault(const std::string& name, const std::string& default_value) {
+        const char* value = std::getenv(name.c_str());
+        return value ? value : default_value;
+    }
 
-#ifndef NDEBUG
-    const Level DEFAULT_LOG_LEVEL = DEBUG;
-#else
-    const Level DEFAULT_LOG_LEVEL = INFO;
-#endif
-    Level   level_ = DEFAULT_LOG_LEVEL;
-    Level   print_level_ = DEFAULT_LOG_LEVEL;
-    int32_t rank   = 0;
+    void tryFlush(int32_t level) {
+        if (base_log_level_ >= alog::LOG_LEVEL_DEBUG || level <= alog::LOG_LEVEL_ERROR) {
+            fflush(stdout);
+            fflush(stderr);
+            logger_->flush();
+        }
+    }
 
-    Logger();
+    uint32_t getLevelfromstr(const char* s);
 
-    Level getLevelfromstr(const char* s);
+    inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
+        return "[" + std::to_string(pthread_self()) + "][RANK " + std::to_string(rank_) + "][" + file + ":"
+               + std::to_string(line) + "][" + func + "]";
+    }
 
-    inline const std::string getLevelName(const Level level) {
+    inline const std::string getLevelName(const uint32_t level) {
         return level_name_.at(level);
     }
 
-    inline const std::string getPrefix(const Level level) {
-        return getPrefix(level, rank);
-    }
+private:
+    alog::Logger*          logger_;
+    alog::FileAppender*    file_appender_;
+    alog::ConsoleAppender* console_appender_;
 
-    inline const std::string getTimeStr() {
-        time_t            now = time(0);
-        struct tm*        t   = localtime(&now);
-        std::stringstream ss;
-        ss << std::put_time(t, "%y-%m-%d %H:%M:%S");
-        return ss.str();
-    }
+#ifndef NDEBUG
+    uint32_t base_log_level_ = alog::LOG_LEVEL_DEBUG;
+#else
+    uint32_t base_log_level_ = alog::LOG_LEVEL_INFO;
+#endif
+    const std::map<const uint32_t, const std::string> level_name_ = {{alog::LOG_LEVEL_TRACE1, "TRACE"},
+                                                                     {alog::LOG_LEVEL_DEBUG, "DEBUG"},
+                                                                     {alog::LOG_LEVEL_INFO, "INFO"},
+                                                                     {alog::LOG_LEVEL_WARN, "WARNING"},
+                                                                     {alog::LOG_LEVEL_ERROR, "ERROR"}};
 
-    inline const std::string getPrefix(const Level level, const int rank) {
-        return PREFIX + "[" + getLevelName(level) + "][RANK " + std::to_string(rank) + "]["
-               + std::to_string(pthread_self()) + "][" + getTimeStr() + "] ";
-    }
+    int32_t rank_ = 0;
 };
 
 #define FT_LOG(level, ...)                                                                                             \
     do {                                                                                                               \
-        auto logger_level = fastertransformer::Logger::getLogger().getPrintLevel();                                    \
-        if (logger_level <= level) {                                                                                   \
-            fastertransformer::Logger::getLogger().log(level, __VA_ARGS__);                                            \
-        }                                                                                                              \
-        if (logger_level == fastertransformer::Logger::DEBUG) {                                                        \
-            fflush(stdout);                                                                                            \
-            fflush(stderr);                                                                                            \
-        }                                                                                                              \
+        auto& logger = fastertransformer::Logger::getEngineLogger();                                                   \
+        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 
-#define FT_LOG_TRACE(...) FT_LOG(fastertransformer::Logger::TRACE, __VA_ARGS__)
-#define FT_LOG_DEBUG(...) FT_LOG(fastertransformer::Logger::DEBUG, __VA_ARGS__)
-#define FT_LOG_INFO(...) FT_LOG(fastertransformer::Logger::INFO, __VA_ARGS__)
-#define FT_LOG_WARNING(...) FT_LOG(fastertransformer::Logger::WARNING, __VA_ARGS__)
-#define FT_LOG_ERROR(...) FT_LOG(fastertransformer::Logger::ERROR, __VA_ARGS__)
-#define FT_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getLogger().log(ex, ##__VA_ARGS__)
+#define FT_LOG_TRACE(...) FT_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define FT_LOG_DEBUG(...) FT_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define FT_LOG_INFO(...) FT_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define FT_LOG_WARNING(...) FT_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define FT_LOG_ERROR(...) FT_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define FT_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
+
+#define FT_ACCESS_LOG(level, ...)                                                                                      \
+    do {                                                                                                               \
+        auto& logger = fastertransformer::Logger::getAccessLogger();                                                   \
+        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
+    } while (0)
+
+#define FT_ACCESS_LOG_TRACE(...) FT_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define FT_ACCESS_LOG_DEBUG(...) FT_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define FT_ACCESS_LOG_INFO(...) FT_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define FT_ACCESS_LOG_WARNING(...) FT_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define FT_ACCESS_LOG_ERROR(...) FT_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define FT_ACCESS_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
 }  // namespace fastertransformer

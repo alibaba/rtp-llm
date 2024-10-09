@@ -5,14 +5,6 @@
 
 namespace fastertransformer {
 
-inline bool isDebugMode() {
-    return Logger::getLogger().getLevel() == Logger::DEBUG;
-}
-
-inline bool enableDebugPrint() {
-    return Logger::getLogger().getPrintLevel() == Logger::DEBUG;
-}
-
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false);
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName);

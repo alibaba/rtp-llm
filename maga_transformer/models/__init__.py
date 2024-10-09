@@ -37,5 +37,5 @@ import logging
 try:
     from internal_source.maga_transformer.models import internal_init
 except ImportError as e:
-    print("import internal source failed, error: ", str(e))
+    logging.info("import internal source failed, error: ", str(e))
     pass

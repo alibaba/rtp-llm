@@ -207,7 +207,7 @@ class GPT(BaseModel):
 
     def _safe_load_from_module(self, param: torch.nn.Parameter, fname: str):
         # np_w is 1-D array since a bin file doesn't have shape info.
-        print(f"load {fname} to {param.data.shape}")
+        logging.info(f"load {fname} to {param.data.shape}")
         param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(self.device)
 
 
