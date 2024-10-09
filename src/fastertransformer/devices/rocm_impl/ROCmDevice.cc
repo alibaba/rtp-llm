@@ -136,6 +136,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                                        hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_32F);
 
+    hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     moe_runner_.reset(new rocmMoeWrapper());
@@ -240,6 +241,7 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 void ROCmDevice::syncAndCheck() {
     syncCommunication();
     hipDeviceSynchronize();
+    ROCM_SYNC_AND_CHECK();
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {

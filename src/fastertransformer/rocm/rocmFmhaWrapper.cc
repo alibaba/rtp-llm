@@ -244,7 +244,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     }();
 
     ck_tile::stream_config stream_config{
-        nullptr,  // stream_id_
+        stream_,  // stream_id_
         false,    // time_kernel_
         0,        // log_level_
         0,        // cold_niters_

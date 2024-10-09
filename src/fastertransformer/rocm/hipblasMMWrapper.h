@@ -64,7 +64,6 @@ public:
               void*              C,
               const int          ldc);
 
-    void setStream(hipStream_t stream);
     void setFP32GemmConfig();
     void setFP16GemmConfig();
 #ifdef ENABLE_BF16
@@ -99,6 +98,10 @@ public:
                             const int64_t      strideC,
                             const int          batch_count,
                             hipblasDatatype_t  computeType);
+    void setStream(hipStream_t stream) {
+        stream_ = stream;
+        hipblasSetStream(hipblas_handle_, stream_);
+    }
 };
 }  // namespace rocm
 }  // namespace fastertransformer

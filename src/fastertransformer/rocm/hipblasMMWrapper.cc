@@ -45,10 +45,6 @@ hipblasComputeType_t hipblasMMWrapper::getHipblasLtComputeType(hipblasDatatype_t
     return HIPBLAS_COMPUTE_32F;
 }
 
-void hipblasMMWrapper::setStream(hipStream_t stream) {
-    stream_ = stream;
-}
-
 void hipblasMMWrapper::setFP32GemmConfig() {
     Atype_       = HIPBLAS_R_32F;
     Btype_       = HIPBLAS_R_32F;
