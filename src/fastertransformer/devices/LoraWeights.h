@@ -106,15 +106,19 @@ struct LoraOpInput {
     BufferPtr lora_input_lengths_;
     std::vector<ConstBufferPtr> lora_a_;
     std::vector<ConstBufferPtr> lora_b_;
+    bool use_same_lora_;
 
     LoraOpInput(BufferPtr lora_input_lengths,
                 std::vector<ConstBufferPtr> lora_a,
-                std::vector<ConstBufferPtr> lora_b) :
+                std::vector<ConstBufferPtr> lora_b,
+                bool use_same_lora = false) :
                 lora_input_lengths_(lora_input_lengths),
-                lora_a_(lora_a), lora_b_(lora_b) {}
+                lora_a_(lora_a), lora_b_(lora_b), use_same_lora_(use_same_lora) {}
 
 
-    LoraOpInput(BufferPtr lora_input_length, std::vector<LoraWeightsPtr>& lora_weights)
+    LoraOpInput(BufferPtr lora_input_length,
+                std::vector<LoraWeightsPtr>& lora_weights,
+                bool use_same_lora = false)
     {
         FT_CHECK_WITH_INFO((lora_input_length->dim() == 1),
             "lora_input_length[%d] dim must be 1.", lora_input_length->dim());
@@ -138,6 +142,7 @@ struct LoraOpInput {
             }
 
         }
+        use_same_lora_ = use_same_lora;
 
     }
 };
@@ -158,8 +163,11 @@ struct FfnLayerLoraInput {
 struct LoraModelInput {
     BufferPtr lora_input_lengths_;
     std::vector<LoraModelPtr> lora_model_input_;
+    bool use_same_lora_;
 
-    LoraModelInput(BufferPtr lora_input_lengths, std::vector<LoraModelPtr> lora_model_input) {
+    LoraModelInput(BufferPtr lora_input_lengths,
+                   std::vector<LoraModelPtr> lora_model_input,
+                   bool use_same_lora = false) {
         FT_CHECK_WITH_INFO((lora_input_lengths != nullptr),
             "lora_input_lengths can not be empty");
 
@@ -172,6 +180,7 @@ struct LoraModelInput {
 
         lora_input_lengths_ = lora_input_lengths;
         lora_model_input_   = lora_model_input;
+        use_same_lora_      = use_same_lora;
     }
 
     LoraOpInputPtr getOpInput(const size_t layer_num, const std::string& target_module) {
@@ -184,7 +193,7 @@ struct LoraModelInput {
             }
 
         }
-        return std::make_shared<LoraOpInput>(lora_input_lengths_, lora_weights);
+        return std::make_shared<LoraOpInput>(lora_input_lengths_, lora_weights, use_same_lora_);
     }
 
     AttentionLayerLoraInput getAttentionLayerLoraInput(const size_t layer_num) {

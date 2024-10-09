@@ -103,10 +103,12 @@ ft::lora::LoraModelInputPtr LoraManager::makeLoraModelInput(ft::BufferPtr lora_i
     size_t batch_size = lora_ids->shape()[0];
     std::vector<ft::lora::LoraModelPtr> result(batch_size);
     int32_t* lora_ids_ptr = lora_ids->data<int32_t>();
+    bool use_same_lora = true;
     for (int i = 0; i < batch_size; i++) {
         result[i] = getLora(lora_ids_ptr[i]);
+        use_same_lora = use_same_lora && (lora_ids_ptr[i] == lora_ids_ptr[0]);
     }
-    return std::make_shared<ft::lora::LoraModelInput>(lora_input_lengths, result);
+    return std::make_shared<ft::lora::LoraModelInput>(lora_input_lengths, result, use_same_lora);
 }
 
 }  // namespace lora

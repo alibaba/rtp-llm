@@ -63,3 +63,26 @@ TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForGroupGemmTest) {
         }
     }
 }
+
+TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForSameLoraTest) {
+    std::vector<int> ms = {64, 1024};
+    std::vector<int> ns = {64, 1024};
+    std::vector<int> ks = {64, 1024};
+    std::vector<DataType> input_dtypes = {DataType::TYPE_FP16};
+    std::vector<DataType> lora_dtypes = {DataType::TYPE_FP16};
+    for (auto m : ms) {
+        for (auto n : ns) {
+            for (auto k : ks) {
+                for (auto input_dtype : input_dtypes) {
+                    for (auto lora_dtype : lora_dtypes) {
+                        sameLoraLinearLayerTest({1}, m, n, k, 8, input_dtype, lora_dtype);
+                        sameLoraLinearLayerTest({1000}, m, n, k, 128, input_dtype, lora_dtype);
+                        sameLoraLinearLayerTest({1, 77}, m, n, k, 64, input_dtype, lora_dtype);
+                        sameLoraLinearLayerTest({77, 66, 1, 1, 1}, m, n, k, 8, input_dtype, lora_dtype);
+                        sameLoraLinearLayerTest({100, 1, 1, 1, 1}, m, n, k, 8, input_dtype, lora_dtype);
+                    }
+                }
+            }
+        }
+    }
+}
