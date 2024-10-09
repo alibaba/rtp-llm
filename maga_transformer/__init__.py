@@ -7,6 +7,8 @@ from maga_transformer.config.log_config import LOGGING_CONFIG
 LOG_PATH = os.environ.get('LOG_PATH', 'logs')
 os.makedirs(LOG_PATH, exist_ok=True)
 LOGLEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+if LOGLEVEL == "TRACE":
+    LOGLEVEL = "DEBUG"
 
 if os.environ.get('NCCL_DEBUG_FILE') is None:
     os.environ['NCCL_DEBUG_FILE'] = os.path.join(LOG_PATH, 'nccl.log')
