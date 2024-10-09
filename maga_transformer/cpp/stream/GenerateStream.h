@@ -58,8 +58,8 @@ public:
         return 1;
     }
 
-
     // Only used in C++ world.
+    int reuseBlockSize() const;
     virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual int tryReleaseKVBlock(int nums);
@@ -67,11 +67,8 @@ public:
     int nextNeedBlockNums(size_t reserve_step) const;
     void setNeedReleaseResource(bool need_release_resource);
     void incrFallbackBlock(int fallback_blocks);
-
-    void constructCacheKey();
-    const std::vector<int64_t>& cacheKeys() const;
-    int reuseBlockSize() const;
-    const std::string& cacheStorePeer() const;
+    bool hasCacheKeys() const;
+    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -155,9 +152,9 @@ public:
     size_t iterCount() const;
 
     const ResourceContext& resourceContext() const;
-    void setKVCache(const BatchKVCacheBlockAddr &kv_cache_block_addr);
+    void setKVCache(const BatchKVCacheResource &kv_cache_block_addr);
     void setLoss(const ft::Buffer& loss);
-    const BatchKVCacheBlockAddr& kvCache() const;
+    const BatchKVCacheResource& kvCache() const;
     size_t maxBlockSize() const;
 
     bool needFinish();
@@ -295,9 +292,9 @@ protected:
     int                                 sp_edit_search_index_   = 0;
     bool                                sp_edit_first_time_     = true;
 
+    bool                                last_block_aligned_     = false;
     bool                                need_remote_generate_   = false;
     bool                                use_cache_store_        = false;
-    std::vector<int64_t>                cache_keys_;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     ft::SpecialTokens                   special_tokens_;

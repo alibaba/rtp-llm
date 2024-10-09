@@ -214,12 +214,12 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
     rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP32);
     cache_manager_ = nullptr;
-    auto kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     auto common_inputs = AttentionCommonInputs({*input_lengths_device, *sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_offset, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size = batch_size;

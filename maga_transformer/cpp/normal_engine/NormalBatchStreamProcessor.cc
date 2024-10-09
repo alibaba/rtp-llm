@@ -38,7 +38,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     if (max_block_size) {
-        model_input.kv_cache_offset = device_->allocateBuffer(
+        model_input.kv_cache_block_id = device_->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
         model_input.cache_keys = device_->allocateBuffer(
             {ft::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
@@ -113,9 +113,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_input_lengths[batch_idx] = 1;
             lm_output_indexes[batch_idx] = batch_idx;
             if (max_block_size) {
-                std::memcpy((*model_input.kv_cache_offset)[batch_idx].data(),
-                            kv_cache.batch_offset[i].data(),
-                            kv_cache.batch_offset[i].size() * sizeof(int));
+                std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
+                            kv_cache.batch_block_id[i].data(),
+                            kv_cache.batch_block_id[i].size() * sizeof(int));
             }
             batch_idx += 1;
         }
@@ -179,12 +179,14 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_block_size) {
-                std::memcpy((*model_input.kv_cache_offset)[batch_idx].data(),
-                            kv_cache.batch_offset[i].data(),
-                            kv_cache.batch_offset[i].size() * sizeof(int));
-                std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
-                        stream->cacheKeys().data(),
-                        stream->cacheKeys().size() * sizeof(int64_t));
+                std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
+                            kv_cache.batch_block_id[i].data(),
+                            kv_cache.batch_block_id[i].size() * sizeof(int));
+                if (stream->hasCacheKeys()) {
+                    std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
+                        stream->cacheKeys(i).data(),
+                        stream->cacheKeys(i).size() * sizeof(int64_t));
+                }
             }
             *(model_input.request_id->dataWithOffset<int64_t>(batch_idx - total_decode_batch_size)) = stream->streamId();
             *(model_input.request_pd_separation->dataWithOffset<bool>(batch_idx - total_decode_batch_size)) = stream->queryPdSep();

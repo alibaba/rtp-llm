@@ -13,7 +13,8 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
+absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(
+    const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
     for (const auto& item: params.multi_task_prompt_tokens_) {
         const auto& task_id = item.first;
@@ -28,12 +29,14 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         generate_input->need_release_resource = false;
 
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
-       
+
         const auto& kv_cache = stream->kvCache();
-        FT_CHECK(kv_cache.batch_offset.size() == 1);
-        FT_CHECK(kv_cache.batch_offset[0].size() > 0);
-        cache_manager->insertResidentCache(kv_cache.batch_offset[0], tokens_id);
-        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, kv_cache.batch_offset[0]);
+        const auto& cache_keys = stream->cacheKeys(0);
+        FT_CHECK(kv_cache.batch_block_id.size() == 1);
+        FT_CHECK(kv_cache.batch_block_id[0].size() > 0);
+        CacheManager::FreeInfo free_info(kv_cache.batch_block_id[0], tokens_id, cache_keys);
+        cache_manager->insertResidentCache(free_info);
+        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, kv_cache.batch_block_id[0]);
     }
     return multi_task_prompt_args;
 }

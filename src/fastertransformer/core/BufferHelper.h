@@ -19,15 +19,15 @@ BufferPtr vector2Buffer(const std::vector<T>& vec) {
 };
 
 template<typename T>
-std::vector<T> buffer2vector(const Buffer& src, size_t num) {
-    FT_CHECK_WITH_INFO((num <= src.size()),
-        "buffer num[%d] is less than num [%d]", src.size(), num);
-    FT_CHECK_WITH_INFO((sizeof(T) == src.typeSize()),
-        "Buffer type size %d is not equal to %d", src.typeSize(), sizeof(T));
+std::vector<T> buffer2vector(const Buffer& src, size_t size) {
+    FT_CHECK_WITH_INFO((src.size() >= size),
+        "buffer size [%d] is less than size [%d]", src.size(), size);
+    FT_CHECK_WITH_INFO((src.typeSize() == sizeof(T)),
+        "Buffer type size %d is not equal to size of T: %d", src.typeSize(), sizeof(T));
     std::vector<T> dst;
-    auto           size = num * sizeof(T);
-    dst.resize(num);
-    memcpy(dst.data(), src.data(), size);
+    auto           total_size = size * sizeof(T);
+    dst.resize(size);
+    memcpy(dst.data(), src.data(), total_size);
     return dst;
 }
 

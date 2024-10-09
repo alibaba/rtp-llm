@@ -82,15 +82,15 @@ void GptModel::prepareAttentionInputs(
 {
     attention_inputs.warmup = inputs.warmup;
     if (!inputs.warmup && inputs.pd_separation) {
-        FT_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_offset, "failed to get information for pd seperation store cache");
-        CacheStoreInputs cache_store_inputs({inputs.input_lengths, inputs.prefix_lengths, inputs.kv_cache_offset});
+        FT_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id, "failed to get information for pd seperation store cache");
+        CacheStoreInputs cache_store_inputs({inputs.input_lengths, inputs.prefix_lengths, inputs.kv_cache_block_id});
         attention_inputs.cache_store_inputs = cache_store_inputs;
     }
-    if (inputs.kv_cache_offset) {
-        checkKvBlocksShape(inputs.kv_cache_offset);
+    if (inputs.kv_cache_block_id) {
+        checkKvBlocksShape(inputs.kv_cache_block_id);
         KvCacheInfo kv_cache;
         kv_cache.layer_num = weights_.layers.size();
-        kv_cache.kv_cache_offset = device_->clone({*inputs.kv_cache_offset, AllocationType::DEVICE, {"kv_cache_offset"}});
+        kv_cache.kv_cache_block_id = device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
         attention_inputs.kv_cache = kv_cache;
     }
 
@@ -290,7 +290,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     }
 
     // prepare resources for all layers
-    auto kv_cache_offset = inputs.kv_cache_offset;
+    auto kv_cache_block_id = inputs.kv_cache_block_id;
     AttentionCommonInputs attention_common_inputs({
         *input_lengths,
         *sequence_lengths,
@@ -332,9 +332,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             hidden = std::move(pre_layernorm_output.output);
         }
 
-        if (kv_cache_offset) {
+        if (kv_cache_block_id) {
             // NOTE: these values in each layer are overwritten.
-            attention_common_inputs.kv_cache->kv_cache_offset = kv_cache_offset;
+            attention_common_inputs.kv_cache->kv_cache_block_id = kv_cache_block_id;
             attention_common_inputs.kv_cache->k_cache_buffer = inputs.k_cache_buffer->index(i);
             attention_common_inputs.kv_cache->v_cache_buffer = inputs.v_cache_buffer->index(i);
             if (inputs.k_scale_buffer) {

@@ -3,14 +3,13 @@
 #include "autil/EnvUtil.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
-#include "maga_transformer/cpp/utils/HashUtil.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 
 using namespace std;
 
@@ -24,6 +23,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , max_seq_len_(params.max_seq_len_)
     , vocab_size_(params.vocab_size_)
     , stream_cache_resource_(this, resource_context, input->need_release_resource)
+    , need_release_resource_(input->need_release_resource)
     , enable_fast_gen_(params.enable_fast_gen_)
     , use_cache_store_(params.use_cache_store_)
     , metrics_reporter_(metrics_reporter)
@@ -55,12 +55,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                generate_input_->input_ids->sizeBytes());
     }
 
-    constructCacheKey();
-
     cum_log_probs_ =
         device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
-
 
     generate_status_.status = GenerateState::WAITING;
     sub_generate_status_.clear();
@@ -72,31 +69,18 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_.init(tileNum());
 
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
-    // TODO: need fix context block copy
+    // TODO(xinfei.sxf): need fix context block copy
     perf_test_ = true;
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 }
 
-void GenerateStream::constructCacheKey() {
-    if (!stream_cache_resource_.resourceContext().cache_manager) {
-        return;
-    }
-    if (!use_cache_store_) {
-        return;
-    }
-    cache_keys_.reserve(stream_cache_resource_.singleBatchNeedBlocks(seq_length_));
-    auto seq_size_per_block = seqSizePerBlock();
-    auto data = generate_input_->input_ids->data<int32_t>();
-    int64_t hash = 0;
-    for (int pos = 0; pos < seq_length_; pos += seq_size_per_block) {
-        hash = hashInt64Array(hash, data + pos, data + min(seq_length_, pos + seq_size_per_block));
-        cache_keys_.push_back(hash);
-    }
+bool GenerateStream::hasCacheKeys() const {
+    return stream_cache_resource_.hasCacheKeys();
 }
 
-const std::vector<int64_t>& GenerateStream::cacheKeys() const {
-    return cache_keys_;
+const std::vector<int64_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+    return stream_cache_resource_.cacheKeys(batch_id);
 }
 
 absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
@@ -152,6 +136,7 @@ void GenerateStream::releaseResource() {
     stream_cache_resource_.releaseResource();
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
+    need_release_resource_ = need_release_resource;
     stream_cache_resource_.setNeedReleaseResource(need_release_resource);
 }
 int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
@@ -217,7 +202,7 @@ bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         if (!prompt_param_.prompt_token.empty()) {
             auto total_input_len = inputLength() + prompt_param_.prompt_token.size();
             if (total_input_len >= max_seq_len_) {
-                setStop("after update prefix, total input len " + std::to_string(total_input_len) 
+                setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len) 
                     + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
@@ -553,11 +538,11 @@ size_t GenerateStream::iterCount() const {
     return iter_count_;
 }
 
-void GenerateStream::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr) {
+void GenerateStream::setKVCache(const BatchKVCacheResource& kv_cache_block_addr) {
     stream_cache_resource_.setKVCache(kv_cache_block_addr);
 }
 
-const BatchKVCacheBlockAddr& GenerateStream::kvCache() const {
+const BatchKVCacheResource& GenerateStream::kvCache() const {
     return stream_cache_resource_.kvCache();
 }
 

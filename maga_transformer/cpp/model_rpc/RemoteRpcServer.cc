@@ -55,9 +55,10 @@ void RemoteRpcServer::initLocalPeerInfo() {
 
 void RemoteRpcServer::initCacheStore() {
     resource_.cache_store = engine_->getDevice()->cacheStore();
-    if (maga_init_params_.gpt_init_parameter.use_cache_store_ && !resource_.cache_store) {
+    if (!resource_.cache_store) {
         FT_FAIL("cache store is nullptr");
     }
+    const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
 }
 
 }  // namespace rtp_llm

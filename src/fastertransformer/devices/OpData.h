@@ -325,7 +325,7 @@ struct EmbeddingLookupParams {
 
 struct KvCacheInfo {
     int layer_num;
-    BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
+    BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
     BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]

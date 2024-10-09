@@ -51,7 +51,7 @@ TEST_F(GptModelTest, testSimple) {
     auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
     auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     auto kv_cache = torch::empty(0);
-    auto kv_cache_offset = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
+    auto kv_cache_block_id = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf = tensorToBuffer(mask_tensor);
 
@@ -61,7 +61,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
-    inputs.kv_cache_offset = kv_cache_offset;
+    inputs.kv_cache_block_id = kv_cache_block_id;
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
     inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
@@ -124,8 +124,8 @@ TEST_F(GptModelTest, testSimple) {
     inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({2}, {0, 3}, AllocationType::HOST);
 
-    inputs.kv_cache_offset = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
-    device_->copy({inputs.kv_cache_offset->view(0, 1), *kv_cache_offset});
+    inputs.kv_cache_block_id = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
+    device_->copy({inputs.kv_cache_block_id->view(0, 1), *kv_cache_block_id});
 
     device_->syncAndCheck();
     outputs = model->forward(inputs);

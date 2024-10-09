@@ -24,15 +24,15 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto& layer_kv_cache = params.common.kv_cache;
     if (layer_kv_cache) {
         const auto &kv_cache = layer_kv_cache.value();
-        const auto &kv_cache_offset = *kv_cache.kv_cache_offset;
-        const auto &shape = kv_cache.kv_cache_offset->shape();
+        const auto &kv_cache_block_id = *kv_cache.kv_cache_block_id;
+        const auto &shape = kv_cache.kv_cache_block_id->shape();
         RUNTIME_ASSERT_OP_ARG(
             ((shape.size() == 2) && (shape[0] == input_lengths.shape()[0])),
-            "kv_cache_offset shape in attention layer should be [batch_size, block_length]"
-            ", but got %s", kv_cache_offset.debugString().c_str());
+            "kv_cache_block_id shape in attention layer should be [batch_size, block_length]"
+            ", but got %s", kv_cache_block_id.debugString().c_str());
         RUNTIME_ASSERT_OP_ARG(
                 kv_cache.k_cache_buffer && kv_cache.v_cache_buffer,
-                "kv cache buffer should has value when use kv_cache_offset");
+                "kv cache buffer should has value when use kv_cache_block_id");
         const auto& k_cache_shape = kv_cache.k_cache_buffer->shape();
         const auto& v_cache_shape = kv_cache.v_cache_buffer->shape();
         RUNTIME_ASSERT_OP_ARG(
@@ -90,12 +90,12 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 #endif     
     }
 
-    auto kv_cache_offset = layer_kv_cache ? layer_kv_cache->kv_cache_offset : nullptr;
+    auto kv_cache_block_id = layer_kv_cache ? layer_kv_cache->kv_cache_block_id : nullptr;
     if (generate_batch_size) {
         auto generate_qkv = qkv->view(0, generate_batch_size);
         auto generate_output = qkv_output->view(0, generate_batch_size);
         if (layer_kv_cache) {
-            params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(0, generate_batch_size);
+            params.common.kv_cache->kv_cache_block_id = kv_cache_block_id->slice(0, generate_batch_size);
         }
         decoderSelfAttention({params.layer_id, generate_qkv, generate_output, params.common, params.weights, params.configs, params.qscheme});
     }
@@ -103,7 +103,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         auto context_qkv = qkv->view(generate_batch_size, context_token_num);
         auto context_output = qkv_output->view(generate_batch_size, context_token_num);
         if (layer_kv_cache) {
-            params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(generate_batch_size, context_batch_size);
+            params.common.kv_cache->kv_cache_block_id = kv_cache_block_id->slice(generate_batch_size, context_batch_size);
         }
         contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs, params.qscheme});
     }

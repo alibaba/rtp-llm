@@ -41,7 +41,7 @@ public:
 
 private:
     WarmUpResult warmUp(const EngineInitParams& params);
-    void   initLoadBalance();
+    void         initLoadBalance();
     absl::Status trySaveStepError() const;
     void         loop();
     void         initCacheManager(std::optional<WarmUpResult> warm_up_result);

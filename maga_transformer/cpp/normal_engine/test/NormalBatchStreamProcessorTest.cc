@@ -31,8 +31,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query1->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
     query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
-    BatchKVCacheBlockAddr addr1;
-    addr1.batch_offset = {{1, 2, 3, 4}};
+    BatchKVCacheResource addr1;
+    addr1.batch_block_id = {{1, 2, 3, 4}};
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -41,8 +41,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query2->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, param, resource_context, nullptr);
     query2->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
-    BatchKVCacheBlockAddr addr2;
-    addr2.batch_offset = {{5, 6, 7, 8}};
+    BatchKVCacheResource addr2;
+    addr2.batch_block_id = {{5, 6, 7, 8}};
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -50,16 +50,16 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query3->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query3->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr     stream3         = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
-    BatchKVCacheBlockAddr addr3;
-    addr3.batch_offset = {{9, 10}};
+    BatchKVCacheResource addr3;
+    addr3.batch_block_id = {{9, 10}};
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
     query4->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query4->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr     stream4         = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
-    BatchKVCacheBlockAddr addr4;
-    addr4.batch_offset = {{11, 12, 13, 14}};
+    BatchKVCacheResource addr4;
+    addr4.batch_block_id = {{11, 12, 13, 14}};
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -90,12 +90,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<int> input_lengths    = {1, 2, 3, 3};
         vector<int> sequence_lengths = {1, 2};
         vector<int> prefix_lengths   = {0, 1};
-        vector<int> kv_cache_offset  = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
+        vector<int> kv_cache_block_id  = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
         EXPECT_EQ(combo_tokens, buffer2vector<int>(*model_input.combo_tokens));
         EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, buffer2vector<int>(*model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
-        EXPECT_EQ(kv_cache_offset, buffer2vector<int>(*model_input.kv_cache_offset));
+        EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_block_id));
         EXPECT_EQ(model_input.attention_mask->size(), 2 * 3 * 4);
     }
     {
@@ -119,8 +119,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query1->generate_config                 = make_shared<GenerateConfig>();
     query1->generate_config->calculate_loss = 1;
     GenerateStreamPtr     stream1           = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
-    BatchKVCacheBlockAddr addr1;
-    addr1.batch_offset = {{1}};
+    BatchKVCacheResource addr1;
+    addr1.batch_block_id = {{1}};
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -128,8 +128,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query3->generate_config                 = make_shared<GenerateConfig>();
     query3->generate_config->calculate_loss = 2;
     GenerateStreamPtr     stream3           = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
-    BatchKVCacheBlockAddr addr3;
-    addr3.batch_offset = {{9}};
+    BatchKVCacheResource addr3;
+    addr3.batch_block_id = {{9}};
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -137,8 +137,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query4->generate_config                 = make_shared<GenerateConfig>();
     query4->generate_config->calculate_loss = 1;
     GenerateStreamPtr     stream4           = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
-    BatchKVCacheBlockAddr addr4;
-    addr4.batch_offset = {{11, 12}};
+    BatchKVCacheResource addr4;
+    addr4.batch_block_id = {{11, 12}};
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;

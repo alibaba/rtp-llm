@@ -155,11 +155,11 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
         return absl::OkStatus();
     }
     resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
-    CHECK_AND_RETURN_REF(system_prompt_param,
+    if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
+        resource_context_.reuse_cache = true;
+        CHECK_AND_RETURN_REF(system_prompt_param,
                          SystemPromptConstructor::construct(
                              score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
-    if (!system_prompt_param.empty()) {
-        resource_context_.reuse_cache = true;
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
     return absl::OkStatus();

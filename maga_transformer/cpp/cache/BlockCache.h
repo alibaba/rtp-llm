@@ -13,11 +13,12 @@
 namespace rtp_llm {
 
 struct CacheItem {
-    std::vector<int> token_list;
-    std::vector<int> block_indices;
-    std::vector<float> loss;
-    size_t           cache_key;
-    bool             is_resident = false;
+    std::vector<int32_t>    token_list;
+    std::vector<int32_t>    block_indices;
+    std::vector<int64_t>    cache_key;
+    std::vector<float>      loss;
+    bool                    is_resident = false;
+    size_t                  item_key;
 };
 
 const size_t kCacheMaxCapacity = 1000000;
@@ -33,11 +34,11 @@ public:
 public:
     BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    static size_t prefixLength(const std::vector<int>& left, const std::vector<int>& right);
+    static size_t prefixLength(const std::vector<int64_t>& left, const std::vector<int64_t>& right);
 
-    MatchResult match(const std::vector<int>& token_list);
+    MatchResult match(const std::vector<int64_t>& cache_key);
 
-    std::vector<int> put(const std::vector<int>& token_list, const std::vector<int>& block_indices, const std::vector<float>& loss, bool is_resident);
+    std::vector<int> put(CacheItem& item);
 
     std::vector<int> pop();
 
@@ -52,7 +53,7 @@ public:
     int holdBlockNums() const;
 
 private:
-    bool hasHashKey(size_t cache_key) const;
+    bool hasHashKey(size_t item_key) const;
 
 private:
     mutable LRUCache<size_t, CacheItem> lru_cache_;

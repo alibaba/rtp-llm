@@ -69,11 +69,11 @@ public:
     ft::BufferPtr lora_ids;                    // [batch_size]
     ft::BufferPtr lora_input_lengths;          // [batch_size]
 
-    ft::BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
-    ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
-    ft::BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    ft::BufferPtr kv_cache_block_id;    // [batch_size, block_nums], kv cache block block id
+    ft::BufferPtr k_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr v_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr k_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
+    ft::BufferPtr v_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
 };
 
 struct MergedInput {

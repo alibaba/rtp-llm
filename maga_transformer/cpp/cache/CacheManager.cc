@@ -221,22 +221,32 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
     return kv_cache_;
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCache(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
-    return mallocWithCacheImpl(token_ids, mm_bounds, need_loss);
+CacheManager::MatchInfo CacheManager::mallocWithCache(const MallocInfo& malloc_info) {
+    auto match_info = matchImpl(malloc_info);
+    if (match_info.loss.empty() && malloc_info.need_loss) {
+        return {0, {}, {}};
+    }
+    block_ref_counter_.incrementRefCounter(match_info.cache_blocks);
+    incrQueryRefCounter(match_info.cache_blocks);
+    if (metrics_reporter_) {
+        RtpLLMCacheReuseMetricsCollector collector;
+        collector.kv_cache_reuse_length = match_info.reuse_length;
+        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+    }
+    return match_info;
 }
 
-CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds) {
-    auto match_result = block_cache_.match(token_ids);
+CacheManager::MatchInfo CacheManager::matchImpl(const MallocInfo& malloc_info) {
+    auto match_result = block_cache_.match(malloc_info.cache_keys);
     int cache_block_num = match_result.block_indices.size();
-    int reuse_length    = std::min(match_result.matched_len, static_cast<size_t>(token_ids.size()) - 1);
-    int reuse_block_num = reuse_length / config_.seq_size_per_block;
+    int reuse_block_num = std::min(match_result.matched_len, static_cast<size_t>((malloc_info.token_ids.size()) - 1) / config_.seq_size_per_block);
     // common length must large than reuse_length, when need calculate loss
-    if ((!match_result.loss.empty()) && reuse_block_num && match_result.matched_len % config_.seq_size_per_block == 0) {
+    if ((!match_result.loss.empty()) && reuse_block_num) {
         reuse_block_num -= 1;
     }
-    reuse_length        = reuse_block_num * config_.seq_size_per_block;
-    for (int i = mm_bounds.size() - 1; i >= 0; --i) {
-        auto& bound = mm_bounds[i];
+    int reuse_length = reuse_block_num * config_.seq_size_per_block;
+    for (int i = malloc_info.mm_bounds.size() - 1; i >= 0; --i) {
+        auto& bound = malloc_info.mm_bounds[i];
         if (reuse_length > bound[0] && reuse_length < bound[0] + bound[1]) {
             reuse_length = bound[0] / config_.seq_size_per_block * config_.seq_size_per_block;
         }
@@ -278,23 +288,7 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     }
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids,
-                                                          const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
-    auto match_info = matchImpl(token_ids, mm_bounds);
-    if (match_info.loss.empty() && need_loss) {
-        return {0, {}, {}};
-    }
-    block_ref_counter_.incrementRefCounter(match_info.cache_blocks);
-    incrQueryRefCounter(match_info.cache_blocks);
-    if (metrics_reporter_) {
-        RtpLLMCacheReuseMetricsCollector collector;
-        collector.kv_cache_reuse_length = match_info.reuse_length;
-        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
-    }
-    return match_info;
-}
-
-std::tuple<bool, KVCacheBlockAddr> CacheManager::malloc(int nums) {
+std::tuple<bool, KVCacheResource> CacheManager::malloc(int nums) {
     std::lock_guard<std::mutex> guard(mutex_);
     auto [success, block_indices] = mallocIndex(nums);
     return {success, {block_indices}};
@@ -329,9 +323,9 @@ void CacheManager::reserveBlocks(int nums) {
     maybeFreeBlockFromCache(nums);
 }
 
-void CacheManager::free(const std::vector<KVCacheBlockAddr>& resource) {
+void CacheManager::free(const std::vector<KVCacheResource>& resource) {
     for (const auto& kv_block : resource) {
-        free(kv_block.offset);
+        free(kv_block.block_id);
     }
 }
 
@@ -362,35 +356,35 @@ void CacheManager::maybeFreeBlockFromCache(int nums) {
     }
 }
 
-void CacheManager::freeWithCache(const std::vector<int>&   block_indices,
-                                 const std::vector<int>&   token_ids,
-                                 const std::vector<float>& loss) {
+void CacheManager::freeWithCache(FreeInfo& free_info) {
     std::lock_guard<std::mutex> guard(mutex_);
-    decrQueryRefCounter(block_indices);
-    insertIntoCache(block_indices, token_ids, loss, false);
+    decrQueryRefCounter(free_info.block_indices);
+    free_info.is_resident = false;
+    insertIntoCache(free_info);
 }
 
-void CacheManager::insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids) {
-    insertIntoCache(block_indices, token_ids, {}, true);
+void CacheManager::insertResidentCache(FreeInfo& free_info) {
+    free_info.is_resident = true;
+    insertIntoCache(free_info);
 }
 
-void CacheManager::insertIntoCache(const std::vector<int>&   block_indices,
-                                   const std::vector<int>&   token_ids,
-                                   const std::vector<float>& loss,
-                                   bool                      is_resident) {
-    if (token_ids.size() > 1) {
-        size_t cache_len = token_ids.size() - 1;
-        size_t block_len = std::min(block_indices.size(), cache_len / seq_size_per_block_);
-        cache_len        = block_len * seq_size_per_block_;
-        std::vector<int> indices =
-            block_cache_.put(std::vector<int>(token_ids.begin(), token_ids.begin() + cache_len),
-                             std::vector<int>(block_indices.begin(), block_indices.begin() + block_len),
-                             loss.empty() ? loss : std::vector<float>(loss.begin(), loss.begin() + cache_len),
-                             is_resident);
+void CacheManager::insertIntoCache(FreeInfo& free_info) {
+    if (free_info.token_ids.size() > 1) {
+        size_t token_len = free_info.token_ids.size() - 1;
+        size_t block_len = std::min(
+            std::min(free_info.block_indices.size(), free_info.cache_keys.size()), token_len / seq_size_per_block_);
+        token_len        = block_len * seq_size_per_block_;
+        CacheItem item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
+                       {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
+                       {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
+                        free_info.loss.empty() ? 
+                        free_info.loss : std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
+                        free_info.is_resident};
+        std::vector<int> indices = block_cache_.put(item);
         freeImpl(indices);
-        freeImpl(std::vector<int>(block_indices.begin() + block_len, block_indices.end()));
+        freeImpl(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
     } else {
-        freeImpl(block_indices);
+        freeImpl(free_info.block_indices);
     }
 }
 

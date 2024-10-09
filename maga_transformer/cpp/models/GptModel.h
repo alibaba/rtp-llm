@@ -55,11 +55,11 @@ struct GptModelInputs {
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    ft::BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
-    ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
-    ft::BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    ft::BufferPtr kv_cache_block_id;    // [batch_size, block_nums], kv cache block block id
+    ft::BufferPtr k_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr v_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr k_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
+    ft::BufferPtr v_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
 
     std::optional<std::vector<ft::BufferPtr>> multimodal_features; // all features in gathered stream stored here
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
@@ -95,8 +95,8 @@ public:
         if (lora_input_lengths) {
             debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
         }
-        if (kv_cache_offset) {
-            debug_string << ", kv_cache_blocks: " << kv_cache_offset->debugString();
+        if (kv_cache_block_id) {
+            debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugString();
         }
         if (attention_mask) {
             debug_string << ", attention_mask: " << attention_mask->debugString();
@@ -147,7 +147,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::inputLengths] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::sequenceLengths] = inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_offset.get() ? inputs.kv_cache_offset->shape()[1] : 0;
+    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraIds] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
@@ -197,7 +197,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         inputs.prefix_lengths = device->allocateBuffer(
              {ft::DataType::TYPE_INT32, {context_batch_size}, ft::AllocationType::HOST});
         if (max_blocks != 0) {
-            inputs.kv_cache_offset = device->allocateBuffer(
+            inputs.kv_cache_block_id = device->allocateBuffer(
                     {ft::DataType::TYPE_INT32,
                     {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, ft::AllocationType::HOST});
             inputs.cache_keys = device->allocateBuffer(
@@ -248,7 +248,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     buffers.emplace_back(inputs.sequence_lengths);
     buffers.emplace_back(inputs.prefix_lengths);
     if (max_blocks) {
-        buffers.emplace_back(inputs.kv_cache_offset);
+        buffers.emplace_back(inputs.kv_cache_block_id);
         buffers.emplace_back(inputs.cache_keys);
     }
     buffers.emplace_back(inputs.request_id);

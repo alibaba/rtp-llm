@@ -113,9 +113,9 @@ absl::Status NormalEngine::initSystemPrompt() {
         return absl::OkStatus();
     }
     resource_context_.reuse_cache = params_.reuse_cache_;
-    CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
-    if (!system_prompt_param.empty()) {
+    if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
+        CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
     return absl::OkStatus();

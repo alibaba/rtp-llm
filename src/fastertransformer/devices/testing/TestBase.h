@@ -19,7 +19,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/utils/KVCacheUtils.h"
-#include "maga_transformer/cpp/cache/BatchKVCacheBlockAddr.h"
+#include "maga_transformer/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 
 
@@ -248,11 +248,11 @@ protected:
         const auto batch_layer_kv_block_num = ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
         const auto batch_size = input_lengths.size();
 
-        auto kv_cache_offset = device_->allocateBuffer({
+        auto kv_cache_block_id = device_->allocateBuffer({
             ft::DataType::TYPE_INT32, {batch_size, batch_layer_kv_block_num}, ft::AllocationType::HOST
         });
 
-        rtp_llm::BatchKVCacheBlockAddr batch_kv_cache;
+        rtp_llm::BatchKVCacheResource batch_kv_cache;
 
         for (auto i = 0; i < batch_size; i++) {
             auto [success, kv_cache] = cache_manager_->malloc(batch_layer_kv_block_num);
@@ -260,14 +260,14 @@ protected:
             batch_kv_cache.pushBack(kv_cache);
         }
         for (auto i = 0; i < batch_size; i++) {
-            std::memcpy((*kv_cache_offset)[i].data(),
-                        batch_kv_cache.batch_offset[i].data(),
-                        batch_kv_cache.batch_offset[i].size() * sizeof(int));
+            std::memcpy((*kv_cache_block_id)[i].data(),
+                        batch_kv_cache.batch_block_id[i].data(),
+                        batch_kv_cache.batch_block_id[i].size() * sizeof(int));
             // [batch(i), layer_num(j), ...]
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto max_pad_seq = kvCache.sizes()[3];
-                auto k_indexs = batch_kv_cache.batch_offset[i];
+                auto k_indexs = batch_kv_cache.batch_block_id[i];
                 for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
                     auto block_start = k * cache_config.seq_size_per_block;
                     auto block_end   = block_start + cache_config.seq_size_per_block;
@@ -292,8 +292,8 @@ protected:
             }
 
         }
-        auto kv_cache_offset_gpu_buf = device_->allocateBuffer({kv_cache_offset->type(), kv_cache_offset->shape()});
-        device_->copy({*kv_cache_offset_gpu_buf, *kv_cache_offset});
+        auto kv_cache_offset_gpu_buf = device_->allocateBuffer({kv_cache_block_id->type(), kv_cache_block_id->shape()});
+        device_->copy({*kv_cache_offset_gpu_buf, *kv_cache_block_id});
         return kv_cache_offset_gpu_buf;
     }
 

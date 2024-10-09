@@ -7,14 +7,14 @@ namespace rtp_llm {
 
 class CacheManager;
 
-class KVCacheBlockAddr {
+class KVCacheResource {
 public:
     void clear();
-    KVCacheBlockAddr clone(std::shared_ptr<CacheManager>& cache_manager) const;
+    KVCacheResource clone(std::shared_ptr<CacheManager>& cache_manager) const;
 
 public:
     // [max_block_per_seq]
-    std::vector<int> offset;
+    std::vector<int> block_id;
 };
 
 }  // namespace rtp_llm

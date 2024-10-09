@@ -9,7 +9,7 @@
 #include "maga_transformer/cpp/cache/BlockCache.h"
 #include "maga_transformer/cpp/cache/BlockRefCounter.h"
 #include "maga_transformer/cpp/cache/CacheConfig.h"
-#include "maga_transformer/cpp/cache/KVCacheBlockAddr.h"
+#include "maga_transformer/cpp/cache/KVCacheResource.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
@@ -52,6 +52,33 @@ public:
         void* v_scale_addr = nullptr;
     };
 
+    struct MallocInfo {
+        MallocInfo(const std::vector<int32_t>& token_ids,
+                   const std::vector<int64_t>& cache_keys,
+                   const std::vector<std::vector<int32_t>>& mm_bounds = {},
+                   bool need_loss = false)
+                   : token_ids(token_ids), cache_keys(cache_keys), mm_bounds(mm_bounds), need_loss(need_loss) {}
+
+        const std::vector<int32_t>& token_ids;
+        const std::vector<int64_t>& cache_keys;
+        const std::vector<std::vector<int32_t>> mm_bounds = {};
+        bool need_loss = false;
+    };
+
+    struct FreeInfo {
+        FreeInfo(const std::vector<int32_t>& block_indices,
+                 const std::vector<int32_t>& token_ids,
+                 const std::vector<int64_t>& cache_keys,
+                 const std::vector<float> loss = {})
+                 : block_indices(block_indices), token_ids(token_ids), cache_keys(cache_keys), loss(loss) {}
+
+        const std::vector<int32_t>& block_indices;
+        const std::vector<int32_t>& token_ids;
+        const std::vector<int64_t>& cache_keys;
+        const std::vector<float> loss;
+        bool is_resident = false;
+    };
+
 public:
     CacheManager(const CacheConfig& config, ft::DeviceBase* device,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
@@ -64,18 +91,15 @@ public:
     uint32_t               maxSeqLen() const;
     const KVCacheBuffer&   kvCacheBuffer() const;
 
-    std::tuple<bool, KVCacheBlockAddr> malloc(int nums = 1);
-    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids, 
-                                                       const std::vector<std::vector<int>>& mm_bounds = {}, 
-                                                       bool need_loss = false);
-    int                                match(const std::vector<int>& token_ids);
+    std::tuple<bool, KVCacheResource> malloc(int nums = 1);
+    MatchInfo                          mallocWithCache(const MallocInfo& malloc_info);
     void                               reserveBlocks(int nums);
     void                               incrRefCounter(const std::vector<int>& blocks);
 
-    void free(const std::vector<KVCacheBlockAddr>& resource);
+    void free(const std::vector<KVCacheResource>& resource);
     void free(const std::vector<int>& indice);
-    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids, const std::vector<float>& loss = {});
-    void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
+    void freeWithCache(FreeInfo& free_info);
+    void insertResidentCache(FreeInfo& free_info);
 
     void setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
     void setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
@@ -96,22 +120,15 @@ private:
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndTpSync();
     void                                    initKvCache();
-    MatchInfo                               matchImpl(const std::vector<int>& token_ids,
-                                                      const std::vector<std::vector<int>>& mm_bounds);
+    MatchInfo                               matchImpl(const MallocInfo& malloc_info);
     void                                    regUserMr();
     void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
-    MatchInfo                               mallocWithCacheImpl(const std::vector<int>& token_ids,
-                                                                const std::vector<std::vector<int>>& mm_bounds = {},
-                                                                bool need_loss = false);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);
-    void insertIntoCache(const std::vector<int>&   block_indices,
-                         const std::vector<int>&   token_ids,
-                         const std::vector<float>& loss,
-                         bool                      is_resident);
+    void insertIntoCache(FreeInfo& free_info);
 
     void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
                                 const std::vector<int>& src_index, const std::vector<int>& target_index);
