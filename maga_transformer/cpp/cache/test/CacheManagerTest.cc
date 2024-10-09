@@ -24,11 +24,11 @@ protected:
     }
 
     CacheManager::MatchInfo
-    mallocWithCache(CacheManager& cache_manager, const vector<int>& token_ids, int need_block_num = -1) {
+    mallocWithCache(CacheManager& cache_manager, const vector<int>& token_ids, const vector<vector<int>>& mm_bounds = {}, int need_block_num = -1) {
         if (need_block_num == -1) {
             need_block_num = token_ids.size();
         }
-        auto match_info = cache_manager.mallocWithCacheImpl(token_ids);
+        auto match_info = cache_manager.mallocWithCacheImpl(token_ids, mm_bounds);
         if (match_info.cache_blocks.size() < need_block_num) {
             auto [success, index] = cache_manager.mallocIndex(need_block_num - match_info.cache_blocks.size());
             if (success) {
@@ -167,6 +167,63 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(cache_manager.cacheItemNum(), 2);
+}
+
+TEST_F(CacheManagerTest, testAllocateWithMultimodalReuse) {
+    auto         cache_config = initConfig();
+    cache_config.block_nums = 10;
+    cache_config.seq_size_per_block = 2;
+    CacheManager cache_manager(cache_config, device_);
+
+    ASSERT_EQ(cache_manager.freeBlockNums(), 9);
+    auto [success1, index1] = cache_manager.mallocIndex(4);
+    ASSERT_EQ(index1, std::vector<int>({1, 2, 3, 4}));
+    ASSERT_EQ(cache_manager.cacheItemNum(), 0);
+
+    cache_manager.freeWithCache(index1, {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007});
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(cache_manager.cacheItemNum(), 1);
+
+    auto match_info = mallocWithCache(cache_manager, {1000, 1001, 1002, 1003, 1004, 1005, 1006}, {{5, 2}}, 4);
+    ASSERT_EQ(cache_manager.freeBlockNums(), 4);
+    ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 4, 5}));
+    ASSERT_EQ(match_info.reuse_length, 4);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
+
+    cache_manager.freeWithCache(match_info.cache_blocks, {1000, 1001, 1002, 1003, 1004, 1005, 1006});
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(cache_manager.cacheItemNum(), 1);
+
+    match_info = mallocWithCache(cache_manager, {1000, 1001, 1002, 1003, 1004, 1015}, {{1, 2}, {3, 2}}, 3);
+    ASSERT_EQ(match_info.cache_blocks, std::vector<int>({4, 5, 6}));
+    ASSERT_EQ(match_info.reuse_length, 0);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 1);
+    ASSERT_EQ(cache_manager.cacheItemNum(), 1);
+
+    cache_manager.freeWithCache(match_info.cache_blocks, {1000, 1001, 1002, 1003, 1004, 1015});
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 2);
 }
 
@@ -398,7 +455,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc cache item 1
-    auto match_info = mallocWithCache(cache_manager, {1000, 1002}, 1);
+    auto match_info = mallocWithCache(cache_manager, {1000, 1002}, {}, 1);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1}));
     ASSERT_EQ(match_info.reuse_length, 0);
     // Insert cache item 1
@@ -406,7 +463,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_FALSE(cache_manager.blockCache().hasKey({1000, 1002}));
 
     // Malloc cache item 2
-    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003}, 2);
+    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003}, {}, 2);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2}));
     ASSERT_EQ(match_info.reuse_length, 0);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -416,7 +473,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_TRUE(cache_manager.blockCache().hasKey({1000, 1002}));
 
     // Malloc cache item 3
-    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004}, 2);
+    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004}, {}, 2);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2}));
     ASSERT_EQ(match_info.reuse_length, 2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
@@ -425,7 +482,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     // Free cache item 3
     cache_manager.freeWithCache(match_info.cache_blocks, {1000, 1002, 1003, 1004, 1005});
 
-    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004, 1005}, 3);
+    match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004, 1005}, {}, 3);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(match_info.reuse_length, 4);
 }

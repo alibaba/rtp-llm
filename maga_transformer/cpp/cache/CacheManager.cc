@@ -167,7 +167,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_id
     reuse_length        = reuse_block_num * config_.seq_size_per_block;
     for (int i = mm_bounds.size() - 1; i >= 0; --i) {
         auto& bound = mm_bounds[i];
-        if (reuse_length >= bound[0] && reuse_length < bound[0] + bound[1]) {
+        if (reuse_length > bound[0] && reuse_length < bound[0] + bound[1]) {
             reuse_length = bound[0] / config_.seq_size_per_block * config_.seq_size_per_block;
         }
     }
