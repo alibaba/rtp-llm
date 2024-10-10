@@ -313,6 +313,10 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.sequence_lengths = sequence_lengths;
+    sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.beam_index   =  device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
+    // eg: device_->bufMemset(*sampler_inputs.beam_index, 0);
     sampler_inputs.input_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_UINT32, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -338,6 +342,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
     float* repetition_penalty = sampler_inputs.repetition_penalty->data<float>();
     int32_t* min_lengths      = sampler_inputs.min_lengths->data<int32_t>();
     int32_t* no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
+    int* beam_search_sequence_lengths = sampler_inputs.beam_search_sequence_lengths->data<int32_t>();
 
     int batch_idx   = 0;
     for (auto& stream : all_streams) {
@@ -353,8 +358,9 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
 
         for (int i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
+            beam_search_sequence_lengths[batch_idx]  = stream->seqLength();
             // TODO(xinfei.sxf) fix num beams after sampler support
-            num_beams[batch_idx]          = 1;
+            num_beams[batch_idx]          = stream->numBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;
             top_p[batch_idx]              = stream->generateConfig()->top_p;
             temperature[batch_idx]        = stream->generateConfig()->temperature;
@@ -372,6 +378,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
             batch_idx += 1;
         }
     }
+
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
@@ -400,6 +407,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
         BufferPtr loss = nullptr;
+        BufferPtr beam_index = (sampler_output.beam_index == nullptr) ? nullptr : sampler_output.beam_index->slice(batch_idx, current_batch_size);
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto tokens = stream->currentExecuteTokens(0);
@@ -412,7 +420,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
+        if (stream->numBeams() > 1 && beam_index != nullptr) {
+            stream->update(new_all_token_ids, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
+            stream->beamSearchKvCacheUpdate(beam_index);
+        } else {
+            stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
+        }
         offset += batch;
         token_offset += token_size;
     }

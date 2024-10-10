@@ -182,6 +182,8 @@ public:
         return acceped_bouns_token_;
     }
 
+    void beamSearchKvCacheUpdate(ft::BufferPtr beam_idx);
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;

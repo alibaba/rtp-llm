@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/models/Sampler.h"
-
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <unordered_set>
 
 using namespace std;
@@ -40,7 +40,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
         // now from_batch_idx to sample_to_batch_idx have the same beam size, sample once.
         const auto sample_batch_size = sample_to_batch_idx - from_batch_idx + 1;
-        const auto sample_seq_num = sample_batch_size * current_beam_size;
+        const auto sample_seq_num = sample_batch_size;
         const auto sample_to_seq_idx = from_seq_idx + sample_seq_num;
 
         auto sample_tokens = input_tokens.view(from_seq_idx, sample_seq_num);
@@ -51,6 +51,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             ? inputs.sequence_lengths->view(from_batch_idx,
                                             min(sample_batch_size, decoder_batch_size - from_batch_idx))
             : Buffer::emptyBuffer();
+
         auto sample_cum_log_probs = device_->allocateBuffer(
             {inputs.cum_log_probs->type(), {sample_seq_num}});
         device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
@@ -83,7 +84,55 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.all_probs ? (OptionalBufferRef) all_probs: nullopt
             });
         } else {
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            size_t beam_batch_size = (size_t)(sample_batch_size / current_beam_size);
+            FT_LOG_DEBUG("current_beam_size is %d", current_beam_size);
+            FT_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
+            FT_CHECK_WITH_INFO((sample_batch_size % current_beam_size == 0),
+                "sample_batch_size[%d] must devide by current_beam_size[%d]");
+            auto beam_search_sequence_lengths = inputs.beam_search_sequence_lengths->view(from_batch_idx, sample_batch_size);
+            auto beam_index = inputs.beam_index->view(from_batch_idx, sample_batch_size);
+            std::chrono::steady_clock::time_point t_start, t_end;
+            std::chrono::microseconds diff;
+            t_start = std::chrono::steady_clock::now();
+            auto org_sample_logits_shape = sample_logits.shape();
+            auto org_sample_tokens_shape = sample_tokens.shape();
+            auto org_input_lengths_shape = input_lengths.shape();
+            auto org_sequence_lengths_shape = beam_search_sequence_lengths.shape();
+            auto org_sample_cum_log_probs_shape = sample_cum_log_probs->shape();
+            auto org_beam_index_shape    = beam_index.shape();
+            sample_logits.updateShape({beam_batch_size,
+                                         (size_t)current_beam_size,
+                                         (size_t)inputs.logits->shape()[1]});
+            sample_tokens.updateShape({beam_batch_size,
+                                         (size_t)current_beam_size,
+                                         (size_t)input_tokens.shape()[1]});
+            beam_search_sequence_lengths.updateShape({beam_batch_size,
+                                          (size_t)current_beam_size});
+            sample_cum_log_probs->updateShape({beam_batch_size,
+                                                (size_t)current_beam_size});
+            input_lengths.updateShape({beam_batch_size,
+                                        (size_t)current_beam_size});
+            beam_index.updateShape({beam_batch_size,
+                                    (size_t)current_beam_size});
+
+
+            device_->sampleBeamSearch({sample_logits,
+                                       sample_tokens,
+                                       input_lengths,
+                                       beam_search_sequence_lengths,
+                                       *sample_cum_log_probs,
+                                       beam_index});
+
+            sample_logits.updateShape(org_sample_logits_shape);
+            sample_tokens.updateShape(org_sample_tokens_shape);
+            beam_search_sequence_lengths.updateShape(org_sequence_lengths_shape);
+            sample_cum_log_probs->updateShape(org_sample_cum_log_probs_shape);
+            input_lengths.updateShape(org_input_lengths_shape);
+            beam_index.updateShape(org_beam_index_shape);
+
+            t_end = std::chrono::steady_clock::now();
+            diff = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+            FT_LOG_DEBUG("beam[%d] search op time is %d us", current_beam_size, diff);
         }
 
         device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
@@ -93,7 +142,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
     // TODO(xinfei.sxf) 优化copy token_ids
-    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.all_probs)});
+    return SamplerOutput({move(inputs.token_ids),
+                          move(inputs.cum_log_probs),
+                          move(inputs.all_probs),
+                          move(inputs.beam_index)});
 }
 
 } // namespace rtp_llm

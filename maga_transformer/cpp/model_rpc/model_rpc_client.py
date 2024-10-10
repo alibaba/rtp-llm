@@ -132,12 +132,7 @@ class ModelRpcClient(object):
             address = f'localhost:{g_master_info.model_rpc_port}'
         self._address = address
 
-    def check_input(self, input: GenerateInput):
-        if input.generate_config.num_beams > 1:
-            raise FtRuntimeException(ExceptionType.ERROR_GENERATE_CONFIG_FORMAT, "rpc model not support beam search now")
-
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
-        self.check_input(input)
         input_pb = trans_input(input)
         response_iterator = None
         try:

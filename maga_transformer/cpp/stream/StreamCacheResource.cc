@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 
 using namespace std;
 namespace ft = fastertransformer;
@@ -161,6 +162,26 @@ const BatchKVCacheBlockAddr& StreamCacheResource::kvCache() const {
 
 void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr) {
     batch_block_addr_ = kv_cache_block_addr;
+}
+
+void StreamCacheResource::beamSearchKvCacheUpdate(const std::vector<int>& beam_index) {
+    auto kv_cache = kvCache();
+    int batch_size = kv_cache.batchSize();
+    int block_size = kv_cache.blocks(0).size();
+
+    std::vector<int> src_block_offset(batch_size * block_size);
+    std::vector<int> target_block_offset(batch_size * block_size);
+    // check all batch has same block num
+    for (int i = 0; i < batch_size; i ++) {
+        FT_CHECK(block_size == kv_cache.blocks(i).size());
+        for (int j = 0; j < block_size; j++) {
+            src_block_offset[i * block_size + j] = kv_cache.blocks(i)[j];
+            target_block_offset[i * block_size + j] = kv_cache.blocks(beam_index[i])[j];
+        }
+    }
+
+    resource_context_.cache_manager->beamSearchKvUpdate(ft::vector2Buffer(src_block_offset),
+                                                        ft::vector2Buffer(target_block_offset));
 }
 
 }  // namespace rtp_llm

@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/common/fatal_util.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -432,5 +433,27 @@ void CacheManager::copyKvCacheFromSeqPosition(const SeqPosition& src_seq_positio
     //     kv_cache_.v_blocks.index({"...", src_seq_position.index, "...", src_seq_position.offset, "..."}),
     //     /*non_blocking=*/true);
 }
+
+
+// src_block_offset and target_block_offset has same shape.
+void CacheManager::beamSearchKvUpdate(ft::BufferPtr src_block_offset,
+                                      ft::BufferPtr target_block_offset)
+{
+    auto k_blocks_tensor = Buffer2torchTensor(kv_cache_.k_blocks, false);
+    auto v_blocks_tensor = Buffer2torchTensor(kv_cache_.v_blocks, false);
+
+    auto org_kv_cache_offset_tensor = Buffer2torchTensor(src_block_offset, false);
+    auto target_kv_cache_offset_tensor = Buffer2torchTensor(target_block_offset, false);
+
+    auto k_tmp = k_blocks_tensor.index_select(1, target_kv_cache_offset_tensor.to(device_->getTorchDevice()));
+    auto v_tmp = v_blocks_tensor.index_select(1, target_kv_cache_offset_tensor.to(device_->getTorchDevice()));
+
+    for (int i = 0; i < org_kv_cache_offset_tensor.size(0); i++) {
+        auto src_index = org_kv_cache_offset_tensor[i].item<int>();
+        k_blocks_tensor.index({torch::indexing::Slice(), src_index}).copy_(k_tmp.index({torch::indexing::Slice(), i}).to(device_->getTorchDevice()));
+        v_blocks_tensor.index({torch::indexing::Slice(), src_index}).copy_(v_tmp.index({torch::indexing::Slice(), i}).to(device_->getTorchDevice()));
+    }
+};
+
 
 }  // namespace rtp_llm

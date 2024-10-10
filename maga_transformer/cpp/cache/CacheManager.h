@@ -79,6 +79,9 @@ public:
 
     void reportMetricsLoop();
 
+    void beamSearchKvUpdate(ft::BufferPtr src_block_offset,
+                            ft::BufferPtr  target_block_offset);
+
 private:
     void                                    initFreeBlock();
     ft::BufferPtr                           tryAllocateMaxBuffer();

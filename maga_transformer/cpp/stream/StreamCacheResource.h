@@ -43,6 +43,9 @@ public:
     const BatchKVCacheBlockAddr& kvCache() const;
     void                         setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr);
 
+    void beamSearchKvCacheUpdate(const std::vector<int>& beam_index);
+
+
     const ResourceContext& resourceContext() const {
         return resource_context_;
     }

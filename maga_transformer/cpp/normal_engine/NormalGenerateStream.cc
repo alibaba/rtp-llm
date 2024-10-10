@@ -35,14 +35,16 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
     if (finished) {
         setFinishedWithoutLock();
     }
+    // unfinshed beam search also need to update cum_log_probs.
+    if (cum_log_probs) {
+        device_->copy({*cum_log_probs_, *cum_log_probs});
+    }
 
     if (!isStreaming() && !finished) {
         return;
     }
 
-    if (cum_log_probs) {
-        device_->copy({*cum_log_probs_, *cum_log_probs});
-    }
+
 
     size_t output_len = seq_length_ - last_output_pos_;
     generate_outputs_->generate_outputs.clear();

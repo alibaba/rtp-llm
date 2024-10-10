@@ -33,7 +33,8 @@ public:
     ft::BufferPtr logits;            // shape: [batch_size * num_beams, vocab_size]
     mutable ft::BufferPtr token_ids; // shape: [batch_size * num_beams, max_length]
     ft::BufferPtr input_lengths;     // shape: [batch_size]
-    ft::BufferPtr sequence_lengths;  // shape: [batch_size]
+    // shape: [decoder_batch_size]
+    ft::BufferPtr sequence_lengths;
     size_t    step;                  // typically largest sequence length in the batch
 
     size_t    batch_size;
@@ -48,6 +49,10 @@ public:
 
     mutable ft::BufferPtr cum_log_probs; // shape: [batch_size * num_beams]
     mutable ft::BufferPtr all_probs;     // shape: [batch_size * num_beams, vocab_size]
+
+    // for beam search
+    ft::BufferPtr beam_search_sequence_lengths;
+    ft::BufferPtr beam_index;
 };
 
 struct SamplerOutput {
@@ -55,6 +60,7 @@ public:
     ft::BufferPtr token_ids;
     ft::BufferPtr cum_log_probs;
     ft::BufferPtr all_probs;
+    ft::BufferPtr beam_index;
 };
 
 // Sampler would split logits into appropriate groups (mostly, based on beam size)

@@ -143,6 +143,9 @@ std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() const {
     return generate_input_->generate_config;
 }
 bool GenerateStream::isStreaming() const {
+    if (numBeams() > 1) {
+        return false;
+    }
     return generate_input_->generate_config->is_streaming;
 }
 int64_t GenerateStream::streamId() const {
@@ -575,8 +578,12 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
                 return;
             }
         }
-
-        device_->copy({(*complete_token_ids_)[i].view(seq_length_, num_new_tokens), (*new_tokens)[i].view(0, num_new_tokens)});
+        if (numBeams() > 1) {
+            auto new_tokens_num = (*new_tokens)[i].shape()[0];
+            device_->copy({(*complete_token_ids_)[i].view(0, new_tokens_num), (*new_tokens)[i]});
+        } else {
+            device_->copy({(*complete_token_ids_)[i].view(seq_length_, num_new_tokens), (*new_tokens)[i].view(0, num_new_tokens)});
+        }
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
@@ -588,6 +595,15 @@ void GenerateStream::update(const GptModelOutputs& model_outputs,
                             SamplerOutput&   sampler_output)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+}
+
+
+// beam_idx: [beam_width] int, the element must less than beam_width.
+void GenerateStream::beamSearchKvCacheUpdate(ft::BufferPtr beam_idx) {
+    auto beam_idx_vec = ft::buffer2vector<int>(*beam_idx);
+    FT_CHECK(beam_idx_vec.size() == tileNum());
+
+    stream_cache_resource_.beamSearchKvCacheUpdate(beam_idx_vec);
 }
 
 
