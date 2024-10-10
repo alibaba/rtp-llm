@@ -290,9 +290,12 @@ void HttpApiServer::registerResponses() {
 }
 
 bool HttpApiServer::registerRoot() {
-    auto shared_this = shared_from_this();
-    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                  const http_server::HttpRequest&                  request) -> void {
+    auto weak_this = weak_from_this();
+    auto callback = [weak_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest& request) -> void {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (shared_this->isStopped()) {
@@ -307,9 +310,12 @@ bool HttpApiServer::registerRoot() {
 }
 
 bool HttpApiServer::registerEmbedding() {
-    auto shared_this = shared_from_this();
-    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                     const http_server::HttpRequest&                  request) -> void {
+    auto weak_this = weak_from_this();
+    auto callback = [weak_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest& request) -> void {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         if (!shared_this->embedding_endpoint_.has_value()) {
             FT_LOG_WARNING("non-embedding model can't handle embedding request!");
                 writer->SetStatus(503, "Service Unavailable");
@@ -352,9 +358,12 @@ bool HttpApiServer::registerEmbedding() {
 }
 
 bool HttpApiServer::registerHealth() {
-    auto shared_this = shared_from_this();
-    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                  const http_server::HttpRequest&                  request) -> void {
+    auto weak_this = weak_from_this();
+    auto callback = [weak_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest& request) -> void {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (shared_this->isStopped()) {
@@ -379,7 +388,7 @@ bool HttpApiServer::registerHealth() {
 
 bool HttpApiServer::registerV1Model() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                       const http_server::HttpRequest&                  request) -> void {
+                       const http_server::HttpRequest& request) -> void {
         std::string model_content = R"del({
     "object": "list",
     "data": [
@@ -403,7 +412,7 @@ bool HttpApiServer::registerV1Model() {
 
 bool HttpApiServer::registerSetLogLevel() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                       const http_server::HttpRequest&                  request) -> void {
+                       const http_server::HttpRequest& request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         const auto body = request.GetBody();
@@ -436,7 +445,7 @@ bool HttpApiServer::registerSetLogLevel() {
 
 bool HttpApiServer::registerTokenizerEncode() {
     auto callback = [pipeline = pipeline_](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                           const http_server::HttpRequest&                  request) mutable -> void {
+                                           const http_server::HttpRequest& request) mutable -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (!ParallelInfo::isMaster()) {
@@ -498,9 +507,12 @@ bool HttpApiServer::registerTokenizerEncode() {
 }
 
 bool HttpApiServer::registerInference() {
-    auto shared_this = shared_from_this();
-    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                  const http_server::HttpRequest&                  request) {
+    auto weak_this = weak_from_this();
+    auto callback = [weak_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest& request) {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         shared_this->active_request_count_.fetch_add(1);
         try {
             inferResponse(std::move(writer),
@@ -520,7 +532,7 @@ bool HttpApiServer::registerInference() {
 bool HttpApiServer::registerInferenceInternal() {
     auto callback = [engine = engine_, params = params_, pipeline = pipeline_, controller = controller_](
                         std::unique_ptr<http_server::HttpResponseWriter> writer,
-                        const http_server::HttpRequest&                  request) -> void {
+                        const http_server::HttpRequest& request) -> void {
         if (!ParallelInfo::isWorker()) {
             FT_LOG_WARNING("gang master should not access /inference_internal api directly");
             writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
@@ -532,9 +544,12 @@ bool HttpApiServer::registerInferenceInternal() {
         }
         inferResponse(std::move(writer), request, engine, params, pipeline, controller);
     };
-    auto shared_this      = shared_from_this();
-    auto callback_wrapper = [shared_this, callback](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                                    const http_server::HttpRequest&                  request) {
+    auto weak_this = weak_from_this();
+    auto callback_wrapper = [weak_this, callback](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                    const http_server::HttpRequest& request) {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         shared_this->active_request_count_.fetch_add(1);
         try {
             callback(std::move(writer), request);
@@ -547,9 +562,12 @@ bool HttpApiServer::registerInferenceInternal() {
 }
 
 bool HttpApiServer::registerWorkerStatus() {
-    auto shared_this = shared_from_this();
-    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                  const http_server::HttpRequest&                  request) -> void {
+    auto weak_this = weak_from_this();
+    auto callback = [weak_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest& request) -> void {
+        auto shared_this = weak_this.lock();
+        if (shared_this == nullptr) return;
+
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         writer->AddHeader("Content-Type", "application/json");
         if (shared_this->isStopped()) {

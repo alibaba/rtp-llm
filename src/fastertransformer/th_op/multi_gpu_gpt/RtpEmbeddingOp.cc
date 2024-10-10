@@ -66,7 +66,7 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
     if (http_server_->start(http_server_address)) {
         FT_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
     } else {
-        FT_LOG_ERROR("embedding HTTP Server start fail.");
+        throw std::runtime_error("embedding HTTP Server start fail.");
     }
 }
 
