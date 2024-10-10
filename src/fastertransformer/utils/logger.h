@@ -45,7 +45,7 @@ public:
         }
         alog::Logger::MAX_MESSAGE_LENGTH = 102400;
 
-        bool use_console_append = getEnvWithDefault("FT_SERVER_TEST", "false") == "true";
+        bool use_console_append = getEnvWithDefault("FT_SERVER_TEST", "0") == "1";
         if (use_console_append) {
             console_appender_ = (alog::ConsoleAppender*)alog::ConsoleAppender::getAppender();
             console_appender_->setAutoFlush(true);

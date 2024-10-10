@@ -17,11 +17,13 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 void EngineBase::initDevices(const EngineInitParams& params) {
     fastertransformer::Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
 
+    FT_LOG_INFO("install sighandler begin");
+    fastertransformer::Logger::getEngineLogger().flush();    
     if (!installSighandler()) {
         FT_LOG_ERROR("install sighandler failed");
         std::runtime_error("install sighandler failed");
     }
-
+    FT_LOG_INFO("install sighandler success");
     auto  global_params               = ft::DeviceFactory::getDefaultGlobalDeviceParams();
     auto& default_device_params       = global_params.device_params[0].second;
     default_device_params.tp_size     = params.gpt_init_parameter.tp_size_;
