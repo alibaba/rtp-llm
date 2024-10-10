@@ -10,12 +10,11 @@ LOGLEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 if LOGLEVEL == "TRACE":
     LOGLEVEL = "DEBUG"
 
-if os.environ.get('NCCL_DEBUG_FILE') is None:
-    os.environ['NCCL_DEBUG_FILE'] = os.path.join(LOG_PATH, 'nccl.log')
-
 if os.environ.get('FT_SERVER_TEST') is None:
     LOGGING_CONFIG['loggers']['']['level'] = LOGLEVEL
     logging.config.dictConfig(LOGGING_CONFIG)
+    if os.environ.get('NCCL_DEBUG_FILE') is None:
+        os.environ['NCCL_DEBUG_FILE'] = os.path.join(LOG_PATH, 'nccl.log')
 else:
     logging.basicConfig(level=LOGLEVEL,
                     format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",

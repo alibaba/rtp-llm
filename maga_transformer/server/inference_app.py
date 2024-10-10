@@ -220,18 +220,10 @@ class InferenceApp(object):
         async def encode(req: Union[str,Dict[Any, Any]]):
             return self.inference_server.tokenizer_encode(req)
 
-        @app.post("/set_debug_log")
-        async def set_debug_log(req: Union[str,Dict[Any, Any]]):
+        @app.post("/set_log_level")
+        async def set_log_level(req: Union[str,Dict[Any, Any]]):
             try:
-                self.inference_server.set_debug_log(req)
-                return {"status": "ok"}
-            except Exception as e:
-                return {"error": str(e)}
-
-        @app.post("/set_debug_print")
-        async def set_debug_print(req: Union[str,Dict[Any, Any]]):
-            try:
-                self.inference_server.set_debug_print(req)
+                self.inference_server.set_log_level(req)
                 return {"status": "ok"}
             except Exception as e:
                 return {"error": str(e)}

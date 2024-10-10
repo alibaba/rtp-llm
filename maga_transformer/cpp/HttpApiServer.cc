@@ -8,7 +8,7 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 
 namespace torch_ext {
-extern void setDebugLogLevel(bool debug);
+extern bool setLogLevel(const std::string& log_level);
 }  // namespace torch_ext
 
 namespace rtp_llm {
@@ -267,7 +267,7 @@ void HttpApiServer::registerResponses() {
     registerRoot();
     registerHealth();
     registerV1Model();
-    registerSetDebugLog();
+    registerSetLogLevel();
     registerTokenizerEncode();
     registerInference();
     registerInferenceInternal();
@@ -341,7 +341,7 @@ bool HttpApiServer::registerV1Model() {
     return http_server_.RegisterRoute("GET", "/v1/models", callback);
 }
 
-bool HttpApiServer::registerSetDebugLog() {
+bool HttpApiServer::registerSetLogLevel() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
@@ -349,15 +349,19 @@ bool HttpApiServer::registerSetDebugLog() {
         const auto body = request.GetBody();
         try {
             auto body_map = AnyCast<JsonMap>(ParseJson(body));
-            auto it       = body_map.find("debug");
+            auto it       = body_map.find("log_level");
             if (it == body_map.end()) {
-                FT_LOG_WARNING("set debug log level failed, request has no debug info, request body: %s", body.c_str());
-                writer->Write(R"({"error":"set debug log level failed, request has no debug info"})");
+                FT_LOG_WARNING("set log level failed, request has no log level info, request body: %s", body.c_str());
+                writer->Write(R"({"error":"set log level failed, request has no log level info"})");
                 return;
             }
-            auto value = AnyCast<bool>(it->second);
-            torch_ext::setDebugLogLevel(value);
-            writer->Write(R"({"status":"ok"})");
+            auto value = AnyCast<std::string>(it->second);
+            if (torch_ext::setLogLevel(value)) {
+                writer->Write(R"({"status":"ok"})");
+            } else {
+                FT_LOG_WARNING("set log level failed, invalid log level: %s", value);
+                writer->Write(R"({"error":"set debug log level failed, invalid log level"})");
+            }
             return;
         } catch (const std::exception& e) {
             FT_LOG_WARNING("set debug log level failed, found exception. request body: %s, exception: [%s]",
@@ -367,7 +371,7 @@ bool HttpApiServer::registerSetDebugLog() {
             return;
         }
     };
-    return http_server_.RegisterRoute("POST", "/set_debug_log", callback);
+    return http_server_.RegisterRoute("POST", "/set_log_level", callback);
 }
 
 bool HttpApiServer::registerTokenizerEncode() {

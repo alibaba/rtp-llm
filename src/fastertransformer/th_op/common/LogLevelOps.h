@@ -5,6 +5,6 @@
 
 namespace torch_ext {
 
-void setDebugLogLevel(bool debug);
+bool setLogLevel(const std::string& log_level_str);
 
 }  // namespace torch_ext

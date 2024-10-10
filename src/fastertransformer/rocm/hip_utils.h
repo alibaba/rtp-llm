@@ -182,18 +182,6 @@ inline void sync_and_check(const char* const file, int const line) {
         }
         FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
     }
-
-#ifndef NDEBUG
-    hipDeviceSynchronize();
-    hipError_t result = hipGetLastError();
-    if (result) {
-        std::string msg = std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n";
-        FT_LOG_INFO(msg);
-        fflush(stdout);
-        throw std::runtime_error(msg);
-    }
-#endif
 }
 
 /*************Time Handling**************/

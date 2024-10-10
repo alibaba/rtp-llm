@@ -197,18 +197,6 @@ inline void syncAndCheck(const char* const file, int const line) {
         }
         FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
     }
-
-#ifndef NDEBUG
-    cudaDeviceSynchronize();
-    cudaError_t result = cudaGetLastError();
-    if (result) {
-        std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n";
-        FT_LOG_INFO(msg);
-        fflush(stdout);
-        throw std::runtime_error(msg);
-    }
-#endif
 }
 
 inline void CheckError(const char* const file, int const line) {

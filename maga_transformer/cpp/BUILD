@@ -31,6 +31,8 @@ cc_library(
         "//:gpt_init_params_hdr",
         "//src/fastertransformer/utils:py_utils",
         "@havenask//aios/alog:alog",
+        "@com_google_absl//absl/debugging:stacktrace",
+        "@com_google_absl//absl/debugging:symbolize",
     ],
     visibility = ["//visibility:public"],
 )

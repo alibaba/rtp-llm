@@ -73,15 +73,15 @@ TEST_F(HttpApiServerTest, testRegisterV1Model) {
     MockRouteCallback("GET", "/v1/models", request);
 }
 
-TEST_F(HttpApiServerTest, testRegisterSetDebugLog) {
-    EXPECT_TRUE(server_->registerSetDebugLog());
+TEST_F(HttpApiServerTest, testRegisterSetLogLevel) {
+    EXPECT_TRUE(server_->registerSetLogLevel());
     const std::string body    = R"del(
 {
-    "debug": true
+    "log_level": "INFO"
 }
 )del";
     auto              request = CreateHttpRequest(body);
-    MockRouteCallback("POST", "/set_debug_log", request);
+    MockRouteCallback("POST", "/set_log_level", request);
 }
 
 TEST_F(HttpApiServerTest, testRegisterTokenizerEncode) {

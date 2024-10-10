@@ -301,15 +301,10 @@ class InferenceServer(object):
         else:
             return LoadBalanceInfo()
 
-    def set_debug_log(self, req: Union[str,Dict[Any, Any]]) -> None:
+    def set_log_level(self, req: Union[str,Dict[Any, Any]]) -> None:
         if isinstance(req, str):
             req = json.loads(req)
-        return torch.ops.fastertransformer.set_debug_log_level(req['debug'])
-
-    def set_debug_print(self, req: Union[str,Dict[Any, Any]]) -> None:
-        if isinstance(req, str):
-            req = json.loads(req)
-        return torch.ops.fastertransformer.set_debug_print_level(req['debug'])
+        return torch.ops.fastertransformer.set_log_level(req['log_level'])
 
 
     async def update(self, version_info: VersionInfo):

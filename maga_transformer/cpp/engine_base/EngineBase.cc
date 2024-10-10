@@ -1,19 +1,27 @@
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
+#include "maga_transformer/cpp/utils/SignalUtils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "autil/EnvUtil.h"
+#include <stdexcept>
 
 using namespace autil;
 
 namespace rtp_llm {
 
 EngineBase::EngineBase(const EngineInitParams& params) {
-    fastertransformer::Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
     EngineBase::initDevices(params);
     device_       = ft::DeviceFactory::getDefaultDevice();
     lora_manager_ = std::make_shared<lora::LoraManager>();
 }
 
 void EngineBase::initDevices(const EngineInitParams& params) {
+    fastertransformer::Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
+
+    if (!installSighandler()) {
+        FT_LOG_ERROR("install sighandler failed");
+        std::runtime_error("install sighandler failed");
+    }
+
     auto  global_params               = ft::DeviceFactory::getDefaultGlobalDeviceParams();
     auto& default_device_params       = global_params.device_params[0].second;
     default_device_params.tp_size     = params.gpt_init_parameter.tp_size_;
