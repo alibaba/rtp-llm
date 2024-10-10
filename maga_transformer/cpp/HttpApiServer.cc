@@ -328,12 +328,10 @@ bool HttpApiServer::registerEmbedding() {
         }
 
         try {
-            FT_LOG_WARNING("%d", __LINE__);
             auto [response, logable_response] = embedding_endpoint.handle(request.GetBody());
-            FT_LOG_WARNING("%d", __LINE__);
             if (logable_response.has_value()) {
                 // TODO: access log response
-                FT_LOG_WARNING("TODO: access log embedding model response");
+                FT_LOG_WARNING("TODO: access log embedding response");
             }
             writer->Write(response);
         } catch (const py::error_already_set& e) {
@@ -609,20 +607,7 @@ void HttpApiServer::stop() {
 
 std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(const std::string& body) {
 
-    // if isinstance(request, str):
-    //     request = json.loads(request)
-    // formated_request = await self.custom_model_.renderer.render_request(request)
-    // batch_input = self.custom_model_.renderer.create_input(formated_request)
-    // batch_output = await self.decoder_engine_.decode(batch_input)
-    // response = await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)
-    // logable_response = await self.custom_model_.renderer.render_log_response(response)
-    // return response, logable_response
-
-    // py::handle batch_input;
-    // py::module json;
     th::Tensor token_ids, token_type_ids, input_lengths;
-    // py::handle formated_request;
-    // int input_length;
     std::optional<MultimodalFeature> multimodal_features = std::nullopt;
     {
         py::gil_scoped_acquire gil;
@@ -630,21 +615,15 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
         py::object request = json.attr("loads")(body);
 
         auto coro = py_render_.attr("render_request")(request);
-
         py::module::import("nest_asyncio").attr("apply")();
-
         auto loop = py::module::import("asyncio").attr("get_event_loop")();
         auto future = loop.attr("create_task")(coro);
         loop.attr("run_until_complete")(future);
         py::object formated_request = future.attr("result")();
 
-        // py::object asyncio = py::module::import("asyncio");
-        // py::object result = asyncio.attr("run")(formated_request);
-
         py::object batch_input = py_render_.attr("create_input")(formated_request);
         token_type_ids = py::cast<th::Tensor>(batch_input.attr("token_type_ids"));
         input_lengths = py::cast<th::Tensor>(batch_input.attr("input_lengths"));
-        // input_length = py::cast<int>(batch_input.attr("input_length"));
 
         std::vector<MultimodalInput> mm_inputs;
         auto py_mm_inputs = batch_input.attr("multimodal_inputs");
@@ -656,7 +635,6 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
             mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
                                    py::cast<int>(item.attr("mm_type")));
         }
-        // std::optional<MultimodalFeature> multimodal_features = std::nullopt;
         token_ids = py::cast<th::Tensor>(batch_input.attr("token_ids"));
         if (mm_processor_ != nullptr && !mm_inputs.empty()) {
             auto mm_res = mm_processor_->get_mm_features(ft::torchTensor2Buffer(token_ids), mm_inputs);
@@ -668,15 +646,11 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
         }
     }
 
-    FT_LOG_WARNING("%d", __LINE__);
     auto results = embedding_engine_->decode(token_ids,
                                              token_type_ids,
                                              input_lengths,
                                              /*request_id=*/0,
                                              multimodal_features);
-    FT_LOG_WARNING("%d", __LINE__);
-
-    // return std::make_pair("fake embedding", std::nullopt);
 
     py::gil_scoped_acquire gil;
     py::module json = py::module::import("json");
@@ -696,35 +670,27 @@ std::pair<std::string, std::optional<std::string>> EmbeddingEndpoint::handle(con
     py::object cls = embedding_interface.attr("EngineOutputs");
     py::object batch_output = cls("outputs"_a=py::cast(results), "input_length"_a=py::int_(input_length));
 
-    FT_LOG_WARNING("%d", __LINE__);
     coro = py_render_.attr("render_response")(formated_request, batch_input, batch_output);
-    // fT_LOG_WARNING("%d", __LINE__);
-    // py::module::import("nest_asyncio").attr("apply")();
-    // fT_LOG_WARNING("%d", __LINE__);
-    // auto loop = py::module::import("asyncio").attr("get_event_loop")();
-    FT_LOG_WARNING("%d", __LINE__);
     future = loop.attr("create_task")(coro);
-    FT_LOG_WARNING("%d", __LINE__);
     loop.attr("run_until_complete")(future);
-    FT_LOG_WARNING("%d", __LINE__);
     py::object response = future.attr("result")();
-    FT_LOG_WARNING("%d", __LINE__);
 
-    auto json_response = json.attr("dumps")(response);
-    FT_LOG_WARNING("%d", __LINE__);
-    std::string json_string = py::cast<std::string>(json_response);
-    return std::make_pair(json_string, std::nullopt);
+    coro = py_render_.attr("render_log_response")(response);
+    future = loop.attr("create_task")(coro);
+    loop.attr("run_until_complete")(future);
+    py::object logable_response = future.attr("result")();
 
-    // auto logable_response = py_render_.attr("render_log_response")(response);
-    // FT_LOG_WARNING("%d", __LINE__);
-    // if (logable_response.is_none()) {
-    //     auto json_response = json.attr("dumps")(response);
-    //     return std::make_pair(py::cast<std::string>(json_response), std::nullopt);
-    // } else {
-    //     auto json_response = json.attr("dumps")(response);
-    //     auto json_logable_response = json.attr("dumps")(logable_response);
-    //     return std::make_pair(py::cast<std::string>(json_response), py::cast<std::string>(logable_response));
-    // }
+    if (logable_response.is_none()) {
+        auto json_response = json.attr("dumps")(response);
+        std::string json_string = py::cast<std::string>(json_response);
+        return std::make_pair(json_string, std::nullopt);
+    } else {
+        auto json_response = json.attr("dumps")(response);
+        std::string json_string = py::cast<std::string>(json_response);
+        auto json_logable_response = json.attr("dumps")(logable_response);
+        std::string logable_json_string = py::cast<std::string>(json_logable_response);
+        return std::make_pair(json_string, logable_json_string);
+    }
 }
 
 // ------------------------------- Pipeline -------------------------------
