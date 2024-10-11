@@ -5,6 +5,6 @@ BASE_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_transformer_arm_open_source_b
 TARGET_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_transformer_arm
 DEV_IMAGE=$BASE_IMAGE
 BAZEL_ARGS="--config=arm"
-PLATFORM=aarch64
+export PLATFORM=aarch64
 
 sh package_docker.sh ${BASE_IMAGE} ${TARGET_IMAGE} ${DEV_IMAGE} ${BAZEL_ARGS}

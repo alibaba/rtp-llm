@@ -43,14 +43,23 @@ else
     WHEEL_OS=manylinux1
 fi
 VERSION=`cat $DIR/../../open_source/version`
-WHL_FILE=maga_transformer-$VERSION-cp310-cp310-$WHEEL_OS_$PLATFORM.whl
+WHL_FILE=maga_transformer-$VERSION-cp310-cp310-${WHEEL_OS}_$PLATFORM.whl
 
 # create temp container
 TEMP_CONTAINER_NAME=packaging_temp_$TAG
+
+# set cleanup trap
+function docker_cleanup() {
+    docker stop $TEMP_CONTAINER_NAME || true
+    docker rm $TEMP_CONTAINER_NAME || true
+}
+
+trap docker_cleanup EXIT
+
 # docker pull $DEV_IMAGE:$BASE_IMAGE_TAG
 docker run --device /dev/fuse -v /mnt/:/mnt/ -v /dev/shm:/dev/shm --rm --gpus all  \
     --name=$TEMP_CONTAINER_NAME  --label com.search.type=dev \
-    -v /home/:/home/ -v /var/run/docker.sock:/var/run/docker.sock \
+    -v /home/:/home/ \
     -v ~/.cache/:/root/.cache/ \
     --net=host \
     -dit $DEV_IMAGE:$BASE_IMAGE_TAG /bin/bash
@@ -64,11 +73,6 @@ docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "ssh-keyscan gitlab.alibaba-inc
 docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG $WHEEL_TARGET"
 rm $DIR/$WHL_FILE -f
 docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/maga_transformer/$WHL_FILE $DIR/
-
-# drop temp container
-(docker stop $TEMP_CONTAINER_NAME && docker rm $TEMP_CONTAINER_NAME) || (
-    echo "docker stop failed... skip"
-)
 
 # prepare start script
 START_SH_DIR="$DIR/../../internal_source/maga_start.sh"
