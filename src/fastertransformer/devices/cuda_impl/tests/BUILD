@@ -93,6 +93,29 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_custom_all_reduce_test2",
+    srcs = [
+        "CudaCustomAllReduceTest.cc"
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps + [
+        "//src/fastertransformer/devices/cuda_impl/tests:custom_ar_test"
+    ],
+    tags = ["custom_ar_ut"],
+)
+
+test_suite(
+    name = "custom_ar_barrier_dead_lock_recover_test",
+    tests = [
+        ":cuda_custom_all_reduce_test",
+        ":cuda_custom_all_reduce_test2",
+        "//internal_source/maga_transformer/test/smoke:qwen2_0.5b_custom_ar_L20",
+    ]
+)
+
+cc_test(
     name = "cuda_general_ops_test",
     srcs = [
         "CudaGeneralOpsTest.cc",
