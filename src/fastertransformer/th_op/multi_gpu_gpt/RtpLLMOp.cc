@@ -142,7 +142,7 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
         if (http_server_->start(http_server_address)) {
             FT_LOG_INFO("normal HTTP Server listening on %s", http_server_address.c_str());
         } else {
-            FT_LOG_ERROR("normal HTTP Server start fail.");
+            FT_FAIL("normal HTTP Server start fail.");
         }
     }
     grpc_server_->Wait();
