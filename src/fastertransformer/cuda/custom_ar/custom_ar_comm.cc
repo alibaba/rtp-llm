@@ -94,7 +94,7 @@ void CustomAllReduceComm::allReduce(
     param_.local_output_buffer_ptr = output_ptr;
     param_.kernel_algo =
         select_kernel_algo(support_nv_link_, param_.elts_total_num * param_.data_type_size, world_size_);
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream);
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, param_.barrier_flag, stream);
 }
 
 void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) {

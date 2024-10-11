@@ -210,7 +210,7 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
         auto currentTimepoint = std::chrono::steady_clock::now();
         if (timeout && std::chrono::duration_cast<std::chrono::milliseconds>(currentTimepoint - synchronizeTimepoint)
             >= opTimeout) {
-            FT_LOG_WARNING("Op run time more than 5000ms, abort");
+            FT_LOG_WARNING("Op run time more than 120000ms, abort");
             abort();
         }
         cudaErr = cudaStreamQuery(stream);

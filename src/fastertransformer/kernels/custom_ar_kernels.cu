@@ -17,9 +17,6 @@
 #include "custom_ar_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include <cassert>
-#if USING_ROCM
-#include "src/fastertransformer/rocm/cuda_shims.h"
-#endif
 #include <cstddef>
 
 namespace fastertransformer {
@@ -51,33 +48,25 @@ static inline __device__ uint32_t fadd(const uint32_t& a, const uint32_t& b) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static inline __device__ void st_flag_release(uint32_t& flag, uint32_t* flag_addr) {
-#if USING_ROCM
-    __atomic_store((__attribute__((address_space(1))) uint32_t*)flag_addr,
-                   (__attribute__((address_space(1))) uint32_t*)&flag,
-                   __ATOMIC_RELEASE);
-#else
+static inline __device__ void st_flag_release(uint32_t const& flag, uint32_t* flag_addr) {
 #if __CUDA_ARCH__ >= 700
     asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
 #else
     __threadfence_system();
     asm volatile("st.global.volatile.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
 #endif
-#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static inline __device__ void ld_flag_acquire(uint32_t& flag, uint32_t* flag_addr) {
-#if USING_ROCM
-    __atomic_load((__attribute__((address_space(1))) uint32_t*)flag_addr, &flag, __ATOMIC_ACQUIRE);
-#else
+static inline __device__ uint32_t ld_flag_acquire(uint32_t* flag_addr) {
+    uint32_t flag;
 #if __CUDA_ARCH__ >= 700
     asm volatile("ld.global.acquire.sys.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
 #else
     asm volatile("ld.global.volatile.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
 #endif
-#endif
+    return flag;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -146,8 +135,66 @@ inline __device__ bf168 init_packed_type() {
     return val;
 }
 
+__inline__ __device__ void multi_gpu_barrier(uint32_t**     peer_barrier_ptrs,
+                                             uint32_t const barrier_flag,
+                                             size_t const   local_rank,
+                                             size_t const   world_size,
+                                             const size_t   tidx,
+                                             const size_t   bidx) {
+    // After this function, at least one block in each GPU has reached the barrier
+    if (tidx < world_size) {
+        // we can think of signals having the shape [world_size, world_size]
+        // Dimension 0 is the "listening" dimension, dimension 1 is "emitting" dimension
+
+        // Block 0 broadcasts its flag (local_rank on emitting dimension) to all receivers
+        size_t offset = (barrier_flag % 2) ? world_size : 0;
+
+        if (bidx == 0) {
+            st_flag_release(barrier_flag, peer_barrier_ptrs[tidx] + offset + local_rank);
+        }
+
+        // All blocks check that corresponding block 0 on other GPUs have set the flag
+        // No deadlock because block #0 is always the first block started
+        uint32_t* peer_barrier_d = peer_barrier_ptrs[local_rank] + offset + tidx;
+        while (ld_flag_acquire(peer_barrier_d) != barrier_flag) {}
+    }
+
+    __syncthreads();
+}
+
+__inline__ __device__ void block_barrier(uint32_t**     peer_barrier_ptrs,
+                                         uint32_t const barrier_flag,
+                                         size_t const   local_rank,
+                                         size_t const   world_size,
+                                         const size_t   tidx,
+                                         const size_t   bidx,
+                                         const size_t   grid_size) {
+    // After this function, the block of id == bidx of each GPU has reached the barrier
+    if (tidx < world_size) {
+        // we can think of signals having the shape [world_size, 2, num_blocks, world_size]
+        // (+ an offset on dim 2 to account for flags used in multi_gpu_barrier)
+        // Dimension 0 is the "listening" dimension, dimension 3 is "emitting" dimension
+
+        // Block broadcast its flag (local_rank on emitting dimension) to all receivers
+        uint32_t flag_block_offset = world_size + bidx * world_size;
+
+        if (barrier_flag % 2 == 1) {
+            flag_block_offset += (grid_size + 1) * world_size;
+        }
+
+        st_flag_release(barrier_flag, peer_barrier_ptrs[tidx] + flag_block_offset + local_rank);
+
+        // Blocks check that corresponding blocks on other GPUs have also set the flag
+        uint32_t* peer_barrier_d = peer_barrier_ptrs[local_rank] + flag_block_offset + tidx;
+
+        while (ld_flag_acquire(peer_barrier_d) != barrier_flag) {}
+    }
+
+    __syncthreads();
+}
+
 template<typename T, size_t RANKS_PER_NODE>
-static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params) {
+static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params, uint32_t barrier_flag) {
     // The block index.
     const size_t bidx = blockIdx.x;
     // The thread index with the block.
@@ -164,23 +211,7 @@ static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params) 
     // The end of the segment computed by that block.
     size_t max_offset = std::min((bidx + 1) * params.elts_per_block, params.elts_per_rank);
 
-    // Synchronize the ranks.
-    if (tidx < RANKS_PER_NODE) {
-        // The 1st block notifies the other ranks.
-        if (bidx == 0) {
-            st_flag_release(params.barrier_flag, params.peer_barrier_ptrs[tidx] + params.local_rank);
-        }
-        uint32_t* peer_barrier_d = params.peer_barrier_ptrs[params.local_rank] + tidx;
-        uint32_t  rank_barrier   = 0;
-        // Busy-wait until all ranks are ready.
-        do {
-            ld_flag_acquire(rank_barrier, peer_barrier_d);
-        } while (rank_barrier != params.barrier_flag);
-    }
-
-    // Make sure we can move on...
-    __syncthreads();
-
+    multi_gpu_barrier(params.peer_barrier_ptrs, barrier_flag, params.local_rank, RANKS_PER_NODE, tidx, bidx);
     // The source pointers. Distributed round-robin for the different warps.
     const T* src_d[RANKS_PER_NODE];
 #pragma unroll
@@ -211,12 +242,13 @@ static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params) 
 }
 
 template<typename T, size_t RANKS_PER_NODE>
-static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params) {
+static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params, uint32_t barrier_flag) {
 
     // The block index.
     const size_t bidx = blockIdx.x;
     // The thread index with the block.
-    const size_t tidx = threadIdx.x;
+    const size_t tidx      = threadIdx.x;
+    const size_t grid_size = gridDim.x;
 
     // The number of elements packed into one for comms
     static constexpr size_t NUM_ELTS = std::is_same<T, float>::value ? 4 : 8;
@@ -229,23 +261,7 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params) 
     // The end of the segment computed by that block.
     size_t max_offset = min(offset + params.elts_per_block, params.elts_total_num);
 
-    // Synchronize the ranks.
-
-    if (tidx < RANKS_PER_NODE) {
-        // The 1st block notifies the other ranks.
-        if (bidx == 0) {
-            st_flag_release(params.barrier_flag, params.peer_barrier_ptrs[tidx] + params.local_rank);
-        }
-        uint32_t* peer_barrier_d = params.peer_barrier_ptrs[params.local_rank] + tidx;
-        uint32_t  rank_barrier   = 0;
-        // Busy-wait until all ranks are ready.
-        do {
-            ld_flag_acquire(rank_barrier, peer_barrier_d);
-        } while (rank_barrier != params.barrier_flag);
-    }
-
-    // Make sure we can move on...
-    __syncthreads();
+    multi_gpu_barrier(params.peer_barrier_ptrs, barrier_flag, params.local_rank, RANKS_PER_NODE, tidx, bidx);
 
     // The source pointers. Distributed round-robin for the different warps.
     T* src_d[RANKS_PER_NODE];
@@ -279,25 +295,7 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params) 
         reinterpret_cast<PackedType*>(&src_d[0][local_offset])[0] = sums;
     }
 
-    // sync threads to make sure all block threads have the sums
-    __syncthreads();
-
-    // barreris among the blocks with the same idx (release-acuqire semantics)
-    if (tidx < RANKS_PER_NODE) {
-        // The all blocks notifies the other ranks.
-        uint32_t flag_block_offset = RANKS_PER_NODE + bidx * RANKS_PER_NODE;
-        st_flag_release(params.barrier_flag, params.peer_barrier_ptrs[tidx] + flag_block_offset + params.local_rank);
-
-        // Busy-wait until all ranks are ready.
-        uint32_t  rank_barrier   = 0;
-        uint32_t* peer_barrier_d = params.peer_barrier_ptrs[params.local_rank] + flag_block_offset + tidx;
-        do {
-            ld_flag_acquire(rank_barrier, peer_barrier_d);
-        } while (rank_barrier != params.barrier_flag);
-    }
-
-    // sync threads to make sure all other ranks has the final partial results
-    __syncthreads();
+    block_barrier(params.peer_barrier_ptrs, barrier_flag, params.local_rank, RANKS_PER_NODE, tidx, bidx, grid_size);
 
     // Gather all needed elts_num from other intra-node ranks
     for (size_t local_offset = offset; local_offset < max_offset; local_offset += blockDim.x * NUM_ELTS) {
@@ -334,29 +332,30 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
             param->elts_per_block = roundUp(divUp(elts_total_num, blocks_per_grid), elts_per_thread);
 
             // std::stringstream string_stream;
-            // string_stream  << "[ONE] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // string_stream  << "[ONE] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid
+            // << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << "
+            // elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
             // FT_LOG_INFO(string_stream.str());
             break;
         }
         case AllReduceStrategyType::TWOSHOT: {  // two stage all reduce algo
-            size_t mod    = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS;
-            size_t remain = param->elts_total_num % mod;
-            bool half_mod = false;
+            size_t mod      = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS;
+            size_t remain   = param->elts_total_num % mod;
+            bool   half_mod = false;
             if (remain != 0) {
                 size_t max_elts_num = param->max_elts_total_size / data_type_bytes;
                 assert(max_elts_num % mod == 0);
                 if (elts_total_num < mod * 2) {
-                    mod = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS / 2;
-                    remain = param->elts_total_num % mod;
+                    mod      = elts_per_thread * ranks_per_node * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS / 2;
+                    remain   = param->elts_total_num % mod;
                     half_mod = true;
                 }
-                elts_total_num        += (mod - remain);
+                elts_total_num += (mod - remain);
                 elts_total_num        = std::min(elts_total_num, max_elts_num);
                 param->elts_total_num = elts_total_num;
             }
 
             assert(elts_total_num / (elts_per_thread * ranks_per_node) == 0);
-            size_t const total_threads = elts_total_num / (elts_per_thread * ranks_per_node);
 
             threads_per_block = DEFAULT_BLOCK_SIZE;
             blocks_per_grid   = MAX_ALL_REDUCE_BLOCKS;
@@ -369,7 +368,9 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
             param->elts_per_block = roundUp(divUp(param->elts_per_rank, blocks_per_grid), elts_per_thread);
 
             // std::stringstream string_stream;
-            // string_stream  << "[TWO] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << " elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
+            // string_stream  << "[TWO] elts_total_num: " << elts_total_num << " blocks_per_grid: " << blocks_per_grid
+            // << " total_threads: " << total_threads << " threads_per_block: " << threads_per_block << "
+            // elts_per_thread: " << elts_per_thread << std::endl; FT_LOG_INFO(string_stream.str());
             // FT_LOG_INFO(string_stream.str());
             break;
         }
@@ -379,29 +380,31 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, size_t RANKS_PER_NODE>
-void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, cudaStream_t stream) {
+void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, uint32_t barrier_flag, cudaStream_t stream) {
     size_t blocks_per_grid = 1, threads_per_block = DEFAULT_BLOCK_SIZE;
 
     kernelLaunchConfig(param, blocks_per_grid, threads_per_block);
 
     if (param->kernel_algo == 0) {
-        oneShotAllReduceKernel<T, RANKS_PER_NODE><<<blocks_per_grid, threads_per_block, 0, stream>>>(*param);
+        oneShotAllReduceKernel<T, RANKS_PER_NODE>
+            <<<blocks_per_grid, threads_per_block, 0, stream>>>(*param, barrier_flag);
     } else {
-        twoShotAllReduceKernel<T, RANKS_PER_NODE><<<blocks_per_grid, threads_per_block, 0, stream>>>(*param);
+        twoShotAllReduceKernel<T, RANKS_PER_NODE>
+            <<<blocks_per_grid, threads_per_block, 0, stream>>>(*param, barrier_flag);
     }
 }
 
 template<typename T>
-void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_t stream) {
+void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, uint32_t barrier_flag, cudaStream_t stream) {
     switch (param->elts_per_rank) {
         case 2:
-            invokeCustomAllReduceKernel<T, 2>(param, stream);
+            invokeCustomAllReduceKernel<T, 2>(param, barrier_flag, stream);
             break;
         case 4:
-            invokeCustomAllReduceKernel<T, 4>(param, stream);
+            invokeCustomAllReduceKernel<T, 4>(param, barrier_flag, stream);
             break;
         case 8:
-            invokeCustomAllReduceKernel<T, 8>(param, stream);
+            invokeCustomAllReduceKernel<T, 8>(param, barrier_flag, stream);
             break;
         default:
             break;
@@ -409,12 +412,16 @@ void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_
 }
 
 #define INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(T)                                                              \
-    template void invokeCustomAllReduceDispatch<T>(CustomAllReduceParameters * param, cudaStream_t stream);
+    template void invokeCustomAllReduceDispatch<T>(                                                                    \
+        CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);
 
 #define INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(T)                                                                \
-    template void invokeCustomAllReduceKernel<T, 2>(CustomAllReduceParameters * param, cudaStream_t stream);           \
-    template void invokeCustomAllReduceKernel<T, 4>(CustomAllReduceParameters * param, cudaStream_t stream);           \
-    template void invokeCustomAllReduceKernel<T, 8>(CustomAllReduceParameters * param, cudaStream_t stream);
+    template void invokeCustomAllReduceKernel<T, 2>(                                                                   \
+        CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);                                \
+    template void invokeCustomAllReduceKernel<T, 4>(                                                                   \
+        CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);                                \
+    template void invokeCustomAllReduceKernel<T, 8>(                                                                   \
+        CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);
 
 // Template instantiation
 

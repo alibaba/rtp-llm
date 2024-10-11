@@ -26,7 +26,7 @@ def http_post_with_retry(url: str, data: Dict[str, Any], retry_limit: int = 3):
     while retry_time < retry_limit:
         retry_time += 1
         try:
-            ret = requests.post(url, json=data, timeout=10)
+            ret = requests.post(url, json=data, timeout=150)
             if ret.status_code == 200:
                 return ret
         except:

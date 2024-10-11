@@ -76,10 +76,10 @@ inline size_t roundUp(size_t a, size_t n) {
 }
 
 template<typename T, size_t RANKS_PER_NODE>
-void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, cudaStream_t stream);
+void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, uint32_t barrier_flag, cudaStream_t stream);
 
 template<typename T>
-void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_t stream);
+void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, uint32_t barrier_flag, cudaStream_t stream);
 
 void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_grid, size_t& threads_per_block);
 
