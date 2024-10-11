@@ -10,12 +10,24 @@ LOGLEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 if LOGLEVEL == "TRACE":
     LOGLEVEL = "DEBUG"
 
+file_logger_init_success = False
 if os.environ.get('FT_SERVER_TEST') is None:
     LOGGING_CONFIG['loggers']['']['level'] = LOGLEVEL
-    logging.config.dictConfig(LOGGING_CONFIG)
+
     if os.environ.get('NCCL_DEBUG_FILE') is None:
         os.environ['NCCL_DEBUG_FILE'] = os.path.join(LOG_PATH, 'nccl.log')
-else:
+
+    try:
+        logging.config.dictConfig(LOGGING_CONFIG)
+        file_logger_init_success = True
+        print(f"successfully init logger config {LOGGING_CONFIG}")
+    except BaseException as e:
+        # for compatible with yitian arm machine in prod env, which lacks hippo infras and envs.
+        import traceback
+        print(f"failed to init logger config {LOGGING_CONFIG}: {e}\n {traceback.format_exc()}")
+
+
+if not file_logger_init_success:
     logging.basicConfig(level=LOGLEVEL,
                     format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
                     datefmt='%m/%d/%Y %H:%M:%S')
