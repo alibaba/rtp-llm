@@ -46,11 +46,11 @@ void setup_topk_runtime_args(int    batch_size,
     for (int i = 0; i < batch_size; i++) {
         uint  k = top_ks_size > 1 ? top_ks[i] : top_k;
         float p = top_ps_size > 1 ? top_ps[i] : top_p;
-        if (k == 0 && p == 0.0f) {
-            k = 1;
-        }
         if (k > 0 && p == 0.0f) {
             p = 1.0f;
+        }
+	if (k == 0) {
+            k = 1;
         }
         // Clip k value. A topk sampling kernel supports up to TOP_K_MAX=64.
         top_ks[i] = k > TOP_K_MAX ? TOP_K_MAX : k;
