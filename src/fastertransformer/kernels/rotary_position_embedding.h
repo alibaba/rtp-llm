@@ -644,18 +644,19 @@ __device__ __inline__ void normal_rope(vector_t&       x,
     }
 }
 
-template<typename scalar_t, typename vector_t>
+template<typename RopeInit, typename scalar_t, typename vector_t>
 __device__ __inline__ void glm2_rope(vector_t&   x,
                                      const int   tidx,
                                      const int   seqidx,
                                      const int   dim,
-                                     const float base)
+                                     const float base,
+                                     const RopeInit& rope_init)
 {
     const int  vec_size = vector_size<scalar_t, vector_t>::size;
     const bool work     = (tidx * vec_size < dim);
 
     if (work) {
-        apply_rotary_embedding(x, tidx, dim, seqidx, base, DefaultRope{});
+        apply_rotary_embedding(x, tidx, dim, seqidx, base, rope_init);
     }
 }
 
@@ -691,7 +692,7 @@ __device__ inline void apply_rope(RopeConfig rope_config,
         break;
     case RopeStyle::Glm2:
         // only do rotary embedding for [..., d / 2]
-        glm2_rope<scalar_t, vector_t>(x, tidx, seqidx, dim / 2, base);
+        glm2_rope<LinearScaleRope, scalar_t, vector_t>(x, tidx, seqidx, dim / 2, base, LinearScaleRope{rope_config.scale});
         break;
     case RopeStyle::DynamicNTK:
         if (seq_len > rope_config.max_pos) {
