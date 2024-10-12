@@ -391,7 +391,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     float q_scaling = params.configs.q_scaling;
     int relative_attention_bias_stride = 0;
-    const float* linear_bias_slopes = nullptr;
+    const float* linear_bias_slopes = params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
     const bool* masked_tokens = nullptr;
 
     // TODO(lidongjin) support int8
