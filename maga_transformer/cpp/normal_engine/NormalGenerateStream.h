@@ -36,8 +36,18 @@ public:
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
                       const ft::BufferPtr& loss) override;
+private:
+    void updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs);
+    void prepareGenerateOutput(const ft::BufferPtr& new_tokens,
+                      const ft::BufferPtr& hidden_states,
+                      const ft::BufferPtr& logits,
+                      const ft::BufferPtr& cum_log_probs,
+                      const ft::BufferPtr& all_probs,
+                      const ft::BufferPtr& loss);
+    void enqueueGenerateOutput();
 
 protected:
+    bool                                      finished_{false};
     std::shared_ptr<GenerateOutputs>          generate_outputs_;
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
 };

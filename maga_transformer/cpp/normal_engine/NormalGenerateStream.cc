@@ -20,19 +20,14 @@ absl::StatusOr<GenerateOutputs> NormalGenerateStream::nextOutput() {
     return generate_outputs_queue_.getAndPopFront();
 }
 
-void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
-                                        const ft::BufferPtr& hidden_states,
-                                        const ft::BufferPtr& logits,
-                                        const ft::BufferPtr& cum_log_probs,
-                                        const ft::BufferPtr& all_probs,
-                                        const ft::BufferPtr& loss) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+void NormalGenerateStream::updateState(const ft::BufferPtr& loss,
+                                       const ft::BufferPtr& cum_log_probs) {
     if (loss) {
         setLoss(*loss);
     }
 
-    bool finished = needFinish();
-    if (finished) {
+    finished_ = needFinish();
+    if (finished_) {
         setFinishedWithoutLock();
     }
     // unfinshed beam search also need to update cum_log_probs.
@@ -40,12 +35,17 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
         device_->copy({*cum_log_probs_, *cum_log_probs});
     }
 
-    if (!isStreaming() && !finished) {
-        return;
+    if (cum_log_probs) {
+        device_->copy({*cum_log_probs_, *cum_log_probs});
     }
+}
 
-
-
+void NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
+                    const ft::BufferPtr& hidden_states,
+                    const ft::BufferPtr& logits,
+                    const ft::BufferPtr& cum_log_probs,
+                    const ft::BufferPtr& all_probs,
+                    const ft::BufferPtr& loss) {
     size_t output_len = seq_length_ - last_output_pos_;
     generate_outputs_->generate_outputs.clear();
     for (int i = 0; i < tileNum(); i++) {
@@ -112,14 +112,39 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
 
         generate_outputs_->generate_outputs.push_back(generate_output);
     }
+}
+
+void NormalGenerateStream::enqueueGenerateOutput() {
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         setStop("queue is full");
-        return;
     } else {
         generate_outputs_queue_.push(*generate_outputs_);
     }
+}
+
+void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
+                                        const ft::BufferPtr& hidden_states,
+                                        const ft::BufferPtr& logits,
+                                        const ft::BufferPtr& cum_log_probs,
+                                        const ft::BufferPtr& all_probs,
+                                        const ft::BufferPtr& loss) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    updateState(loss, cum_log_probs);
+
+    if (!isStreaming() && !finished_) {
+        return;
+    }
+
+    prepareGenerateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);\
+
+    enqueueGenerateOutput();
+
+    if (stoppedWithoutLock()) {
+        return;
+    }
+    
     last_output_pos_ = seq_length_;
 }
 };  // namespace rtp_llm
