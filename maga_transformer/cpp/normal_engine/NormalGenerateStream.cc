@@ -83,7 +83,7 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                 generate_output.hidden_states = device_->clone({hidden_states->view(i, 1), ft::AllocationType::HOST});
             }
         }
-        if (loss) {
+        if (loss_) {
             FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1, "loss index should be input len [%d] - 1 but is [%d]", inputLength(), loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {
