@@ -33,6 +33,7 @@ public:
     void copy(const CopyParams& params) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     void syncAndCheck() override;
+    DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     SelectOutput select(const SelectParams& params) override;
     MultiplyOutput multiply(const MultiplyParams& params) override;
@@ -45,7 +46,7 @@ public:
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params) override;
     DeviceStatus getDeviceStatus() override;
-    
+
     void syncCommunication(bool timeout = true) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
@@ -60,12 +61,12 @@ public:
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
-    
+
 private:
     hipDeviceProp_t             rocmDevProp;
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> hostAllocator_;
-    
+
     hipStream_t                 stream_ = nullptr;
     hipDeviceProp_t device_prop_;
 

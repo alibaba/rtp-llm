@@ -63,8 +63,8 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         NCCLCHECK(ncclGroupStart());
         NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
         NCCLCHECK(ncclGroupEnd());
-    }    
-    
+    }
+
 #if PINCPU_MEM
     allocator_.reset(new Allocator<AllocatorType::ROCM>());
     hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());
@@ -172,6 +172,12 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
     props.tp_rank = nccl_param_.rank_;
     props.tp_size = nccl_param_.world_size_;
     return props;
+}
+
+DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
+    DevicePrepOutput output;
+    output.need_mask = false;
+    return std::move(output);
 }
 
 void ROCmDevice::copy(const CopyParams& params) {

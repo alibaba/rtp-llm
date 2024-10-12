@@ -227,8 +227,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
         return;
     } else {
-        // TODO(lidongjin): Only support float32 gemm output.
-        // TODO: deal with GQA: duplicate k_output by head_num / kv_head_num ratio.
+        FT_LOG_WARNING("ck fmha failed, falling to default implementation. This decreases performance drastically.");
         auto qk_output = gemm({*q_output,
                                *k_output,
                                std::nullopt,
@@ -242,11 +241,25 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
         // TODO(lidongjin): Only support float32(in)\float16(output).
         auto softmax_type = qk_output->type();
+        auto lengths_host = clone({
+            params.common.input_lengths.view(decoder_batch_size, batch_size),
+            AllocationType::HOST
+        });
+        auto prefix_lengths_host = params.common.prefix_prompt_lengths
+                                 ? clone({*params.common.prefix_prompt_lengths, AllocationType::HOST})
+                                 : BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
+
+        auto attention_mask = attentionMask({
+            *lengths_host,
+            *prefix_lengths_host,
+            q_output->type(),
+            params.configs.mask_type == AttentionMaskType::causalMask
+        });
         RUNTIME_ASSERT_OP_ARG(
             params.common.attention_mask,
             "attention_mask must be provided for default context attention implementation");
         auto softmax_qk_output = softmax({std::move(qk_output),
-                                        *params.common.attention_mask,
+                                        *attention_mask,
                                         nullopt,
                                         scale,
                                         datatype});
