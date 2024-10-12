@@ -229,7 +229,6 @@ protected:
     ft::BufferPtr                       loss_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;
-    std::shared_ptr<autil::SynchronizedQueue<GenerateOutputs>>  generate_outputs_queue_;
 
     // just for bool test
     bool perf_test_ = false;

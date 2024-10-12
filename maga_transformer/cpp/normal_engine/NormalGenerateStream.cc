@@ -20,8 +20,7 @@ absl::StatusOr<GenerateOutputs> NormalGenerateStream::nextOutput() {
     return generate_outputs_queue_.getAndPopFront();
 }
 
-void NormalGenerateStream::updateState(const ft::BufferPtr& loss,
-                                       const ft::BufferPtr& cum_log_probs) {
+void NormalGenerateStream::updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs) {
     if (loss) {
         setLoss(*loss);
     }
@@ -40,14 +39,16 @@ void NormalGenerateStream::updateState(const ft::BufferPtr& loss,
     }
 }
 
-void NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
-                    const ft::BufferPtr& hidden_states,
-                    const ft::BufferPtr& logits,
-                    const ft::BufferPtr& cum_log_probs,
-                    const ft::BufferPtr& all_probs,
-                    const ft::BufferPtr& loss) {
-    size_t output_len = seq_length_ - last_output_pos_;
-    generate_outputs_->generate_outputs.clear();
+GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
+                                                            const ft::BufferPtr& hidden_states,
+                                                            const ft::BufferPtr& logits,
+                                                            const ft::BufferPtr& cum_log_probs,
+                                                            const ft::BufferPtr& all_probs,
+                                                            const ft::BufferPtr& loss) {
+    size_t          output_len = seq_length_ - last_output_pos_;
+    GenerateOutputs generate_results;
+    generate_results.request_id = request_id_;
+
     for (int i = 0; i < tileNum(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count      = iter_count_;
@@ -84,10 +85,14 @@ void NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens
             }
         }
         if (loss_) {
-            FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1, "loss index should be input len [%d] - 1 but is [%d]", inputLength(), loss_index_);
+            FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
+                               "loss index should be input len [%d] - 1 but is [%d]",
+                               inputLength(),
+                               loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {
-                loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()), ft::AllocationType::HOST});
+                loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()),
+                                       ft::AllocationType::HOST});
             }
             generate_output.loss = loss;
         }
@@ -97,30 +102,32 @@ void NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens
         generate_output.aux_info.input_len    = generate_input_->promptLength();
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len   = seq_length_ - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len = output_len;;
-        generate_output.aux_info.reuse_len    = reuse_length_;
+        generate_output.aux_info.output_len      = seq_length_ - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len = output_len;
+        ;
+        generate_output.aux_info.reuse_len = reuse_length_;
 
         generate_output.aux_info.cum_log_probs =
             device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
 
         if (cum_log_probs) {
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
-                cum_log_probs_->dataWithOffset<float>(i),
-                sizeof(float));
+                   cum_log_probs_->dataWithOffset<float>(i),
+                   sizeof(float));
         }
 
-        generate_outputs_->generate_outputs.push_back(generate_output);
+        generate_results.generate_outputs.push_back(generate_output);
     }
+    return generate_results;
 }
 
-void NormalGenerateStream::enqueueGenerateOutput() {
+void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs generate_results) {
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         setStop("queue is full");
     } else {
-        generate_outputs_queue_.push(*generate_outputs_);
+        generate_outputs_queue_.push(generate_results);
     }
 }
 
@@ -137,14 +144,15 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
         return;
     }
 
-    prepareGenerateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);\
+    GenerateOutputs generate_results =
+        prepareGenerateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);
 
-    enqueueGenerateOutput();
+    enqueueGenerateOutput(generate_results);
 
     if (stoppedWithoutLock()) {
         return;
     }
-    
+
     last_output_pos_ = seq_length_;
 }
 };  // namespace rtp_llm

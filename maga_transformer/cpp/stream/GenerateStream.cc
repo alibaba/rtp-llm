@@ -28,8 +28,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
-    , generate_outputs_queue_(std::make_shared<autil::SynchronizedQueue<GenerateOutputs>>())
-
 {
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();

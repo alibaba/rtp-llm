@@ -1,5 +1,6 @@
 #pragma once
 #include "maga_transformer/cpp/stream/GenerateStream.h"
+#include <cstdint>
 
 namespace ft = fastertransformer;
 
@@ -7,9 +8,8 @@ namespace rtp_llm {
 
 class NormalGenerateStream: public GenerateStream {
 public:
-    NormalGenerateStream(const GenerateStream&  stream): GenerateStream(stream) {
+    NormalGenerateStream(const GenerateStream& stream): GenerateStream(stream) {
         CopyOnWrite(stream);
-        generate_outputs_ = std::make_shared<GenerateOutputs>();
         generate_outputs_queue_.setCapacity(1000);
     }
 
@@ -17,9 +17,7 @@ public:
                          const ft::GptInitParameter&           params,
                          const ResourceContext&                resource_context,
                          kmonitor::MetricsReporterPtr          metrics_reporter):
-        GenerateStream(query, params, resource_context, metrics_reporter) {
-        generate_outputs_             = std::make_shared<GenerateOutputs>();
-        generate_outputs_->request_id = query->request_id;
+        GenerateStream(query, params, resource_context, metrics_reporter), request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
 
@@ -27,7 +25,6 @@ public:
         generate_outputs_queue_.wakeup();
     }
 
-public:
     absl::StatusOr<GenerateOutputs> nextOutput() override;
 
     void updateOutput(const ft::BufferPtr& new_tokens,
@@ -36,19 +33,19 @@ public:
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
                       const ft::BufferPtr& loss) override;
-private:
-    void updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs);
-    void prepareGenerateOutput(const ft::BufferPtr& new_tokens,
-                      const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss);
-    void enqueueGenerateOutput();
 
-protected:
+private:
+    void            updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs);
+    GenerateOutputs prepareGenerateOutput(const ft::BufferPtr& new_tokens,
+                                          const ft::BufferPtr& hidden_states,
+                                          const ft::BufferPtr& logits,
+                                          const ft::BufferPtr& cum_log_probs,
+                                          const ft::BufferPtr& all_probs,
+                                          const ft::BufferPtr& loss);
+    void            enqueueGenerateOutput(GenerateOutputs generate_results);
+
+    int64_t                                   request_id_{0};
     bool                                      finished_{false};
-    std::shared_ptr<GenerateOutputs>          generate_outputs_;
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
 };
 }  // namespace rtp_llm
