@@ -16,6 +16,9 @@
 
 #include "custom_ar_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#if USING_ROCM
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 #include <cassert>
 #include <cstddef>
 
@@ -49,22 +52,33 @@ static inline __device__ uint32_t fadd(const uint32_t& a, const uint32_t& b) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static inline __device__ void st_flag_release(uint32_t const& flag, uint32_t* flag_addr) {
+#if USING_ROCM
+    __atomic_store((__attribute__((address_space(1))) uint32_t*)flag_addr,
+                   (__attribute__((address_space(1))) uint32_t*)&flag,
+                   __ATOMIC_RELEASE);
+#else
 #if __CUDA_ARCH__ >= 700
     asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
 #else
     __threadfence_system();
     asm volatile("st.global.volatile.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
 #endif
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static inline __device__ uint32_t ld_flag_acquire(uint32_t* flag_addr) {
+
     uint32_t flag;
+#if USING_ROCM
+    __atomic_load((__attribute__((address_space(1))) uint32_t*)flag_addr, &flag, __ATOMIC_ACQUIRE);
+#else
 #if __CUDA_ARCH__ >= 700
     asm volatile("ld.global.acquire.sys.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
 #else
     asm volatile("ld.global.volatile.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
+#endif
 #endif
     return flag;
 }

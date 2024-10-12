@@ -93,6 +93,7 @@ void baseTest(const size_t rank, const size_t world_size, const size_t port, con
         const float begin = 0.0;
         const float end   = 1.0;
         const float step  = (end - begin) / (i * m);
+        FT_LOG_INFO("size: %d", i * m);
 
         const auto tensor = torch::arange(begin, end, step, torch::kFloat16) * ((int32_t)rank + 1);
         auto       buf    = device->allocateBuffer({DataType::TYPE_FP16, {static_cast<unsigned long>(tensor.size(0))}});
@@ -114,6 +115,7 @@ void baseTest(const size_t rank, const size_t world_size, const size_t port, con
         const float begin = 0.0;
         const float end   = 1.0;
         const float step  = (end - begin) / (i * m);
+        FT_LOG_INFO("size: %d", i * m);
 
         const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
         auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});

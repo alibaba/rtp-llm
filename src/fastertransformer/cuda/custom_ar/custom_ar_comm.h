@@ -56,7 +56,7 @@ private:
     static size_t getCommBufThreshold(bool support_nv_link, size_t world_size);
 
     size_t barrierBufSize(size_t world_size) const {
-        return (MAX_ALL_REDUCE_BLOCKS + 1) * sizeof(uint32_t) * world_size * 2;
+        return (MAX_ALL_REDUCE_BLOCKS + 1) * sizeof(uint32_t) * world_size * 3;
     }
 
     size_t IPChandleBufSize(size_t world_size) const {
