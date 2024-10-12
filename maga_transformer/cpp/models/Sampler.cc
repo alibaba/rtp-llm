@@ -91,9 +91,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 "sample_batch_size[%d] must devide by current_beam_size[%d]");
             auto beam_search_sequence_lengths = inputs.beam_search_sequence_lengths->view(from_batch_idx, sample_batch_size);
             auto beam_index = inputs.beam_index->view(from_batch_idx, sample_batch_size);
-            std::chrono::steady_clock::time_point t_start, t_end;
-            std::chrono::microseconds diff;
-            t_start = std::chrono::steady_clock::now();
             auto org_sample_logits_shape = sample_logits.shape();
             auto org_sample_tokens_shape = sample_tokens.shape();
             auto org_input_lengths_shape = input_lengths.shape();
@@ -129,10 +126,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             sample_cum_log_probs->updateShape(org_sample_cum_log_probs_shape);
             input_lengths.updateShape(org_input_lengths_shape);
             beam_index.updateShape(org_beam_index_shape);
-
-            t_end = std::chrono::steady_clock::now();
-            diff = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-            FT_LOG_DEBUG("beam[%d] search op time is %d us", current_beam_size, diff);
         }
 
         device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
