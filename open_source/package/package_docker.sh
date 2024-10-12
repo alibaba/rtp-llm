@@ -57,7 +57,7 @@ function docker_cleanup() {
 trap docker_cleanup EXIT
 
 # docker pull $DEV_IMAGE:$BASE_IMAGE_TAG
-docker run --device /dev/fuse -v /mnt/:/mnt/ -v /dev/shm:/dev/shm --rm --gpus all  \
+docker run --device /dev/fuse -v /mnt/:/mnt/ -v /dev/shm:/dev/shm --rm \
     --name=$TEMP_CONTAINER_NAME  --label com.search.type=dev \
     -v /home/:/home/ \
     -v ~/.cache/:/root/.cache/ \
