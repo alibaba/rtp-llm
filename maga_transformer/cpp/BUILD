@@ -365,17 +365,21 @@ cc_library(
 
 cc_library(
     name = "http_api_server",
-    srcs = ["HttpApiServer.cc"],
-    hdrs = ["HttpApiServer.h"],
+    srcs = glob([
+        "api_server/*.cc",
+    ]),
+    hdrs = glob([
+        "api_server/*.h",
+    ]),
     deps = [
-        "//maga_transformer/cpp/http_server:http_server",
+        "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
-        "//maga_transformer/cpp/embedding_engine:embedding_engine",
-        ":embedding_arpc_deps",
-        # "//maga_transformer/cpp:speculative_engine",
-        "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp:multimodal_processor",
+        "//maga_transformer/cpp/http_server:http_server",
+        ":embedding_arpc_deps",
+        "@havenask//aios/autil:net",
+        "@havenask//aios/autil:time",
     ],
     visibility = ["//visibility:public"]
 )
@@ -396,7 +400,6 @@ cc_library(
     ],
     visibility = ["//visibility:public"]
 )
-
 
 py_library(
     name = "model_rpc_client",

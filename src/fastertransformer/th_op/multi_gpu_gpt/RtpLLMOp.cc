@@ -135,19 +135,22 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
     {
+        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_server_->getEngine(),
+                                                      http_server_address,
                                                       params.gpt_init_parameter,
                                                       token_processor));
-        http_server_->registerResponses();
-        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
-        if (http_server_->start(http_server_address)) {
-            FT_LOG_INFO("normal HTTP Server listening on %s", http_server_address.c_str());
-        } else {
-            FT_FAIL("normal HTTP Server start fail.");
-        }
     }
     grpc_server_->Wait();
     is_server_shutdown_ = true;
+}
+
+void RtpLLMOp::startHttpServer(py::object tokenizer, py::object render) {
+    if (http_server_->start()) {
+        FT_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
+    } else {
+        FT_FAIL("normal HTTP Server start fail.");
+    }
 }
 
 void RtpLLMOp::stop() {
@@ -170,11 +173,12 @@ void registerRtpLLMOp(const py::module& m) {
     rtp_llm::registerLoadBalanceInfo(m);
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
-        .def("init", &torch_ext::RtpLLMOp::init)
-        .def("add_lora", &torch_ext::RtpLLMOp::addLora)
-        .def("remove_lora", &torch_ext::RtpLLMOp::removeLora)
+        .def("init",                  &torch_ext::RtpLLMOp::init)
+        .def("start_http_server",     &torch_ext::RtpLLMOp::startHttpServer)
+        .def("add_lora",              &torch_ext::RtpLLMOp::addLora)
+        .def("remove_lora",           &torch_ext::RtpLLMOp::removeLora)
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
-        .def("stop", &torch_ext::RtpLLMOp::stop);
+        .def("stop",                  &torch_ext::RtpLLMOp::stop);
 }
 
 }  // namespace torch_ext

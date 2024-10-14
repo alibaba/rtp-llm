@@ -11,7 +11,7 @@
 #include "maga_transformer/cpp/embedding_engine/arpc/ArpcServiceCreator.h"
 #include "maga_transformer/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "maga_transformer/cpp/HttpApiServer.h"
+#include "maga_transformer/cpp/api_server/HttpApiServer.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;

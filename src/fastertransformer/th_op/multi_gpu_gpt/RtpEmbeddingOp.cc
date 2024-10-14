@@ -59,9 +59,7 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
                                      std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
                                      const ft::GptInitParameter&                   gpt_init_params,
                                      py::object                                    py_render) {
-
     http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, mm_processor, gpt_init_params, py_render));
-    http_server_->registerResponses();
     std::string http_server_address("tcp:0.0.0.0:" + std::to_string(gpt_init_params.http_port_));
     if (http_server_->start(http_server_address)) {
         FT_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
