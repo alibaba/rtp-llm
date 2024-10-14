@@ -100,8 +100,8 @@ def fa_deps():
 
 def kernel_so_deps():
     return select({
-        "//:using_cuda": [":libmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
-        "//:using_rocm": [":libmmha_so"],
+        "//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
+        "//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
 

@@ -14,10 +14,28 @@ genrule(
 )
 
 genrule(
-    name = "libmmha_so",
-    srcs = ["//src/fastertransformer/kernels:mmha"],
+    name = "libmmha1_so",
+    srcs = ["//src/fastertransformer/kernels:mmha1"],
     outs = [
-        "libmmha.so",
+        "libmmha1.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+ 
+genrule(
+    name = "libmmha2_so",
+    srcs = ["//src/fastertransformer/kernels:mmha2"],
+    outs = [
+        "libmmha2.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+ 
+genrule(
+    name = "libdmmha_so",
+    srcs = ["//src/fastertransformer/kernels:dmmha"],
+    outs = [
+        "libdmmha.so",
     ],
     cmd = "cp $(SRCS) $(@D)",
 )

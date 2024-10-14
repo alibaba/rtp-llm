@@ -34,7 +34,9 @@ cc_library(
         "moe_kernels.cu",
         "rocm/*.cu",
     ]) + [
-        ":mmha",
+        ":mmha1",
+        ":mmha2",
+        ":dmmha"
     ],
     hdrs = glob([
         "*.h",
@@ -114,7 +116,9 @@ cc_library(
         "sampling_penalty_kernels.cu",
         "custom_ar_kernels.cu",
         "rocm/quantization_rocm.cu",
-	":mmha",
+	    ":mmha1",
+        ":mmha2",
+        ":dmmha"
     ],
     hdrs = [
         "hello_world.h",
@@ -197,7 +201,9 @@ template_tail = """
 }
 """
 
-gen_cpp_code("mmha_inst", [T_Tcache, Dh, DO_MULTI_BLOCK, ROPE_TYPE],
+gen_cpp_code("mmha_inst_1", [T_Tcache[:4], Dh, DO_MULTI_BLOCK, ROPE_TYPE],
+             template_header, template, template_tail, element_per_file=4, suffix=".cu")
+gen_cpp_code("mmha_inst_2", [T_Tcache[4:], Dh, DO_MULTI_BLOCK, ROPE_TYPE],
              template_header, template, template_tail, element_per_file=4, suffix=".cu")
 
 cc_library(
@@ -226,11 +232,9 @@ cc_library(
 )
 
 cc_library(
-    name = "mmha_cu",
-    srcs = glob([
-        "decoder_masked_multihead_attention/*.cu",
-    ]) + [
-        ":mmha_inst"
+    name = "mmha_cu_1",
+    srcs = [
+        ":mmha_inst_1"
     ],
     hdrs = glob([
         "decoder_masked_multihead_attention/*.h",
@@ -248,9 +252,73 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "mmha_cu_2",
+    srcs = [
+        ":mmha_inst_2"
+    ],
+    hdrs = glob([
+        "decoder_masked_multihead_attention/*.h",
+    ], exclude=[
+        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
+    ]),
+    deps = any_cuda_deps + [
+        ":rocm_utils",
+        ":mmha_hdrs",
+        ":attn_utils",
+        "//src/fastertransformer/utils:utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dmmha_cu",
+    srcs = glob([
+        "decoder_masked_multihead_attention/*.cu",
+    ]),
+    hdrs = glob([
+        "decoder_masked_multihead_attention/*.h",
+    ], exclude=[
+        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
+    ]),
+    deps = any_cuda_deps + [
+        ":rocm_utils",
+        ":mmha_hdrs",
+        ":attn_utils",
+        "//src/fastertransformer/utils:utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
 cc_shared_library(
-    name = "mmha",
-    roots = [":mmha_cu"],
+    name = "mmha1",
+    roots = [":mmha_cu_1"],
+    preloaded_deps = any_cuda_deps + [
+        ":rocm_utils",
+        ":mmha_hdrs",
+        ":attn_utils",
+        "//src/fastertransformer/utils:utils",
+    ],
+)
+
+cc_shared_library(
+    name = "mmha2",
+    roots = [":mmha_cu_2"],
+    preloaded_deps = any_cuda_deps + [
+        ":rocm_utils",
+        ":mmha_hdrs",
+        ":attn_utils",
+        "//src/fastertransformer/utils:utils",
+    ],
+)
+
+cc_shared_library(
+    name = "dmmha",
+    roots = [":dmmha_cu"],
     preloaded_deps = any_cuda_deps + [
         ":rocm_utils",
         ":mmha_hdrs",
