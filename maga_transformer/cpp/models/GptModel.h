@@ -68,6 +68,9 @@ struct GptModelInputs {
     bool need_all_logits = false;
 public:
     std::string debugString() const {
+        if (!ft::Logger::getEngineLogger().isDebugMode()) {
+            return "";
+        }
         std::stringstream debug_string;
         debug_string << "GptModelInputs { "
                      << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
