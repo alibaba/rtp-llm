@@ -328,7 +328,7 @@ cc_library(
     ]),
     deps = [
         ":utils",
-        "@havenask//:kmonitor_client_cpp",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ],
     visibility = ["//visibility:public"]
 )

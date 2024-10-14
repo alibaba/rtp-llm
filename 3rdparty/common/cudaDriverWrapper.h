@@ -74,6 +74,7 @@ public:
         CUstream hStream, void** kernelParams, void** extra) const;
 
     CUresult cuMemcpyDtoH(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount) const;
+    CUresult cuCtxSetCurrent(CUcontext ctx);
 
 private:
     void* handle;
@@ -95,15 +96,17 @@ private:
         unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes,
         CUstream hStream, void** kernelParams, void** extra);
     CUresult (*_cuMemcpyDtoH)(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+    CUresult (*_cuCtxSetCurrent)(CUcontext ctx);
 };
 
 inline void cuErrCheck_(CUresult stat, CUDADriverWrapper const* wrap, char const* file, int line)
 {
+
     if (stat != CUDA_SUCCESS)
     {
         char const* msg = nullptr;
         wrap->cuGetErrorName(stat, &msg);
-        fprintf(stderr, "CUDA Error: %s %s %d\n", msg, file, line);
+        fprintf(stderr, "CUDA Error: %s %s %d, ErrorCode: %d\n", msg, file, line, int(stat));
     }
 }
 

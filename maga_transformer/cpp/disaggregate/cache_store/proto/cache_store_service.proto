@@ -1,0 +1,54 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+enum KvCacheStoreServiceErrorCode {
+    EC_SUCCESS = 0;
+    EC_FAILED_INTERNAL = 1;
+    EC_FAILED_RDMA_CONNECTION = 2;
+    EC_FAILED_RDMA_WRITE = 3;
+    EC_FAILED_LOAD_BUFFER = 4;
+    EC_FAILED_INVALID_REQ = 5;
+};
+
+message RdmaNicRKey {
+    optional uint32 nicid = 1;
+    optional uint32 rkey = 2;
+}
+
+message RdmaBlockBufferAddrInfo {
+    optional uint64 addr = 1;
+    repeated RdmaNicRKey nic_rkeys = 2;
+};
+
+message BlockBufferInfo {
+    optional string key = 1;
+    optional uint32 len = 2;
+    optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
+    optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
+}
+
+message CacheLoadRequest {
+    repeated BlockBufferInfo blocks = 1;
+    optional uint32 timeout_ms = 2;
+    optional string client_ip = 3;
+    optional uint32 client_port = 4;
+    optional int64 request_send_start_time_us = 5;
+    optional string requestid = 6;
+}
+
+message CacheLoadResponse {
+    optional KvCacheStoreServiceErrorCode error_code = 1;
+    optional int64 response_send_start_time_us = 2;
+    optional bool direct_write_response = 3[default=false]; // true is rdma, false is tcp
+    repeated BlockBufferInfo blocks = 4;
+};
+
+service KvCacheStoreService {
+    option (arpc.global_service_id) = 10000;
+    
+    rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
+        option (arpc.local_method_id) = 10002;
+    }
+}

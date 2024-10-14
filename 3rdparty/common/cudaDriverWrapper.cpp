@@ -85,6 +85,7 @@ CUDADriverWrapper::CUDADriverWrapper()
     *(void**) (&_cuLaunchCooperativeKernel) = load_sym(handle, "cuLaunchCooperativeKernel");
     *(void**) (&_cuLaunchKernel) = load_sym(handle, "cuLaunchKernel");
     *(void**) (&_cuMemcpyDtoH) = load_sym(handle, "cuMemcpyDtoH_v2");
+    *(void**) (&_cuCtxSetCurrent) = load_sym(handle, "cuCtxSetCurrent");
 }
 
 CUDADriverWrapper::~CUDADriverWrapper()
@@ -142,6 +143,11 @@ CUresult CUDADriverWrapper::cuLinkAddFile(CUlinkState state, CUjitInputType type
     unsigned int numOptions, CUjit_option* options, void** optionValues) const
 {
     return (*_cuLinkAddFile)(state, type, path, numOptions, options, optionValues);
+}
+
+CUresult CUDADriverWrapper::cuCtxSetCurrent(CUcontext ctx) 
+{
+    return (*_cuCtxSetCurrent)(ctx);
 }
 
 CUresult CUDADriverWrapper::cuLinkAddData(CUlinkState state, CUjitInputType type, void* data, size_t size,

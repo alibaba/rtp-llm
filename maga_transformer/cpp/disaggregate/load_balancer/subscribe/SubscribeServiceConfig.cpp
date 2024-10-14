@@ -1,0 +1,61 @@
+#include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/SubscribeServiceConfig.h"
+
+namespace rtp_llm {
+
+void CM2SubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("zk_host", zk_host, zk_host);
+    json.Jsonize("zk_path", zk_path, zk_path);
+    json.Jsonize("zk_timeout_ms", zk_timeout_ms, zk_timeout_ms);
+    json.Jsonize("clusters", clusters, clusters);
+}
+
+bool CM2SubscribeServiceConfig::validate() const {
+    return !zk_host.empty() && !zk_path.empty() && zk_timeout_ms > 0;
+}
+
+LocalNodeJsonize::LocalNodeJsonize(const std::string& biz_, const std::string& ip_, uint32_t arpc_port_):
+    biz(biz_), ip(ip_), arpc_port(arpc_port_) {}
+
+void LocalNodeJsonize::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("biz", biz, biz);
+    json.Jsonize("ip", ip, ip);
+    json.Jsonize("arpc_port", arpc_port, arpc_port);
+}
+
+bool LocalNodeJsonize::validate() const {
+    return !biz.empty() && !ip.empty() && arpc_port > 0;
+}
+
+void LocalSubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("nodes", nodes, nodes);
+}
+
+bool LocalSubscribeServiceConfig::validate() const {
+    for (auto& node : nodes) {
+        if (!node.validate()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void SubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("cm2", cm2_configs, cm2_configs);
+    json.Jsonize("local", local_configs, local_configs);
+}
+
+bool SubscribeServiceConfig::validate() const {
+    for (auto& config : cm2_configs) {
+        if (!config.validate()) {
+            return false;
+        }
+    }
+    for (auto& config : local_configs) {
+        if (!config.validate()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace rtp_llm

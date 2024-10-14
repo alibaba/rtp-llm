@@ -19,6 +19,12 @@ def requirement(names):
             visibility = ["//visibility:public"],
         )
 
+def cache_store_deps():
+    native.alias(
+        name = "cache_store_arch_select_impl",
+        actual = "//maga_transformer/cpp/disaggregate/cache_store:cache_store_base_impl"
+    )
+
 def th_transformer_so():
     native.alias(
         name = "th_transformer_so",

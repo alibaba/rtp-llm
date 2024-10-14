@@ -1,0 +1,20 @@
+#include "maga_transformer/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImpl.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
+
+namespace rtp_llm {
+    std::unique_ptr<MemoryUtilBase> createMemoryUtilImpl(bool rdma_mode);
+
+    std::unique_ptr<MessagerClient> createMessagerClient(const std::shared_ptr<MemoryUtil>& memory_util);
+
+    std::unique_ptr<CacheStoreServiceImpl>
+    createCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
+                                const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
+                                const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter);
+
+    std::unique_ptr<MessagerServer>
+    createMessagerServer(const std::shared_ptr<MemoryUtil>&                memory_util,
+                         const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
+                         const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter); 
+    }  // namespace rtp_llm

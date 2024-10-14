@@ -56,6 +56,7 @@ def cc_proto_library(
         use_grpc_plugin = False,
         use_grpc_namespace = False,
         default_header = False,
+        protolib_deps = [],
         **kargs):
     """Bazel rule to create a C++ protobuf library from proto source files.
 
@@ -80,6 +81,9 @@ def cc_proto_library(
       **kargs: other keyword arguments that are passed to cc_library.
     """
 
+    wkt_deps = ["@com_google_protobuf//:cc_wkt_protos"]
+    all_protolib_deps = protolib_deps + wkt_deps
+
     includes = []
     if include != None:
         includes = [include]
@@ -90,10 +94,10 @@ def cc_proto_library(
         proto_gen(
             name = name + "_genproto",
             srcs = srcs,
-            deps = [s + "_genproto" for s in deps],
             includes = includes,
             protoc = protoc,
             visibility = ["//visibility:public"],
+            deps = [s + "_genproto" for s in all_protolib_deps],
         )
 
         # An empty cc_library to make rule dependency consistent.
@@ -117,7 +121,6 @@ def cc_proto_library(
     proto_gen(
         name = name + "_genproto",
         srcs = srcs,
-        deps = [s + "_genproto" for s in deps],
         includes = includes,
         protoc = protoc,
         plugin = grpc_cpp_plugin,
@@ -126,6 +129,7 @@ def cc_proto_library(
         gen_cc = 1,
         outs = outs,
         visibility = ["//visibility:public"],
+        deps = [s + "_genproto" for s in all_protolib_deps],
     )
 
     if use_grpc_plugin:
@@ -285,6 +289,7 @@ def tf_proto_library_cc(
     cc_proto_library(
         name = cc_name,
         srcs = srcs,
+        protolib_deps = protodeps,
         deps = cc_deps + ["@com_google_protobuf//:cc_wkt_protos"],
         cc_libs = cc_libs + if_static(
             ["@com_google_protobuf//:protobuf"],
@@ -384,3 +389,50 @@ def tf_proto_library(
         visibility = visibility,
         use_grpc_plugin = has_services,
     )
+
+def cc_proto(
+        name,
+        srcs,
+        deps=None,
+        import_prefix=None,
+        strip_import_prefix=None,
+        visibility=None,
+        use_grpc_plugin=False,
+        cc_compile_grpc=True,
+        py_compile_grpc=True,
+        default_header = True,):
+    cc_compile_grpc = cc_compile_grpc if use_grpc_plugin else False
+    py_compile_grpc = py_compile_grpc if use_grpc_plugin else False
+    tf_proto_library(
+        name = name,
+        srcs = srcs,
+        protodeps = deps,
+        visibility = visibility,
+        cc_grpc_version = cc_compile_grpc,
+        has_services = py_compile_grpc,
+        default_header = default_header,
+    )
+    native.cc_library(
+        name = name + "_cc_proto",
+        hdrs = [s[:-len(".proto")] + ".pb.h" for s in srcs],
+        deps = [name + "_cc_impl"],
+        include_prefix = import_prefix,
+        strip_include_prefix = strip_import_prefix,
+        visibility = visibility,
+    )
+    header_deps = []
+    for dep in deps:
+        if str(dep).startswith("//"):
+            header_deps.append(dep + "_cc_proto_headers")
+        else:
+            # tensorflow proto library
+            header_deps.append(dep + "_cc_headers_only")
+    native.cc_library(
+        name = name + "_cc_proto_headers",
+        hdrs = [s[:-len(".proto")] + ".pb.h" for s in srcs],
+        deps = header_deps,
+        include_prefix = import_prefix,
+        strip_include_prefix = strip_import_prefix,
+        visibility = visibility,
+    )
+    return name + "_cc_proto"

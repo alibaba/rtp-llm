@@ -17,8 +17,7 @@ cc_library(
     copts = copts(),
     linkopts = [
         "-ldl",
-    ],
-    visibility = ["//:__subpackages__"],
+    ]    
 )
 
 cc_library(
