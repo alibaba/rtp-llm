@@ -840,12 +840,14 @@ class ModelWeightInfo:
         for lora_a_b in ['lora_A', 'lora_B']:
             for lora_name in lora_names:
                 ckpt_layer_weight = None
+                orig_process_fun = None
                 for layer_weight in layer_weights:
 
                     if layer_weight.name == lora_name:
                         ckpt_layer_weight = layer_weight.weights
+                        orig_process_fun = layer_weight.process_fun
 
-                assert (ckpt_layer_weight != None)
+                assert (ckpt_layer_weight != None and orig_process_fun != None)
                 if lora_name == W.attn_qkv_w and len(ckpt_layer_weight) == 3:
                     ckpt_names = [lora_base_name.format(ckpt.name[:-len(".weight")], lora_a_b) for ckpt in ckpt_layer_weight]
                     qkv_ckpt_weights = [CkptWeightInfo(name, identity) for name in ckpt_names]
@@ -856,7 +858,14 @@ class ModelWeightInfo:
                 else:
                     ckpt_name = lora_base_name.format(ckpt_layer_weight[0].name[:-len(".weight")], lora_a_b)
                     ckpt_weight_info = CkptWeightInfo(ckpt_name, identity)
-                    lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], transpose))
+
+                    if lora_a_b == 'lora_A' and isinstance(orig_process_fun, functools.partial) and orig_process_fun.func.__name__ == 'transpose_pad' and orig_process_fun.keywords['dim'] ==1:
+                        lora_b_process_fun = orig_process_fun
+                    elif lora_a_b == 'lora_B' and isinstance(orig_process_fun, functools.partial) and orig_process_fun.func.__name__ == 'transpose_pad' and orig_process_fun.keywords['dim'] ==0:
+                        lora_b_process_fun = orig_process_fun
+                    else:
+                        lora_b_process_fun = transpose
+                    lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], lora_b_process_fun))
         return lora_layer_weights
 
     def set_lora(self, qkv_fun = None, half1 = None , half2 = None):
