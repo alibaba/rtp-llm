@@ -80,6 +80,7 @@ size_t NormalEngine::warmUp(const EngineInitParams& params) {
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
@@ -97,6 +98,7 @@ void NormalEngine::initLoadBalance() {
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->generate_config->max_new_tokens = 3;
     fake_input->generate_config->top_k = 1;
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     auto stream = enqueue(fake_input);
     while(!stream->finished() && !stream->stopped()) {
         FT_LOG_INFO("wait load balance int run over for 1s");

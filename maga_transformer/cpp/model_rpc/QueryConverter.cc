@@ -58,7 +58,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id = input->request_id();
-    generate_input->begin_time_ms = autil::TimeUtility::currentTimeInMicroSeconds();
+    generate_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }

@@ -74,7 +74,7 @@ public:
 
     int                             lora_id       = -1;
     int                             prefix_length = 0;
-    int64_t                         begin_time_ms = 0;
+    int64_t                         begin_time_us = 0;
 
     // config
     bool                            need_release_resource = true;

@@ -38,7 +38,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     common_len_ = seq_length_;
     max_chunk_len_ = seq_length_;
 
-    begin_time_us_      = input->begin_time_ms;
+    begin_time_us_      = input->begin_time_us;
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});

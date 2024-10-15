@@ -148,7 +148,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
 
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->request_id                    = requestCounter.incAndReturn();
-    input->begin_time_ms                 = autil::TimeUtility::currentTimeInMicroSeconds();
+    input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = std::make_shared<GenerateConfig>();
 
     auto body    = ParseJson(request.GetBody());
