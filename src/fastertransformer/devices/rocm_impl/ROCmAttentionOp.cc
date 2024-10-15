@@ -143,34 +143,42 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     bool store_kv = true;
     bool store_cache = params.common.kv_cache.has_value();
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
-        q_output->data(),
-        k_output->data(),
-        v_output->data(),
-        &prefix_prompt_param,
-        params.input.data(),
-        params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
-        params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
-        params.common.padding_offset->data<int>(),
-        params.common.cu_seqlens->data<int>(),
-        batch_size,
-        seq_len,
-        token_num,
-        head_num,
-        kv_head_num,
-        size_per_head,
-        params.configs.rope_config,
-        params.configs.use_logn_attn,
-        scale_out_ptr,
-        int8_mode,
-        false,
-        store_qkv,
-        store_q,
-        store_kv,
-        store_cache,
-        stream_
-    );
-    sync_check_cuda_error();
+    // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
+    bool skip_add_bias_transpose = (params.configs.rope_config.style == RopeStyle::No &&
+     !params.common.kv_cache && 
+     !params.configs.fuse_qkv_add_bias);
+    FT_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
+    if (!skip_add_bias_transpose)
+    {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
+            q_output->data(),
+            k_output->data(),
+            v_output->data(),
+            &prefix_prompt_param,
+            params.input.data(),
+            params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
+            params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
+            params.common.padding_offset->data<int>(),
+            params.common.cu_seqlens->data<int>(),
+            batch_size,
+            seq_len,
+            token_num,
+            head_num,
+            kv_head_num,
+            size_per_head,
+            params.configs.rope_config,
+            params.configs.use_logn_attn,
+            scale_out_ptr,
+            int8_mode,
+            false,
+            store_qkv,
+            store_q,
+            store_kv,
+            store_cache,
+            stream_
+        );
+        sync_check_cuda_error();
+    }
 
     fmha_runner_->setup(datatype,
                         params.configs.mask_type,
