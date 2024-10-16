@@ -66,6 +66,7 @@ public:
                      << ", timeout_ms:" << timeout_ms
                      << ", top_k:" << top_k
                      << ", top_p:" << top_p
+                     << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", stop_words_list:" << vectorsToString(stop_words_list) << "}";
         return debug_string.str();
     }

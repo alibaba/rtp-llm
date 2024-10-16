@@ -245,7 +245,7 @@ absl::Status SpeculativeEngine::step() {
         FT_LOG_DEBUG("pre stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    bool all_streams_disable_sp_run = std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
+    bool all_streams_disable_sp_run = !streams.empty() && std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
 
     int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     int64_t score_begin_time_us = 0;
