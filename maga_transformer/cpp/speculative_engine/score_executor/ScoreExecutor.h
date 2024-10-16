@@ -24,8 +24,10 @@ public:
                            const std::shared_ptr<CacheManager>&      cache_manager,
                            const std::shared_ptr<lora::LoraManager>& lora_manager,
                            bool                                      warm_up = false):
-        device_(device), normal_executor_(params, cache_manager, device_, lora_manager, warm_up) {
-        normal_executor_.setBatchProcessor(
+        device_(device),
+        score_normal_executor_(params, cache_manager, device_, lora_manager, warm_up),
+        normal_executor_(params, cache_manager, device_, lora_manager, warm_up) {
+        score_normal_executor_.setBatchProcessor(
             std::move(std::make_unique<ScoreBatchStreamProcessor>(params.gpt_init_parameter)));
     }
 
@@ -38,6 +40,7 @@ public:
 
 private:
     ft::DeviceBase* device_;
+    NormalExecutor  score_normal_executor_;
     NormalExecutor  normal_executor_;
 };
 

@@ -12,9 +12,11 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
     size_t stream_index = 0;
     std::list<GenerateStreamPtr> score_streams;
 
-    ScoreOutput score_output(proposer_output.propose_step, streams.size());
+    ScoreOutput score_output(streams.size());
     for (const GenerateStreamPtr& stream : streams) {
-        score_streams.emplace_back(std::make_shared<ScoreStream>(*stream, proposer_output.outputs[stream_index], score_output.outputs[stream_index], proposer_output.propose_step));
+        size_t propose_step = proposer_output.outputs[stream_index]->propose_step;
+        score_output.outputs[stream_index]->propose_step = propose_step;
+        score_streams.emplace_back(std::make_shared<ScoreStream>(*stream, proposer_output.outputs[stream_index], score_output.outputs[stream_index], propose_step));
         stream_index++;
     }
 
@@ -22,7 +24,7 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
         FT_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    RETURN_IF_STATUS_ERROR(normal_executor_.process(score_streams));
+    RETURN_IF_STATUS_ERROR(score_normal_executor_.process(score_streams));
 
     for (auto& stream: score_streams) {
         FT_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());

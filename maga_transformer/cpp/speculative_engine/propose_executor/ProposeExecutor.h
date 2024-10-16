@@ -28,7 +28,8 @@ protected:
 };
 
 std::unique_ptr<ProposeExecutor>
-createProposeExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
+createProposeExecutor(const EngineInitParams&                        score_model_engine_init_params,
+                      std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
                       ft::DeviceBase*                                device,
                       const std::shared_ptr<CacheManager>&           cache_manager,
                       const std::shared_ptr<lora::LoraManager>&      lora_manager);

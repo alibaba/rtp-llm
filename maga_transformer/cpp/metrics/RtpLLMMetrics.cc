@@ -1,8 +1,10 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "src/fastertransformer/utils/EnvUtils.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "maga_transformer/cpp/metrics/KmonParam.h"
 
+using namespace fastertransformer;
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
@@ -211,14 +213,6 @@ void RtpLLMKernelMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKernel
 
 #undef REPORT_QPS
 #undef REPORT_GAUGE
-
-std::string getEnvWithDefault(const std::string& name, const std::string& default_value) {
-    if (std::getenv(name.c_str())) {
-        return std::getenv(name.c_str());
-    } else {
-        return default_value;
-    }
-}
 
 bool initKmonitorFactory() {
     KmonParam param;

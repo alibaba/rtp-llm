@@ -5,7 +5,7 @@ namespace rtp_llm {
 
 struct ProposeOutput {
 public:
-    ProposeOutput(size_t propose_step, size_t stream_num): propose_step(propose_step), outputs(stream_num) {
+     ProposeOutput(size_t stream_num): outputs(stream_num) {
         for (size_t i = 0; i < stream_num; i++) {
             outputs[i] = std::make_shared<SpeculativeExecutorStreamOutput>();
         }
@@ -13,9 +13,8 @@ public:
 
     std::string debugString() const {
         std::stringstream debug_string;
-        debug_string << "ProposeOutput { "
-                     << "propose_step: " << propose_step;
-        debug_string << ", outputs: [";
+        debug_string << "ProposeOutput { ";
+        debug_string << "outputs: [";
         for (auto& output : outputs) {
             debug_string << output->debugString() << ", ";
         }
@@ -23,8 +22,16 @@ public:
         return debug_string.str();
     }
 
+    bool hasNoPropose() const {
+        for (auto& output : outputs) {
+            if (output->tokens && output->tokens->size() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 public:
-    size_t                                          propose_step;
     std::vector<SpeculativeExecutorStreamOutputPtr> outputs;  // outputs for each stream
 };
 

@@ -111,6 +111,8 @@ class ChatCompletionRequest(BaseModel):
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
+    sp_advice_prompt: str = ""
+    sp_edit: bool = False
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None

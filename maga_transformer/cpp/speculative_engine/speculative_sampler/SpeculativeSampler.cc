@@ -10,7 +10,7 @@ std::unique_ptr<SpeculativeSampler> createSpeculativeSampler(const std::unique_p
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const std::string& sp_type = propose_model_engine_init_params->sp_type;
     std::unique_ptr<SpeculativeSampler> speculative_sampler = nullptr;
-    if (sp_type == "vanilla" || sp_type == "prompt_lookup") {
+    if (sp_type == "vanilla" || sp_type == "deterministic") {
         speculative_sampler.reset(new RejectionSampler(device));
     } else {
         FT_FAIL("Invalid sp_type: %s", sp_type);

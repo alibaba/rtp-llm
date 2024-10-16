@@ -10,7 +10,8 @@ cc_library(
     hdrs = [
         "logger.h",
         "string_utils.h",
-        "exception.h"
+        "exception.h",
+        "EnvUtils.h"
     ],
     deps = ["@havenask//aios/alog:alog"],
     copts = copts(),

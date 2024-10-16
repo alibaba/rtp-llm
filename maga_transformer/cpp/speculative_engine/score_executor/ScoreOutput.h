@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 struct ScoreOutput {
 public:
-    ScoreOutput(size_t propose_step, size_t stream_num): propose_step(propose_step), outputs(stream_num) {
+    ScoreOutput(size_t stream_num): outputs(stream_num) {
         for (size_t i = 0; i < stream_num; i++) {
             outputs[i] = std::make_shared<SpeculativeExecutorStreamOutput>();
         }
@@ -16,9 +16,8 @@ public:
 
     std::string debugString() const {
         std::stringstream debug_string;
-        debug_string << "ScoreOutput { "
-                     << "propose_step: " << propose_step;
-        debug_string << ", outputs: [";
+        debug_string << "ScoreOutput { ";
+        debug_string << "outputs: [";
         for (auto& output : outputs) {
             debug_string << output->debugString() << ", ";
         }
@@ -27,7 +26,6 @@ public:
     }
 
 public:
-    size_t                                          propose_step;
     std::vector<SpeculativeExecutorStreamOutputPtr> outputs;  // outputs for each stream
 };
 

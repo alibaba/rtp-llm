@@ -45,18 +45,18 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
                      sp_type(sp_type),
                      vanilla_model_params(new EngineInitParams(gpt_init_parameter, std::move(gpt_weights))) {}
 
-    // Consturctor for prompt lookingup propose model
+    // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(std::string sp_type) : sp_type(sp_type) {}
     
     bool gpt_model() {
         return sp_type == "vanilla";
     }
 
-    std::string                  sp_type;
+    std::string                       sp_type;
     std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;
-    py::object                   eagle_model;
-    py::object                   medusa_model;
-    kmonitor::MetricsReporterPtr    metrics_reporter = nullptr;
+    py::object                        eagle_model;
+    py::object                        medusa_model;
+    kmonitor::MetricsReporterPtr      metrics_reporter = nullptr;
 };
 
 class WeightsConverter {

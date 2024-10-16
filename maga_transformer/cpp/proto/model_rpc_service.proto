@@ -51,6 +51,8 @@ message GenerateConfigPB {
     IntMatrix stop_words_list = 21;
     repeated int32 select_tokens_id = 22;
     google.protobuf.StringValue adapter_name = 23;
+    bool sp_edit = 24;
+    repeated int32 sp_advice_prompt_token_ids = 25;
 }
 
 message MulitmodalInputPB {

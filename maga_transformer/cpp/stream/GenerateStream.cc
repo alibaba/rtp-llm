@@ -515,6 +515,15 @@ void GenerateStream::matchEosToken(int batch_id) {
         }
     }
 }
+
+std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
+    FT_CHECK(seq_length_ >= token_num);
+    std::vector<int> latest_tokens(token_num);
+    memcpy(latest_tokens.data(), 
+        complete_token_ids_->dataWithOffset<int32_t>(seq_length_ - token_num), sizeof(int32_t) * token_num);
+    return latest_tokens;
+}
+
 void GenerateStream::matchStopWordsList() {
     if (seq_length_ < generate_input_->generate_config->min_new_tokens + inputLength()) {
         return;
@@ -643,7 +652,7 @@ void GenerateStream::reportMetric() {
         if (finished() || cancelled_) {
             collector.reuse_length           = reuse_length_;
             collector.input_token_length     = inputLength();
-            collector.output_token_length    = seq_length_ - generate_input_->inputLength();
+            collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = tileNum();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -718,7 +727,6 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
         loss_ = nullptr;
     }
     stream_cache_resource_.setStream(this);
-    generate_input_->generate_config = std::make_shared<GenerateConfig>(*other_stream.generate_input_->generate_config);
 }
 
 }  // namespace rtp_llm

@@ -37,8 +37,7 @@ private:
     absl::Status trySaveStepError() const;
     absl::Status initCacheManager();
     absl::Status initSystemPrompt();
-    void         reportMetrics(const SpeculativeSamplerOutput& sampler_output,
-                               int64_t                         propose_begin_time_us,
+    void         reportMetrics(int64_t                         propose_begin_time_us,
                                int64_t                         score_begin_time_us,
                                int64_t                         sampler_begin_time_us,
                                int64_t                         update_begin_time_us,

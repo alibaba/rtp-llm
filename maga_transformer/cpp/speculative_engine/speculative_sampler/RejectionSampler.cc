@@ -19,14 +19,16 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
     SpeculativeSamplerOutput sampler_output;
     FT_CHECK(proposer_output.outputs.size() == scorer_output.outputs.size());
     size_t stream_index = 0;
-    size_t propose_step = proposer_output.propose_step;
     // TODO(xyz): optimize the RejectionSampler with batch processing interface
     for (const GenerateStreamPtr& stream : streams) {
         const SpeculativeExecutorStreamOutputPtr& propose_stream_output = proposer_output.outputs[stream_index];
         const SpeculativeExecutorStreamOutputPtr& scorer_stream_output  = scorer_output.outputs[stream_index];
+        size_t propose_step = propose_stream_output->propose_step;
         std::shared_ptr<GenerateConfig>&          stream_config         = stream->generateConfig();
         size_t                                    accepted_len          = 0;
-        if (stream_config->top1()) {
+        if (propose_step == 0) {
+            accepted_len = 1;
+        } else if (stream_config->top1()) {
             accepted_len = top1Sample(propose_step, propose_stream_output, scorer_stream_output);
         } else {
             accepted_len = stochasticSample(propose_step, propose_stream_output, scorer_stream_output);

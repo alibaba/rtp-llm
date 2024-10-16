@@ -77,7 +77,7 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,
                                                                              gpt_init_params,
                                                                              std::move(*gpt_weight));
-        } else if (sp_type == "prompt_lookup") {
+        } else if (sp_type == "deterministic") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type);
         } else if (sp_type == "eagle") {
             FT_FAIL("sp_type %s not support", sp_type.c_str());

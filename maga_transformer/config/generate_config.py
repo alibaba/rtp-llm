@@ -47,6 +47,9 @@ class GenerateConfig(BaseModel):
     return_output_ids: bool = False
     md5_value: str = ""
     custom_prop: str = "{}"
+    sp_advice_prompt: str = ""
+    sp_advice_prompt_token_ids: List[int] = []
+    sp_edit: bool = False
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

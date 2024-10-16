@@ -24,6 +24,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->calculate_loss                 = config_proto->calculate_loss();
     generate_config->is_streaming                   = config_proto->is_streaming();
     generate_config->timeout_ms                     = config_proto->timeout_ms();
+    generate_config->sp_edit                        = config_proto->sp_edit();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(), config_proto->select_tokens_id().data(), config_proto->select_tokens_id_size() * sizeof(int));
     for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {
@@ -32,6 +33,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
             stop_words.push_back(value);
         }
         generate_config->stop_words_list.push_back(stop_words);
+    }
+
+
+    for (const auto& token_id : config_proto->sp_advice_prompt_token_ids()) {
+        generate_config->sp_advice_prompt_token_ids.push_back(token_id);
     }
 
     generate_config->top_k = config_proto->top_k();

@@ -62,6 +62,10 @@ def trans_input(input_py: GenerateInput):
     # tmp stream true because cancel has bug
     generate_config_pb.is_streaming = True
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
+    if input_py.generate_config.sp_advice_prompt_token_ids:
+        generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
+    if input_py.generate_config.sp_edit:
+        generate_config_pb.sp_edit = input_py.generate_config.sp_edit
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()

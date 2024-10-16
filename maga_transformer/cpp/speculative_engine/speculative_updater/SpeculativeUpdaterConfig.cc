@@ -6,7 +6,7 @@ SpeculativeUpdaterConfig createSpeculativeUpdaterConfig(std::unique_ptr<ProposeM
     std::string sp_type = propose_model_engine_init_params->sp_type;
     if (sp_type == "vanilla") {
         return {true, true, false};
-    } else if (sp_type == "prompt_lookup") {
+    } else if (sp_type == "deterministic") {
         return {false, true, false};
     } else {
         FT_FAIL("Invalid sp_type: %s", sp_type);

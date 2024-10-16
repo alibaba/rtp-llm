@@ -25,7 +25,11 @@ public:
         handleBounsToken();
     }
 
-    ~VanillaStream() {}
+    ~VanillaStream() {
+        if (old_top_k_ > 0) {
+            generateConfig()->top_k = old_top_k_;
+        }
+    }
 
     absl::StatusOr<GenerateOutputs> nextOutput() override {
         FT_FAIL("VanillaStream::nextOutput should not be called");
@@ -68,6 +72,7 @@ private:
 
     void setGenerateConfig() {
         std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
+        old_top_k_= generate_config->top_k;
         if (!generate_config->top1()) {
             setReturnAllProbs(true);
         } 
@@ -77,6 +82,7 @@ private:
     }
 
 protected:
+    int                                old_top_k_    = -1;              
     SpeculativeExecutorStreamOutputPtr output_buffer_;
     size_t                             current_step_ = 0;
     size_t                             propose_step_ = 0;

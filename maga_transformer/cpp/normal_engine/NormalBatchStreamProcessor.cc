@@ -133,7 +133,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             cum_output_seq_len += input_tokens.size();
 
             for (int index = 0; index < input_tokens.size(); ++index) {
-                if (input_tokens[index] >= vocab_size_ && input_masks[index]) {
+                if (input_tokens[index] >= vocab_size_ && (index >= input_masks.size() || input_masks[index])) {
                     std::ostringstream error_msg;
                     error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index] << " exceed vocab_size " << vocab_size_;
                     return absl::InvalidArgumentError(error_msg.str());

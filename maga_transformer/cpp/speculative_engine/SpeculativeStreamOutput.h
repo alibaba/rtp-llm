@@ -12,8 +12,10 @@ struct SpeculativeExecutorStreamOutput {
 public:
     std::string debugString() const {
         std::stringstream debug_string;
-        debug_string << "SpeculativeExecutorStreamOutput { "
-                     << "tokens: " << tokens->debugStringWithData<int32_t>();
+        debug_string << "SpeculativeExecutorStreamOutput { propose_step : " << propose_step;
+        if (tokens) {
+            debug_string << ", tokens: " << tokens->debugStringWithData<int32_t>();
+        }
         if (logits) {
             debug_string << ", logits: " << logits->debugStringWithData<int32_t>();
         }
@@ -28,6 +30,7 @@ public:
     }
 
 public:
+    size_t propose_step = 0;
     ft::BufferPtr tokens        = nullptr;  // selected tokens
     ft::BufferPtr logits        = nullptr;
     ft::BufferPtr hidden_states = nullptr;

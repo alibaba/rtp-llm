@@ -189,6 +189,36 @@ public:
     
     void generateNextPositionId(int32_t* now_pos);
 
+    int64_t vocabSize() const {
+        return vocab_size_;
+    }
+
+    size_t outputTokenLen() const {
+        return seqLength() - inputLength();
+    }
+
+    size_t spEditSearchIndex() const {
+        return sp_edit_search_index_;
+    }
+
+    void incSpEditSearchIndex(size_t accepted_num) {
+        sp_edit_search_index_ += accepted_num;
+    }
+
+    void setSpEditSearchIndex(size_t sp_edit_search_index) {
+        sp_edit_search_index_ = sp_edit_search_index;
+    }
+
+    bool spEditFirstTime() const {
+        return sp_edit_first_time_;
+    }
+
+    void setSpEditFirstTime(bool sp_edit_first_time) {
+        sp_edit_first_time_ = sp_edit_first_time;
+    }
+
+    std::vector<int> getLatestTokens(size_t token_num);
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
@@ -227,6 +257,8 @@ protected:
     int                                 max_chunk_len_          = 0;
 
     int                                 common_len_             = 0;
+    int                                 sp_edit_search_index_   = 0;
+    bool                                sp_edit_first_time_     = true;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
     ft::SpecialTokens                   special_tokens_;

@@ -67,7 +67,7 @@ class ModelFactory:
             gpt_model = model_cls.from_config(config)
             dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
             model = ProposeModel(model_config.sp_type, gpt_model)
-        elif model_config.sp_type == "prompt_lookup":
+        elif model_config.sp_type == "deterministic":
             model = ProposeModel(model_config.sp_type)
         elif model_config.sp_type == "eagle":
             raise NotImplementedError
@@ -181,9 +181,9 @@ class ModelFactory:
                                           max_seq_len=normal_model_config.max_seq_len,
                                           gen_num_per_circle=gen_num_per_circle,
                                           sp_type=sp_type)
-        elif sp_type == "prompt_lookup":
-            logging.info("use prompt lookup speculative model")
-            raise NotImplementedError
+        elif sp_type == "deterministic":
+            propose_model_config = ModelConfig(sp_type=sp_type)
+            logging.info("use deterministic speculative model")
         elif sp_type == "eagle":
             logging.info("use eagle speculative model")
             raise NotImplementedError

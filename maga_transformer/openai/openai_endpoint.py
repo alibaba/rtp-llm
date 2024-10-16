@@ -93,6 +93,10 @@ class OpenaiEndopoint():
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
+        if request.sp_edit == True:
+            config.sp_edit = request.sp_edit
+        if request.sp_advice_prompt != "":
+            config.sp_advice_prompt = request.sp_advice_prompt
         config.add_special_tokens(self.model.config.special_tokens)
         config.convert_select_tokens(self.model.config.vocab_size, self.tokenizer)
         return config
@@ -198,6 +202,9 @@ class OpenaiEndopoint():
             mm_inputs = rendered_input.multimodal_inputs
         else:
             mm_inputs = []
+
+        if generate_config.sp_advice_prompt != "":
+            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(generate_config.sp_advice_prompt) 
 
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None

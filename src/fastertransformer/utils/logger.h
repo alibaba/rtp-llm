@@ -31,13 +31,12 @@
 
 #include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/string_utils.h"
+#include "EnvUtils.h"
 
 namespace fastertransformer {
 
 class Logger {
 public:
-
-
     Logger(const std::string& submodule_name) {
         logger_ = alog::Logger::getLogger(submodule_name.c_str());
         if (logger_ == nullptr) {
@@ -102,12 +101,10 @@ public:
              const std::string func,
              const std::string format,
              const Args&... args) {
-        if (logger_->isLevelEnabled(level)) {
-            std::string fmt    = getPrefix(file, line, func) + format;
-            std::string logstr = fmtstr(fmt, args...);
-            logger_->log(level, "%s", logstr.c_str());
-            tryFlush(level);
-        }
+        std::string fmt    = getPrefix(file, line, func) + format;
+        std::string logstr = fmtstr(fmt, args...);
+        logger_->log(level, "%s", logstr.c_str());
+        tryFlush(level);
     }
 
     void log(std::exception const& ex, uint32_t level = alog::LOG_LEVEL_ERROR) {
@@ -118,11 +115,11 @@ public:
         rank_ = rank;
     }
 
-    inline bool isDebugMode() {
+    bool isDebugMode() {
         return base_log_level_ >= alog::LOG_LEVEL_DEBUG;
     }
 
-    inline bool isTraceMode() {
+    bool isTraceMode() {
         return base_log_level_ >= alog::LOG_LEVEL_TRACE1;
     }
 
@@ -132,12 +129,11 @@ public:
         logger_->flush();
     }
 
-private:
-    inline std::string getEnvWithDefault(const std::string& name, const std::string& default_value) {
-        const char* value = std::getenv(name.c_str());
-        return value ? value : default_value;
+    bool isLevelEnabled(int32_t level) {
+        return logger_->isLevelEnabled(level);
     }
 
+private:
     void tryFlush(int32_t level) {
         if (base_log_level_ >= alog::LOG_LEVEL_DEBUG || level <= alog::LOG_LEVEL_ERROR) {
             flush();
@@ -173,6 +169,9 @@ private:
 #define FT_LOG(level, ...)                                                                                             \
     do {                                                                                                               \
         auto& logger = fastertransformer::Logger::getEngineLogger();                                                   \
+        if (!logger.isLevelEnabled(level)) {                                                                           \
+            break;                                                                                                     \
+        }                                                                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 
@@ -186,6 +185,9 @@ private:
 #define FT_ACCESS_LOG(level, ...)                                                                                      \
     do {                                                                                                               \
         auto& logger = fastertransformer::Logger::getAccessLogger();                                                   \
+        if (!logger.isLevelEnabled(level)) {                                                                           \
+            break;                                                                                                     \
+        }                                                                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 
@@ -200,6 +202,9 @@ private:
 #define FT_STACKTRACE_LOG(level, ...)                                                                                  \
     do {                                                                                                               \
         auto& logger = fastertransformer::Logger::getStackTraceLogger();                                               \
+        if (!logger.isLevelEnabled(level)) {                                                                           \
+            break;                                                                                                     \
+        }                                                                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 

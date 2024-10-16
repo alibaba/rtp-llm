@@ -46,6 +46,8 @@ public:
     bool                is_streaming         = false;
     int                 timeout_ms           = -1;
     std::vector<std::vector<int>> stop_words_list;
+    bool                sp_edit              = false;
+    std::vector<int>    sp_advice_prompt_token_ids;
 
     bool top1() {
         return top_k == 1;
@@ -92,6 +94,8 @@ public:
         JSONIZE(is_streaming);
         JSONIZE(timeout_ms);
         JSONIZE(stop_words_list);
+        JSONIZE(sp_edit);
+        JSONIZE(sp_advice_prompt_token_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

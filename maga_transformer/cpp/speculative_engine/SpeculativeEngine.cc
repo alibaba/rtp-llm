@@ -47,7 +47,7 @@ absl::Status SpeculativeEngine::init() {
     }
     RETURN_IF_STATUS_ERROR(initCacheManager());
     FT_LOG_INFO("create cache manager done");
-    propose_executor_ = createProposeExecutor(
+    propose_executor_ = createProposeExecutor(score_model_params_,
         propose_model_params_, device_, resource_context_.propose_cache_manager, getLoraManager());
     FT_LOG_INFO("create speculative executor done");
     score_executor_.reset(
@@ -248,36 +248,53 @@ absl::Status SpeculativeEngine::step() {
     CHECK_AND_RETURN_REF(propose_output, propose_executor_->propose(streams));
     FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
 
-    int64_t score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
-    FT_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());
+
+    int64_t score_begin_time_us = 0;
+    int64_t sampler_begin_time_us = 0;
+    int64_t update_begin_time_us = 0;
+    int64_t total_propose_token_num  = 0;
+    int64_t total_accepted_token_num = 0;
+    
+
+    if (propose_output.hasNoPropose()) {
+        // fast path for no propose
+        score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
+        sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        update_begin_time_us = sampler_begin_time_us;
+        total_propose_token_num = 0;
+        total_accepted_token_num = streams.size();
+    } else {
+        score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
+        FT_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());
+
+        if (device_->getDeviceProperties().tp_rank == 0) {
+            sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams, propose_output, score_output));
+            FT_LOG_DEBUG("sampler_output: %s", sampler_output.debugString().c_str());
+
+            update_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            RETURN_IF_STATUS_ERROR(speculative_updater_->update(streams, sampler_output));
+
+            for (const auto& output : sampler_output.outputs) {
+                total_propose_token_num += output.propose_step;
+                total_accepted_token_num += output.accepted_token_nums;
+            }
+        }
+    }
+
+    for (auto& stream : streams) {
+        FT_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
 
     if (device_->getDeviceProperties().tp_rank == 0) {
-        int64_t sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams, propose_output, score_output));
-        FT_LOG_DEBUG("sampler_output: %s", sampler_output.debugString().c_str());
-
-        int64_t update_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        RETURN_IF_STATUS_ERROR(speculative_updater_->update(streams, sampler_output));
-
-        for (auto& stream : streams) {
-            FT_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
-        }
-
-        int64_t total_propose_token_num  = 0;
-        int64_t total_accepted_token_num = 0;
-        for (const auto& output : sampler_output.outputs) {
-            total_propose_token_num += output.propose_step;
-            total_accepted_token_num += output.accepted_token_nums;
-        }
-
-        reportMetrics(sampler_output,
-                      propose_begin_time_us,
-                      score_begin_time_us,
-                      sampler_begin_time_us,
-                      update_begin_time_us,
-                      total_propose_token_num,
-                      total_accepted_token_num);
+        reportMetrics(propose_begin_time_us,
+                    score_begin_time_us,
+                    sampler_begin_time_us,
+                    update_begin_time_us,
+                    total_propose_token_num,
+                    total_accepted_token_num);
 
         for (auto& stream : streams) {
             if (stream->finished()) {
@@ -290,8 +307,7 @@ absl::Status SpeculativeEngine::step() {
     return absl::OkStatus();
 }
 
-void SpeculativeEngine::reportMetrics(const SpeculativeSamplerOutput& sampler_output,
-                                      int64_t                         propose_begin_time_us,
+void SpeculativeEngine::reportMetrics(int64_t                         propose_begin_time_us,
                                       int64_t                         score_begin_time_us,
                                       int64_t                         sampler_begin_time_us,
                                       int64_t                         update_begin_time_us,
