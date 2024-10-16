@@ -191,19 +191,21 @@ class InferenceServer(object):
         return await self.embedding(request, raw_request)
 
     def _handle_exception(self, request: Dict[str, Any], e: Exception):
-        self._access_logger.log_exception_access(request, e)
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
             error_code = 409
         elif isinstance(e, asyncio.CancelledError):
             kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
             error_code = 499
+            self._access_logger.log_exception_access(request, e)
         else:
             error_code = 500
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
                 "source": request.get("source", "unkown"),
                 "error_code": str(format_exception(e).get("error_code", -1))
             })
+            self._access_logger.log_exception_access(request, e)
+
         rep = ORJSONResponse(format_exception(e), status_code=error_code)
         return rep
 
