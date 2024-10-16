@@ -26,7 +26,7 @@ public:
     }
 
     ~VanillaStream() {
-        if (old_top_k_ > 0) {
+        if (old_top_k_ >= 0) {
             generateConfig()->top_k = old_top_k_;
         }
     }

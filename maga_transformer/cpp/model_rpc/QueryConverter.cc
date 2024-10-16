@@ -25,6 +25,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->is_streaming                   = config_proto->is_streaming();
     generate_config->timeout_ms                     = config_proto->timeout_ms();
     generate_config->sp_edit                        = config_proto->sp_edit();
+    generate_config->force_disable_sp_run           = config_proto->force_disable_sp_run();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(), config_proto->select_tokens_id().data(), config_proto->select_tokens_id_size() * sizeof(int));
     for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {

@@ -45,8 +45,9 @@ public:
     bool                return_hidden_states = false;
     bool                is_streaming         = false;
     int                 timeout_ms           = -1;
-    std::vector<std::vector<int>> stop_words_list;
     bool                sp_edit              = false;
+    bool                force_disable_sp_run = false;
+    std::vector<std::vector<int>> stop_words_list;
     std::vector<int>    sp_advice_prompt_token_ids;
 
     bool top1() {
@@ -63,6 +64,8 @@ public:
                      << ", return_hidden_states:" << return_hidden_states
                      << ", is_streaming:" << is_streaming
                      << ", timeout_ms:" << timeout_ms
+                     << ", top_k:" << top_k
+                     << ", top_p:" << top_p
                      << ", stop_words_list:" << vectorsToString(stop_words_list) << "}";
         return debug_string.str();
     }
@@ -95,6 +98,7 @@ public:
         JSONIZE(timeout_ms);
         JSONIZE(stop_words_list);
         JSONIZE(sp_edit);
+        JSONIZE(force_disable_sp_run);
         JSONIZE(sp_advice_prompt_token_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL

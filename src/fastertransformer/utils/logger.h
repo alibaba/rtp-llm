@@ -28,10 +28,10 @@
 
 #include "alog/Appender.h"
 #include "alog/Logger.h"
+#include "autil/EnvUtil.h"
 
 #include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/string_utils.h"
-#include "EnvUtils.h"
 
 namespace fastertransformer {
 
@@ -44,13 +44,13 @@ public:
         }
         alog::Logger::MAX_MESSAGE_LENGTH = 102400;
 
-        bool use_console_append = getEnvWithDefault("FT_SERVER_TEST", "0") == "1";
+        int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
         if (use_console_append) {
             console_appender_ = (alog::ConsoleAppender*)alog::ConsoleAppender::getAppender();
             console_appender_->setAutoFlush(true);
             logger_->setAppender(console_appender_);
         } else {
-            std::string file_appender_path = getEnvWithDefault("LOG_PATH", "logs") + "/" + submodule_name + ".log";
+            std::string file_appender_path = autil::EnvUtil::getEnv("LOG_PATH", "logs") + "/" + submodule_name + ".log";
             file_appender_ = (alog::FileAppender*)alog::FileAppender::getAppender(file_appender_path.c_str());
             file_appender_->setCacheLimit(1024);
             file_appender_->setHistoryLogKeepCount(5);

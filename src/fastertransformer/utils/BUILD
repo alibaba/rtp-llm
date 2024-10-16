@@ -11,9 +11,9 @@ cc_library(
         "logger.h",
         "string_utils.h",
         "exception.h",
-        "EnvUtils.h"
     ],
-    deps = ["@havenask//aios/alog:alog"],
+    deps = ["@havenask//aios/alog:alog", 
+            "@havenask//aios/autil:env_util"],
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

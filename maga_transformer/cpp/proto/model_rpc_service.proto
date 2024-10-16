@@ -53,6 +53,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue adapter_name = 23;
     bool sp_edit = 24;
     repeated int32 sp_advice_prompt_token_ids = 25;
+    bool force_disable_sp_run = 26;
 }
 
 message MulitmodalInputPB {

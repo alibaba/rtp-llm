@@ -1,12 +1,13 @@
+#include <algorithm>
 #include <cstdint>
 
 #include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
-#include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeOnlineAdaptor.h"
+#include "maga_transformer/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
@@ -54,7 +55,7 @@ absl::Status SpeculativeEngine::init() {
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
 
     scheduler_.reset(
-        new FIFOScheduler(score_model_params_.gpt_init_parameter, resource_context_.cache_manager, metrics_reporter_));
+        new SpeculativeScheduler(score_model_params_.gpt_init_parameter, resource_context_.cache_manager, metrics_reporter_));
     FT_LOG_INFO("create fifo scheduler done");
     online_adaptor_.reset(new SpeculativeOnlineAdaptor());
     FT_LOG_INFO("create online adaptor");
@@ -244,20 +245,23 @@ absl::Status SpeculativeEngine::step() {
         FT_LOG_DEBUG("pre stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
+    bool all_streams_disable_sp_run = std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
+
     int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    CHECK_AND_RETURN_REF(propose_output, propose_executor_->propose(streams));
-    FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
-
-
     int64_t score_begin_time_us = 0;
     int64_t sampler_begin_time_us = 0;
     int64_t update_begin_time_us = 0;
     int64_t total_propose_token_num  = 0;
     int64_t total_accepted_token_num = 0;
-    
 
-    if (propose_output.hasNoPropose()) {
-        // fast path for no propose
+    ProposeOutput propose_output;
+    if (!all_streams_disable_sp_run) {
+        CHECK_AND_ASSIGN(propose_output, propose_executor_->propose(streams));
+        FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
+    }
+
+    // fast path for no propose and all_streams_disable_sp_run
+    if (all_streams_disable_sp_run || propose_output.hasNoPropose()) {
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
         sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

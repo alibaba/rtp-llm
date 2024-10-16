@@ -66,7 +66,8 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
     if input_py.generate_config.sp_edit:
         generate_config_pb.sp_edit = input_py.generate_config.sp_edit
-
+    if input_py.generate_config.force_disable_sp_run:
+        generate_config_pb.force_disable_sp_run = input_py.generate_config.force_disable_sp_run
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])

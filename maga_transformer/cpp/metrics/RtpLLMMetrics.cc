@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/utils/EnvUtils.h"
+#include "autil/EnvUtil.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "maga_transformer/cpp/metrics/KmonParam.h"
@@ -263,11 +263,11 @@ bool initKmonitorFactory() {
 kmonitor::MetricsTags getHippoTags() {
     auto hippo_tags = kmonitor::MetricsTags();
     if (std::getenv("HIPPO_ROLE")) {
-        hippo_tags.AddTag("host_ip", getEnvWithDefault("HIPPO_SLAVE_IP", ""));
-        hippo_tags.AddTag("container_ip", getEnvWithDefault("RequestedIP", ""));
-        hippo_tags.AddTag("hippo_role", getEnvWithDefault("HIPPO_ROLE", ""));
-        hippo_tags.AddTag("hippo_app", getEnvWithDefault("HIPPO_APP", ""));
-        hippo_tags.AddTag("hippo_group", getEnvWithDefault("HIPPO_SERVICE_NAME", ""));
+        hippo_tags.AddTag("host_ip", autil::EnvUtil::getEnv("HIPPO_SLAVE_IP", ""));
+        hippo_tags.AddTag("container_ip", autil::EnvUtil::getEnv("RequestedIP", ""));
+        hippo_tags.AddTag("hippo_role", autil::EnvUtil::getEnv("HIPPO_ROLE", ""));
+        hippo_tags.AddTag("hippo_app", autil::EnvUtil::getEnv("HIPPO_APP", ""));
+        hippo_tags.AddTag("hippo_group", autil::EnvUtil::getEnv("HIPPO_SERVICE_NAME", ""));
     }
     return hippo_tags;
 }

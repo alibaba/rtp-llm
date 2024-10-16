@@ -217,6 +217,14 @@ public:
         sp_edit_first_time_ = sp_edit_first_time;
     }
 
+    bool forceDisableSpRun() const {
+        return generate_input_->generate_config->force_disable_sp_run;
+    }
+
+    bool disableSpRun() const {
+        return numBeams() > 1 || forceDisableSpRun();
+    }
+
     std::vector<int> getLatestTokens(size_t token_num);
 
 protected:

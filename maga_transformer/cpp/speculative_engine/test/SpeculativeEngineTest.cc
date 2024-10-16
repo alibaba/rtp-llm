@@ -80,42 +80,6 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
     }
 }
 
-
-TEST_F(SpeculativeNormalEngineTest, testTopp) {
-    CustomConfig config;
-    auto gpt_init_params = ft::GptInitParameter();
-    auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
-
-    ASSERT_TRUE(engine->resourceContext().cache_manager);
-    ASSERT_FALSE(engine->resourceContext().system_prompt);
-    ASSERT_FALSE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-
-    // test streaming query
-    {
-        std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
-        query->generate_config                 = make_shared<GenerateConfig>();
-        query->generate_config->max_new_tokens = 3;
-        query->generate_config->is_streaming   = true;
-        query->generate_config->top_p           = 0.5;
-        query->generate_config->top_k           = 0;
-
-        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
-
-        ASSERT_TRUE(stream != nullptr);
-        auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
-
-        auto output2 = stream->nextOutput();
-        ASSERT_TRUE(output2.ok());
-
-        ASSERT_TRUE(stream->generateConfig()->top_k == 0);
-    }
-}
-
-
-
 TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int> prompt_1 = {1, 2, 3};

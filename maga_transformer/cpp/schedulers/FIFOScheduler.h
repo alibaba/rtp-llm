@@ -15,7 +15,7 @@ public:
                            const std::shared_ptr<CacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
-    ~FIFOScheduler();
+    ~FIFOScheduler() override;
 
     absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;

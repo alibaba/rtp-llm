@@ -1,7 +1,6 @@
 #pragma once
 
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
-#include "src/fastertransformer/utils/EnvUtils.h"
 #include <cstdint>
 
 using namespace fastertransformer;
@@ -17,11 +16,8 @@ public:
 
         max_str_match_len_ =
             std::min(max_str_match_len_, (size_t)score_model_engine_init_params.gpt_init_parameter.max_seq_len_);
-        std::string min_match_str = getEnvWithDefault("SP_MIN_STR_MATCH", "-1");
-        std::string max_match_str = getEnvWithDefault("SP_MAX_STR_MATCH", "-1");
-
-        parseAndSetNum(min_match_str, min_str_match_len_);
-        parseAndSetNum(max_match_str, max_str_match_len_);
+        min_str_match_len_ = autil::EnvUtil::getEnv("SP_MIN_STR_MATCH", 2);
+        max_str_match_len_ = autil::EnvUtil::getEnv("SP_MAX_STR_MATCH", 1024);
 
         FT_LOG_INFO("DeterministicExecutor min str match size is %ld", min_str_match_len_);
         FT_LOG_INFO("DeterministicExecutor max str match size is %ld", max_str_match_len_);
@@ -44,19 +40,6 @@ public:
     }
 
 private:
-    void parseAndSetNum(const std::string& str_num, size_t& num) {
-        if (str_num == "-1") {
-            return;
-        }
-
-        try {
-            num = std::stod(str_num);
-        } catch (const std::exception& e) {
-            // ignore
-            return;
-        }
-    }
-
     void ruleBasedTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
 
     void SpEditTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);

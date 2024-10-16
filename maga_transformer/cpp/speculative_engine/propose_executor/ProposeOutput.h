@@ -5,7 +5,9 @@ namespace rtp_llm {
 
 struct ProposeOutput {
 public:
-     ProposeOutput(size_t stream_num): outputs(stream_num) {
+    ProposeOutput() {}
+
+    ProposeOutput(size_t stream_num): outputs(stream_num) {
         for (size_t i = 0; i < stream_num; i++) {
             outputs[i] = std::make_shared<SpeculativeExecutorStreamOutput>();
         }
