@@ -45,11 +45,9 @@ public:
 
 private:
     void parseAndSetNum(const std::string& str_num, size_t& num) {
-        FT_LOG_INFO("x %s x", str_num.c_str());
         if (str_num == "-1") {
             return;
         }
-        FT_LOG_INFO("x %s x2", str_num.c_str());
 
         try {
             num = std::stod(str_num);

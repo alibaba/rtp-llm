@@ -38,12 +38,6 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
         std::min((size_t)config->max_new_tokens,
                  std::min(max_str_match_len_, advice_prompt_token_ids.size() - sp_edit_search_index));
 
-    FT_LOG_INFO(
-        "SpEditTokenSelector max_match_len %d, min_str_match_len_ %d, output_token_len %d, sp_edit_search_index %d",
-        max_match_len,
-        min_str_match_len_,
-        output_token_len,
-        sp_edit_search_index);
     if (stream->spEditFirstTime()) {
         stream_output->tokens = std::make_shared<fastertransformer::Buffer>(fastertransformer::MemoryType::MEMORY_CPU,
                                                                             ft::DataType::TYPE_INT32,
@@ -51,13 +45,7 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                                                                             advice_prompt_token_ids.data());
         stream->setSpEditFirstTime(false);
     } else if (max_match_len >= min_str_match_len_ && min_str_match_len_ <= output_token_len) {
-
         std::vector<int> latest_tokens = stream->getLatestTokens(min_str_match_len_);
-        for (size_t i = 0; i < latest_tokens.size(); i++) {
-            std::cout << latest_tokens[i] << " ";
-        }
-        std::cout << std::endl;
-
         for (size_t i = sp_edit_search_index; i + min_str_match_len_ < advice_prompt_token_ids.size(); i++) {
             size_t j = 0;
             for (; j < min_str_match_len_; j++) {
