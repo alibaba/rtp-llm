@@ -7,6 +7,7 @@
 #include "src/fastertransformer/utils/logger.h"
 
 #include "rocm/include/hipblaslt/hipblaslt-ext.hpp"
+#include "hip_utils.h"
 
 #include <fstream>
 #include <string>
@@ -124,47 +125,6 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
     return std::make_pair(config, algoIndex);
 }
 
-static const char* hipblasGetErrorEnum(hipblasStatus_t error)
-{
-    switch (error) {
-        case HIPBLAS_STATUS_SUCCESS:
-            return "HIPBLAS_STATUS_SUCCESS";
-
-        case HIPBLAS_STATUS_NOT_INITIALIZED:
-            return "HIPBLAS_STATUS_NOT_INITIALIZED";
-
-        case HIPBLAS_STATUS_ALLOC_FAILED:
-            return "HIPBLAS_STATUS_ALLOC_FAILED";
-
-        case HIPBLAS_STATUS_INVALID_VALUE:
-            return "HIPBLAS_STATUS_INVALID_VALUE";
-
-        case HIPBLAS_STATUS_ARCH_MISMATCH:
-            return "HIPBLAS_STATUS_ARCH_MISMATCH";
-
-        case HIPBLAS_STATUS_MAPPING_ERROR:
-            return "HIPBLAS_STATUS_MAPPING_ERROR";
-
-        case HIPBLAS_STATUS_EXECUTION_FAILED:
-            return "HIPBLAS_STATUS_EXECUTION_FAILED";
-
-        case HIPBLAS_STATUS_INTERNAL_ERROR:
-            return "HIPBLAS_STATUS_INTERNAL_ERROR";
-
-        case HIPBLAS_STATUS_NOT_SUPPORTED:
-            return "HIPBLAS_STATUS_NOT_SUPPORTED";
-
-        case HIPBLAS_STATUS_UNKNOWN:
-            return "HIPBLAS_STATUS_LICENSE_ERROR";
-
-        case HIPBLAS_STATUS_HANDLE_IS_NULLPTR:
-            return "HIPBLAS_STATUS_HANDLE_IS_NULLPTR";
-
-        case HIPBLAS_STATUS_INVALID_ENUM:
-            return "HIPBLAS_STATUS_INVALID_ENUM";
-    }
-    return "<unknown>";
-} 
 void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle_t handle) {
     std::ifstream file;
     std::string   line;
@@ -208,27 +168,26 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
         if(config.epilogue != HIPBLASLT_EPILOGUE_DEFAULT)
         {
             hipblasLtEpilogue_t epilogue_ = config.epilogue;
-            hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_));
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_)));
             int32_t bias_data_type = config.C_data_type;
-            hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type));
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         }
 
-        hipblasLtMatrixLayoutCreate(&ADesc,
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc,
                                     config.A_data_type,
                                     config.trans_a == HIPBLAS_OP_N ? config.m : config.k,
                                     config.trans_a == HIPBLAS_OP_N ? config.k : config.m,
-                                    config.lda);
-        hipblasLtMatrixLayoutCreate(&BDesc,
+                                    config.lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc,
                                     config.B_data_type,
                                     config.trans_b == HIPBLAS_OP_N ? config.k : config.n,
                                     config.trans_b == HIPBLAS_OP_N ? config.n : config.k,
-                                    config.ldb);
-        hipblasLtMatrixLayoutCreate(&CDesc, config.C_data_type, config.m, config.n, config.ldc);
+                                    config.ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, config.C_data_type, config.m, config.n, config.ldc));
 
         algoIndices[0] = algoIndex;
         algos.clear();
-        hipblasStatus_t sts = hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos);
-        // printf("status = %s, algoIndex = %d, line = %s\n", hipblasGetErrorEnum(sts), algoIndices[0], line.c_str());
+        ROCM_CHECK(hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos));
 
         if(algos.size() > 0)
         {

@@ -123,8 +123,8 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     ROCM_CHECK(hipGetDeviceProperties(&device_prop_, device_id_));
 
-    hipblasCreate(&hipblas_handle_);
-    hipblasLtCreate(&hipblaslt_handle_);
+    ROCM_CHECK(hipblasCreate(&hipblas_handle_));
+    ROCM_CHECK(hipblasLtCreate(&hipblaslt_handle_));
 
     //hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
@@ -144,9 +144,9 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
 ROCmDevice::~ROCmDevice() {
     hipblas_mm_wrapper_.reset();
-    hipStreamDestroy(stream_);
-    hipblasDestroy(hipblas_handle_);
-    hipblasLtDestroy(hipblaslt_handle_);
+    ROCM_CHECK(hipStreamDestroy(stream_));
+    ROCM_CHECK(hipblasDestroy(hipblas_handle_));
+    ROCM_CHECK(hipblasLtDestroy(hipblaslt_handle_));
     curandstate_buf_.reset();
 
     if (stream_ != nullptr) {
@@ -217,7 +217,7 @@ void ROCmDevice::copy(const CopyParams& params) {
         copyType = hipMemcpyHostToHost;
     }
 
-    (void)hipMemcpy(dst.data(), src.data(), src.sizeBytes(), copyType);
+    ROCM_CHECK(hipMemcpy(dst.data(), src.data(), src.sizeBytes(), copyType));
     //(void)hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
     //(void)hipStreamSynchronize(stream_);
 }
@@ -246,7 +246,7 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 
 void ROCmDevice::syncAndCheck() {
     syncCommunication();
-    hipDeviceSynchronize();
+    ROCM_CHECK(hipDeviceSynchronize());
     ROCM_SYNC_AND_CHECK();
 }
 
@@ -624,7 +624,7 @@ void ROCmDevice::printBuffer(const BufferPtr b) {
         size_t scales_dim0 = qb.scales().shape()[0];
         size_t group_size  = (kernel_dim0 / scales_dim0);
 
-        printf("QBuffer( group_size = %d\n [\n", group_size);
+        printf("QBuffer( group_size = %zu\n [\n", group_size);
         printf("   kernel: ");
         printBuffer(BufferPtr(new Buffer(qb.kernel())));
         printf("   scales: ");

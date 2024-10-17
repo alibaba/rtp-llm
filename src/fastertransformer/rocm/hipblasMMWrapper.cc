@@ -18,16 +18,16 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
     hipblas_algo_map_.loadGemmConfig(config_path, hipblaslt_handle);
 
     int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
-    hipblasLtMatmulPreferenceCreate(&blasLtPrefer);
-    hipblasLtMatmulPreferenceSetAttribute(blasLtPrefer,
+    ROCM_CHECK(hipblasLtMatmulPreferenceCreate(&blasLtPrefer));
+    ROCM_CHECK(hipblasLtMatmulPreferenceSetAttribute(blasLtPrefer,
                                           HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                                           &workspaceSize,
-                                          sizeof(workspaceSize));
+                                          sizeof(workspaceSize)));
 }
 
 hipblasMMWrapper::~hipblasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    hipblasLtMatmulPreferenceDestroy(blasLtPrefer);
+    ROCM_CHECK(hipblasLtMatmulPreferenceDestroy(blasLtPrefer));
     allocator_->free((void**)(&hipblas_workspace_));
 }
 
@@ -133,7 +133,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
 
     if (info && !disable_hipblasLt) {
-        hipblasLtMatmul(hipblaslt_handle_,
+        ROCM_CHECK(hipblasLtMatmul(hipblaslt_handle_,
                         info->opDesc.get(),
                         alpha,
                         A,
@@ -148,7 +148,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                         &info->algo,
                         workSpace,
                         workspaceSize,
-                        stream_);
+                        stream_));
     } else {
         ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
                                       transa,
@@ -275,9 +275,9 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
 
     if(info)
     {
-        hipblasLtMatmulDescSetAttribute(info->opDesc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(info->opDesc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
 
-        hipblasLtMatmul(hipblaslt_handle_,
+        ROCM_CHECK(hipblasLtMatmul(hipblaslt_handle_,
                         info->opDesc.get(),
                         alpha,
                         A,
@@ -292,32 +292,32 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
                         &info->algo,
                         workSpace,
                         workspaceSize,
-                        stream_);
+                        stream_));
     }
     else
     {
         hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
-        hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), m, k, lda);
-        hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), k, n, ldb);
-        hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc);
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), m, k, lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), k, n, ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc));
 
         hipblasLtMatmulDesc_t matmul;
-        hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+        ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F));
         hipblasOperation_t trans_a = transa;
         hipblasOperation_t trans_b = transb;
-        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t));
-        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
 
         hipblasLtEpilogue_t epilogue_ = epilogue;
-        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_)));
         int32_t bias_data_type = getHipDataType(Ctype_);
-        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type));
-        hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
         
         const int                        request_solutions = 1;
         hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
         int                              returnedAlgoCount = 0;
-        hipblasLtMatmulAlgoGetHeuristic(hipblaslt_handle_,
+        ROCM_CHECK(hipblasLtMatmulAlgoGetHeuristic(hipblaslt_handle_,
                                         matmul,
                                         ADesc,
                                         BDesc,
@@ -326,9 +326,9 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
                                         blasLtPrefer,
                                         request_solutions,
                                         heuristicResult,
-                                        &returnedAlgoCount); 
+                                        &returnedAlgoCount)); 
 
-        hipblasLtMatmul(hipblaslt_handle_,
+        ROCM_CHECK(hipblasLtMatmul(hipblaslt_handle_,
                         matmul,
                         alpha,
                         A,
@@ -343,12 +343,12 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
                         &heuristicResult[0].algo,
                         workSpace,
                         workspaceSize,
-                        stream_);
+                        stream_));
 
-        hipblasLtMatrixLayoutDestroy(ADesc);
-        hipblasLtMatrixLayoutDestroy(BDesc);
-        hipblasLtMatrixLayoutDestroy(CDesc);
-        hipblasLtMatmulDescDestroy(matmul);
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(ADesc));
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(BDesc));
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(CDesc));
+        ROCM_CHECK(hipblasLtMatmulDescDestroy(matmul));
     }
 }
 

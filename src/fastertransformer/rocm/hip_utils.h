@@ -171,7 +171,7 @@ void check(T result, char const* const func, const char* const file, int const l
 }
 inline void sync_and_check(const char* const file, int const line) {
     if (Logger::getEngineLogger().isDebugMode()) {
-        hipDeviceSynchronize();
+        ROCM_CHECK(hipDeviceSynchronize());
         hipError_t result = hipGetLastError();
         if (result) {
             std::string msg = std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " " + file

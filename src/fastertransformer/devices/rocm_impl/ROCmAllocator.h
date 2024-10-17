@@ -20,12 +20,12 @@ public:
 
     void* malloc(size_t size) {
         void* ptr = nullptr;
-        (void)Alloc(&ptr, size);
+        ROCM_CHECK(Alloc(&ptr, size));
         return ptr;
     };
 
     void free(void** ptr) {
-        (void)Free(*ptr);
+        ROCM_CHECK(Free(*ptr));
         *ptr = nullptr;
     };
 

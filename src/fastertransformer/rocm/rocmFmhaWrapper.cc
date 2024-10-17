@@ -8,6 +8,15 @@
 
 namespace fastertransformer {
 
+static void throwCKError(const char* const file, int const line, std::string const& info = "") {
+    auto error_msg = std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
+    std::printf("%s", error_msg.c_str());
+    fflush(stdout);
+    fflush(stderr);
+    abort();
+    throw std::exception();
+}
+#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
 uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                 void*  k,
                                 void*  v,
@@ -255,7 +264,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
     // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
     if (run_time < 0) {
-        return 0;
+        CK_FAIL("fmha_fwd faild");
     } else {
         return 1;
     }
