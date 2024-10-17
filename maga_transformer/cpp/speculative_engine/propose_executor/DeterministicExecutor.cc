@@ -34,45 +34,86 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
     const auto&  advice_prompt_token_ids = config->sp_advice_prompt_token_ids;
     const auto&  sp_edit_search_index    = stream->spEditSearchIndex();
     const size_t output_token_len        = stream->outputTokenLen();
-    size_t       max_match_len =
-        std::min((size_t)config->max_new_tokens,
-                 std::min(max_str_match_len_, advice_prompt_token_ids.size() - sp_edit_search_index));
 
     if (stream->spEditFirstTime()) {
+        size_t propose_len    = std::min((size_t)config->max_new_tokens,
+                                      std::min(propose_step_, advice_prompt_token_ids.size() - sp_edit_search_index));
         stream_output->tokens = std::make_shared<fastertransformer::Buffer>(fastertransformer::MemoryType::MEMORY_CPU,
                                                                             ft::DataType::TYPE_INT32,
-                                                                            std::vector{1, max_match_len},
+                                                                            std::vector{1, propose_len},
                                                                             advice_prompt_token_ids.data());
         stream->setSpEditFirstTime(false);
-    } else if (max_match_len >= min_str_match_len_ && min_str_match_len_ <= output_token_len) {
-        std::vector<int> latest_tokens = stream->getLatestTokens(min_str_match_len_);
-        for (size_t i = sp_edit_search_index; i + min_str_match_len_ < advice_prompt_token_ids.size(); i++) {
-            size_t j = 0;
-            for (; j < min_str_match_len_; j++) {
-                if (latest_tokens[j] != advice_prompt_token_ids[i + j]) {
-                    break;
+        postProcess(stream, stream_output);
+    } else if (min_str_match_len_ <= output_token_len) {
+        size_t begin_match_len = std::min(max_str_match_len_, output_token_len);
+
+        std::vector<int> max_latest_tokens = stream->getLatestTokens(begin_match_len);
+        for (size_t match_len = begin_match_len; match_len >= min_str_match_len_; match_len--) {
+
+            std::vector<int> latest_tokens(max_latest_tokens.end() - match_len, max_latest_tokens.end());
+            for (size_t i = sp_edit_search_index; i + match_len < advice_prompt_token_ids.size() - 1; i++) {
+                size_t j = 0;
+                for (; j < match_len; j++) {
+                    if (latest_tokens[j] != advice_prompt_token_ids[i + j]) {
+                        break;
+                    }
                 }
-            }
-            if (j == min_str_match_len_) {
-                size_t start_propose_index = i + min_str_match_len_;
-                stream->setSpEditSearchIndex(start_propose_index);
-                stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
-                    fastertransformer::MemoryType::MEMORY_CPU,
-                    ft::DataType::TYPE_INT32,
-                    std::vector{1, max_match_len - (start_propose_index - sp_edit_search_index)},
-                    advice_prompt_token_ids.data() + start_propose_index);
-                break;
+                if (j == match_len) {
+                    size_t start_propose_index = i + match_len;
+                    size_t propose_len =
+                        std::min((size_t)config->max_new_tokens,
+                                 std::min(propose_step_, advice_prompt_token_ids.size() - start_propose_index));
+                    stream->setSpEditSearchIndex(start_propose_index);
+                    stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
+                        fastertransformer::MemoryType::MEMORY_CPU,
+                        ft::DataType::TYPE_INT32,
+                        std::vector{1, propose_len},
+                        advice_prompt_token_ids.data() + start_propose_index);
+                    postProcess(stream, stream_output);
+                    return;
+                }
             }
         }
     }
-
-    postProcess(stream, stream_output);
 }
 
 void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&            stream,
                                                       SpeculativeExecutorStreamOutputPtr& stream_output) {
-    // TODO(xyz): implement prompt lookup
-    return;
+    auto& config                  = stream->generateConfig();
+    auto& advice_prompt_token_ids = config->sp_advice_prompt_token_ids;
+
+    const size_t seq_len = stream->seqLength();
+
+    if (min_str_match_len_ <= seq_len) {
+        size_t           begin_match_len   = std::min(max_str_match_len_, seq_len);
+        std::vector<int> max_latest_tokens = stream->getLatestTokens(begin_match_len);
+
+        for (size_t match_len = begin_match_len; match_len >= min_str_match_len_; match_len--) {
+            std::vector<int> latest_tokens(max_latest_tokens.end() - match_len, max_latest_tokens.end());
+            for (size_t i = 0; i + match_len < advice_prompt_token_ids.size() - 1; i++) {
+                size_t j = 0;
+                for (; j < match_len; j++) {
+                    if (latest_tokens[j] != advice_prompt_token_ids[i + j]) {
+                        break;
+                    }
+                }
+                if (j == match_len) {
+                    size_t start_propose_index = i + match_len;
+                    size_t propose_len =
+                        std::min((size_t)config->max_new_tokens,
+                                 std::min(propose_step_, advice_prompt_token_ids.size() - start_propose_index));
+                    stream->setSpEditSearchIndex(start_propose_index);
+                    stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
+                        fastertransformer::MemoryType::MEMORY_CPU,
+                        ft::DataType::TYPE_INT32,
+                        std::vector{1, propose_len},
+                        advice_prompt_token_ids.data() + start_propose_index);
+                    postProcess(stream, stream_output);
+                    return;
+                }
+            }
+        }
+    }
 }
 
 void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stream,

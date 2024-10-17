@@ -72,13 +72,15 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
         }
         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> params = nullptr;
         std::string sp_type = propose_model.attr("sp_type").cast<std::string>();
+        size_t gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,
+                                                                             gen_num_per_circle,
                                                                              gpt_init_params,
                                                                              std::move(*gpt_weight));
         } else if (sp_type == "deterministic") {
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type);
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle);
         } else if (sp_type == "eagle") {
             FT_FAIL("sp_type %s not support", sp_type.c_str());
         } else if (sp_type == "medusa") {

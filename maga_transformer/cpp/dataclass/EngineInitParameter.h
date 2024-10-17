@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <pybind11/pytypes.h>
 #include <tuple>
 
@@ -40,19 +41,23 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
 
     // Constructor for vanilla propose model
     ProposeModelEngineInitParams(std::string sp_type,
+                     size_t gen_num_per_circle,
                      const ft::GptInitParameter&    gpt_init_parameter,
                      ft::Weights&&                  gpt_weights) :
                      sp_type(sp_type),
+                     gen_num_per_circle(gen_num_per_circle),
                      vanilla_model_params(new EngineInitParams(gpt_init_parameter, std::move(gpt_weights))) {}
 
     // Consturctor for deterministic propose model
-    ProposeModelEngineInitParams(std::string sp_type) : sp_type(sp_type) {}
+    ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle) :
+                    sp_type(sp_type), gen_num_per_circle(gen_num_per_circle) {}
     
     bool gpt_model() {
         return sp_type == "vanilla";
     }
 
     std::string                       sp_type;
+    size_t                            gen_num_per_circle = 0;
     std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;
     py::object                        eagle_model;
     py::object                        medusa_model;

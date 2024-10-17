@@ -66,9 +66,9 @@ class ModelFactory:
             config: GptInitModelParameters = model_cls.create_config(model_config)
             gpt_model = model_cls.from_config(config)
             dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
-            model = ProposeModel(model_config.sp_type, gpt_model)
+            model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle, gpt_model)
         elif model_config.sp_type == "deterministic":
-            model = ProposeModel(model_config.sp_type)
+            model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
         elif model_config.sp_type == "eagle":
             raise NotImplementedError
         elif model_config.sp_type == "medusa":
@@ -182,7 +182,9 @@ class ModelFactory:
                                           gen_num_per_circle=gen_num_per_circle,
                                           sp_type=sp_type)
         elif sp_type == "deterministic":
-            propose_model_config = ModelConfig(sp_type=sp_type)
+            gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
+            propose_model_config = ModelConfig(sp_type=sp_type,
+                                               gen_num_per_circle=gen_num_per_circle)
             logging.info("use deterministic speculative model")
         elif sp_type == "eagle":
             logging.info("use eagle speculative model")
