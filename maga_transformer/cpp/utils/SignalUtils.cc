@@ -2,6 +2,9 @@
 #include <sstream>
 #include <unistd.h>
 #include <iostream>
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <sstream>
 
 #include "maga_transformer/cpp/utils/SignalUtils.h"
 #include "src/fastertransformer/utils/logger.h"
@@ -12,11 +15,11 @@ static constexpr int kMaxStackDepth = 64;
 
 void printStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
     void*             addrs[kMaxStackDepth];
-    int               stack_depth = absl::GetStackTrace(addrs, kMaxStackDepth, 2);
+
     std::stringstream stack_ss;
     time_t            current_time = time(nullptr);
-    stack_ss << std::endl << "*** Aborted at " << current_time << " (unix time) try \"date -d @\"" << current_time
-             << "if you are using GNU date***" << std::endl;
+    stack_ss << std::endl << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
+             << "\" if you are using GNU date***" << std::endl;
 
     switch (signum) {
         case SIGSEGV:
@@ -45,7 +48,8 @@ void printStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
             break;
     }
 
-    for (int i = 0; i < stack_depth; ++i) {
+    int stack_depth = backtrace(addrs, kMaxStackDepth);
+    for (int i = 2; i < stack_depth; ++i) {
         char line[2048];
         char buf[1024];
         if (absl::Symbolize(addrs[i], buf, sizeof(buf))) {
