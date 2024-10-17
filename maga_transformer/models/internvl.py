@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen_v2 import QWenV2
 from maga_transformer.models.llama import Llama
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.internvl_weight import InternVLVitWeight, InternVLWeightInfo
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -31,7 +31,7 @@ class InternVLTokenizer:
     def decode(self, token_id: List[int], **kwargs):
         return self.tokenizer.decode(token_id, **kwargs)
 
-class InternVL(GPT, MultiModalMixin):
+class InternVL(BaseModel, MultiModalMixin):
     def init_multimodal(self, config: GptInitModelParameters):
         with torch.cuda.device(torch.device(g_parallel_info.device)):
             self.mm_part = InternVLImageEmbedding(config.mm_related_params.config)

@@ -1093,30 +1093,23 @@ class ModelWeights:
         self.device = device
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
-        self._pytorch_weights: Dict[str, torch.Tensor] = {}
         self._dtype = dtype
 
         for _ in range(num_layers):
             self.weights.append({})
 
-    def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
-        self._pytorch_weights[name] = tensor
-
-    def steal_pytorch_weight(self, name: str):
-        if name not in self._pytorch_weights:
-            return None
-        t = self._pytorch_weights[name]
-        del self._pytorch_weights[name]
-        return t
-
-    def has_pytorch_weight(self, name: str):
-        return name in self._pytorch_weights
-
-    def append_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
+    def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
 
-    def append_global_weight(self, name: str, tensor: torch.Tensor):
+    def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
+
+    def steal_global_weight(self, name: str):
+        if name not in self.global_weights:
+            return None
+        tensor = self.global_weights[name]
+        del self.global_weights[name]
+        return tensor
 
     @property
     def dtype(self):

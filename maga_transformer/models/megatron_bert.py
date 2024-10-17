@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Type, Optional
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.bert import Bert
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierModule

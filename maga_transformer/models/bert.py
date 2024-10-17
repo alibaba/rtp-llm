@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Type, Optional
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierModule
 from maga_transformer.models.downstream_modules.classifier.bert_classifier import BertClassifierModule
@@ -15,7 +15,7 @@ from maga_transformer.models.bert_weight import BertWeightInfo, RobertaWeightInf
 from maga_transformer.model_factory_register import register_model
 from transformers import AutoTokenizer
 
-class Bert(GPT):
+class Bert(BaseModel):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
 
@@ -70,8 +70,6 @@ class Bert(GPT):
         config.type_vocab_size = config_json.get('type_vocab_size', 0)
         config.layernorm_eps = config_json['layer_norm_eps']
         config.inter_size = config_json['intermediate_size']
-
-        GPT._load_quant_config(config.ckpt_path, config_json, config)
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

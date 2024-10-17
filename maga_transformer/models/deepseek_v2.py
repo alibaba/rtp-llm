@@ -7,7 +7,7 @@ import os
 import json
 from typing import List, Any
 
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.utils.model_weight import (
     W,
     ModelDeployWeightInfo,
@@ -160,7 +160,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
 
-class DeepSeekV2(GPT):
+class DeepSeekV2(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(

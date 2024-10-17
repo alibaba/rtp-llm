@@ -13,7 +13,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
-from maga_transformer.models.base_model import MultimodalInput
+from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
@@ -231,7 +231,7 @@ class MultiModalMixin:
         weight_names = vit_weight.weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
-            t = self.weight.steal_pytorch_weight(fname)
+            t = self.weight.steal_global_weight(fname)
             if t is None:
                 raise Exception(f"failed to get tensor from name {fname}")
             param.data = t.reshape(param.data.shape).to(ctype).to(device)

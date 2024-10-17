@@ -1,10 +1,11 @@
 import functools
 from typing import Any, Dict, List
+from maga_transformer.models.base_model import ModelConfig
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, \
     ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, ones, transpose
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
@@ -108,7 +109,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
 
 StarcoderTokenizer = GPT2TokenizerFast
 
-class StarCoder(GPT):
+class StarCoder(BaseModel):
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
         return StarcoderTokenizer.from_pretrained(config.tokenizer_path)
@@ -138,8 +139,6 @@ class StarCoder(GPT):
         config.has_positional_encoding = True
         config.has_post_decoder_layernorm = True
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        GPT._load_quant_config(ckpt_path, config_json, config)
-        config.need_ffn_act_scale = config.quant_algo.isAwq()
         return config
 
     @classmethod
@@ -161,6 +160,11 @@ class StarCoder(GPT):
                 has_positional_encoding=True,
                 has_post_decoder_layernorm=True)
         return config
+
+    @classmethod
+    def _load_quant_config(cls, ckpt_path: str,  config: GptInitModelParameters):
+        super(StarCoder, cls)._load_quant_config(ckpt_path, config)
+        config.need_ffn_act_scale = config.quant_algo.isAwq()
 
 register_model('gpt_bigcode', StarCoder)
 register_model('wizardcoder', StarCoder)

@@ -8,7 +8,7 @@ from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo,
                                                  merge_qkv_b, merge_qkv_hf)
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
@@ -123,7 +123,6 @@ class QWenV2(QWen):
             content = reader.read()
             config_json = json.loads(content)
         QWenV2._from_config_json(config, config_json)
-        GPT._load_quant_config(ckpt_path, config_json, config)
         return config
 
     @staticmethod

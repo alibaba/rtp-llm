@@ -3,7 +3,7 @@ from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, \
     ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, transpose
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 from maga_transformer.model_factory_register import register_model
 import torch
@@ -105,7 +105,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
 StarcoderTokenizer = GPT2TokenizerFast
 
 
-class StarCoder2(GPT):
+class StarCoder2(BaseModel):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

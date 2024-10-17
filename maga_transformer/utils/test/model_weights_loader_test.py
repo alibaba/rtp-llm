@@ -22,7 +22,7 @@ class ModelWeihgtsLoaderTest(TestCase):
         model_cls = ModelFactory.get_model_cls(model_type)
         model_config = ModelConfig(model_type=model_type,
             ckpt_path=ckpt_path,
-            tokenizer_path=tokenizer_path,            
+            tokenizer_path=tokenizer_path,
             weight_type=weight_type,
             max_seq_len=max_seq_len,
             seq_size_per_block=seq_size_per_block,
@@ -51,8 +51,8 @@ class ModelWeihgtsLoaderTest(TestCase):
         model_type = "qwen_13b"
         config, weights = ModelWeihgtsLoaderTest.load_ckpt(model_type, ckpt_path, num_layers = 1)
         self.assertEqual(config.num_layers, len(weights.weights))
-        self.assertEqual([4, 5120], list(weights.steal_pytorch_weight(W.embedding).shape))
-        self.assertEqual([4, 5120], list(weights.steal_pytorch_weight(W.lm_head).shape))
+        self.assertEqual([4, 5120], list(weights.steal_global_weight(W.embedding).shape))
+        self.assertEqual([4, 5120], list(weights.steal_global_weight(W.lm_head).shape))
         self.assertEqual([1920], list(weights.weights[0][W.attn_qkv_w][0].shape))
 
 
@@ -61,8 +61,8 @@ class ModelWeihgtsLoaderTest(TestCase):
         model_type = "qwen_13b"
         config, weights = ModelWeihgtsLoaderTest.load_ckpt(model_type, ckpt_path, num_layers = 4)
         self.assertEqual(config.num_layers, len(weights.weights))
-        self.assertEqual([1, 5120], list(weights.steal_pytorch_weight(W.embedding).shape))
-        self.assertEqual([1, 5120], list(weights.steal_pytorch_weight(W.lm_head).shape))
+        self.assertEqual([1, 5120], list(weights.steal_global_weight(W.embedding).shape))
+        self.assertEqual([1, 5120], list(weights.steal_global_weight(W.lm_head).shape))
         self.assertEqual([1920], list(weights.weights[0][W.attn_qkv_w][0].shape))
         self.assertEqual([1920], list(weights.weights[1][W.attn_qkv_w][0].shape))
 

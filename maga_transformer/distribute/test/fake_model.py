@@ -19,12 +19,16 @@ class FakeConfig(object):
 
 class FakeModel(BaseModel):
     def __init__(self, config: GptInitModelParameters):
-        super().__init__()
+        super().__init__(config)
+
+    def load_tokenizer(self):
         self.tokenizer = FakeTokenizer()
-        self.config = config
-        
-    def is_multimodal(self) -> bool:
-        return False
+
+    def init_misc(self):
+        pass
+
+    def load(self, ckpt_path: str):
+        pass
 
     @staticmethod
     def create_config(ckpt_path: str, **kwargs: Any) -> Any:

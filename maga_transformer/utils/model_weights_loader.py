@@ -134,27 +134,14 @@ class ModelWeightsLoader:
             if self._merge_lora:
                 self._lora_log.update(lora_logs)
             for (layer_id, name, tensor) in results:
-                weights.append_layer_weight(layer_id, name, tensor)
+                weights.set_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
             tensor = self._load_and_convert_tensor(weight, datatype=self._data_type)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
             tensor = tensor.to(device)
-            weights.append_pytorch_weight(weight.name, tensor)
-
-        for name, tensor in self._load_medusa_weights(self._model_weights_info.medusa_weights):
-            weights.append_pytorch_weight(name, tensor)
+            weights.set_global_weight(weight.name, tensor)
 
         return weights
-
-    def _load_medusa_weights(self, medusa_weights: List[WeightInfo]) -> List[Tuple[str, torch.Tensor]]:
-        if len(medusa_weights) == 0:
-            return []
-        results: List[Tuple[str, torch.Tensor]] = []
-        assert len(medusa_weights) == 1
-        for weight in medusa_weights[0].weights:
-            name = weight.tensor_name(None)
-            results.append((name, self.load_tensor(name)[0]))
-        return results
 
     def load_lora_weights_from_scratch(self, lora_name: str, lora_path: str, device: str, num_process=1):
         lora_weights = LoRAWeights(self._num_layers)
@@ -170,7 +157,7 @@ class ModelWeightsLoader:
         for results, logs in all_results:
             self._lora_log.update(logs)
             for (int8_flag, layer_id, name, tensor) in results:
-                lora_weights.append_layer_weight(
+                lora_weights.set_layer_weight(
                     int8_flag, layer_id, name, tensor)
 
         lora_weights.apply_scale(lora_alpha / rank) # apply scale

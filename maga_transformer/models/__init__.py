@@ -1,4 +1,4 @@
-from .gpt import GPT
+from .base_model import BaseModel
 from .gpt_neox import GPTNeox
 from .llama import Llama, Baichuan
 from .sgpt_bloom import SGPTBloom

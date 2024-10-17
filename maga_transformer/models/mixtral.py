@@ -8,7 +8,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, \
     identity, zeros, transpose, concat_1, concat_0, merge_qkv_lora_A, merge_qkv_lora_B, stack_
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
@@ -91,7 +91,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy(), lora_weights=lora_weights)
 
-class Mixtral(GPT):
+class Mixtral(BaseModel):
     @staticmethod
     def get_weight_cls():
         return MixtralWeightInfo

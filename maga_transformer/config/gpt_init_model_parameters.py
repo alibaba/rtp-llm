@@ -209,25 +209,6 @@ class GptInitModelParameters:
             self.layer_inter_size = sparse_config.layer_inter_size
             self.is_sparse_head = True
 
-    def update_medusa_config(self, ckpt_path: str):
-        medusa_config_file = None
-        medusa_config = None
-        if os.path.exists(os.path.join(ckpt_path, "config.json")):
-            medusa_config_file = os.path.join(ckpt_path, "config.json")
-        if os.environ.get('MEDUSA_CONFIG_FILE', None) is not None:
-            medusa_config_file = os.environ['MEDUSA_CONFIG_FILE']
-
-        if medusa_config_file is not None:
-            with open(medusa_config_file, 'r') as reader:
-                medusa_config_json = json.loads(reader.read())
-            if medusa_config_json.get('medusa_config', None) is not None:
-                medusa_config = MedusaConfig.from_dict(medusa_config_json['medusa_config'])
-
-        if medusa_config is not None and medusa_config.check():
-            logging.info("use medusa config")
-            self.medusa_config = medusa_config
-            self.gpt_init_params.use_medusa = True
-
     def update_inter_padding_size(self, tp_size: int):
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
@@ -273,28 +254,6 @@ class GptInitModelParameters:
             self.multi_task_prompt = json.loads(prompt_str, strict=False)
             return
 
-    def update_ptuning_config(self):
-        if not self.ptuning_path:
-            inner_ptuing_path = os.path.join(self.ckpt_path, 'ptuning')
-            if os.path.exists(inner_ptuing_path):
-                logging.info(f"ckpt contain ptuning ckpt files, {inner_ptuing_path}")
-                self.ptuning_path = inner_ptuing_path
-        logging.info(f"use ptuning from model_config set by env, {self.ptuning_path}")
-        if self.ptuning_path:
-            config_file_path = os.path.join(self.ptuning_path, "config.json")
-        else:
-            config_file_path = os.path.join(self.ckpt_path, "config.json")
-        if not os.path.exists(config_file_path):
-            return
-        logging.info(f"load ptuing config from {config_file_path}")
-        with open(config_file_path, 'r') as reader:
-            content = json.load(reader)
-            if 'pre_seq_len' in content:
-                self.pre_seq_len = content['pre_seq_len']
-            if 'prefix_projection' in content:
-                self.prefix_projection = content['prefix_projection']
-        logging.info(f"read ptuning config, pre_seq_len:{self.pre_seq_len}, prefix_projection:{self.prefix_projection}")
-
     def update_task_type_use_kvcache(self):
         self.task_type = check_task_type(self.ckpt_path)
         self.setTaskType(self.task_type.value)
@@ -333,8 +292,6 @@ class GptInitModelParameters:
         self.update_config_with_sparse_config(ckpt_path)
         self.update_inter_padding_size(tp_size)
         self.update_task_prompt_config()
-        self.update_ptuning_config()
-        self.update_medusa_config(ckpt_path)
         self.update_task_type_use_kvcache()
 
         load_cutlass_gemm_config(self.quant_algo)

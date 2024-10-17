@@ -1,6 +1,6 @@
 import torch
 from typing import List, Any, Tuple
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
 from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
 from maga_transformer.model_factory_register import register_model
@@ -59,8 +59,6 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
         config.mm_sep_tokens = [[sep_token]] # image_token_index
-
-        GPT._load_quant_config(ckpt_path, config_json, config)
 
     def multimodal_modify_prompt_plugin(self, prompt: str, images: List[str],
                                     img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:

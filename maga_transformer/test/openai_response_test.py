@@ -42,8 +42,14 @@ async def fake_output_generator(
 MAX_SEQ_LEN=1024
 
 class FakeModel(BaseModel):
-    def is_multimodal(self) -> bool:
-        return False
+    def load_tokenizer(self):
+        pass
+
+    def init_misc(self):
+        pass
+
+    def load(self, ckpt_path: str):
+        pass
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -58,7 +64,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             max_seq_len = 1024,
             vocab_size = 1024,
         )
-        self.model = FakeModel()
+        self.model = FakeModel(None)
         self.model.config = model_params
 
     async def test_parse_qwen_function_call(self):

@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from transformers.models.llama.tokenization_llama import LlamaTokenizer as LlamaTokenizerOrigin
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
 def compute_intermediate_size(n, ffn_dim_multiplier=1, multiple_of=256):
@@ -20,7 +20,7 @@ class LlamaTokenizer(LlamaTokenizerOrigin):
             return ""
         return super().convert_tokens_to_string(tokens)
 
-class Llama(GPT):
+class Llama(BaseModel):
     @staticmethod
     def get_mscale(scale: float):
         if scale <= 1:
@@ -65,7 +65,7 @@ class Llama(GPT):
         else:
             raise Exception("llama parameter from unkown source")
 
-        GPT._load_quant_config(ckpt_path, config_json, config)
+
 
         return config
 

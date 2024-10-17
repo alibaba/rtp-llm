@@ -3,10 +3,10 @@ from typing import Any, Dict
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.models.gpt_neox_weight import GPTNeoxWeight, GPTNeox13BWeight
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
-class GPTNeox(GPT):
+class GPTNeox(BaseModel):
     @staticmethod
     def get_weight_cls():
         return GPTNeoxWeight

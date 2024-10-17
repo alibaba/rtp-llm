@@ -22,7 +22,7 @@ class LoRAWeights:
     def set_lora_rank(self, lora_rank: int):
         self.lora_rank = lora_rank
 
-    def append_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
+    def set_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
         assert not int8_flag, "LoRA does not support int8 mode"
         prefix_name = name[:-len(".lora_A")]
         if name.endswith('.lora_A'):

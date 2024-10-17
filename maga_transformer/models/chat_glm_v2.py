@@ -5,10 +5,10 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.tokenizer.tokenization_chatglm2 import ChatGLMTokenizer
 from maga_transformer.models.glm_v2_weight import GlmV2WeightInfo
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
-class ChatGlmV2(GPT):
+class ChatGlmV2(BaseModel):
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
         return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)

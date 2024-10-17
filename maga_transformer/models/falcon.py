@@ -5,7 +5,7 @@ import functools
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, zeros, ones, transpose, qkv_gather
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
 class FalconWeightInfo(ModelDeployWeightInfo):
@@ -51,7 +51,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
-class Falcon(GPT):
+class Falcon(BaseModel):
     @staticmethod
     def get_weight_cls():
         return FalconWeightInfo

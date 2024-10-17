@@ -27,18 +27,6 @@ class ParallelInfo(object):
             self.device = 'cpu'
 
     @property
-    def is_pp_first(self) -> bool:
-        return self.pp_rank == 0
-
-    @property
-    def is_pp_last(self) -> bool:
-        return self.pp_rank == self.pp_size - 1
-
-    @property
-    def pp_rank(self) -> int:
-        return self.world_rank // self.tp_size
-
-    @property
     def tp_rank(self) -> int:
         return self.world_rank % self.tp_size
 
@@ -64,10 +52,10 @@ class ParallelInfo(object):
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
             raise Exception("not support info.world_size mod info.local_world_size != 0")
-        
+
         if torch.cuda.is_available():
             torch.cuda.set_device(info.local_rank)
-     
+
         return info
 
     # used for ut
@@ -78,7 +66,7 @@ class ParallelInfo(object):
         self.world_size=new_info.world_size
         self.world_rank=new_info.world_rank
         self.local_world_size=new_info.local_world_size
-        
+
     def __str__(self):
         return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ]"
 
@@ -91,7 +79,7 @@ class WorkerInfo(object):
         self.gang_hb_port = gang_hb_port
         self.name = name
         self.info = info
-        
+
     def equals(self, other: 'WorkerInfo') -> bool:
         return self.ip == other.ip and self.server_port == other.server_port
 
@@ -103,7 +91,7 @@ class WorkerInfo(object):
             gang_hb_port=WorkerInfo.gang_hb_port_offset(g_parallel_info.local_rank),
             name='', info=None)
         return info
-    
+
     @staticmethod
     def self_server_port():
         return int(os.environ.get('START_PORT', DEFAULT_START_PORT))
@@ -132,7 +120,7 @@ class WorkerInfo(object):
         self.gang_hb_port = new_info.gang_hb_port
         self.name = new_info.name
         self.info = new_info.info
-        
+
     def __str__(self):
         return f"WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} name={self.name} info={self.info} ]"
 
@@ -151,7 +139,7 @@ class MasterInfo:
 
 g_master_info = MasterInfo(
     ip='',
-    th_nccl_port=0,    
+    th_nccl_port=0,
     gpt_nccl_port = 0,
     dynamic_decoder_nccl_port=0,
     nccl_op_port=0,
@@ -162,7 +150,7 @@ g_master_info = MasterInfo(
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.http_port = base_port + 2
-    g_master_info.model_rpc_port = base_port + 1    
+    g_master_info.model_rpc_port = base_port + 1
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.gpt_nccl_port = base_port - 2
     g_master_info.dynamic_decoder_nccl_port = base_port - 3

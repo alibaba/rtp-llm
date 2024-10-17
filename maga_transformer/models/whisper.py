@@ -9,7 +9,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from transformers.models.whisper.processing_whisper import WhisperProcessor
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.models.multimodal.multimodal_common import AudioEmbeddingInterface
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -39,14 +39,14 @@ class WhisperAudioEmbedding(AudioEmbeddingInterface):
             raise Exception(f"Wrong shape embedding for audio input dim 1, expect {self.embedding_length}, but get {res.shape[1]}")
         return res
 
-class Whisper(GPT, MultiModalMixin):
+class Whisper(BaseModel, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         if g_parallel_info.tp_rank == 0:
             with torch.device(g_parallel_info.device):
                 ckpt_path = config.ckpt_path
                 self.mm_part = WhisperAudioEmbedding(WhisperProcessor.from_pretrained(ckpt_path), WhisperEncoder.from_pretrained(ckpt_path), config.cross_attn_input_len)
             config.mm_related_params.vit_weights = BaseVitWeights({}, False)
-        GPT.__init__(self, config)
+        BaseModel.__init__(self, config)
 
     @staticmethod
     def get_weight_cls():

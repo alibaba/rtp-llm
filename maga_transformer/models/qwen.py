@@ -13,7 +13,7 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     ModelDeployWeightInfo, CkptWeightInfo, \
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad, ones
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
@@ -221,7 +221,7 @@ class QWenWeight(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
-class QWenBase(GPT):
+class QWenBase(BaseModel):
     @staticmethod
     def get_weight_cls():
         return QWenWeight
@@ -271,8 +271,6 @@ class QWenBase(GPT):
         config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-
-        GPT._load_quant_config(ckpt_path, config_json, config)
 
         if config_json.get("use_dynamic_ntk"):
             config.rotary_embedding_style = 4

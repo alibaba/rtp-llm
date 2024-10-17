@@ -6,7 +6,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     ModelDeployWeightInfo, CkptWeightInfo, identity, transpose, trans_qkv, trans_qkv_b
-from maga_transformer.models.gpt import GPT
+from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
 class BloomWeightInfo(ModelDeployWeightInfo):
@@ -80,7 +80,7 @@ class BloomWeightInfo(ModelDeployWeightInfo):
         return ModelWeightInfo(weights, layer_weights)
 
 
-class Bloom(GPT):
+class Bloom(BaseModel):
     @staticmethod
     def get_weight_cls():
         return BloomWeightInfo
@@ -132,5 +132,5 @@ class Bloom(GPT):
         config.has_post_decoder_layernorm=True
         config.use_attention_linear_bias=True
         return config
-    
+
 register_model('bloom', Bloom, ["BloomForCausalLM"])
