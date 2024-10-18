@@ -9,12 +9,11 @@
 #include <cstring>
 
 #include "src/fastertransformer/kernels/hello_world.h"
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/rmsnormKernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 
 //layerNorm
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
+#include "src/fastertransformer/kernels/rocm/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/kernels/rmsnormKernels.h"

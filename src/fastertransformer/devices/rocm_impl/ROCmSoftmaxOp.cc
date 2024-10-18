@@ -1,6 +1,5 @@
 #include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
-// #include "src/fastertransformer/devices/CommonDefines.h"
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
+#include "src/fastertransformer/kernels/rocm/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
