@@ -376,6 +376,9 @@ class BaseModel(object):
             if self.config.logit_scale != 1.0:
                 lm_head_w = self.config.scale_logit * lm_head_w
             self.weight.set_global_weight(W.lm_head, lm_head_w)
+        else:
+            # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
+            self.weight.steal_global_weight(W.lm_head)
 
         pos_weight = self.weight.global_weights.get(W.positional_embedding, None)
         if pos_weight != None:
