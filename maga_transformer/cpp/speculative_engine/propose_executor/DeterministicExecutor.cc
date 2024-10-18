@@ -44,11 +44,11 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                                                                             advice_prompt_token_ids.data());
         stream->setSpEditFirstTime(false);
         postProcess(stream, stream_output);
-    } else if (min_str_match_len_ <= output_token_len) {
-        size_t begin_match_len = std::min(max_str_match_len_, output_token_len);
+    } else if (min_token_match_len_ <= output_token_len) {
+        size_t begin_match_len = std::min(max_token_match_len_, output_token_len);
 
         std::vector<int> max_latest_tokens = stream->getLatestTokens(begin_match_len);
-        for (size_t match_len = begin_match_len; match_len >= min_str_match_len_; match_len--) {
+        for (size_t match_len = begin_match_len; match_len >= min_token_match_len_; match_len--) {
 
             std::vector<int> latest_tokens(max_latest_tokens.end() - match_len, max_latest_tokens.end());
             for (size_t i = sp_edit_search_index; i + match_len < advice_prompt_token_ids.size() - 1; i++) {
@@ -84,11 +84,11 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
 
     const size_t seq_len = stream->seqLength();
 
-    if (min_str_match_len_ <= seq_len) {
-        size_t           begin_match_len   = std::min(max_str_match_len_, seq_len);
+    if (min_token_match_len_ <= seq_len) {
+        size_t           begin_match_len   = std::min(max_token_match_len_, seq_len);
         std::vector<int> max_latest_tokens = stream->getLatestTokens(begin_match_len);
 
-        for (size_t match_len = begin_match_len; match_len >= min_str_match_len_; match_len--) {
+        for (size_t match_len = begin_match_len; match_len >= min_token_match_len_; match_len--) {
             std::vector<int> latest_tokens(max_latest_tokens.end() - match_len, max_latest_tokens.end());
             for (size_t i = 0; i + match_len < advice_prompt_token_ids.size() - 1; i++) {
                 size_t j = 0;
@@ -131,7 +131,7 @@ void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stre
     if (!config->top1()) {
         const auto& all_probs = device_->allocateBuffer(
             {ft::DataType::TYPE_FP32, {propose_step, (size_t)stream->vocabSize()}, ft::AllocationType::HOST}, {""});
-
+        device_->bufMemset(*all_probs, 0);
         for (size_t i = 0; i < propose_step; i++) {
             *all_probs->view(0, i).dataWithOffset<float>(stream_output->tokens->data<int32_t>()[i]) = 1.0;
         }
