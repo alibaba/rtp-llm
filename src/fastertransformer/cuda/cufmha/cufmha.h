@@ -15,35 +15,32 @@ public:
     cufmha() = default;
     ~cufmha() = default;
 
-    void init(cudaStream_t stream) {
+    void init(cudaStream_t      stream) {
         stream_ = stream;
     }
-
-    void setup(DataType dtype,
+    void setup(DataType          dtype,
                AttentionMaskType mtype,
-               size_t head_num,
-               size_t kv_head_num,
-               size_t size_per_head,
-               float  q_scaling,
-               bool   use_linear_bias_slopes,
-               bool   paged_kv_fmha)
-    {
-        dtype_ = dtype;
-        mtype_ = mtype;
-        head_num_ = head_num;
-        kv_head_num_ = kv_head_num;
-        size_per_head_ = size_per_head;
-        q_scaling_ = q_scaling;
-        use_linear_bias_slopes_ = use_linear_bias_slopes;
-        paged_kv_fmha_ = paged_kv_fmha;
+               size_t            head_num,
+               size_t            kv_head_num,
+               size_t            size_per_head,
+               float             q_scaling,
+               bool              use_linear_bias_slopes);
+
+    bool trtV1FmhaSupport() {
+        return support_trt_v1_fmha_;
     }
 
+    bool trtV2FmhaSupport() {
+        return support_trt_v2_fhma_;
+    }
 
-    bool trtV1FmhaSupport();
+    bool trtV2FmhaPagedSupport() {
+        return support_trt_v2_paged_fmha_;
+    }
 
-    bool trtV2FmhaSupport();
-
-    bool openSourceFmhaSupport();
+    bool openSourceFmhaSupport() {
+        return support_open_source_fmha_;
+    }
 
     void runTrtV1Fmha(void* input,
                       void* cu_seqlens,
@@ -112,6 +109,21 @@ public:
                                       size_t max_seq_len_kv = 0,
                                       bool   paged = false);
 private:
+    bool initTrtV1FmhaAndCheckSupport();
+
+    bool initTrtV2FmhaAndCheckSupport();
+
+    bool initTrtV2FmhaPagedAndCheckSupport();
+
+    bool initOpenSourceFmhaAndCheckSupport();
+
+    void reset(DataType          dtype,
+               AttentionMaskType mtype,
+               size_t            head_num,
+               size_t            kv_head_num,
+               size_t            size_per_head,
+               float             q_scaling,
+               bool              use_linear_bias_slopes);
     static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
@@ -135,6 +147,7 @@ private:
 private:
 
     std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2> trtv2_fmha_runner_;
+    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2> trtv2_paged_fmha_runner_;
     std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2Sm70> trtv2_sm70_fmha_runner_;
 #ifdef USE_OLD_TRT_FMHA
     std::unique_ptr<FusedMHARunnerFP16v2> trtv1_fmha_runner_;
@@ -142,12 +155,17 @@ private:
     DataType dtype_;
     AttentionMaskType mtype_;
 
+    bool init_done_ = false;
+
     size_t head_num_;
     size_t kv_head_num_;
     size_t size_per_head_;
     float q_scaling_;
     bool use_linear_bias_slopes_;
-    bool paged_kv_fmha_;
+    bool support_trt_v1_fmha_;
+    bool support_trt_v2_fhma_;
+    bool support_trt_v2_paged_fmha_;
+    bool support_open_source_fmha_;
 
     cudaStream_t stream_;
 };

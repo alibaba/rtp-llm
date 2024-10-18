@@ -17,8 +17,47 @@ tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
 
 }
 
+void cufmha::setup(DataType dtype,
+                   AttentionMaskType mtype,
+                   size_t head_num,
+                   size_t kv_head_num,
+                   size_t size_per_head,
+                   float  q_scaling,
+                   bool   use_linear_bias_slopes) {
+    if (init_done_) {
+        if (dtype != dtype_ || mtype != mtype_ || head_num != head_num_ ||
+            kv_head_num != kv_head_num_ || size_per_head != size_per_head_ ||
+            q_scaling != q_scaling_) {
+            FT_LOG_INFO("cufmha: setup with different arguments, reset again");
+            reset(dtype, mtype, head_num, kv_head_num, size_per_head, q_scaling, use_linear_bias_slopes);
+        }
+        return;
+    }
+    reset(dtype, mtype, head_num, kv_head_num, size_per_head, q_scaling, use_linear_bias_slopes);
+}
 
-bool cufmha::trtV1FmhaSupport() {
+void cufmha::reset(DataType dtype,
+                   AttentionMaskType mtype,
+                   size_t head_num,
+                   size_t kv_head_num,
+                   size_t size_per_head,
+                   float  q_scaling,
+                   bool   use_linear_bias_slopes) {
+    dtype_ = dtype;
+    mtype_ = mtype;
+    head_num_ = head_num;
+    kv_head_num_ = kv_head_num;
+    size_per_head_ = size_per_head;
+    q_scaling_ = q_scaling;
+    use_linear_bias_slopes_ = use_linear_bias_slopes;
+    support_trt_v1_fmha_ = initTrtV1FmhaAndCheckSupport();
+    support_trt_v2_fhma_ = initTrtV2FmhaAndCheckSupport();
+    support_trt_v2_paged_fmha_ = initTrtV2FmhaPagedAndCheckSupport();
+    support_open_source_fmha_ = initOpenSourceFmhaAndCheckSupport();
+    init_done_ = true;
+}
+
+bool cufmha::initTrtV1FmhaAndCheckSupport() {
 #ifdef USE_OLD_TRT_FMHA
     trtv1_fmha_runner_.reset(
     new FusedMHARunnerFP16v2(head_num_, size_per_head_, get_sm(), q_scaling_));
@@ -71,8 +110,7 @@ void cufmha::runTrtV1Fmha(void* input,
 
 }
 
-
-bool cufmha::trtV2FmhaSupport() {
+bool cufmha::initTrtV2FmhaAndCheckSupport() {
     if (get_sm() == tensorrt_llm::kernels::kSM_70) {
         trtv2_sm70_fmha_runner_.reset(
             new tensorrt_llm::kernels::FusedMHARunnerV2Sm70(
@@ -84,8 +122,7 @@ bool cufmha::trtV2FmhaSupport() {
     }
     trtv2_fmha_runner_.reset(
         new tensorrt_llm::kernels::FusedMHARunnerV2(
-            trtDtypeConvert(dtype_), paged_kv_fmha_, head_num_, size_per_head_, q_scaling_));
-
+            trtDtypeConvert(dtype_), false, head_num_, size_per_head_, q_scaling_));
 
     return trtv2_fmha_runner_->fmha_supported() &&
            (mtype_ == AttentionMaskType::causalMask ||
@@ -93,7 +130,20 @@ bool cufmha::trtV2FmhaSupport() {
         !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
 }
 
-bool cufmha::openSourceFmhaSupport()
+bool cufmha::initTrtV2FmhaPagedAndCheckSupport() {
+    if (get_sm() == tensorrt_llm::kernels::kSM_70) {
+        return false;
+    }
+    trtv2_paged_fmha_runner_.reset(
+        new tensorrt_llm::kernels::FusedMHARunnerV2(
+            trtDtypeConvert(dtype_), true, head_num_, size_per_head_, q_scaling_));
+    return trtv2_paged_fmha_runner_->fmha_supported() &&
+           (mtype_ == AttentionMaskType::causalMask ||
+            mtype_ == AttentionMaskType::noMask) &&
+        !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
+}
+
+bool cufmha::initOpenSourceFmhaAndCheckSupport()
 {
     return (kv_head_num_ != 0 && head_num_ % kv_head_num_ == 0) &&
            (mtype_ == AttentionMaskType::causalMask ||
@@ -115,7 +165,7 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                                bool   mRemovePadding,
                                bool   is_alibi,
                                bool   is_alibi_with_sacle) {
-    trtv2_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
+    trtv2_paged_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
                                     mRemovePadding,
                                     (mtype_ == AttentionMaskType::causalMask),
                                     kv_head_num_);
@@ -123,7 +173,7 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
     // unless each layer has different cyclic kv cache length.
     // Max cache capacity (used to allocate KV cache)
 
-    trtv2_fmha_runner_->setup(batch_size,
+    trtv2_paged_fmha_runner_->setup(batch_size,
                               input_seq_len,
                               max_past_kv_len,
                               kv_block_array.mMaxBlocksPerSeq,
@@ -135,7 +185,7 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                               1,
                               0);
 
-    trtv2_fmha_runner_->run(input,
+    trtv2_paged_fmha_runner_->run(input,
                             kv_block_array,
                             cu_q_seqlens,
                             cu_kv_seqlens,
