@@ -51,7 +51,7 @@ public:
     void init(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
         int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
         nvinfer1::DataType weight_type, bool has_zeros, int group_size,
-        MOEExpertScaleNormalizationMode normalization_mode);
+        MOEExpertScaleNormalizationMode normalization_mode, int tp_size = 1, int tp_rank = 0);
 
     ~MixtureOfExpertsPlugin() = default;
 
@@ -75,8 +75,8 @@ private:
     bool mHasZeros;
     int mGroupSize;
     // tensorrt_llm::common::QuantMode mQuantMode;
-    // int mTPSize{};
-    // int mTPRank{};
+    int mTPSize{};
+    int mTPRank{};
     // MOEParallelismMode mParallelismMode{};
     MOEExpertScaleNormalizationMode mNormalizationMode{};
 

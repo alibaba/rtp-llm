@@ -451,6 +451,8 @@ struct MoeConfigs {
     bool normalize_expert_scale        = false;
     int64_t moe_inter_padding_size     = 0;
     bool has_moe_norm                  = false;
+    int tp_size                       = 1;
+    int tp_rank                       = 0;
 };
 
 struct FfnConfigs {

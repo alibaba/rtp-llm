@@ -37,7 +37,7 @@ MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k,
 
 void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
     int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
-    nvinfer1::DataType weight_type, bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
+    nvinfer1::DataType weight_type, bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode, int tp_size, int tp_rank)
 {
     mNumExperts = number_of_experts;
     mK = top_k;
@@ -50,6 +50,8 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     mHasZeros = has_zeros;
     mGroupSize = group_size;
     mNormalizationMode = normalization_mode;
+    mTPSize = tp_size;
+    mTPRank = tp_rank;
     if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4)
     {
         FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16,
@@ -94,12 +96,14 @@ size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
 
 MOEParallelismConfig MixtureOfExpertsPlugin::getParallelismConfig() const
 {
-    return {};
+    // 默认MOE都走EP
+    return MOEParallelismConfig(1, 0, mTPSize, mTPRank);
+    // return {};
     // switch (mParallelismMode)
     // {
     // case kernels::MOEParallelismMode::NONE: return {};
     // case kernels::MOEParallelismMode::EXPERT_PARALLELISM:
-    //     return MOEParallelismConfig::ExpertParallelism(mTPSize, mTPRank);
+    // return MOEParallelismConfig(1, 0, mTPSize, mTPRank);
     // case kernels::MOEParallelismMode::TENSOR_PARALLELISM:
     //     return MOEParallelismConfig::TensorParallelism(mTPSize, mTPRank);
     // }
