@@ -339,6 +339,13 @@ class QwenRenderer(CustomChatRenderer):
             output_length = len(processed_output.output_str)
             finish_reason = processed_output.finish_reason
             output_token_length = processed_output.output_token_length
+            delta_string = output_string[responded_length : output_length]
+            trunc_string = truncate_response_with_stop_words(delta_string, generate_config.stop_words_str)
+            logging.debug(f"delta_string:{delta_string}, output_string:{output_string}, trunc_string:{trunc_string}")
+            if len(trunc_string) != len(delta_string):
+                if finish_reason == None:
+                    finish_reason = FinisheReason.stop
+                break
 
             if (output_string.endswith("\nAction:")):
                 generating_function_call = True

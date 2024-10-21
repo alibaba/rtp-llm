@@ -211,8 +211,13 @@ class CustomChatRenderer():
             if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):
                 continue
             delta_output_string = decoded_string[len(decoded_prev_token):]
-            trunc_string = truncate_response_with_stop_words(delta_output_string, stop_word_slice_list)
+            trunc_string = truncate_response_with_stop_words(delta_output_string, generate_config.stop_words_str)
+            if len(trunc_string) != len(delta_output_string):
+                if finish_reason == None:
+                    finish_reason = FinisheReason.stop
+                break
 
+            trunc_string = truncate_response_with_stop_words(delta_output_string, stop_word_slice_list)
             if len(delta_output_string) > 0 and trunc_string == delta_output_string:
                 last_token_length = len(output_ids) - len(responded_output_ids)
                 responded_output_ids = output_ids
