@@ -78,6 +78,7 @@ void SpeculativeEngine::initLoadBalance() {
     fake_input->generate_config                 = make_shared<GenerateConfig>();
     fake_input->generate_config->max_new_tokens = 3;
     fake_input->generate_config->top_k          = 1;
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     auto stream                                 = enqueue(fake_input);
     while (!stream->finished() && !stream->stopped()) {
         FT_LOG_INFO("wait load balance int run over for 1s");
@@ -140,6 +141,7 @@ size_t SpeculativeEngine::warmUp() {
     fake_input->generate_config                       = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = socre_gpt_params.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(socre_gpt_params.warm_up_with_loss_);
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 
     score_executor_.reset(new ScoreExecutor(score_model_params_, device_, nullptr, nullptr, true));
