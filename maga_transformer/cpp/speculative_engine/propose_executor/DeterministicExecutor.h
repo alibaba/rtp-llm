@@ -18,8 +18,8 @@ public:
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
                                  (size_t)score_model_engine_init_params.gpt_init_parameter.max_seq_len_);
 
-        min_token_match_len_ = autil::EnvUtil::getEnv("SP_MIN_TOKEN_MATCH", 1);
-        max_token_match_len_ = autil::EnvUtil::getEnv("SP_MAX_TOKEN_MATCH", 3);
+        min_token_match_len_ = autil::EnvUtil::getEnv("SP_MIN_TOKEN_MATCH", 2);
+        max_token_match_len_ = autil::EnvUtil::getEnv("SP_MAX_TOKEN_MATCH", 2);
         
         FT_LOG_INFO("DeterministicExecutor propose step is %ld", propose_step_);
         FT_LOG_INFO("DeterministicExecutor min token match size is %ld", min_token_match_len_);
