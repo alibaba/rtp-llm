@@ -111,14 +111,25 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                         (size_t)current_beam_size});
             beam_index.updateShape({beam_batch_size,
                                     (size_t)current_beam_size});
+            auto sample_logits_device = device_->clone({sample_logits, AllocationType::DEVICE});
+            auto sample_tokens_device = device_->clone({sample_tokens, AllocationType::DEVICE});
+            auto input_lengths_device = device_->clone({input_lengths, AllocationType::DEVICE});
+            auto beam_search_sequence_lengths_device = device_->clone({beam_search_sequence_lengths, AllocationType::DEVICE});
+            auto sample_cum_log_probs_device = device_->clone({*sample_cum_log_probs, AllocationType::DEVICE});
+            auto beam_index_device = device_->clone({beam_index, AllocationType::DEVICE});
 
-
-            device_->sampleBeamSearch({sample_logits,
-                                       sample_tokens,
-                                       input_lengths,
-                                       beam_search_sequence_lengths,
-                                       *sample_cum_log_probs,
-                                       beam_index});
+            device_->sampleBeamSearch({*sample_logits_device,
+                                       *sample_tokens_device,
+                                       *input_lengths_device,
+                                       *beam_search_sequence_lengths_device,
+                                       *sample_cum_log_probs_device,
+                                       *beam_index_device});
+            device_->copy({sample_logits, *sample_logits_device});
+            device_->copy({sample_tokens, *sample_tokens_device});
+            device_->copy({input_lengths, *input_lengths_device});
+            device_->copy({beam_search_sequence_lengths, *beam_search_sequence_lengths_device});
+            device_->copy({*sample_cum_log_probs, *sample_cum_log_probs_device});
+            device_->copy({beam_index, *beam_index_device});
 
             sample_logits.updateShape(org_sample_logits_shape);
             sample_tokens.updateShape(org_sample_tokens_shape);

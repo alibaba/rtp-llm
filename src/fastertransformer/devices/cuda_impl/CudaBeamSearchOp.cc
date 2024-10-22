@@ -4,62 +4,81 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
+#include "3rdparty/trt_beam_search/beamSearchKernels.h"
+
 using namespace std;
 namespace fastertransformer {
 
 void CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
-
-    FT_LOG_DEBUG("sampleBeamSearch start");
-    auto logits = Buffer2torchTensor(params.logits, false);
-    auto token_ids = Buffer2torchTensor(params.token_ids, false);
-    auto cum_log_probs = Buffer2torchTensor(params.cum_log_probs, false);
+    const int batch_size  = params.logits.shape()[0];
+    const int beam_width  = params.logits.shape()[1];
+    const int vocab_size  = params.logits.shape()[2];
+    const int max_seq_len = params.token_ids.shape()[2];
+    FT_CHECK_WITH_INFO((vocab_size > 2 * beam_width),
+        "cuda beam search op need vocab_size[%d] > beam_width[%d] * 2", vocab_size, beam_width);
+    // set trt kernel workspace
+    const int n_pad_beam_width  = tensorrt_llm::kernels::padToNextPowerOfTwo(beam_width);
+    const int n_topk            = batch_size * n_pad_beam_width * n_pad_beam_width * 2;
+    const int n_temp_buffer     = batch_size * n_pad_beam_width * tensorrt_llm::kernels::nMaxVocabPartForStage1FastKernel * (2 * (n_pad_beam_width * 2) + 2);
+    const size_t workspace_size = roundUp(n_topk, 4) + roundUp(n_temp_buffer, 4);
+    BufferPtr workspace        = allocateBuffer({DataType::TYPE_FP32, {workspace_size}});
+    cudaMemsetAsync(workspace->data(), 0, workspace->sizeBytes(), stream_);
+    // set BeamHypotheses
+    tensorrt_llm::kernels::BeamHypotheses BH;
+    // basic scalar
+    BH.nMaxBatchSize = batch_size;
+    BH.nBatchSize    = batch_size;
+    BH.nBeamWidth    = beam_width;
+    BH.nMaxSeqLen    = max_seq_len;
+    BH.nVocabSize    = vocab_size;
+    // essential ptr
+    BH.inputLengths     = params.input_lengths.data<int>();
+    BH.sequenceLengths  = params.sequence_lengths.data<int>();
     auto input_lengths = Buffer2torchTensor(params.input_lengths, false);
     auto sequence_lengths = Buffer2torchTensor(params.sequence_lengths, false);
-    auto beam_index_output = Buffer2torchTensor(params.beam_index, false);
-    FT_LOG_DEBUG("sampleBeamSearch buffer to tensor done");
-
-    int batch_size  = logits.size(0);
-    // for beam history update cache.
-    auto token_ids_clone = token_ids.clone();
-
+    auto cum_log_probs_t = Buffer2torchTensor(params.cum_log_probs, false);
     for (int i = 0; i < batch_size; i++) {
-        // logits float[beam_width, vocab_size]
-        auto beam_width = logits[i].size(0);
-        // first topk from log softmax logits
-        // probs: [beam_width, beam_width]
-        auto [probs, index] = logits[i].log_softmax(-1).topk(beam_width, -1);
-        // add cum_log_probs
-        probs = probs + cum_log_probs[i].reshape({-1, 1});
-        // second topk from probs
-        // log_probs: [beam_width]
-        auto [log_probs, beam_index] = probs.flatten(0, -1).topk(beam_width, -1);
-        auto new_token_ids = torch::gather(index.flatten(0, -1), 0, beam_index);
-        beam_index = torch::div(beam_index, beam_width, "floor").squeeze();
-        // context first beam sampler
         if (input_lengths[i].equal(sequence_lengths[i])) {
-            new_token_ids = index[0];
-            log_probs = probs[0];
-            beam_index = torch::zeros_like(new_token_ids);
-        }
-        // according beam index to update input token ids
-        for (int j = 0; j < beam_width; j++) {
-            int sequence_index = sequence_lengths[i][j].item<int>() + 1;
-            auto select_beam_index = beam_index[j].item<int>();
-            auto tmp = token_ids[i][select_beam_index];
-            token_ids_clone.index_put_({i, j}, tmp);
-            token_ids_clone.index_put_({i, j, sequence_index - 1}, new_token_ids[j]);
-            cum_log_probs.index_put_({i, j}, log_probs[j]);
-            beam_index_output.index_put_({i, j}, beam_index[j]);
+            for (int j = 1; j < beam_width; j++) {
+                cum_log_probs_t.index_put_({i, j}, -1e9);
+            }
         }
     }
+    BH.cumLogProbs      = params.cum_log_probs.data<float>();
+    BH.beamIdsPtr       = params.beam_index.data<int>();
+    auto output_ids     = allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width}, AllocationType::DEVICE}, {});
+    BH.outputIdsPtr     = output_ids->data<int>();
 
-    auto output_token_ids        = torchTensor2Buffer(token_ids_clone);
-    auto output_cum_log_probs    = torchTensor2Buffer(cum_log_probs);
-    auto output_beam_index       = torchTensor2Buffer(beam_index_output);
+
+    // invoke trt kernel
+    switch (params.logits.type()) {
+        case DataType::TYPE_FP16:
+            tensorrt_llm::kernels::invokeTopkSoftMax(params.logits.data<half>(), workspace->data(), BH, stream_);
+            break;
+        case DataType::TYPE_FP32:
+            tensorrt_llm::kernels::invokeTopkSoftMax(params.logits.data<float>(), workspace->data(), BH, stream_);
+            break;
+        default:
+            FT_CHECK_WITH_INFO(false, "cuda beam search op dose not support dtype[%d]", params.logits.type());
+    }
+
+    auto output_ids_tensor = Buffer2torchTensor(output_ids, false);
+    auto token_ids = Buffer2torchTensor(params.token_ids, false);
+    auto beam_index_output = Buffer2torchTensor(params.beam_index, false);
+
+    auto token_ids_clone = token_ids.clone();
+    for (int i = 0; i < batch_size; i++) {
+        for (int j = 0; j < beam_width; j++) {
+            int sequence_index = sequence_lengths[i][j].item<int>() + 1;
+            auto select_beam_index = beam_index_output[i][j].item<int>();
+            auto tmp = token_ids[i][select_beam_index];
+            token_ids_clone.index_put_({i, j}, tmp);
+            token_ids_clone.index_put_({i, j, sequence_index - 1}, output_ids_tensor[i][j]);
+        }
+    }
+    auto output_token_ids = torchTensor2Buffer(token_ids_clone);
 
     copy({params.token_ids, *output_token_ids});
-    copy({params.cum_log_probs, *output_cum_log_probs});
-    copy({params.beam_index, *output_beam_index});
     return;
 }
 

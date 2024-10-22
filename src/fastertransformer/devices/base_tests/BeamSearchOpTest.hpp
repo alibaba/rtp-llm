@@ -49,6 +49,11 @@ public:
         auto cum_log_probs     = torch::rand({batch_size, beam_width}, float_options);
         auto token_ids         = torch::randint(0, vocab_size - 1, {batch_size, beam_width, max_seq_len}, int_options);
         auto logits            = torch::rand({batch_size, beam_width, vocab_size}, float_options);
+        if (rand_sequence_length == rand_input_length) {
+            logits = torch::rand({batch_size, 1, vocab_size}, float_options).repeat({1, beam_width, 1});
+            token_ids = torch::randint(0, vocab_size - 1, {batch_size, 1, max_seq_len}, int_options).repeat({1, beam_width, 1});
+            cum_log_probs = torch::zeros({batch_size, beam_width}, float_options);
+        }
         auto beam_index        = torch::zeros({batch_size, beam_width}, int_options);
 
         return TestBeamSearchInput({logits,

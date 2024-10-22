@@ -64,21 +64,21 @@ struct BeamSearchOpImpl : torch::nn::Module {
         // log_probs: [beam_width, beam_width]
         auto [log_probs, index] = input.logits.log_softmax(-1).topk(beam_width, -1);
         // add cum_log_probs
+        auto cum_log_probs = input.cum_log_probs;
+        if (input.input_lengths.equal(input.sequence_lengths)) {
+            for (int i = 1; i < beam_width; i++) {
+                cum_log_probs.index_put_({i}, -1e9);
+            }
+        }
         log_probs = log_probs + input.cum_log_probs.reshape({-1, 1});
 
         auto new_token_ids = torch::zeros({beam_width}, torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU)));
         auto beam_index    = torch::zeros({beam_width}, torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU)));
         // first beam search
-        if (input.input_lengths.equal(input.sequence_lengths)) {
-            new_token_ids = index[0];
-            log_probs     = log_probs[0];
-        } else {
-            // second topk from probs
-            // log_probs: [beam_width]
-            std::tie(log_probs, beam_index) = log_probs.flatten(0, -1).topk(beam_width, -1);
-            new_token_ids = torch::gather(index.flatten(0, -1), 0, beam_index);
-            beam_index = torch::div(beam_index, beam_width, "floor").squeeze();
-        }
+
+        std::tie(log_probs, beam_index) = log_probs.flatten(0, -1).topk(beam_width, -1);
+        new_token_ids = torch::gather(index.flatten(0, -1), 0, beam_index);
+        beam_index = torch::div(beam_index, beam_width, "floor").squeeze();
 
         // according beam index to update input token ids
         auto token_ids = input.token_ids.clone();
