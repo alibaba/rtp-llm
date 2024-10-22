@@ -26,7 +26,6 @@ from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase, ModuleDatabase, DictDatabase
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
-from maga_transformer.ops.ft_op_base import FTOPBase
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -192,22 +191,8 @@ class BaseModel(object):
     def __init__(self, config: GptInitModelParameters) -> None:
         self.config = config
         self.weight = None
-        self.word_embedding: Optional[ParallelEmbedding] = None
-        self.prefix_encoder: Optional[torch.nn.Module] = None
-        self.position_encoding: Optional[ParallelEmbedding] = None
-        self.token_type_embeddings: Optional[ParallelEmbedding] = None
-        self.pre_decoder_layernorm: Optional[torch.nn.Module] = None
-        self.post_decoder_layernorm: Optional[torch.nn.Module] = None
 
-        self.lm_head: Optional[ParallelLinear] = None
-        self.context_decoder: Optional[FTOPBase] = None
-        self.decoder: Optional[FTOPBase] = None
-        self.dynamic_decoder = None
-        self.use_fp32_to_compute_logit = False
         self.linear_bias_slopes: Optional[torch.Tensor] = None
-
-        self.medusa_head: Optional[torch.nn.ModuleList] = None
-
         self.prefix_tokens: Optional[torch.Tensor] = None
         self.tokenizer: Optional[PreTrainedTokenizerBase] = None
         self.max_input_buffer_len: int = 0

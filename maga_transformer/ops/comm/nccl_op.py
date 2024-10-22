@@ -1,6 +1,5 @@
 from typing import List
 import torch
-from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 
 def singleton(cls):
@@ -13,7 +12,7 @@ def singleton(cls):
     return inner
 
 @singleton
-class NcclOp(FTOPBase):
+class NcclOp():
     def __init__(self):
         super().__init__()
         self.ft_op_ = torch.classes.FasterTransformer.NcclOp( # type: ignore

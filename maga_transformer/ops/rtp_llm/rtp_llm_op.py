@@ -1,14 +1,13 @@
 from typing import Optional, Tuple
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.propose_model.propose_model import ProposeModel
-from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.utils.token_processor import TokenProcessor
 from maga_transformer.ops import LoadBalanceInfo
 
 
-class RtpLLMOp(FTOPBase):
+class RtpLLMOp():
     def __init__(
             self,
             model: BaseModel,
