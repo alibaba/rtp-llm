@@ -395,9 +395,12 @@ __global__ void batchApplyRepetitionPenalty(T*           logits,
         }
         // output_ids shape: (input_len + output_len, batch_size)
         int penalty_index = output_ids[index * batch_size + batch_idx];
-        assert(penalty_index < vocab_size);
+        if (penalty_index >= vocab_size || penalty_index < 0) {
+            continue;
+        }
+
+        float logit       = (float)logits[penalty_index];
         penalty_indices[index] = penalty_index;
-        float logit            = (float)logits[penalty_index];
         if (penalty_type == RepetitionPenaltyType::Additive) {
             penalty_logits[index] = logit - penalty;
         }
@@ -423,8 +426,9 @@ __global__ void batchApplyRepetitionPenalty(T*           logits,
         if (index >= input_length && index < max_input_length) {
             continue;
         }
-        if (penalty_indices[index] >= 0)
+        if (penalty_indices[index] >= 0 && penalty_indices[index] < vocab_size) {
             logits[penalty_indices[index]] = penalty_logits[index];
+        }
     }
 }
 
@@ -458,8 +462,10 @@ __global__ void batchApplyRepetitionPenaltyLongSeq(T*           logits,
         }
         // output_ids shape: (input_len + output_len, batch_size)
         int penalty_index = output_ids[index * batch_size + batch_idx];
-        assert(penalty_index < vocab_size);
-        float logit            = (float)logits[penalty_index];
+        if (penalty_index >= vocab_size || penalty_index < 0) {
+            continue;
+        }
+        float logit       = (float)logits[penalty_index];
         if (penalty_type == RepetitionPenaltyType::Additive) {
             penalty_logits[index * batch_size + batch_idx] = logit - penalty;
         }
@@ -482,7 +488,9 @@ __global__ void batchApplyRepetitionPenaltyLongSeq(T*           logits,
             continue;
         }
         int penalty_index = output_ids[index * batch_size + batch_idx];
-        logits[penalty_index] = penalty_logits[index * batch_size + batch_idx];
+        if (penalty_index < vocab_size && penalty_index >= 0) {
+            logits[penalty_index] = penalty_logits[index * batch_size + batch_idx];
+        }
     }
 }
 

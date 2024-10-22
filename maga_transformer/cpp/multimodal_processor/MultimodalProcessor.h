@@ -137,7 +137,7 @@ private:
             {token_ids->type(), {(size_t)expanded_len}, ft::AllocationType::HOST}, {});
         ft::BufferPtr new_locs = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)mm_num}, ft::AllocationType::HOST}, {});
-        memset(expanded_ids->data(), 0, expanded_ids->sizeBytes());
+        memset(expanded_ids->data(), -1, expanded_ids->sizeBytes());
         std::fill(token_masks->data<int32_t>(), token_masks->dataWithOffset<int32_t>(token_masks->size()), 1);
 
         int new_loc_idx = 0, old_loc_idx = 0;
