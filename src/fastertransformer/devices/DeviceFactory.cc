@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "autil/EnvUtil.h"
 #include <cassert>
 
 using namespace std;
@@ -41,11 +42,39 @@ GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
     return params;
 }
 
-void DeviceFactory::initDevices(const GlobalDeviceParams& global_params) {
+int64_t getDefaultDeviceReserveMemoryBytes(const GptInitParameter& params) {
+    auto reserve_bytes =
+        -256L * 1024 * 1024 * std::min(4, (int)params.tp_size_);  // 256MB, and need more when tp > 1
+    if (params.is_multimodal_) {
+        reserve_bytes -= 4L * 1024 * 1024 * 1024;
+    }
+    FT_LOG_INFO("Default device reserve memory bytes: %ld", reserve_bytes);
+    return reserve_bytes;
+}
+
+void DeviceFactory::initDevices(const GptInitParameter& params) {
     if (getCurrentDevices().size()) {
         FT_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
     }
+    auto global_params = getDefaultGlobalDeviceParams();
+    auto& device_params       = global_params.device_params[0].second;
+    device_params.tp_size     = params.tp_size_;
+    device_params.tp_rank     = params.tp_rank_;
+    device_params.device_id   = params.local_rank_;
+    device_params.master_ip   = params.nccl_ip_;
+    device_params.master_port = params.nccl_port_;
+    device_params.tokens_per_block = params.seq_size_per_block_;
+    int max_batch_size =
+        params.max_context_batch_size_ + params.max_generate_batch_size_;
+    device_params.max_batch_size =
+        std::max(1024, max_batch_size * 2);  // set static max batch size to avoid sampler reset memory
+
+    device_params.device_reserve_memory_bytes = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", getDefaultDeviceReserveMemoryBytes(params));
+    device_params.host_reserve_memory_bytes = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", (int64_t)(4L * 1024 * 1024 * 1024)); // 4GB
+    FT_LOG_INFO("Device reserve memory bytes: %ld", device_params.device_reserve_memory_bytes);
+    FT_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
+
     if (!global_params.device_params.size()) {
         FT_LOG_ERROR("No device is specified to init !");
         abort();

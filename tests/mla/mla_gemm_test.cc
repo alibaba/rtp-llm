@@ -39,14 +39,7 @@ MlaQKVGemmOP::MlaQKVGemmOP(int64_t head_num,
                            int64_t nope_head_dim,
                            int64_t rope_head_dim,
                            int64_t v_head_dim) {
-    std::string device_name   = "CUDA";
-    auto        device_params = GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}};
-
-    auto& default_device_params = device_params.device_params[0].second;
-
-    default_device_params.device_reserve_memory_bytes = 1L * 1024 * 1024 * 1024;
-    default_device_params.host_reserve_memory_bytes   = 1L * 1024 * 1024 * 1024;
-    DeviceFactory::initDevices(device_params);
+    DeviceFactory::initDevices(GptInitParameter());
     device = DeviceFactory::getDefaultDevice();
 
     attention_configs.use_mla       = true;

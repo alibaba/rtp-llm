@@ -349,7 +349,7 @@ std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInit
     if (sp_model) {
         model = model.attr("model");
     }
-     const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+    const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
     py::object                  py_layers_weights = model.attr("weight").attr("weights");
     py::object                  py_global_weights = model.attr("weight").attr("global_weights");
 

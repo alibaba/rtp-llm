@@ -18,12 +18,11 @@ namespace rtp_llm {
 
 class CacheConfigCreatorTest: public DeviceTestBase {
     void SetUp() override {
-        setenv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(20L * 1024 * 1024).c_str(), 1);
+        device_reserve_memory_size_ = 20L * 1024 * 1024;
         DeviceTestBase::SetUp();
     }
 
     void TearDown() override {
-        unsetenv("DEVICE_RESERVE_MEMORY_BYTES");
         DeviceTestBase::TearDown();
     }
 };

@@ -50,3 +50,16 @@ cc_library(
     copts = copts(),
     alwayslink = 1,
 )
+
+cc_library(
+    name = "device_py_export",
+    srcs = [
+        "DeviceExport.cc",
+    ],
+    deps = [
+        ":devices_base_impl",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+    alwayslink = 1,
+)

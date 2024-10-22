@@ -2,7 +2,7 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_envs = {
-    "TEST_USING_DEVICE": "CUDA",
+    "DEVICE_RESERVE_MEMORY_BYTES": "0",
 }
 
 cc_library(

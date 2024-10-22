@@ -9,7 +9,7 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 LinearSoftmaxHandlerImpl::LinearSoftmaxHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
-    DeviceFactory::initDevices(DeviceFactory::getDefaultGlobalDeviceParams());
+    DeviceFactory::initDevices(params);
     device_ = DeviceFactory::getDefaultDevice();
 }
 
@@ -62,7 +62,7 @@ th::Tensor LinearSoftmaxHandlerImpl::forward(th::Tensor hidden_states, th::Tenso
     printBufferData(*sliced_hidden_buffer, "sliced_hidden_buffer");
 
     // out with fp32
-    auto gemm_output = device_->gemm({*sliced_hidden_buffer, *weight_, std::nullopt, nullptr, DataType::TYPE_FP32});    
+    auto gemm_output = device_->gemm({*sliced_hidden_buffer, *weight_, std::nullopt, nullptr, DataType::TYPE_FP32});
     auto decoder_output = device_->softmax({gemm_output, std::nullopt, *bias_});
     auto output_cpu = device_->clone({*decoder_output, AllocationType::HOST});
     return Buffer2torchTensor(output_cpu);

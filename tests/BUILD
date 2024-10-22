@@ -21,6 +21,7 @@ cc_library(
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         "@flash_attention//:flash_attention2_impl",
+        "//:gpt_init_params",
     ],
     copts = cuda_copts(),
     alwayslink = True,
@@ -142,5 +143,8 @@ py_test(
     deps = [
         "//maga_transformer:torch",
     ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "0",
+    },
     exec_properties = {'gpu':'A10'},
 )

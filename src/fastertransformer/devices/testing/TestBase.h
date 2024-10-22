@@ -12,6 +12,7 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
@@ -43,16 +44,9 @@ public:
     }
 
     virtual void initTestDevices() {
-        auto device_name = getenv("TEST_USING_DEVICE");
-        auto device_params = device_name
-            ? ft::GlobalDeviceParams{{{ft::getDeviceType(device_name), ft::DeviceInitParams{0}}}}
-            : ft::DeviceFactory::getDefaultGlobalDeviceParams();
-        auto& default_device_params = device_params.device_params[0].second;
-        default_device_params.device_reserve_memory_bytes =
-            autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", device_reserve_memory_size_);
-        default_device_params.host_reserve_memory_bytes =
-            autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", host_reserve_memory_size_);
-        ft::DeviceFactory::initDevices(device_params);
+        autil::EnvUtil::setEnv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(device_reserve_memory_size_));
+        autil::EnvUtil::setEnv("HOST_RESERVE_MEMORY_BYTES", std::to_string(host_reserve_memory_size_));
+        ft::DeviceFactory::initDevices(GptInitParameter());
         device_ = ft::DeviceFactory::getDefaultDevice();
     }
 

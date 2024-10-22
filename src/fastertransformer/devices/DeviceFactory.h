@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include <unordered_map>
 #include <vector>
 
@@ -16,13 +17,13 @@ using DeviceCreatorType = std::function<DeviceBase*(const DeviceInitParams&)>;
 
 class DeviceFactory {
 public:
-    static GlobalDeviceParams getDefaultGlobalDeviceParams();
-    static void initDevices(const GlobalDeviceParams& params);
+    static void initDevices(const GptInitParameter& params);
     static DeviceBase* getDevice(DeviceType type, int device_id = 0);
     static DeviceBase* getDefaultDevice();
     static void registerDevice(DeviceType type, DeviceCreatorType creator);
 
 private:
+    static GlobalDeviceParams getDefaultGlobalDeviceParams();
     static std::unordered_map<DeviceType, DeviceCreatorType>& getRegistrationMap();
     static std::vector<DeviceBase *>& getCurrentDevices();
 };
