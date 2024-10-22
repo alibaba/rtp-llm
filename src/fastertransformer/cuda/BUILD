@@ -249,6 +249,7 @@ cc_library(
         "//src/fastertransformer/utils:utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
+        "//3rdparty/trt_beam_search:trt_beam_search_impl",
     ],
     copts = copts(),
     include_prefix = "src",
