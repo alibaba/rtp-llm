@@ -33,10 +33,6 @@ void NormalGenerateStream::updateState(const ft::BufferPtr& loss, const ft::Buff
     if (cum_log_probs) {
         device_->copy({*cum_log_probs_, *cum_log_probs});
     }
-
-    if (cum_log_probs) {
-        device_->copy({*cum_log_probs_, *cum_log_probs});
-    }
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
