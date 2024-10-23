@@ -119,8 +119,7 @@ class ModelWeightsLoader:
     def load_weights_from_scratch(self, device: str, num_process=1):
         weights = ModelWeights(self._num_layers, device, self._data_type)
         if num_process > 1:
-            ctx = multiprocessing.get_context('spawn')
-            with ctx.Pool(num_process) as pool:
+            with multiprocessing.pool.ThreadPool(num_process) as pool:
                 all_results = pool.starmap(
                     self._load_layer_weight,
                     zip(range(self._num_layers),
