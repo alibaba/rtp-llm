@@ -1,14 +1,12 @@
-#include "src/fastertransformer/devices/DeviceFactory.h"
-
-#include "torch/extension.h"
-#include <cstdio>
-#include <iostream>
-#include <memory>
+#include "src/fastertransformer/devices/DeviceExport.h"
 
 using namespace fastertransformer;
 
 namespace torch_ext {
+
+void registerDeviceOps(py::module& m) {
+    m.def("init_devices", &DeviceFactory::initDevices);
 }
 
-// static auto devices_init = torch::RegisterOperators("devices::init_devices", &DeviceFactory::initDevices);
+} // namespace torch_ext
 

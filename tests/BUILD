@@ -144,7 +144,7 @@ py_test(
         "//maga_transformer:torch",
     ],
     env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0",
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
     },
     exec_properties = {'gpu':'A10'},
 )

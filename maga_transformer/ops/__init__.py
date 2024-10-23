@@ -54,8 +54,7 @@ xft_loaded = False
 
 
 try:
-    # CUDA GPU build
-    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo
+    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo, init_devices
     from libth_transformer import MultimodalInput as MultimodalInputCpp
 except BaseException as e:
     import traceback

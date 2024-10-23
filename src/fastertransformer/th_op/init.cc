@@ -3,6 +3,7 @@
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
+#include "src/fastertransformer/devices/DeviceExport.h"
 
 using namespace fastertransformer;
 
@@ -12,6 +13,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
+    registerDeviceOps(m);
 }
 
 } // namespace torch_ext

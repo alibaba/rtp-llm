@@ -53,6 +53,9 @@ cc_library(
 
 cc_library(
     name = "device_py_export",
+    hdrs = [
+        "DeviceExport.h",
+    ],
     srcs = [
         "DeviceExport.cc",
     ],
