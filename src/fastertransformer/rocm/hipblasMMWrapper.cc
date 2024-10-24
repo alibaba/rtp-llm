@@ -107,6 +107,9 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
     const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
 
+    void* workSpace     = hipblas_workspace_;
+    int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
+
     const auto* info = hipblas_algo_map_.getAlgo(transa,
                                                  transb,
                                                  m,
@@ -124,15 +127,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                                  HIPBLAS_COMPUTE_32F,
                                                  1,
                                                  HIPBLASLT_EPILOGUE_DEFAULT);
-    static bool disable_hipblasLt = []() {
-        auto env = std::getenv("ROCM_DISABLE_HIPBLASLT");
-        return env != nullptr && std::strcmp(env, "1") == 0;
-    }();
-
-    void* workSpace     = hipblas_workspace_;
-    int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
-
-    if (info && !disable_hipblasLt) {
+    if (info) {
         ROCM_CHECK(hipblasLtMatmul(hipblaslt_handle_,
                         info->opDesc.get(),
                         alpha,
@@ -150,25 +145,64 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                         workspaceSize,
                         stream_));
     } else {
-        ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
-                                      transa,
-                                      transb,
-                                      m,
-                                      n,
-                                      k,
-                                      alpha,
-                                      A,
-                                      Atype_,
-                                      lda,
-                                      B,
-                                      Btype_,
-                                      ldb,
-                                      beta,
-                                      C,
-                                      Ctype_,
-                                      ldc,
-                                      computeType_,
-                                      HIPBLAS_GEMM_DEFAULT));
+        hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc));
+
+        hipblasLtMatmulDesc_t matmul;
+        ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, getHipDataType(computeType_)));
+        hipblasOperation_t trans_a = transa;
+        hipblasOperation_t trans_b = transb;
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+        
+        if(hipblasLtMatmul(hipblaslt_handle_,
+                        matmul,
+                        alpha,
+                        A,
+                        ADesc,
+                        B,
+                        BDesc,
+                        beta,
+                        C,
+                        CDesc,
+                        C,
+                        CDesc,
+                        NULL,
+                        workSpace,
+                        workspaceSize,
+                        stream_) != HIPBLAS_STATUS_SUCCESS)
+        {        
+            printf("[BLAS] blaslt failed, back to blas:\n");
+            printf("[BLAS] trans = %c%c, mnk = [%d,%d,%d], ld = [%d,%d,%d]\n",
+                transa == HIPBLAS_OP_N?'N':'T',transb == HIPBLAS_OP_N?'N':'T',
+                m,n,k, lda,ldb,ldc);
+            ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
+                                        transa,
+                                        transb,
+                                        m,
+                                        n,
+                                        k,
+                                        alpha,
+                                        A,
+                                        Atype_,
+                                        lda,
+                                        B,
+                                        Btype_,
+                                        ldb,
+                                        beta,
+                                        C,
+                                        Ctype_,
+                                        ldc,
+                                        computeType_,
+                                        HIPBLAS_GEMM_DEFAULT));
+        }
+
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(ADesc));
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(BDesc));
+        ROCM_CHECK(hipblasLtMatrixLayoutDestroy(CDesc));
+        ROCM_CHECK(hipblasLtMatmulDescDestroy(matmul));
     }
 }
 
@@ -200,7 +234,7 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
     const void* alpha =
         is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<const void*>(&f_alpha);
     const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
-
+    
     ROCM_CHECK(hipblasGemmStridedBatchedEx(hipblas_handle_,
                                                 transa,
                                                 transb,
