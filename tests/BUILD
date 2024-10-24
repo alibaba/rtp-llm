@@ -2,26 +2,6 @@ load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 
-cc_library(
-    name = "test_lib",
-    deps = torch_deps() + [
-        "//src/fastertransformer/cuda:allocator_cuda",
-        "//src/fastertransformer/devices:devices_base_impl",
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-        "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/models:models",
-        "@flash_attention//:flash_attention2_impl",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "@com_google_googletest//:gtest",
-    ],
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-)
-
 ################################ py test ################################
 
 cc_library(
