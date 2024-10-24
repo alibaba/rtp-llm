@@ -44,6 +44,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         return weights
     
     def _get_hf_weight_info(self):
+        inter_padding_size = self._inter_padding_size
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('model.embed_tokens.weight', identity)], identity),
             WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
@@ -62,9 +63,9 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                                       CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)],
                                       functools.partial(merge_qkv_b)),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], transpose),
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity)   
         ]
 
