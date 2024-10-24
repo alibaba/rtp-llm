@@ -127,10 +127,13 @@ class InferenceApp(object):
         @app.get("/worker_status")
         def worker_status():
             check_shutdown()
+            load_balance_version = 0
             load_balance_info = self.inference_server.get_load_balance_info()
             available_concurrency = self.inference_server._controller.get_available_concurrency()
             if int(os.environ.get('LOAD_BALANCE', 0)) and load_balance_info.step_per_minute > 0 and load_balance_info.step_latency_us > 0:
                 available_concurrency = load_balance_info.step_per_minute
+                # when use new version available_concurrency need set new load_balance_version
+                load_balance_version = 1
             return {
                 "available_concurrency": available_concurrency,
                 "available_kv_cache": load_balance_info.available_kv_cache,
@@ -138,6 +141,7 @@ class InferenceApp(object):
                 "step_latency_ms": load_balance_info.step_latency_us / 1000,
                 "step_per_minute": load_balance_info.step_per_minute,
                 "iterate_count": load_balance_info.iterate_count,
+                "version": load_balance_version,
                 "alive": True,
             }
 

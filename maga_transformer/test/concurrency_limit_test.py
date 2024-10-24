@@ -124,6 +124,7 @@ class ConcurrencyLimitTest(TestCase):
             "step_latency_ms": load_balance_info.step_latency_us / 1000,
             "step_per_minute": load_balance_info.step_per_minute,
             "iterate_count": load_balance_info.iterate_count,
+            "version": 1,
             "alive": True,
         })
 
