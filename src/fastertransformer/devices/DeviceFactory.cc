@@ -70,12 +70,14 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.max_batch_size =
         std::max(1024, max_batch_size * 2);  // set static max batch size to avoid sampler reset memory
 
-    device_params.device_reserve_memory_bytes = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0);
-    if (device_params.device_reserve_memory_bytes == 0) {
-        device_params.device_reserve_memory_bytes = getDefaultDeviceReserveMemoryBytes(params);
-    }
-    device_params.host_reserve_memory_bytes = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", (int64_t)(4L * 1024 * 1024 * 1024)); // 4GB
+    const auto device_mem_reserve_env = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0L);
+    FT_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);
+    device_params.device_reserve_memory_bytes = device_mem_reserve_env
+                                                ? device_mem_reserve_env
+                                                : getDefaultDeviceReserveMemoryBytes(params);
     FT_LOG_INFO("Device reserve memory bytes: %ld", device_params.device_reserve_memory_bytes);
+
+    device_params.host_reserve_memory_bytes = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", (int64_t)(4L * 1024 * 1024 * 1024)); // 4GB
     FT_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
 
     if (!global_params.device_params.size()) {

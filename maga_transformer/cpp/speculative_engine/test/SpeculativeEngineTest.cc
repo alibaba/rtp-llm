@@ -90,7 +90,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 96);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 95);
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
