@@ -74,9 +74,6 @@ uint32_t MoeRunnerImpl(const rocmMoeParams& params,
     auto totlaM    = params.total_rows_before_expert_host[params.num_experts - 1];
     auto dtypeSize = sizeof(InputT);
 
-    hipStream_t stream;
-    hipStreamCreate(&stream);
-
     uint32_t rslt = 0;
     // Lip: designed 2 stages,
     if (isGatedActivation(params.activation_type)) {
@@ -109,14 +106,14 @@ uint32_t MoeRunnerImpl(const rocmMoeParams& params,
                                                  params.total_rows_before_expert_host,
                                                  params.N,
                                                  params.K,
-                                                 stream});
+                                                 params.stream});
 
         if (params.isUp_RowMajor) {
             rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         } else {
             rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         }
-        hipStreamSynchronize(stream);
+        hipStreamSynchronize(params.stream);
 
         // start stage2. do "gate_O*UP_O, then GEMM with down_W"
         if (params.isDown_RowMajor) {
@@ -162,7 +159,7 @@ uint32_t MoeRunnerImpl(const rocmMoeParams& params,
             rslt = MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsDown, ActivationType::Identity,gemm_desc_workspace,gemm_kernel_args_dev);
         }
     }
-    hipStreamDestroy(stream);
+    
     return rslt;
 }
 
