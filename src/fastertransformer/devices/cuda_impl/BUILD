@@ -1,7 +1,7 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "cuda_base", "trt_plugins")
+load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins")
 
-cuda_base()
+cuda_register()
 trt_plugins()
 
 cc_library(
@@ -32,7 +32,18 @@ cc_library(
     visibility = ["//visibility:public"],
     copts = copts(),
     alwayslink = 1,
-    include_prefix = "src/fastertransformer/devices/",
+)
+cc_library(
+    name = "gpu_register",
+    srcs = glob([
+        "CudaDeviceRegister.cc",
+    ]),
+    deps = [
+        ":gpu_base",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+    alwayslink = 1,
 )
 cc_library(
     name = "cuda_impl",
@@ -49,7 +60,7 @@ cc_library(
         "CudaBeamSearchOp.cc",
     ]),
     deps = [
-        ":cuda_base",
+        ":cuda_register",
         "//src/fastertransformer/devices/torch_impl:torch_beam_search_op_impl",
     ],
     visibility = ["//visibility:public"],

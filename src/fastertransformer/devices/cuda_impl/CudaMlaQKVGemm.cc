@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/kernels/mla_kernels/mla_merge_transpose_kernel.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"

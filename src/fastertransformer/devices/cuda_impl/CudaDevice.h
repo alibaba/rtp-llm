@@ -99,18 +99,8 @@ protected:
                            const CudaGemmArguments arguments,
                            BufferPtr               output);
 
-private:
-    std::unique_ptr<IAllocator> allocator_;
-    std::unique_ptr<IAllocator> host_allocator_;
-    c10::cuda::CUDACachingAllocator::CUDAAllocator *origin_torch_cuda_allocator_;
-
+protected:
     cudaStream_t stream_;
-    cublasHandle_t cublas_handle_;
-    cublasLtHandle_t cublaslt_handle_;
-    cudaDeviceProp device_prop_;
-
-    std::mutex cublas_wrapper_mutex_;
-    std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
 
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
@@ -119,21 +109,34 @@ private:
     std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plugin_;
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
+    FMHAType fmha_type_ = FMHAType::NONE;
+    std::unique_ptr<cufmha> cufmha_runner_;
+    std::unique_ptr<cuggemm> cuggemm_runner_;
+    bool use_multi_block_mode       = false;
+
+private:
+    std::unique_ptr<IAllocator> allocator_;
+    std::unique_ptr<IAllocator> host_allocator_;
+    c10::cuda::CUDACachingAllocator::CUDAAllocator *origin_torch_cuda_allocator_;
+
+    cublasHandle_t cublas_handle_;
+    cublasLtHandle_t cublaslt_handle_;
+    cudaDeviceProp device_prop_;
+
+    std::mutex cublas_wrapper_mutex_;
+    std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
+
     NcclParam nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
-    FMHAType fmha_type_ = FMHAType::NONE;
-    std::unique_ptr<cufmha> cufmha_runner_;
-    std::unique_ptr<cuggemm> cuggemm_runner_;
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;
     bool use_trtv2_fmha_paged       = false;
     bool use_open_source_fmha       = false;
     bool use_open_source_fmha_paged = false;
-    bool use_multi_block_mode       = false;
     bool use_group_gemm             = false;
 };
 

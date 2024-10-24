@@ -5,7 +5,7 @@
 
 #define private public
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 using namespace std;
 using namespace fastertransformer;

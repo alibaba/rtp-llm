@@ -12,6 +12,7 @@ enum class DeviceType {
     Yitian = 2,
     ArmCpu = 3,
     ROCm = 4,
+    Ppu = 5,
 };
 
 struct DeviceInitParams {

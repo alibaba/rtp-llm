@@ -119,10 +119,10 @@ def trt_plugins():
         })
     )
 
-def cuda_base():
+def cuda_register():
     native.alias(
-        name = "cuda_base",
+        name = "cuda_register",
         actual = select({
-            "//conditions:default": "//src/fastertransformer/devices/cuda_impl:gpu_base",
+            "//conditions:default": "//src/fastertransformer/devices/cuda_impl:gpu_register",
         })
     )
