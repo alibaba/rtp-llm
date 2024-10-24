@@ -1,0 +1,11 @@
+syntax = "proto2";
+package demo;
+
+message Demo {
+  optional int32 int32_field = 1;
+  optional string string_field = 2;
+  repeated string repeated_string_field = 3;
+
+  optional bytes raw_string_field = 5 [ctype=RAW_STRING];
+  repeated bytes repeated_raw_string_field = 6 [ctype=RAW_STRING];
+}

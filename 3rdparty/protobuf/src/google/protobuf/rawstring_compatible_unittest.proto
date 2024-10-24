@@ -1,0 +1,41 @@
+syntax = "proto2";
+
+option cc_enable_arenas = true;
+
+message StringMessage {
+    optional string optional_string_value = 1;
+    optional bytes optional_bytes_value = 2;
+
+    required string required_string_value = 3;
+    required bytes required_bytes_value = 4;
+
+    repeated string repeated_string_value = 5;
+    repeated bytes repeated_bytes_value = 6;
+
+    oneof oneof_string {
+        string oneof_string_value = 7;
+    }
+
+    oneof oneof_bytes {
+        bytes oneof_bytes_value = 8;
+    }
+}
+
+message RawStringMessage {
+    optional string optional_string_value = 1 [ctype=RAW_STRING];
+    optional bytes optional_bytes_value = 2 [ctype=RAW_STRING];
+
+    required string required_string_value = 3 [ctype=RAW_STRING];
+    required bytes required_bytes_value = 4 [ctype=RAW_STRING];
+
+    repeated string repeated_string_value = 5 [ctype=RAW_STRING];
+    repeated bytes repeated_bytes_value = 6 [ctype=RAW_STRING];
+
+    oneof oneof_string {
+        string oneof_string_value = 7 [ctype=RAW_STRING];
+    }
+
+    oneof oneof_bytes {
+        bytes oneof_bytes_value = 8 [ctype=RAW_STRING];
+    }
+}

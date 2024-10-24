@@ -97,13 +97,9 @@ def git_deps():
         shallow_since = "1678195250 +0800",
     )
 
-    git_repository(
+    native.local_repository(
         name = "com_google_protobuf",
-        remote = "https://github.com/protocolbuffers/protobuf.git",
-        # tag = 3.7
-        commit = "a2a0afb5468dc423782344a2047abc041e75323e",
-        shallow_since = "1518192000 +0800",
-        # build_file = str(Label("//3rdparty/protobuf:protobuf.BUILD")),
+        path = "3rdparty/protobuf",
     )
 
     new_git_repository(
