@@ -177,7 +177,6 @@ void check(T result, char const* const func, const char* const file, int const l
         fflush(stdout);
         throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
                                  + file + ":" + std::to_string(line) + " \n");
-        abort();
     }
 }
 
@@ -210,8 +209,6 @@ inline void CheckError(const char* const file, int const line) {
 }
 
 #define sync_check_cuda_error() fastertransformer::syncAndCheck(__FILE__, __LINE__)
-
-#define final_check_error() CheckError(__FILE__, __LINE__)
 
 inline int get_sm() {
     static int sm = []() {
