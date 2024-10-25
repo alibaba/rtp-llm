@@ -12,7 +12,7 @@ RUN dnf install -y \
         unzip wget which findutils rsync tar \
         gcc gcc-c++ libstdc++-static gdb coreutils \
         binutils bash glibc-devel libdb glibc glibc-langpack-en bison lld \
-        emacs-nox git git-lfs nfs-utils java-11-openjdk-devel \
+        emacs-nox git git-lfs nfs-utils java-17-openjdk-devel \
         gcc-toolset-12 gcc-toolset-12-gcc-c++ libappstream-glib* \
         https://mirrors.aliyun.com/docker-ce/linux/centos/8/x86_64/stable/Packages/docker-ce-cli-26.1.3-1.el8.x86_64.rpm
 

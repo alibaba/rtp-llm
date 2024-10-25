@@ -354,7 +354,7 @@ private:
 
 FusedMHARunnerV2Sm70::FusedMHARunnerV2Sm70(
     const Data_type data_type, const int numHeads, const int headSize, const float qScaling)
-    : pimpl(new mhaImpl(data_type, numHeads, headSize, qScaling, fastertransformer::getSMVersion()))
+    : pimpl(new mhaImpl(data_type, numHeads, headSize, qScaling, fastertransformer::get_sm()))
 {
 }
 

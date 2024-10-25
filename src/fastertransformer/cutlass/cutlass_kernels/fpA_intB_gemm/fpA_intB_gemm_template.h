@@ -368,7 +368,7 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    sm_ = fastertransformer::getSMVersion();
+    sm_ = fastertransformer::get_sm();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
     gemm_lut_ = get_gemm_lut<T, WeightType>();
 }
@@ -593,7 +593,7 @@ CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getChosenConfig(const void
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
     tc::CutlassGemmConfig config;
     return config;
-  
+
 }
 
 } // namespace cutlass_kernels

@@ -326,16 +326,6 @@ inline void print_mem_usage(std::string time = "after allocation") {
     FT_LOG_INFO("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
 }
 
-inline int getSMVersion() {
-    int device{-1};
-    check_cuda_error(cudaGetDevice(&device));
-    int sm_major = 0;
-    int sm_minor = 0;
-    check_cuda_error(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device));
-    check_cuda_error(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device));
-    return sm_major * 10 + sm_minor;
-}
-
 inline int getMaxSharedMemoryPerBlock() {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));

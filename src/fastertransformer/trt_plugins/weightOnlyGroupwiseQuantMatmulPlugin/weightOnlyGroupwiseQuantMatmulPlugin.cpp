@@ -32,7 +32,7 @@ WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinf
 
 void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits)
 {
-    mArch = fastertransformer::getSMVersion();
+    mArch = fastertransformer::get_sm();
     mType = type;
     mGroupSize = group_size;
     mHasZeros = has_zeros;

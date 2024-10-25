@@ -68,7 +68,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     tc::CutlassGemmConfig int4_config = int4_runner.getChosenConfig(
         in_ptr2, w_ptr2, s_ptr2, z_ptr2, nullptr, out_ptr2, m, n, k, group_size, ws_ptr2, ws_size2, stream);
 
-    int  mArch              = fastertransformer::getSMVersion();
+    int  mArch              = fastertransformer::get_sm();
     bool mCudaKernelEnabled = tensorrt_llm::kernels::weight_only::is_supported(
         mArch, tensorrt_llm::kernels::weight_only::KernelType::FP16Int4Groupwise);
     tensorrt_llm::kernels::weight_only::KernelType mCudaKernelType =

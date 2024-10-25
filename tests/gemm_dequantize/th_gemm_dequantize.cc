@@ -211,7 +211,7 @@ Tensor fused_gemv_dq_helper(
 
     T* output_tensor_ptr = get_ptr<T>(output_tensor);
 
-    int arch = fastertransformer::getSMVersion();
+    int arch = fastertransformer::get_sm();
 
     tensorrt_llm::kernels::weight_only::KernelType type = tensorrt_llm::kernels::weight_only::KernelType::FP16Int8PerChannel;
 

@@ -213,7 +213,7 @@ CutlassGroupGemmRunner<T>::CutlassGroupGemmRunner()
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    sm_ = getSMVersion();
+    sm_ = get_sm();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }
 

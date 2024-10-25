@@ -41,7 +41,7 @@ static bool UseTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_param
         FT_LOG_INFO("TRT FMHA is disabled for by env");
         use_trt_fmha = false;
     }
-    if (!tensorrt_llm::kernels::MHARunner::fmha_supported(gpt_init_parameter.size_per_head_, fastertransformer::getSMVersion())) {
+    if (!tensorrt_llm::kernels::MHARunner::fmha_supported(gpt_init_parameter.size_per_head_, fastertransformer::get_sm())) {
         FT_LOG_INFO("TRT FMHA is disabled for by check fmha_supported");
         use_trt_fmha = false;
     }
@@ -93,7 +93,7 @@ static bool UsePagedTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_
     }
     if (gpt_init_parameter.int8_kv_cache_) {
         FT_LOG_INFO("Paged TRT FMHA is disabled for int8 kvcache");
-        use_paged_trt_fmha = false;        
+        use_paged_trt_fmha = false;
     }
     char* paged_fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
     if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {

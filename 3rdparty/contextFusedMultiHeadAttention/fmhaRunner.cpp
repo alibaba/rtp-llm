@@ -716,7 +716,7 @@ private:
 FusedMHARunnerV2::FusedMHARunnerV2(const Data_type data_type, bool const pagedKVFMHA, int const numHeads,
     int const headSize, float const qScaling, float const qkTanhScale)
     : pimpl(new mhaImpl(
-        data_type, pagedKVFMHA, numHeads, headSize, qScaling, qkTanhScale, fastertransformer::getSMVersion()))
+        data_type, pagedKVFMHA, numHeads, headSize, qScaling, qkTanhScale, fastertransformer::get_sm()))
 {
 }
 

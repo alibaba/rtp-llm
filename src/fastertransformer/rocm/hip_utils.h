@@ -232,7 +232,7 @@ inline void print_mem_usage(std::string time = "after allocation")
     printf("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
 }
 
-inline int getSMVersion()
+inline int get_sm()
 {
     int device{-1};
     ROCM_CHECK(hipGetDevice(&device));

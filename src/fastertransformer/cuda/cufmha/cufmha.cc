@@ -120,6 +120,10 @@ bool cufmha::initTrtV2FmhaAndCheckSupport() {
             mtype_ == AttentionMaskType::noMask) &&
         !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
     }
+    if (get_sm() < tensorrt_llm::kernels::kSM_80) {
+        FT_LOG_INFO("cuda sm %d < 80, not support trt v2 fmha", get_sm());
+        return false;
+    }
     trtv2_fmha_runner_.reset(
         new tensorrt_llm::kernels::FusedMHARunnerV2(
             trtDtypeConvert(dtype_), false, head_num_, size_per_head_, q_scaling_));
@@ -131,7 +135,8 @@ bool cufmha::initTrtV2FmhaAndCheckSupport() {
 }
 
 bool cufmha::initTrtV2FmhaPagedAndCheckSupport() {
-    if (get_sm() == tensorrt_llm::kernels::kSM_70) {
+    if (get_sm() < tensorrt_llm::kernels::kSM_80) {
+        FT_LOG_INFO("cuda sm %d < 80, not support trt paged fmha", get_sm());
         return false;
     }
     trtv2_paged_fmha_runner_.reset(

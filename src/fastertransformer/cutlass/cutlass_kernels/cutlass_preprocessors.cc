@@ -129,7 +129,7 @@ LayoutDetails getLayoutDetailsForArch(QuantType quant_type)
 
 LayoutDetails getLayoutDetailsForTransform(QuantType quant_type)
 {
-    const int arch = fastertransformer::getSMVersion();
+    const int arch = fastertransformer::get_sm();
     if (arch >= 70 && arch < 75)
     {
         return getLayoutDetailsForArch<cutlass::arch::Sm70>(quant_type);
@@ -545,7 +545,7 @@ void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, co
     // Works on row major data, so issue this permutation first.
     if (details.uses_imma_ldsm)
     {
-        const int arch = getSMVersion();
+        const int arch = get_sm();
         permute_B_rows_for_mixed_gemm(dst_buf.data(), src_buf.data(), shape, quant_type, arch);
         src_buf.swap(dst_buf);
     }

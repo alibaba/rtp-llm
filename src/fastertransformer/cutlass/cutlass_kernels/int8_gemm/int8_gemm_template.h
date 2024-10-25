@@ -94,7 +94,7 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     using GemmOp = typename DefaultGemmConf::Operator;
     using EpilogueCompute =
         typename cutlass::platform::conditional<cutlass::platform::is_same<T, int32_t>::value, ElementCompute, ElementOutput>::type;
-    
+
     using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric<ActivationFunctor, ElementOutput, DefaultGemmConf::EpilogueOutputOp::kCount, EpilogueCompute, EpilogueCompute, cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
 
     // only TN is supported (s8 * s8 + s32)
@@ -321,7 +321,7 @@ void dispatchGemmActivationFunc(const int8_t* A, const int8_t* B, tk::QuantMode 
             break;
         case CutlassActivationType::GELU_FAST:
             dispatchGemmToCutlass<T, arch, cutlass::epilogue::thread::GELU_taylor>(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, workspace,
-                workspaceBytes, gemmConfig, stream, occupancy);       
+                workspaceBytes, gemmConfig, stream, occupancy);
             break;
         default:
         throw std::runtime_error(
@@ -337,7 +337,7 @@ CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    mSm = ft::getSMVersion();
+    mSm = ft::get_sm();
     check_cuda_error(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
     gemm_lut_ = get_gemm_lut<uint8_t, uint8_t>();
 }
@@ -387,7 +387,7 @@ void CutlassInt8GemmRunner<T>::gemm(const void* A, const void* B, tk::QuantMode 
     const size_t workspaceBytes, cudaStream_t stream)
 {
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
-    
+
     dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
         alphaRow, reinterpret_cast<T*>(C), (T*)bias, activation_type, m, n, k, gemmConfig, workspacePtr, workspaceBytes, stream);
 }

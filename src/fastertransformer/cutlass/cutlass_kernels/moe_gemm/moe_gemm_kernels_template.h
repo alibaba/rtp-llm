@@ -374,7 +374,7 @@ MoeGemmRunner<T, WeightType, QuantOp>::MoeGemmRunner()
 {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    sm_ = ft::getSMVersion();
+    sm_ = ft::get_sm();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }
 

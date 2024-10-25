@@ -28,7 +28,7 @@ WeightOnlyQuantMatmulPlugin::WeightOnlyQuantMatmulPlugin(nvinfer1::DataType type
 
 void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId weightTypeId)
 {
-    mArch = fastertransformer::getSMVersion();
+    mArch = fastertransformer::get_sm();
     mType = type;
     mWeightTypeId = weightTypeId;
     if (mWeightTypeId == WeightTypeId::INT8)
