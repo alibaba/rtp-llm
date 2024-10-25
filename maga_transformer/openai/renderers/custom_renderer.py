@@ -18,7 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     RoleEnum, RendererInfo, PromptTokensDetails
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
-from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput
+from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 
 @dataclass
 class StreamResponseObject:
@@ -40,7 +40,7 @@ class RenderedInputs:
     multimodal_inputs: List[MultimodalInput] = []
     rendered_prompt: str = ""
 
-    def __init__(self, input_ids: List[int], rendered_prompt: str = "", input_urls: List[str] = [], input_urls_type: List[MMUrlType] = []):
+    def __init__(self, input_ids: List[int], rendered_prompt: str = "", input_urls: List[str] = [], input_urls_type: List[MMUrlType] = [], preprocess_configs: List[MMPreprocessConfig] = []):
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
         self.multimodal_inputs = []
@@ -48,8 +48,14 @@ class RenderedInputs:
             input_urls_type = [MMUrlType.DEFAULT] * len(input_urls)
         elif len(input_urls_type) != len(input_urls):
             raise Exception(f"the number of multimodal input types must match url, now types {len(input_urls_type)} urls {len(input_urls)}")
-        for url, type in zip(input_urls, input_urls_type):
-            self.multimodal_inputs.append(MultimodalInput(url, type))
+        
+        if len(preprocess_configs) == 0:
+            preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
+        elif len(preprocess_configs) != len(preprocess_configs):
+            raise Exception(f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}")
+        
+        for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
+            self.multimodal_inputs.append(MultimodalInput(url, type, config))
 
 class CustomChatRenderer():
     def __init__(self,

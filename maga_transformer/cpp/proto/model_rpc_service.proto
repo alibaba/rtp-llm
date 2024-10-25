@@ -56,9 +56,18 @@ message GenerateConfigPB {
     bool force_disable_sp_run = 26;
 }
 
+message MMPreprocessConfigPB {
+    int32 width = 1;
+    int32 height = 2;
+    int32 min_pixels = 3;
+    int32 max_pixels = 4;
+    int32 fps = 5;
+}
+
 message MulitmodalInputPB {
     string multimodal_url = 1;
     int32 multimodal_type = 2;
+    MMPreprocessConfigPB mm_preprocess_config = 3; 
 }
 
 message GenerateInputPB {

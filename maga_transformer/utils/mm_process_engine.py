@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
                                                     get_bytes_io_from_url,
-                                                    MMUrlType)
+                                                    MMUrlType,
+                                                    MMPreprocessConfig)
 
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []
@@ -22,16 +23,20 @@ class MMProcessEngine:
     def __init__(self, model):
         self.model = model
 
-    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None):
+    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None, preprocess_configs: Optional[List[List[int]]] = None):
         if types is None:
             types = [MMUrlType.DEFAULT] * len(urls)
+        if preprocess_configs is None:
+            configs = [MMPreprocessConfig()] * len(urls)
+        else:
+            configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
         if self.model.config.mm_position_ids_style == 0:
             res = []
             for index in range(len(urls)):
                 if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), index=index)
+                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index], index=index)
                 else:
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type))
+                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index])
                 if len(embedding.shape) > 2:
                     res.extend(list(embedding))
                 else:
@@ -41,7 +46,7 @@ class MMProcessEngine:
             res = []
             pos_id = []
             for index in range(len(urls)):
-                embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type))
+                embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index])
                 if len(embedding_res[0].shape) > 2:
                     res.extend(list(embedding_res[0]))
                 else:

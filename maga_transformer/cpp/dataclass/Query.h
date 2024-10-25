@@ -15,11 +15,23 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+struct MMPreprocessConfig {
+    int32_t width     = -1;
+    int32_t height    = -1;
+    int32_t min_pixels = -1;
+    int32_t max_pixels = -1;
+    int32_t fps       = -1;
+    MMPreprocessConfig(int32_t width = -1, int32_t height = -1, int32_t min_pixels = -1, int32_t max_pixels = -1, int32_t fps = -1): 
+        width(width), height(height), min_pixels(min_pixels), max_pixels(max_pixels), fps(fps) {}
+};
+
 struct MultimodalInput {
 // public:
     std::string url;
     int32_t     mm_type = 0;
-    MultimodalInput(std::string url, int32_t mm_type = 0): url(url), mm_type(mm_type) {}
+    MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
+    MultimodalInput(std::string url, int32_t mm_type = 0, int32_t width = -1, int32_t height = -1, int32_t min_pixels = -1, int32_t max_pixels = -1, int32_t fps = -1): 
+        url(url), mm_type(mm_type), mm_preprocess_config(MMPreprocessConfig(width, height, min_pixels, max_pixels, fps)) {}
 };
 
 class MultimodalFeature {

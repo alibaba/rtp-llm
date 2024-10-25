@@ -18,7 +18,7 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import MMUrlType, MMPreprocessConfig
 
 
 DEFAULT_CHAT_API_TEMPLATE = (
@@ -35,6 +35,7 @@ class PromptWithMMInput:
     prompt: str
     urls: List[str]
     mm_types: List[MMUrlType] = field(default_factory=list)
+    preprocess_configs: List[MMPreprocessConfig] = field(default_factory=list)
 
 # This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.

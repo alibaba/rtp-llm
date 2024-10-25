@@ -12,6 +12,7 @@ from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import MulitmodalInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputsPB
@@ -79,6 +80,12 @@ def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB):
         mm_input_pb = MulitmodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
+        mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
+        mm_preprocess_config_pb.width = mm_input.config.width
+        mm_preprocess_config_pb.height = mm_input.config.height
+        mm_preprocess_config_pb.min_pixels = mm_input.config.min_pixels
+        mm_preprocess_config_pb.max_pixels = mm_input.config.max_pixels
+        mm_preprocess_config_pb.fps = mm_input.config.fps
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 def trans_tensor(t: TensorPB):

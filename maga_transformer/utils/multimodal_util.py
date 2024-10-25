@@ -7,6 +7,7 @@ from enum import IntEnum
 from io import BytesIO
 from typing import Any, Callable, Optional
 from PIL import Image
+from dataclasses import dataclass, field
 
 from maga_transformer.utils.lru_dict import LruDict
 from maga_transformer.utils.oss_util import get_bytes_io_from_oss_path
@@ -25,14 +26,23 @@ class MMUrlType(IntEnum):
     VIDEO = 2
     AUDIO = 3
 
+@dataclass
+class MMPreprocessConfig:
+    width: int = -1
+    height: int = -1
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+
 class MultimodalInput:
     url: str
     mm_type: MMUrlType
+    config: MMPreprocessConfig
 
-    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT):
+    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT, config: MMPreprocessConfig=MMPreprocessConfig()):
         self.url = url
         self.mm_type = mm_type
-
+        self.config = config
 
 def get_bytes_io_from_url(url: str):
     cached_res = url_data_cache_.check_cache(url)

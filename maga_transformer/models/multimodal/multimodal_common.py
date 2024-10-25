@@ -45,7 +45,7 @@ class MultiModalEmbeddingInterface:
         if cached_res is None:
             try:
                 bytes_io = get_bytes_io_from_url(url)
-                mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type)
+                mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
             except Exception as e:
                 raise Exception(f"multimodal process for {url} error, exception {e}")
             with mm_lock:

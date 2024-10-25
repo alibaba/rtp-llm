@@ -99,29 +99,36 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
                 except Exception as e:
                     raise Exception(str(e))
         elif mm_type == MMUrlType.IMAGE:
-            return self.load_image(data)
+            return self.load_image(data, **kwargs)
         elif mm_type == MMUrlType.VIDEO:
-            return self.load_video(data)
+            return self.load_video(data, **kwargs)
         else:
             raise Exception("unknown mm url type")
     
-    def load_image(self, data, **kwargs):
+    def load_image(self, data, configs, **kwargs):
         image = Image.open(data).convert("RGB")
-        width, height = image.size
-        min_pixels = MIN_PIXELS
-        max_pixels = MAX_PIXELS
         size_factor = IMAGE_FACTOR
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
+        if configs.height != -1 and configs.width != -1:
+            resized_height, resized_width = smart_resize(
+                configs.height,
+                configs.width,
+                factor=size_factor,
+            )
+        else:
+            width, height = image.size
+            min_pixels = MIN_PIXELS if configs.min_pixels == -1 else configs.min_pixels
+            max_pixels = MAX_PIXELS if configs.max_pixels == -1 else configs.max_pixels
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=size_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
         image = image.resize((resized_width, resized_height))
         return image
         
-    def load_video(self, data, **kwargs):
+    def load_video(self, data, configs, **kwargs):
         with tempfile.NamedTemporaryFile() as tmpfile:
             tmpfile.write(data.getbuffer())
             tmpfile_name = tmpfile.name
@@ -133,7 +140,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
                 output_format="TCHW",
             )
 
-        fps = FPS
+        fps = FPS if configs.fps == -1 else configs.fps
         size_factor = FRAME_FACTOR
         nframes = video.size(0) / info["video_fps"] * fps
         nframes = round_by_factor(nframes, size_factor)
@@ -148,17 +155,24 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         height, width = video.shape[2:]
         video = video[idx]
 
-        min_pixels = VIDEO_MIN_PIXELS
-        total_pixels = VIDEO_TOTAL_PIXELS
-        max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / nframes * size_factor), min_pixels * 1.05)
+        if configs.height != -1 and configs.width:
+            resized_height, resized_width = smart_resize(
+                configs.height,
+                configs.width,
+                factor=size_factor,
+            )
+        else:
+            min_pixels = VIDEO_MIN_PIXELS if configs.min_pixels == -1 else configs.min_pixels
+            total_pixels = VIDEO_TOTAL_PIXELS if configs.max_pixels == -1 else configs.max_pixels
+            max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / nframes * size_factor), min_pixels * 1.05)
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=size_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
 
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
         video = transforms.functional.resize(
             video,
             [resized_height, resized_width],

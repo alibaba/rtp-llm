@@ -65,13 +65,19 @@ private:
         } else if (!mm_process_engine_.is_none()) {
             std::vector<std::string> urls;
             std::vector<int32_t> types;
+            std::vector<std::vector<int32_t>> mm_preprocess_configs;
             for (auto& mm_input: mm_inputs) {
                 urls.push_back(mm_input.url);
                 types.push_back(mm_input.mm_type);
+                mm_preprocess_configs.push_back({mm_input.mm_preprocess_config.width,
+                                                 mm_input.mm_preprocess_config.height,
+                                                 mm_input.mm_preprocess_config.min_pixels,
+                                                 mm_input.mm_preprocess_config.max_pixels,
+                                                 mm_input.mm_preprocess_config.fps});
             }
             try {
                 py::gil_scoped_acquire acquire;
-                auto res = mm_process_engine_.attr("submit")(urls, types);
+                auto res = mm_process_engine_.attr("submit")(urls, types, mm_preprocess_configs);
                 auto mm_embedding_vec = ft::convertPyObjectToVec(res.attr("embeddings"));
 
                 MMEmbeddingRes mm_embedding_res;
