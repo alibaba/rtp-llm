@@ -29,15 +29,17 @@ import torchvision.transforms as T
 
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.flash_attn_utils import can_use_flash_attn
 
+has_flash_attn = False
 try:
-    from flash_attn.bert_padding import pad_input, unpad_input
-    from flash_attn.flash_attn_interface import \
-        flash_attn_varlen_qkvpacked_func
-    has_flash_attn = True
-except:
-    logging.info('FlashAttention2 is not installed.')
-    has_flash_attn = False
+    if can_use_flash_attn():
+        from flash_attn.bert_padding import pad_input, unpad_input
+        from flash_attn.flash_attn_interface import \
+            flash_attn_varlen_qkvpacked_func
+        has_flash_attn = True
+except Exception as e:
+    logging.info(f'initialize flash_attn failed, exception {e}, using default attention in internvl vit')
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)

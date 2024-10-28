@@ -10,22 +10,15 @@ import torch.utils.checkpoint
 from torch.nn import CrossEntropyLoss, LayerNorm
 
 from maga_transformer.models.qwen2_vl.activations import ACT2FN
+from maga_transformer.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"
 try:
-    from flash_attn import flash_attn_varlen_func
-    import pynvml
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-    name = pynvml.nvmlDeviceGetName(handle)
-    pynvml.nvmlShutdown()
-    if not any(gpu in name for gpu in ['V100', 'T4', 'RTX 6000']):
+    if can_use_flash_attn():
+        from flash_attn import flash_attn_varlen_func
         default_attn_impl = "flash_attention_2"
-    else:
-        raise Exception(f"cannot use flash_attn in {name}")
-    logging.info(f'initialize flash_attn success, using flash_attn in qwen2 vl vit')
 except Exception as e:
-    logging.info(f'initialize flash_attn failed, exception {e}')
+    logging.info(f'initialize flash_attn failed, exception {e}, using sdpa attention in qwen2 vl vit')
 
 class PatchEmbed(nn.Module):
     def __init__(
