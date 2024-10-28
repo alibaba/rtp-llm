@@ -5,6 +5,7 @@ from typing import Optional, Union, Dict, Any
 class WEIGHT_TYPE(Enum):
     INT4 = ["int4"]
     INT8 = ["int8"]
+    FP8 = ["fp8", "fp8_e4m3"]
     FP16 = ["fp16", "float16"]
     FP32 = ["fp32", "float32"]
     BF16 = ["bf16", "bfloat16","bp16"]

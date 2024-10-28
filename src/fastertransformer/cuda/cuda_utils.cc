@@ -15,7 +15,6 @@
  */
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "cuda_fp8_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -723,6 +722,9 @@ DECLARE_PRINT_TYPE(int8_t);
 DECLARE_PRINT_TYPE(uint8_t);
 DECLARE_PRINT_TYPE(int);
 DECLARE_PRINT_TYPE(int64_t);
+#ifdef ENABLE_FP8
+DECLARE_PRINT_TYPE(__nv_fp8_e4m3);
+#endif
 
 
 std::string getDriverVersion() {

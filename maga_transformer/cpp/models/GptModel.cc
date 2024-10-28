@@ -212,7 +212,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto& embedding_table = weights_.embedding->kernel;
 
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
-    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
+    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;    
 
     const BufferPtr text_tokens_mask = inputs.multimodal_features ?
         device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) : nullptr;
@@ -248,16 +248,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     }
 
     // TODO: fix me
-    ft::QScheme qscheme = QScheme::NoQuantize;
-    if (weights_.layers[0].post_layernorm && weights_.layers[0].post_layernorm->static_scale != nullptr) {
-        qscheme = QScheme::Qint8PerTensor;
-    } else if (weights_.layers[0].self_attention_weights.smoother_weight != nullptr) {
-        qscheme = QScheme::Qint8PerToken;
-    }
-
-    // pre layernorm
+    ft::QScheme act_qscheme = description_.act_qscheme;
+   
+    // pre layernorm    
     BufferPtr pre_decoder_residual = nullptr;
-    if (qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
+    if (act_qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
         pre_decoder_residual = device_->allocateBufferLike(*hidden);
     }
     printBufferData(*hidden, "before decoder layernorm hidden");
@@ -273,7 +268,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                 true,
                                                                 pre_decoder_residual != nullptr,
                                                                 norm_type,
-                                                                qscheme));
+                                                                act_qscheme));
         hidden = std::move(decoder_input.output);
     }
 
@@ -315,7 +310,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                             true,
                                                                             false,
                                                                             norm_type,
-                                                                            qscheme));
+                                                                            act_qscheme));
             hidden = std::move(pre_layernorm_output.output);
         }
 
@@ -342,7 +337,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             attention_common_inputs,
             device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             {description_.layernorm_eps, description_.norm_type},
-            qscheme
+            act_qscheme
         }));
         auto attn_hidden = std::move(attn_output.hidden_states);
         if (device_props_.tp_size > 1) {
@@ -369,7 +364,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                          false,
                                                          description_.post_layernorm,
                                                          norm_type,
-                                                         qscheme);
+                                                         act_qscheme);
 
             auto post_layernorm_output = device_->layernorm(post_layernorm_params);
             hidden = std::move(post_layernorm_output.output);
@@ -396,7 +391,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                          false,
                                                          description_.post_layernorm,
                                                          norm_type,
-                                                         qscheme);
+                                                         act_qscheme);
 
             auto post_layernorm_output = device_->layernorm(post_layernorm_params);
             hidden = std::move(post_layernorm_output.output);
@@ -413,7 +408,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                                 layer.ffn_weights,
                                                 device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-                                                qscheme,
+                                                act_qscheme,
                                                 std::move(ffn_output_buf)});
         if (inputs.lora_model_input) {
             ffn_layer_params.lora_input =  inputs.lora_model_input->getFfnLayerLoraInput(i);
@@ -441,7 +436,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                        true,
                                                                        description_.post_layernorm,
                                                                        norm_type,
-                                                                       ((i == layer_num - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: qscheme));
+                                                                       ((i == layer_num - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: act_qscheme));
         hidden = std::move(ffn_layernorm_output.output);
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }

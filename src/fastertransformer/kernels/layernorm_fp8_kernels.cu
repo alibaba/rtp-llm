@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/kernels/layernorm_fp8_kernels.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include <cuda_fp16.h>

@@ -7,7 +7,8 @@ namespace fastertransformer {
 enum QScheme : size_t {
     NoQuantize = 0,
     Qint8PerToken,
-    Qint8PerTensor
+    Qint8PerTensor,
+    Qfp8PerTensor
 };
 
 class QBuffer final : public Buffer {
@@ -59,6 +60,8 @@ inline DataType QBufferDtype2BufferDtype(DataType dtype) {
         return DataType::TYPE_INT8;
     } else if (dtype == TYPE_QINT4X2 || dtype == DataType::TYPE_INT4X2) {
         return DataType::TYPE_INT4X2;
+    } else if (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_QFP8_E4M3) {
+        return DataType::TYPE_FP8_E4M3;
     } else {
         return DataType::TYPE_INVALID;
     }
@@ -69,6 +72,8 @@ inline DataType BufferDtype2QBufferDtype(DataType dtype) {
         return DataType::TYPE_QINT8;
     } else if (dtype == TYPE_QINT4X2 || dtype == DataType::TYPE_INT4X2) {
         return DataType::TYPE_QINT4X2;
+    } else if (dtype == DataType::TYPE_QFP8_E4M3 || dtype == DataType::TYPE_FP8_E4M3) {
+        return DataType::TYPE_QFP8_E4M3;
     } else {
         return DataType::TYPE_INVALID;
     }

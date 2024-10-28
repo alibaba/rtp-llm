@@ -7,7 +7,6 @@
 using namespace std;
 
 namespace fastertransformer {
-
 AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
     const auto &input = params.input;
     const auto &input_lengths = params.common.input_lengths;
@@ -71,17 +70,25 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
-    auto dtype = (input.isQBuffer() ? qkv->type() : input.type());
+    auto qscheme = params.qscheme;
+    auto dtype = (input.isQBuffer() && qscheme != QScheme::Qfp8PerTensor ? qkv->type() : input.type());
     auto output = params.output ? params.output
                 : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
-
+    BufferPtr qkv_output = nullptr;
+    if (qscheme == QScheme::Qfp8PerTensor) {
+      auto scales = params.weights.static_quant_weight->kernel;
+      qkv_output = BufferPtr(new QBuffer(allocateBuffer({DataType::TYPE_FP8_E4M3, {h_token_num, qkv_hidden_size}}, {"qkv_output"}),
+			    BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
+			    BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
+    } else {
 #if defined(__aarch64__)
     // Arm attention op only support fp32 data type
-    auto qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+    qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
 #else
-    auto qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
-#endif 
+    qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+#endif     
+    }
 
     auto kv_cache_offset = layer_kv_cache ? layer_kv_cache->kv_cache_offset : nullptr;
     if (generate_batch_size) {
@@ -90,7 +97,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(0, generate_batch_size);
         }
-        decoderSelfAttention({params.layer_id, generate_qkv, generate_output, params.common, params.weights, params.configs});
+        decoderSelfAttention({params.layer_id, generate_qkv, generate_output, params.common, params.weights, params.configs, params.qscheme});
     }
     if (context_batch_size) {
         auto context_qkv = qkv->view(generate_batch_size, context_token_num);
@@ -98,11 +105,11 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(generate_batch_size, context_batch_size);
         }
-        contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs});
+        contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs, params.qscheme});
     }
     printBufferData(*qkv_output, "qkv_output");
 
-    if(params.qscheme != QScheme::NoQuantize) {
+    if(params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTensor) {
         OptionalConstBufferRef smoother_weight =
             params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
                                              std::nullopt;
@@ -120,10 +127,10 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             params.weights.static_scale_reciprocal_weight ?
                 (OptionalConstBufferRef) * (params.weights.static_scale_reciprocal_weight->kernel) :
                 std::nullopt;
-
+        auto quant_data_type = params.qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
         auto quant_params = QuantizeParams(
             *qkv_output,
-            DataType::TYPE_QINT8,
+            quant_data_type,
             1,
             params.qscheme,
             smoother_weight,
@@ -132,6 +139,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             static_scale_reciprocal_weight);
 
         BufferPtr quantized_attention_output = quantize(quant_params);
+
 
         auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
@@ -144,7 +152,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 #endif
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
-
     return {std::move(output)};
 }
 

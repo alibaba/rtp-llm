@@ -26,7 +26,7 @@ public:
 
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;
-    config.int8_kv_cache = true;
+    config.kv_cache_data_type = DataType::TYPE_INT8;
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
 

@@ -12,6 +12,9 @@ tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
 #ifdef ENABLE_BF16
         case DataType::TYPE_BF16: return tensorrt_llm::kernels::DATA_TYPE_BF16;
 #endif
+#ifdef ENABLE_FP8
+    case DataType::TYPE_FP8_E4M3: return tensorrt_llm::kernels::DATA_TYPE_E4M3;
+ #endif
         default: throw std::runtime_error("not support dtype");
     }
 
@@ -216,6 +219,7 @@ void cufmha::runTrtV2Fmha(void* input,
                           void* cu_seqlens,
                           void* output,
                           uint32_t* tile_counter_ptr,
+                          float* attention_output_orig_quant_scale,
                           size_t batch_size,
                           size_t seq_len,
                           size_t token_num,
@@ -247,7 +251,7 @@ void cufmha::runTrtV2Fmha(void* input,
                             cu_seqlens,
                             cu_seqlens,
                             tile_counter_ptr,
-                            nullptr,
+                            attention_output_orig_quant_scale,
                             output,
                             stream_);
 

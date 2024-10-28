@@ -52,8 +52,12 @@ private:
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
+    void checkSupportTrtFp8FMHA();
+    bool useFp8Fmha(const DevicePrepParams& params) const;
     void initMoeRunner(const DataType compute_type, const DataType weights_type);
     void checkUseGroupGemm();
+    template<typename QuantType>
+    LayernormOutput _layernorm(const LayernormParams& params);
 
 public:
     cudaStream_t getStream() {return stream_;}
@@ -137,12 +141,16 @@ private:
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
+protected:
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;
     bool use_trtv2_fmha_paged       = false;
     bool use_open_source_fmha       = false;
     bool use_open_source_fmha_paged = false;
     bool use_group_gemm             = false;
+    bool support_trt_fp8_fmha       = false;
+    bool use_fp8_fmha               = false;
+
 };
 
 } // namespace fastertransformer

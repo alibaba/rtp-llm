@@ -46,6 +46,7 @@ enum DataType : std::uint8_t {
     TYPE_QINT8     = 18,
     TYPE_INT4X2    = 19,
     TYPE_QINT4X2   = 20,
+    TYPE_QFP8_E4M3 = 21,
 };
 
 inline DataType getDataType(const std::string& type_str) {
@@ -56,6 +57,10 @@ inline DataType getDataType(const std::string& type_str) {
         data_type = TYPE_BF16;
     } else if (type_str == "fp32") {
         data_type = TYPE_FP32;
+    } else if (type_str == "int8") {
+        data_type = TYPE_INT8;
+    } else if (type_str == "fp8") {
+        data_type = TYPE_FP8_E4M3;
     } else {
         throw std::runtime_error("wrong data type str " + type_str);
     }

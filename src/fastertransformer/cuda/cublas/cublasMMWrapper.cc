@@ -75,23 +75,43 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            const int         ldc,
                            float             f_alpha,
                            float             f_beta) {
+    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta);                            
+}
+
+void cublasMMWrapper::Gemm(cublasOperation_t transa,
+                           cublasOperation_t transb,
+                           const int         m,
+                           const int         n,
+                           const int         k,
+                           const void*       A,
+                           cudaDataType_t    Atype,
+                           const int         lda,
+                           const void*       B,
+                           cudaDataType_t    Btype,
+                           const int         ldb,
+                           void*             C,
+                           cudaDataType_t    Ctype,
+                           const int         ldc,
+                           cudaDataType_t    computeType,
+                           float             f_alpha,
+                           float             f_beta) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     half h_alpha = (half)(f_alpha);
     half h_beta  = (half)(f_beta);
 
     mu_->lock();
     // TODO: default cublas libs
-    int  is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
-    bool using_cublasLt      = (Atype_ == CUDA_R_16F) ? true : false;
+    int  is_fp16_computeType = computeType == CUDA_R_16F ? 1 : 0;
+    bool using_cublasLt      = (Atype == CUDA_R_16F || Atype == CUDA_R_8F_E4M3) ? true : false;
     int  batch_count         = 1;
     // fp32 use cublas as default
     // fp16 use cublasLt as default
     const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
     const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
 
-    int findAlgo = cublas_algo_map_->isExist(batch_count, m, n, k, getCublasDataType(Atype_));
+    int findAlgo = cublas_algo_map_->isExist(batch_count, m, n, k, getCublasDataType(Atype));
 
-    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype_));
+    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype));
     if (findAlgo) {
         if (info.stages != -1) {
             using_cublasLt = true;
@@ -102,7 +122,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
     if (using_cublasLt) {
         cublasLtMatmulDesc_t   operationDesc = NULL;
-        cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
+        cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL, Ddesc = NULL;
         cudaDataType_t         scaleType;
 #if (CUDART_VERSION >= 11000)
         cublasComputeType_t computeType;
@@ -128,9 +148,10 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
         // --------------------------------------
         // Create descriptors for the original matrices
-        cublasLtMatrixLayoutCreate(&Adesc, Atype_, transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda);
-        cublasLtMatrixLayoutCreate(&Bdesc, Btype_, transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb);
-        cublasLtMatrixLayoutCreate(&Cdesc, Ctype_, m, n, ldc);
+        cublasLtMatrixLayoutCreate(&Adesc, Atype, transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda);
+        cublasLtMatrixLayoutCreate(&Bdesc, Btype, transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb);
+        cublasLtMatrixLayoutCreate(&Cdesc, Ctype, m, n, ldc);
+        cublasLtMatrixLayoutCreate(&Ddesc, Btype, m, n, ldc);
 #if (CUDART_VERSION >= 11000)
         cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
 #else
@@ -148,7 +169,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                 findAlgo = 0;
             } else {
                 cublasLtMatmulAlgoInit(
-                    cublaslt_handle_, computeType, scaleType, Atype_, Btype_, Ctype_, Ctype_, info.algoId, &algo);
+                    cublaslt_handle_, computeType, scaleType, Atype, Btype, Ctype, Ctype, info.algoId, &algo);
                 cublasLtMatmulAlgoConfigSetAttribute(
                     &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(info.customOption), sizeof(info.customOption));
                 cublasLtMatmulAlgoConfigSetAttribute(
@@ -185,6 +206,19 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
             }
         }
 
+        int returnedResults                             = 0;
+        cublasLtMatmulHeuristicResult_t heuristicResult = {};
+        cublasLtMatmulPreference_t preference;
+        cublasLtMatmulPreferenceCreate(&preference);
+        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize));
+
+        // we just need the best available heuristic to try and run matmul. There is no guarantee this will work, e.g. if A
+        // is badly aligned, you can request more (e.g. 32) algos and try to run them one by one until something works
+        cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference, 1, &heuristicResult, &returnedResults);
+        // if (returnedResults == 0) {
+        //     check_cuda_error(CUBLAS_STATUS_NOT_SUPPORTED);
+        // }
+
         cublasLtMatmul(cublaslt_handle_,
                        operationDesc,
                        alpha,
@@ -217,21 +251,22 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                                       k,
                                       alpha,
                                       A,
-                                      Atype_,
+                                      Atype,
                                       lda,
                                       B,
-                                      Btype_,
+                                      Btype,
                                       ldb,
                                       beta,
                                       C,
-                                      Ctype_,
+                                      Ctype,
                                       ldc,
-                                      computeType_,
+                                      computeType,
                                       static_cast<cublasGemmAlgo_t>(cublasAlgo)));
         sync_check_cuda_error();
     }
-    mu_->unlock();
+    mu_->unlock();    
 }
+
 
 void cublasMMWrapper::setFP32GemmConfig() {
     Atype_       = CUDA_R_32F;
@@ -254,6 +289,12 @@ void cublasMMWrapper::setBF16GemmConfig() {
     computeType_ = CUDA_R_32F;
 }
 
+#ifdef ENABLE_FP8
+void cublasMMWrapper::setFP8GemmConfig(cudaDataType_t outputType)
+{
+    setGemmConfig(CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, outputType, CUDA_R_32F);
+}
+#endif
 void cublasMMWrapper::setGemmConfig(cudaDataType_t aType,
                                     cudaDataType_t bType,
                                     cudaDataType_t cType,

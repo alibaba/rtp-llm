@@ -1,5 +1,5 @@
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/l1norm_kernels.h"
 
 namespace fastertransformer
@@ -61,7 +61,7 @@ __global__ void generall1Norm(T* output, const T* input, const float eps, int to
 }
 
 template <typename T>
-void dispatch_l1norm_type_square_method(T* output, const T* input, const float eps, int tokens, int hidden_dim, 
+void dispatch_l1norm_type_square_method(T* output, const T* input, const float eps, int tokens, int hidden_dim,
     const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream)
 {
     if (shmem_size >= (48 << 10))
@@ -92,7 +92,7 @@ void invokeGeneralL1Norm(T* out, const T* input, const float eps, const int toke
     if (use_vec_type)
     {
         using Tp = typename packed_as<T, vec_size>::type;
-        dispatch_l1norm_type_square_method(reinterpret_cast<Tp*>(out), reinterpret_cast<const Tp*>(input), eps, tokens, 
+        dispatch_l1norm_type_square_method(reinterpret_cast<Tp*>(out), reinterpret_cast<const Tp*>(input), eps, tokens,
             hidden_dim, grid, block, shmem_size, stream);
     }
     else

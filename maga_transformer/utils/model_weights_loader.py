@@ -281,7 +281,7 @@ class ModelWeightsLoader:
         load_weight(W.sq_quant_scales, torch.float32)
         if self._weights_info._quant_algo.isOmniQuant():
             load_weight(W.sq_quant_shifts, torch.float32)
-        if self._weights_info._quant_algo.isPerTensorQuant():
+        elif self._weights_info._quant_algo.isPerTensorQuant():            
             load_weight(W.static_quant_scales, torch.float32)
         return results
 
@@ -342,7 +342,7 @@ class ModelWeightsLoader:
 
     def _is_quant_weight(self, w):
         quant_algo = self._weights_info._quant_algo
-        if quant_algo.isWeightOnlyPerCol() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
+        if quant_algo.isWeightOnlyPerCol() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant() or quant_algo.isFp8():
             return w.name in W.quant_w
         if quant_algo.isGroupwise():
             return w.name in W.groupwise_quant_params or w.name in W.quant_w
@@ -378,7 +378,7 @@ class ModelWeightsLoader:
         quant_algo = self._weights_info._quant_algo
         if quant_algo.isGroupwise():
             results.extend(self._load_groupwise_layer_weight(layer_weights, layer_id=layer_id, device=device))
-        elif quant_algo.isSmoothQuant() or quant_algo.isOmniQuant() or quant_algo.isPerTensorQuant():
+        elif quant_algo.isSmoothQuant() or quant_algo.isOmniQuant() or quant_algo.isPerTensorQuant() or quant_algo.isFp8():
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif quant_algo.isWeightOnlyPerCol():
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))

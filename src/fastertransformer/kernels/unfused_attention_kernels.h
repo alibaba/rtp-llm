@@ -58,12 +58,6 @@ struct MaskedSoftmaxParam {
     const float* linear_bias_slopes = nullptr;  // (head_num,), optional
 };
 
-enum class KvCacheDataType : int8_t {
-    BASE = 0,
-    INT8 = 1,
-    FP8  = 2
-};
-
 template<typename T, typename T_IN>
 void invokeMaskedSoftmax(MaskedSoftmaxParam<T, T_IN>& param, cudaStream_t stream);
 
@@ -139,6 +133,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     T*                               v_buf,
                                     PrefixPromptBatchWeightsParam*   param,
                                     T*                               QKV,
+                                    void*                            QuantizedQKV,
                                     const int*                       position_ids,
                                     const T*                         qkv_bias,
                                     const int*                       padding_offset,

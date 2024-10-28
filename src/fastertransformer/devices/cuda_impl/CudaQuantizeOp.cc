@@ -1,10 +1,13 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
+
 
 using namespace std;
 
 namespace trt = tensorrt_llm::kernels::cutlass_kernels;
+namespace trt_common = tensorrt_llm::common;
 
 namespace fastertransformer {
 
@@ -96,7 +99,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
             scales = allocateBuffer(
                 {DataType::TYPE_FP32, {params.input.shape()[0]}, getMemAllocationType(params.input.where())},
                 {"scales"});
-        } else if (params.qscheme == QScheme::Qint8PerTensor) {
+        } else if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qfp8PerTensor) {
             FT_CHECK_WITH_INFO(params.static_scale_reciprocal.has_value(), "static_scale_reciprocal should not be nullptr in Qint8PerTensor");
             scales = BufferPtr(new Buffer(params.static_scale_reciprocal.value().get().where(),
                                       params.static_scale_reciprocal.value().get().type(),
@@ -106,7 +109,9 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
             FT_CHECK_WITH_INFO(false, "unknown qscheme %d", int(params.qscheme));
         }
 
-        auto kernel = allocateBuffer({DataType::TYPE_INT8,
+        DataType out_data_type = params.qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+
+        auto kernel = allocateBuffer({out_data_type,
                                     params.input.shape(),
                                     getMemAllocationType(params.input.where())},
                                     {"kernel"});
@@ -129,12 +134,50 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                             params.static_scale.value().get().data<float>(),
                                             stream_,
                                             -1);
-        } else {
+        } 
+#ifdef ENABLE_FP8
+        else if (params.qscheme == QScheme::Qfp8PerTensor) {
+            switch (params.input.type()) {
+                    case DataType::TYPE_FP32:
+		      trt_common::invokeQuantizeMatrix( kernel->data<__nv_fp8_e4m3>(),
+						params.static_scale.value().get().data<float>(),
+						params.input.data<float>(),
+						params.input.size(),
+						params.input.shape()[0],
+						trt_common::QuantizeMode::PER_TENSOR,
+						stream_);
+                    break;
+                case DataType::TYPE_FP16:
+		  trt_common::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
+					   params.static_scale.value().get().data<float>(),
+					   params.input.data<half>(),
+					   params.input.size(),
+					   params.input.shape()[0],
+					   trt_common::QuantizeMode::PER_TENSOR,
+					   stream_);
+                    break;
+#ifdef ENABLE_BF16
+		    
+                case DataType::TYPE_BF16:
+                    trt_common::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
+					     params.static_scale.value().get().data<float>(),
+					     params.input.data<__nv_bfloat16>(),
+					     params.input.size(),
+					     params.input.shape()[0],
+					     trt_common::QuantizeMode::PER_TENSOR,
+					     stream_);
+                    break;
+                default: 
+                    FT_CHECK_WITH_INFO(false, "unsupport data type");
+
+            }
+#endif     
+        } 
+#endif
+        else {
             FT_CHECK_WITH_INFO(false, "params qscheme type unknown: %d", int(params.qscheme));
         }
         sync_check_cuda_error();
-        print_bsd(-1, "kernel", reinterpret_cast<int8_t*>(kernel->data()), 1, params.input.shape()[0], params.input.shape()[1], 0, params.input.shape()[1]);
-        print_bsd(-1, "scale", reinterpret_cast<float*>(scales->data()), 1, params.input.shape()[0], 1, 0, 1);
 
         return BufferPtr(new QBuffer(
             std::move(kernel),

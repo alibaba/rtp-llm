@@ -95,7 +95,7 @@ __inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const
     assert(index_1 < dim_1);
     return index_0 * dim_1 + index_1;
 }
-
+  
 // Use HMMA to compute with FP16/BF16 inputs and FP32 accumulators.
 // #define MMHA_USE_HMMA
 
@@ -1405,9 +1405,9 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     // Quant/Dequant scales for 8bits kv cache.
     using T_scale = typename kv_cache_scale_type_t<T, Tcache>::Type;
     T_scale     kv_scale_orig_quant, kv_scale_quant_orig;
-    const float kv_scale_quant_orig_f = (ENABLE_8BITS_CACHE ? params.kv_scale_quant_orig[0] : 1.0f);
+    const float kv_scale_quant_orig_f = (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_quant_orig[0] : 1.0f);
     convert_from_float(&kv_scale_quant_orig, kv_scale_quant_orig_f);
-    convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_CACHE ? params.kv_scale_orig_quant[0] : 1.0f));
+    convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_orig_quant[0] : 1.0f));
 
     // Up to QK_VECS_PER_Dh_MAX threads load Q and K + the bias values for the current timestep.
     // Trigger the loads from the Q and K buffers.
@@ -1417,7 +1417,6 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     zero(q_bias);
     zero(k_bias);
     if (is_valid_qk_vec) {
-
         // Query
         // The stride between tokens. We may be able to always use params.stride.
         uint32_t q_stride = params.stride ? static_cast<uint32_t>(params.stride) : (num_heads * Dh);
@@ -1841,7 +1840,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 Tcache* k_cache_batch = reinterpret_cast<Tcache*>(kvCacheBuffer.getKBlockPtr(seqIdx, valid_time_now));
 
                 int inBlockIdx = kvCacheBuffer.getKVLocalIdx(valid_time_now, hi_kv, Dh, jj);
-                if constexpr (ENABLE_8BITS_CACHE) {
+                if constexpr (ENABLE_8BITS_CACHE && !FP8_KV_CACHE) {
                     float* k_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(seqIdx, valid_time_now));
                     int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(valid_time_now, hi_kv);
                     load_8bits_kv_cache_vec(
@@ -1984,15 +1983,19 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
         if constexpr (ENABLE_8BITS_CACHE) {
             float k_max = vector_abs_max(k);
+            float scale = 1.0f;
+            if constexpr (std::is_same<Tcache, int8_t>::value) {
 #pragma unroll
-            for (int mask = QK_VECS_PER_Dh_MAX / 2; mask >= 1; mask /= 2) {
-                k_max = fmaxf(k_max, __shfl_xor_sync(shfl_mask(QK_VECS_PER_Dh_MAX), k_max, mask));
+                for (int mask = QK_VECS_PER_Dh_MAX / 2; mask >= 1; mask /= 2) {
+                   k_max = fmaxf(k_max, __shfl_xor_sync(shfl_mask(QK_VECS_PER_Dh_MAX), k_max, mask));
+                }
+                scale = float(1 << (8 - 1)) / k_max;
             }
-            store_8bits_kv_cache_vec(reinterpret_cast<Tcache*>(k_cache), k, inBlockIdx, float(1 << (8 - 1)) / k_max);
+            store_8bits_kv_cache_vec(reinterpret_cast<Tcache*>(k_cache), k, inBlockIdx, scale);
             if (k_idx == 0) {
                 float* k_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(batch_beam_idx, tlength));
                 int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(tlength, hi_kv);
-                *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = k_max / float(1 << (8 - 1));
+                *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = 1.0f / scale;
             }
         }
         else {
@@ -2259,18 +2262,22 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         if (hi == (hi_kv * qhead_per_kv)) {
             if constexpr (ENABLE_8BITS_CACHE) {
                 float v_max = vector_abs_max(v);
+                float scale = 1.0f;
+                if constexpr (std::is_same<Tcache, int8_t>::value) {
 #pragma unroll
-                for (int mask = THREADS_PER_VALUE / 2; mask >= 1; mask /= 2) {
+                   for (int mask = THREADS_PER_VALUE / 2; mask >= 1; mask /= 2) {
                     v_max =
                         fmaxf(v_max,
                               __shfl_xor_sync(
                                   shfl_mask_and_index(THREADS_PER_VALUE, vo % (32 / THREADS_PER_VALUE)), v_max, mask));
+                    }
+                    scale = float(1 << (8 - 1)) / v_max;
                 }
-                store_8bits_kv_cache_vec(v_cache_base, v, inBlockIdx, float(1 << (8 - 1)) / v_max);
+                store_8bits_kv_cache_vec(v_cache_base, v, inBlockIdx, scale);
                 if (vi == 0) {
                     float* v_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(batch_beam_idx, tokenIdx));
                     int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(tokenIdx, hi_kv);
-                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = v_max / float(1 << (8 - 1));
+                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = 1 / scale;
                 }
             }
 
@@ -2324,39 +2331,51 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         }
         __syncthreads();
     }
-
+#ifdef ENABLE_FP8
+    // Quantized output only supports fp8 currently, which should be used together with FP8 Context FMHA.
+    using Quantized_t = __nv_fp8_e4m3;
+    using Quantized_vec = typename packed_type<__nv_fp8_e4m3, num_elems<V_vec_accum>::value>::type;
+#endif
     const auto bhi              = flat_index2(batch_beam_idx, hi, num_heads);
     const auto bhi_seq_len_tile = bhi * params.seq_len_tile;
     // Output the final values.
     if (vo == 0 && (Dh == Dh_MAX || vi < Dh)) {
         const auto bhvi = flat_index2(bhi, vi, Dh);
 #ifdef MMHA_USE_FP32_ACCUM_FOR_OUT
-        if (write_attention_quant) {
-            using Packed_Int8_t = typename packed_type<int8_t, num_elems<V_vec_accum>::value>::type;
-            out                 = mul<V_vec_accum, float>(*params.attention_out_scale_orig_quant, out);
-            *reinterpret_cast<Packed_Int8_t*>(&(reinterpret_cast<int8_t*>(params.out)[bhvi])) = cast_to_int8(out);
-        }
-        else {
-            if (!MULTI_BLOCK_FLAG) {
+	if (!MULTI_BLOCK_FLAG)
+        {
+            if (write_attention_quant)
+            {
+                out = mul<V_vec_accum, float>(*params.attention_out_scale_orig_quant, out);
+#ifdef ENABLE_FP8
+                Quantized_vec final_out;
+                convert_to_fp8(&final_out, out);
+                *reinterpret_cast<Quantized_vec*>(reinterpret_cast<Quantized_t*>(params.out) + bhvi) = final_out;
+#endif
+            }
+            else
+            {
                 // This makes sure we have coalesced memory access.
                 V_vec_k final_out;
                 convert_from_float(&final_out, out);
                 *reinterpret_cast<V_vec_k*>(&params.out[bhvi]) = final_out;
             }
-            else {
-                // for write partial output to partial_out
-                int partial_out_offset = c_tile * params.batch_size * num_heads * params.hidden_size_per_head;
-                // for write partial statistics to partial_max and partial_sum
-                int partial_stats_offset = bhi_seq_len_tile + c_tile;
-
-                // This makes sure we have coalesced memory access.
-                V_vec_k partial_out;
-                convert_from_float(&partial_out, out);
-                *reinterpret_cast<V_vec_k*>(&params.partial_out[partial_out_offset + bhvi]) = partial_out;
-                convert_from_float(reinterpret_cast<float*>(&params.partial_max[partial_stats_offset]), qk_max);
-                convert_from_float(reinterpret_cast<float*>(&params.partial_sum[partial_stats_offset]), sum);
-            }
         }
+        else
+        {
+            // for write partial output to partial_out
+            int partial_out_offset = c_tile * params.batch_size * num_heads * params.hidden_size_per_head;
+            // for write partial statistics to partial_max and partial_sum
+            int partial_stats_offset = bhi_seq_len_tile + c_tile;
+
+            // This makes sure we have coalesced memory access.
+            V_vec_k partial_out;
+            convert_from_float(&partial_out, out);
+            *reinterpret_cast<V_vec_k*>(&params.partial_out[partial_out_offset + bhvi]) = partial_out;
+            convert_from_float(reinterpret_cast<float*>(&params.partial_max[partial_stats_offset]), qk_max);
+            convert_from_float(reinterpret_cast<float*>(&params.partial_sum[partial_stats_offset]), sum);
+        }
+
 #else   // MMHA_USE_FP32_ACCUM_FOR_OUT
         *reinterpret_cast<V_vec_accum*>(&params.out[bhvi]) = out;
 #endif  // MMHA_USE_FP32_ACCUM_FOR_OUT
@@ -2497,8 +2516,20 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 convert_from_float(&inv_sum_compute, inv_sum);
 
                 thread_partial_out = mul<V_vec_k, Tk, V_vec_k>(inv_sum_compute, thread_partial_out);
-
-                *reinterpret_cast<V_vec_k*>(&params.out[bhi * Dh + oi]) = thread_partial_out;
+                if (write_attention_quant)
+                {
+                    thread_partial_out = mul<V_vec_k, float>(*params.attention_out_scale_orig_quant, thread_partial_out);
+#ifdef ENABLE_FP8
+                    Quantized_vec final_out;
+                    convert_to_fp8(&final_out, thread_partial_out);
+                    *reinterpret_cast<Quantized_vec*>(reinterpret_cast<Quantized_t*>(params.out) + bhi * Dh + oi)
+                        = final_out;
+#endif
+                }
+                else
+                {
+                    *reinterpret_cast<V_vec_k*>(&params.out[bhi * Dh + oi]) = thread_partial_out;
+                }
             }
 
             // Reset qk_current_smem and block_counter for the next timestep
@@ -2510,4 +2541,4 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 #endif  // ENABLE_MULTI_BLOCK_OPTION
 }
 
-}  // namespace fastertransformer
+} // namespace fastertransformer

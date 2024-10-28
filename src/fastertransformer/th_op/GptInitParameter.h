@@ -3,6 +3,7 @@
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
+#include "src/fastertransformer/core/Types.h"
 
 #include <vector>
 #include <map>
@@ -16,7 +17,8 @@ enum QuantMethod {
     Awq                 = 3,
     SmoothQuant         = 4,
     OmniQuant           = 5,
-    PerTensorQuant      = 6
+    PerTensorQuant      = 6,
+    FP8Quant            = 7,
 };
 
 enum TaskType {
@@ -61,6 +63,9 @@ public:
     }
     bool isOmniQuant() const {
         return quant_method_ == OmniQuant;
+    }
+    bool isFp8() const {
+        return quant_method_ == FP8Quant;
     }
     bool isQuant() const {
         return quant_method_ != None;
@@ -126,14 +131,16 @@ public:
     std::vector<int64_t> layer_inter_size_         = {};
     std::vector<int64_t> layer_inter_padding_size_ = {};
 
-    double             layernorm_eps_       = 1e-5;
-    std::string        layernorm_type_str_  = "pre_layernorm";
-    std::string        norm_type_str_       = "layernorm";
-    std::string        activation_type_str_ = "Gelu";
+    double             layernorm_eps_          = 1e-5;
+    std::string        layernorm_type_str_     = "pre_layernorm";
+    std::string        norm_type_str_          = "layernorm";
+    std::string        activation_type_str_    = "Gelu";
+    std::string        kv_cache_data_type_str_ = "fp16";
     LayerNormType  layernorm_type_      = LayerNormType::pre_layernorm;
     NormType       norm_type_           = NormType::layernorm;
     TaskType       task_type_           = TaskType::LANGUAGE_MODEL;
     ActivationType activation_type_     = ActivationType::Gelu;
+    DataType kv_cache_data_type_ = DataType::TYPE_FP16;
 
     int64_t rotary_embedding_dim_    = 0;
     int64_t rotary_embedding_style_  = 0;
@@ -206,7 +213,6 @@ public:
     int64_t              mm_position_ids_style_ = 0; // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
     int64_t              position_id_len_factor_ = 1;
 
-    bool     int8_kv_cache_       = false;
     bool     pre_allocate_op_mem_ = true;
     int64_t  seq_size_per_block_  = 8;
 
@@ -244,9 +250,10 @@ public:
     void setNormType();
     void setTaskType(std::string task);
     void setActivationType();
+    void setKvCacheDataType();
     bool isGatedActivation() const;
-
     RopeConfig getRopeConfig() const;
+    bool isKvCacheQuant() const;
 };
 
 }

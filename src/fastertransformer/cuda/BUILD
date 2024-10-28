@@ -180,9 +180,12 @@ cc_library(
         "cuda_fp8_utils.h",
         "cuda_type_utils.cuh",
         "cuda_bf16_fallbacks.cuh",
+        "reduce_kernel_utils.cuh"
     ],
     deps = [
-        "@local_config_cuda//cuda:cuda_headers",
+        ":cuda_utils_base",
+        "//src/fastertransformer/utils:utils",
+        "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -207,7 +210,7 @@ cc_library(
 )
 
 cc_library(
-    name = "cuda_utils",
+    name = "cuda_utils_base",
     srcs = [
         "cuda_utils.cc",
     ],
@@ -216,6 +219,19 @@ cc_library(
         "Dispatch.h",
         "trt_utils.h"
     ],
+    deps = [
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/core:types",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_utils",
     deps = [
         ":cuda_utils_cu",
         "//src/fastertransformer/utils:utils",
@@ -349,6 +365,7 @@ cc_library(
         "cuda_fp8_utils.h",
         "cuda_type_utils.cuh",
         "cuda_bf16_fallbacks.cuh",
+        "reduce_kernel_utils.cuh"
     ],
     deps = [
         "//src/fastertransformer/rocm:rocm_types_hdr",

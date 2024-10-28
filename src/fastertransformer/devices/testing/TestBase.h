@@ -8,6 +8,10 @@
 #include <sys/socket.h>
 #include <torch/torch.h>
 
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
+
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/Buffer.h"

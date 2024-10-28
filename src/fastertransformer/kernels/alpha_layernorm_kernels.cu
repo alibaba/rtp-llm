@@ -1,6 +1,6 @@
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"

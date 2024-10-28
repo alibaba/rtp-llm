@@ -8,6 +8,9 @@ import functools
 from typing import Optional
 from urllib.parse import urlparse
 import threading
+from enum import Enum
+from maga_transformer.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
+
 
 class RetryableError(Exception):
     pass
@@ -30,21 +33,36 @@ def retry_with_timeout(timeout_seconds: int = 300, retry_interval: float = 1.0,
         return wrapper
     return decorator
 
+class MountRwMode(Enum):
+    RWMODE_RO = 0  # 只读模式, 默认只读
+    RWMODE_WO = 1  # 只写模式
+    RWMODE_RW = 2  # 读写模式
+    
+# Fuser is a wrapper class for c2 sidecar fuse.
+# see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
 class Fuser:
     def __init__(self) -> None:
-        self._fuse_uri = "http://0:28006"
-        self._fuse_path_prefix = "/mnt/fuse"
+        if HippoHelper.host_fuse_port():
+            self._fuse_uri = f"http://{HippoHelper.host_ip}:{HippoHelper.host_fuse_port()}"
+            self._fuse_path_prefix = f"{HippoHelper.app_workdir}/fuse"
+        else:
+            self._fuse_uri = "http://0:28006"
+            self._fuse_path_prefix = "/mnt/fuse"
         self._mount_src_map = {}  # Maps mount path to (original path, ref count)
         self.lock = threading.RLock()  # 使用重入锁
         atexit.register(self.umount_all)
 
     @retry_with_timeout()
-    def mount_dir(self, path: str) -> Optional[str]:
+    def mount_dir(self, path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO) -> Optional[str]:
         mnt_path = os.path.join(self._fuse_path_prefix, hashlib.md5(path.encode("utf-8")).hexdigest())
         req_json = {
             "uri": path,
-            "mountDir": mnt_path
+            "mountDir":mnt_path,
+            "rwMode":mount_mode.name
         }
+        if mount_mode in [MountRwMode.RWMODE_WO, MountRwMode.RWMODE_RW]:
+            req_json.update({"cacheOptions":{"writeMode":"WRITE_THROGH","enableRemove":True}})
+        
         logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")
         mount_result = requests.post(f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600).json()
         error_code = mount_result['errorCode']
@@ -107,12 +125,13 @@ class Fuser:
 
 _fuser = Fuser()
 
-def fetch_remote_file_to_local(path: str):
+
+def fetch_remote_file_to_local(path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO):
     parse_result = urlparse(path)
     if parse_result.scheme == '':
         return path
     else:
-        return _fuser.mount_dir(path)
+        return _fuser.mount_dir(path, mount_mode)
 
 def umount_file(path: str, force: bool = False):
     _fuser.umount_fuse_dir(path, force=force)

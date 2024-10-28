@@ -17,7 +17,7 @@
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
 
 namespace fastertransformer
@@ -171,4 +171,4 @@ INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(half);
 INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(__nv_bfloat16);
 #endif
 
-} 
+}

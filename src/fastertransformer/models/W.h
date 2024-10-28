@@ -135,9 +135,21 @@ static const std::string post_ln_s = "post_layernorm_weights.static_quant";
 static const std::string post_ln_sr = "post_layernorm_weights.static_quant_reciprocal";
 static const std::string ffn_intermediate_weight2_s = "ffn_weights.intermediate_weight2.static_quant";
 static const std::string ffn_intermediate_weight2_sr = "ffn_weights.intermediate_weight2.static_quant_reciprocal";
+static const std::string ffn_intermediate_weight3_s = "ffn_weights.intermediate_weight3.static_quant";
+static const std::string ffn_intermediate_weight3_sr = "ffn_weights.intermediate_weight3.static_quant_reciprocal";
 static const std::string post_ffn_ln_s = "post_ffn_layernorm_weights.static_quant";
 static const std::string post_ffn_ln_sr = "post_ffn_layernorm_weights.static_quant_reciprocal";
 
-// for static quant
+// fp8 extra W
+static const std::string attn_qkv_act_scale  = "self_attention_weights.query_weight.act_quant_scale";
+static const std::string attn_o_act_scale    = "self_attention_weights.attention_output.act_quant_scale";
+static const std::string ffn_w1_act_scale    = "ffn_weights.intermediate_weight.act_quant_scale";
+static const std::string ffn_w2_act_scale    = "ffn_weights.intermediate_weight2.act_quant_scale";  // same to ffn_act_s
+static const std::string ffn_w3_act_scale    = "ffn_weights.intermediate_weight3.act_quant_scale";
+static const std::string attn_qkv_act_scale_inv  = "self_attention_weights.query_weight.act_quant_scale_inv";
+static const std::string attn_o_act_scale_inv    = "self_attention_weights.attention_output.act_quant_scale_inv";
+static const std::string ffn_w1_act_scale_inv    = "ffn_weights.intermediate_weight.act_quant_scale_inv";
+static const std::string ffn_w2_act_scale_inv    = "ffn_weights.intermediate_weight2.act_quant_scale_inv";
+static const std::string ffn_w3_act_scale_inv    = "ffn_weights.intermediate_weight3.act_quant_scale_inv";
 }
 }

@@ -91,7 +91,7 @@ static bool UsePagedTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_
         FT_LOG_INFO("Paged TRT FMHA is disabled for sparse");
         use_paged_trt_fmha = false;
     }
-    if (gpt_init_parameter.int8_kv_cache_) {
+    if (gpt_init_parameter.isKvCacheQuant()) {
         FT_LOG_INFO("Paged TRT FMHA is disabled for int8 kvcache");
         use_paged_trt_fmha = false;
     }

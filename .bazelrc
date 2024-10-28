@@ -65,6 +65,7 @@ build:cuda12 --define=using_cuda12=true
 build:cuda12 --copt="-DUSING_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
 build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
+build:cuda12 --copt="-DENABLE_FP8=1"
 
 build:cuda12_2 --config=cuda
 build:cuda12_2 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"

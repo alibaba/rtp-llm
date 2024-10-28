@@ -31,12 +31,14 @@ public:
         , group_size_(quant_algo.getGroupSize())
         , weight_only_(quant_algo.isWeightOnlyPerCol() || quant_algo.isGptq() || quant_algo.isAwq())
         , sq_int8_(quant_algo.isSmoothQuant() || quant_algo.isOmniQuant())
+        , fp8_(quant_algo.isFp8())
     {}
-    QuantAlgo(int weight_bits, int64_t group_size, bool weight_only, bool sq_int8)
+    QuantAlgo(int weight_bits, int64_t group_size, bool weight_only, bool sq_int8, bool fp8)
         : weight_bits_(weight_bits)
         , group_size_(group_size)
         , weight_only_(weight_only)
         , sq_int8_(sq_int8)
+        , fp8_(fp8)
     {}
 
     int getWeightBits() const {
@@ -54,12 +56,16 @@ public:
     bool smoothQuantInt8() const {
         return sq_int8_;
     }
+    bool fp8() const {
+        return fp8_;
+    }
 
 private:
     int weight_bits_ = 0;
     int group_size_ = 0;
     bool weight_only_ = false;
     bool sq_int8_    = false;
+    bool fp8_ = false;
 };
 
 class QuantMode {

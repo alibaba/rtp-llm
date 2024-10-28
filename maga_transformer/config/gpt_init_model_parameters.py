@@ -136,7 +136,8 @@ class GptInitModelParameters:
         self._model_related_types: Dict[str, str] = {
             "layernorm_type": "setLayerNormType",
             "norm_type": "setNormType",
-            "activation_type": "setActivationType"
+            "activation_type": "setActivationType",
+            "kv_cache_data_type": "setKvCacheDataType"
         }
         self.has_lm_head_bias = False
         self.normalize_lm_head_weight = False
@@ -328,8 +329,11 @@ class GptInitModelParameters:
         logging.info(f'reuse_cache: {self.reuse_cache}')
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
-        self.int8_kv_cache = bool(int(os.environ.get('INT8_KV_CACHE', 0)))
-        logging.info(f'int8_kv_cache: {self.int8_kv_cache}')
+        kv_cache_data_type = WEIGHT_TYPE.INT8 if bool(int(os.environ.get('INT8_KV_CACHE', 0))) else WEIGHT_TYPE.FP16
+        if self.quant_algo.isFp8():
+            kv_cache_data_type = WEIGHT_TYPE.FP8
+        self.kv_cache_data_type = kv_cache_data_type.to_str()
+        logging.info(f'kv_cache_data_type: {self.kv_cache_data_type}')
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
         # Update stop_words_str and stop_word_ids from ENV
@@ -370,7 +374,7 @@ class GptInitModelParameters:
     def _eval_kv_cache_mem_size(self):
         if self.task_type != TaskType.LANGUAGE_MODEL:
             return 0
-        kv_cache_bytes = 1 if self.int8_kv_cache else 2
+        kv_cache_bytes = 1 if self.kv_cache_data_type in [WEIGHT_TYPE.FP8.to_str(), WEIGHT_TYPE.INT8.to_str()] else 2
         kv_cache_size = 2 * self.layer_num * self.head_num_kv * self.size_per_head * kv_cache_bytes * self.max_seq_len
         return kv_cache_size
 

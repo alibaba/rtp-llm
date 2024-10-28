@@ -20,7 +20,7 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "beamSearchKernels.h"
 using namespace fastertransformer;
 namespace tensorrt_llm

@@ -38,7 +38,7 @@ struct CacheConfig {
 
         auto dtype_size = ft::getTypeSize(dtype);
         int scale_size = 0;
-        if (dtype == ft::TYPE_INT8) {
+        if (dtype == ft::TYPE_INT8 || dtype == ft::TYPE_FP8_E4M3) {
             scale_size = 4;
         }
 

@@ -62,9 +62,10 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
 
         if (params.qscheme != QScheme::NoQuantize) {
+	        DataType quant_out_data_type = params.qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
             auto quant_params = QuantizeParams(
                 *up_output,
-                DataType::TYPE_QINT8,
+                quant_out_data_type,
                 1,
                 params.qscheme,
                 params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :

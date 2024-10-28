@@ -18,6 +18,7 @@ namespace fastertransformer {
 KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                              const Buffer&                kv_cache_offset_pointers,
                              int                          batch_size,
+                             bool                         use_fp8_fmha,
                              cudaStream_t                 stream) {
     const auto& kv_cache         = params.common.kv_cache;
     const auto& kv_blocks_offset = *(kv_cache->kv_cache_offset);
@@ -29,7 +30,7 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
     const auto& k_cache              = *(kv_cache->k_cache_buffer);
     const auto& v_cache              = *(kv_cache->v_cache_buffer);
-    auto const  elemSize             = kv_cache->k_scale_buffer ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
+    auto const  elemSize             = kv_cache->k_scale_buffer || use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
     // FT_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
     FT_LOG_DEBUG(
         "kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, kv_block_offset:%d",
@@ -60,14 +61,25 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
                               "v scale buffer should has value when use k scale buffer has value");
-        kv_cache_buffer.int8_mode = true;
         const auto& k_scale = *(kv_cache->k_scale_buffer);
         kv_cache_buffer.scale = k_scale.data();
         kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+#ifdef ENABLE_FP8
+    if (use_fp8_fmha) {
+        cache_type = KvCacheDataType::FP8;
+    } else
+#endif
+    if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        FT_LOG_INFO("now use kv_cache int8");
+        cache_type = KvCacheDataType::INT8;
+    } 
+    kv_cache_buffer.cache_type = cache_type;    
     sync_check_cuda_error();
     return kv_cache_buffer;
 }
+
 
 void MHA(const AttentionModuleParams& params,
          FMHAType                     fmha_type,
@@ -76,8 +88,9 @@ void MHA(const AttentionModuleParams& params,
          const BufferPtr&             q_output,
          const BufferPtr&             k_output,
          const BufferPtr&             v_output,
+         const BufferPtr&             qkv_buf_fp8,
          cudaStream_t                 stream,
-         DeviceBase*                  device) {
+         CudaDevice*                  device) {
     FT_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)fmha_type).c_str());
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
@@ -87,6 +100,7 @@ void MHA(const AttentionModuleParams& params,
     auto head_num            = params.configs.head_num;
     auto kv_head_num         = params.configs.kv_head_num;
     auto size_per_head       = params.configs.size_per_head;
+    bool use_fp8_fmha        = qkv_buf_fp8 != nullptr;
     BufferPtr tiled_counter_ptr;
     if (FMHAType::PAGED_TRT_V2 == fmha_type || FMHAType::TRT_V2 == fmha_type) {
         tiled_counter_ptr =
@@ -112,18 +126,51 @@ void MHA(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::TRT_V2: {
-            cufmha_runner->runTrtV2Fmha(params.input.data(),
-                                        params.common.cu_seqlens->data(),
-                                        params.output.data(),
-                                        reinterpret_cast<uint32_t*>(tiled_counter_ptr->data()),
-                                        batch_size,
-                                        seq_len,
-                                        token_num,
-                                        kv_block_array,
-                                        false,
-                                        false,
-                                        params.common.linear_bias_slopes != nullptr,
-                                        false);
+            void  *fmha_input_ptr = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
+            void  *fmha_output_ptr = params.output.data();
+            float *attention_output_orig_quant_scale = nullptr;
+            if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {
+	        printBufferData(*(params.weights.static_scale_reciprocal_weight->kernel), "attn scale");
+                attention_output_orig_quant_scale = (params.weights.static_scale_reciprocal_weight->kernel->data<float>());
+            }
+            bool need_quant_fmha_out = !use_fp8_fmha && params.output.isQBuffer();
+            BufferPtr tmp_fmha_output;
+            if (need_quant_fmha_out) {
+                // for sm89 cannot use fp8_fmha, but attention output should be fp8
+                tmp_fmha_output = device->allocateBuffer({DataType::TYPE_FP16,
+                                        {batch_size, head_num*seq_len_with_prefix*size_per_head},
+                                        AllocationType::DEVICE},
+                                        {"fmha_fp16_output"});
+                cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
+                fmha_output_ptr = tmp_fmha_output->data();
+            }
+            cufmha_runner->runTrtV2Fmha(fmha_input_ptr,
+                            params.common.cu_seqlens->data(),
+                            fmha_output_ptr,
+                            reinterpret_cast<uint32_t*>(tiled_counter_ptr->data()),
+                            attention_output_orig_quant_scale,
+                            batch_size,
+                            seq_len,
+                            token_num,
+                            kv_block_array,
+                            false,
+                            false,
+                            params.common.linear_bias_slopes != nullptr,
+                            false);
+            if (need_quant_fmha_out) {
+                DataType quant_out_data_type = DataType::TYPE_FP8_E4M3;
+                auto quant_params = QuantizeParams(*tmp_fmha_output, 
+                                                   quant_out_data_type, 
+                                                   1, 
+                                                   QScheme::Qfp8PerTensor, 
+                                                   std::nullopt, 
+                                                   std::nullopt, 
+                                                   (OptionalConstBufferRef)*params.weights.static_quant_weight->kernel,
+                                                   (OptionalConstBufferRef)*params.weights.static_scale_reciprocal_weight->kernel
+                                                   );
+                auto quant_output = device->quantize(quant_params);
+                cudaMemcpyAsync(params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
+            }
             break;
         }
         case FMHAType::PAGED_OPEN_SOURCE: {
@@ -228,6 +275,7 @@ void MHA(const AttentionModuleParams& params,
     }
 }
 
+
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
@@ -252,7 +300,17 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto v_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
-        {"v_output"});
+                                    {"v_output"});
+    
+    BufferPtr qkv_buf_fp8;
+    FT_LOG_DEBUG("use fp8_fmha:%d", use_fp8_fmha);
+    if (use_fp8_fmha) {
+        qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3,
+                                        {batch_size, (head_num + kv_head_num*2), seq_len_with_prefix, size_per_head},
+                                        AllocationType::DEVICE},
+                                        {"qkv_fp8_output"});
+	cudaMemsetAsync(qkv_buf_fp8->data(), 0, qkv_buf_fp8->sizeBytes(), stream_);
+    }
 
     if (fmha_type_ == FMHAType::NONE) {
         cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
@@ -265,12 +323,13 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
+    
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
         kv_cache_offset = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
                                          {"kv_cache_offset"});
 
-        kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, stream_);
+        kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, use_fp8_fmha, stream_);
 
         if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
             kv_cache_offset_host = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::HOST},
@@ -287,7 +346,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.count_length             = 1;
         }
     }
-
+    
     // int8
     float*  scale_out_ptr    = nullptr;
     int     int8_mode        = 0;
@@ -324,6 +383,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             v_output->data(),
             &prefix_prompt_param,
             params.input.data(),
+            qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
             params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
             params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
             params.common.padding_offset->data<int>(),
@@ -345,6 +405,15 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             store_cache,
             stream_
         );
+    sync_check_cuda_error();
+
+    if (!qkv_buf_fp8) {
+        printBufferData(params.input, "after invoke transpse");
+    } else {
+        printBufferData(params.input, "after invoke transpse");
+	    FT_LOG_DEBUG("now print qkv_buf_fp8");
+        printBufferData(*qkv_buf_fp8.get(), "after invoke transpse fp8");
+    }
         sync_check_cuda_error();
         // printBufferData(params.input, "after invoke transpse");
         printBufferData(*q_output, "Q after invoke transpose");
@@ -353,19 +422,21 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
     }
 
-    MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
+    MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, qkv_buf_fp8, stream_, this);
 }
 
 template<typename T>
 void selfAttentionwrapper(const AttentionModuleParams params,
                           bool use_multi_block_mode,
+                          bool use_fp8_fmha,
                           size_t max_seq_len_tile,
                           void* partial_out,
                           float* partial_sum,
                           float* partial_max,
                           int* block_counter,
                           KVBlockArray kv_block_array,
-                          cudaStream_t stream)
+                          cudaStream_t stream,
+			              CudaDevice *device)
 {
     size_t batch_size           = params.common.decoder_batch_size;
     size_t step                 = params.common.decoder_max_seq_len + 1;
@@ -375,7 +446,17 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const auto& output = params.output;
 
     const T* qkv_buf_ptr = params.input.data<T>();
-    T* qkv_buf_2_ = output.data<T>();
+    void* qkv_buf_2_ = nullptr;
+    BufferPtr fp8_qkv_buf;
+    if (use_fp8_fmha) {
+      fp8_qkv_buf = device->allocateBuffer({DataType::TYPE_FP16,
+	  output.shape(),
+	  AllocationType::DEVICE},
+	{"fp8_qkv_buf"});
+      qkv_buf_2_ = fp8_qkv_buf->data();
+    } else {
+      qkv_buf_2_ = output.data();
+    }
 
     const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
                             nullptr :
@@ -396,15 +477,26 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     // TODO(lidongjin) support int8
     const float* query_weight_scale_out = nullptr;
-    const float* attention_output_weight_scale_out = nullptr;
-    int int8_mode = 0;
+    const float *attention_output_orig_quant_scale = nullptr;
+    
+    if (params.weights.static_scale_reciprocal_weight) {
+        attention_output_orig_quant_scale = reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data());
+    }
 
+    int int8_mode = 0;
+    tensorrt_llm::common::QuantMode kv_cache_quant_mode = trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
+    if (params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, true, false, true);
+    } else if (params.configs.kv_cache_dtype == KvCacheDataType::FP8 && use_fp8_fmha) {
+        kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
+    }
+    FT_LOG_DEBUG("kv_cache_quant_mode:%d, use_fp8_fmha:%d", kv_cache_quant_mode, use_fp8_fmha);
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
         qkv_buf_ptr,
         bias_ptr,
         relative_attention_bias_ptr,
         nullptr, // cache_indir
-        qkv_buf_2_,
+        reinterpret_cast<T*>(qkv_buf_2_),
         nullptr, // finished
         sequence_lengths,
         batch_size,
@@ -426,8 +518,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         linear_bias_slopes,
         masked_tokens,
         query_weight_scale_out,
-        attention_output_weight_scale_out,
+        attention_output_orig_quant_scale,
         int8_mode,
+        kv_cache_quant_mode,
         use_multi_block_mode,
         (int)max_seq_len_tile,
         reinterpret_cast<T*>(partial_out),
@@ -438,6 +531,10 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         kv_block_array,
         stream);
 
+    if (fp8_qkv_buf) {
+      cudaMemcpyAsync(output.data(), fp8_qkv_buf->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
+      // cudaDeviceSynchronize();
+    }
     sync_check_cuda_error();
 }
 
@@ -486,18 +583,20 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
     auto       kv_cache_offset      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
-    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, stream_);
+    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, use_fp8_fmha, stream_);
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,
                                      use_multi_block_mode,
+                                     use_fp8_fmha,
                                      max_seq_len_tile,
                                      partial_out_data,
                                      partial_sum_data,
                                      partial_max_data,
                                      block_counter_data,
                                      kv_block_array,
-                                     stream_);
+                                     stream_,
+				                     this);
 }
 
 }  // namespace fastertransformer

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "src/fastertransformer/utils/quantization.h"
+
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 
@@ -30,7 +32,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-
+namespace trt_common = tensorrt_llm::common;
 namespace fastertransformer {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -247,6 +249,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const float*  qkv_scale_out,
                                         const float*  attention_out_scale,
                                         const int     int8_mode,
+                                        const trt_common::QuantMode kv_cache_quant_mode,
                                         const bool    multi_block_mode,
                                         int           max_seq_tile,
                                         T*            partial_out,

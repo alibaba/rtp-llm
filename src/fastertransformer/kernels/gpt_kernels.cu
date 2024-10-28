@@ -501,6 +501,10 @@ DEFINE_INVOKETRANSPOSE(half);
 DEFINE_INVOKETRANSPOSE(__nv_bfloat16);
 #endif
 
+#ifdef ENABLE_FP8
+DEFINE_INVOKETRANSPOSE(__nv_fp8_e4m3);
+#endif
+
 template<typename T>
 __global__ void transposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim3)
 {

@@ -8,6 +8,12 @@ static constexpr bool enable_bf16 = true;
 static constexpr bool enable_bf16 = false;
 #endif
 
+#ifdef ENABLE_FP8
+static constexpr bool enable_fp8 = true;
+#else
+static constexpr bool enable_fp8 = false;
+#endif
+
 #ifdef CUDART_VERSION
 static constexpr int cudart_version = CUDART_VERSION;
 #else

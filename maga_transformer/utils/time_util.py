@@ -1,5 +1,7 @@
 import time
+import logging
 from typing import Optional
+from functools import wraps
 
 def current_time_ms() -> float:
     return time.time() * 1000
@@ -27,4 +29,17 @@ class Timer(object):
  
     def __exit__(self, *exc_info):
         """Stop the context manager timer"""
-        self.stop()        
+        self.stop()
+
+def timer_wrapper(description=""):
+    def decorator(func):
+        # 使用 wraps 保留原函数的元数据
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            with Timer() as t:
+                result = func(*args, **kwargs)
+            desc = description if description else func.__name__
+            logging.info(f'{desc} took: {t.cost_ms()/1000:.0f}s')
+            return result
+        return wrapped
+    return decorator

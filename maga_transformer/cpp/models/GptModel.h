@@ -16,6 +16,7 @@ struct GptModelDescription {
     ft::AttentionConfigs attention_conf;
     ft::FfnConfigs       ffn_conf;
     ft::NormType         norm_type;
+    ft::QScheme          act_qscheme = ft::QScheme::NoQuantize;
     double               layernorm_eps = 1e-5;
     size_t               vocab_size = 0;
     bool                 post_layernorm = false;

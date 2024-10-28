@@ -64,8 +64,16 @@ void GptInitParameter::setActivationType() {
     activation_type_ = getActivationType(activation_type_str_);
 }
 
+void GptInitParameter::setKvCacheDataType() {
+    kv_cache_data_type_ = getDataType(kv_cache_data_type_str_);
+}
+
 bool GptInitParameter::isGatedActivation() const {
     return fastertransformer::isGatedActivation(activation_type_);
+}
+
+bool GptInitParameter::isKvCacheQuant() const {
+    return kv_cache_data_type_ == DataType::TYPE_FP8_E4M3 || kv_cache_data_type_ == DataType::TYPE_INT8;
 }
 
 void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int64_t group_size) {
@@ -89,8 +97,10 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     } else if (quant_method == "omni_quant") {
         quant_method_ = OmniQuant;
         weight_bits_ = 8;
-    } else if (quant_method == "pertensor_quant"){
+    } else if (quant_method == "pertensor_quant") {
         quant_method_ = PerTensorQuant;
+    } else if (quant_method == "FP8") {
+        quant_method_ = FP8Quant;
         weight_bits_ = 8;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
@@ -166,6 +176,7 @@ void registerGptInitParameter(py::module m) {
     .def("isSmoothQuant", &QuantAlgo::isSmoothQuant)
     .def("isOmniQuant", &QuantAlgo::isOmniQuant)
     .def("isPerTensorQuant", &QuantAlgo::isPerTensorQuant)
+    .def("isFp8", &QuantAlgo::isFp8)
     .def("isQuant", &QuantAlgo::isQuant)
     .def("isGroupwise", &QuantAlgo::isGroupwise)
     .def("getGroupSize", &QuantAlgo::getGroupSize)
@@ -215,6 +226,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(norm_type, norm_type_str_)                             \
     DEF_PROPERTY(activation_type, activation_type_str_)                 \
     DEF_PROPERTY(rotary_embedding_dim, rotary_embedding_dim_)           \
+    DEF_PROPERTY(kv_cache_data_type, kv_cache_data_type_str_)          \
     DEF_PROPERTY(rotary_embedding_style, rotary_embedding_style_)       \
     DEF_PROPERTY(position_ids_style, position_ids_style_)               \
     DEF_PROPERTY(position_id_len_factor, position_id_len_factor_)       \
@@ -268,7 +280,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(warm_up, warm_up_)                                     \
     DEF_PROPERTY(warm_up_with_loss, warm_up_with_loss_)                 \
     DEF_PROPERTY(fast_gen_max_context_len, fast_gen_max_context_len_)   \
-    DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                         \
     DEF_PROPERTY(is_causal, is_causal_)                                 \
     DEF_PROPERTY(use_medusa, use_medusa_)                               \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                     \
@@ -303,7 +314,9 @@ void registerGptInitParameter(py::module m) {
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)
     .def("setTaskType", &GptInitParameter::setTaskType)
-    .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;
+    .def("setKvCacheDataType", &GptInitParameter::setKvCacheDataType)
+    .def("isGatedActivation", &GptInitParameter::isGatedActivation)
+    .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)  REGISTER_PROPERTYS;
 }
 
 }

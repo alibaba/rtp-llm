@@ -15,7 +15,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     BufferPtr input = params.input;
     BufferPtr norm_output = input;
     float* scales_ptr = nullptr;
-    int8_t* quant_output = nullptr;
+    void* quant_output = nullptr;
     const auto data_type = input->type();
     const auto m = input->shape()[0];
     const auto n = input->shape()[1];
@@ -29,7 +29,8 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
         norm_output = allocateBufferLike(*params.input);
     } else if (params.qscheme != QScheme::NoQuantize) {
-        auto kernel = allocateBuffer({DataType::TYPE_INT8,
+        auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+        auto kernel = allocateBuffer({quant_data_type,
                                             {input->shape()},
                                             AllocationType::DEVICE},
                                             {"kernel"});
@@ -41,7 +42,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                             AllocationType::DEVICE},
                                             {"scales"});
         // when QScheme::Qint8PerTensor, the scale is from ckpt
-        } else if (params.qscheme == QScheme::Qint8PerTensor){
+        } else if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qfp8PerTensor){
             FT_CHECK_WITH_INFO(norm_weight && norm_weight->get().static_scale_reciprocal, "static_scale_reciprocal should not be None");
             scales = BufferPtr(new Buffer(
                 norm_weight->get().static_scale_reciprocal->where(),
@@ -59,7 +60,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                                 DataType::TYPE_INVALID,
                                                 {0},
                                                 nullptr)))));
-        quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
+        quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data();
         if (params.qscheme == QScheme::Qint8PerToken) {
             scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
         }
@@ -81,7 +82,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         sync_check_cuda_error();
         return LayernormOutput({norm_output, nullptr});
     }
-
+    FT_LOG_DEBUG("params.norm_type: params.norm_type");
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         // TODO(lidongjin)
         // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.
@@ -115,9 +116,11 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         }
     }
 
+    auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+    FT_LOG_DEBUG("quant_data_type: %d, params.norm_type is layernorm\n", quant_data_type);
     if (params.norm_type == NormType::layernorm) {
         if (params.residual1.has_value() || params.bias.has_value()) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralAddBiasResidualLayerNorm,
+            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralAddBiasResidualLayerNorm,
                 (params.before_norm_output == nullptr) ? norm_output->data() : params.before_norm_output->data(),
                 norm_output->data(),
                 input->data(),
@@ -138,7 +141,9 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralLayerNorm,
+	        FT_LOG_DEBUG("quant_data_type: %d, params.norm_type is layernorm\n", quant_data_type);
+            sync_check_cuda_error();
+            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralLayerNorm,
                 params.before_norm_output == nullptr ? nullptr: params.before_norm_output->data(),
                 norm_output->data(),
                 input->data(),
@@ -161,7 +166,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
 
     if (params.norm_type == NormType::rmsnorm) {
         if (params.residual1.has_value() || params.bias.has_value()) {
-           DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidualRmsNorm,
+           DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeAddBiasResidualRmsNorm,
                                             params.before_norm_output->data(),
                                             norm_output->data(),
                                             input->data(),
@@ -180,7 +185,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralRmsNorm,
+            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralRmsNorm,
                 norm_output->data(),
                 input->data(),
                 gamma,

@@ -16,6 +16,9 @@
 #if USING_ROCM
 #include "src/fastertransformer/rocm/cuda_shims.h"
 #endif
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
 
 namespace fastertransformer {
 
@@ -38,6 +41,7 @@ namespace fastertransformer {
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_BF16, __nv_bfloat16);
+    
 #elif defined(__aarch64__) 
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, __fp16); \
@@ -83,6 +87,11 @@ DataType getTensorType() {
 
 FT_FOREACH_TYPE(DEFINE_TYPE);
 FT_FOREACH_DEVICE_TYPE(DEFINE_TYPE);
+
+#ifdef ENABLE_FP8
+    DEFINE_TYPE(DataType::TYPE_FP8_E4M3, __nv_fp8_e4m3);
+#endif
+
 DEFINE_TYPE(DataType::TYPE_UINT64, unsigned long long int);
 DECLARE_GET_TYPE(void);
 
@@ -96,6 +105,10 @@ size_t getTypeSize(DataType type) {
     switch (type) {
         FT_FOREACH_TYPE(CASE);
         FT_FOREACH_DEVICE_TYPE(CASE);
+#ifdef ENABLE_FP8
+        CASE(DataType::TYPE_FP8_E4M3, __nv_fp8_e4m3);
+        CASE(DataType::TYPE_QFP8_E4M3, __nv_fp8_e4m3);
+#endif
         CASE(DataType::TYPE_QINT8, int8_t);
         case DataType::TYPE_INT4X2:
         case DataType::TYPE_QINT4X2:
@@ -117,6 +130,10 @@ size_t getTypeBits(DataType type) {
         FT_FOREACH_TYPE(CASE);
         FT_FOREACH_DEVICE_TYPE(CASE);
         CASE(DataType::TYPE_QINT8, int8_t);
+#ifdef ENABLE_FP8
+        CASE(DataType::TYPE_FP8_E4M3, __nv_fp8_e4m3);
+        CASE(DataType::TYPE_QFP8_E4M3, __nv_fp8_e4m3);
+#endif
         case TYPE_QINT4X2: {
             return 4;
         }

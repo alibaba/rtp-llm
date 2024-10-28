@@ -29,6 +29,13 @@ enum class PositionEmbeddingType {
     absolute,
 };
 
+enum class RotaryScalingType : int8_t
+{
+    kNONE = 0,
+    kLINEAR = 1,
+    kDYNAMIC = 2,
+};
+
 template<typename T, typename Tindex>
 void invokeGenRelativePosBias(T*            relative_position_bias,
                               const T*      relative_position_bias_table,

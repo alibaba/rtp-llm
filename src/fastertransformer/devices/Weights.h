@@ -39,7 +39,6 @@ typedef std::shared_ptr<const LayerNormWeights> LayerNormWeightsPtr;
 struct DenseWeights {
     ConstBufferPtr kernel = nullptr;
     ConstBufferPtr bias = nullptr;
-
     DenseWeights() = default;
 
     DenseWeights(BufferPtr& kernel) : kernel(std::move(kernel)) {};
@@ -55,6 +54,7 @@ struct DenseWeights {
                  BufferPtr& bias) :
                  kernel(std::move(kernel)),
                  bias(std::move(bias)) {};
+
 };
 
 typedef std::shared_ptr<const DenseWeights> DenseWeightsPtr;
@@ -105,7 +105,8 @@ struct FfnLayerWeights {
     ConstBufferPtr                          act_scale;
     std::shared_ptr<const DenseWeights>     intermediate_weight2_static_scale_weight;
     std::shared_ptr<const DenseWeights>     intermediate_weight2_static_scale_reciprocal_weight;
-
+    std::shared_ptr<const DenseWeights>     intermediate_weight3_static_scale_weight;
+    std::shared_ptr<const DenseWeights>     intermediate_weight3_static_scale_reciprocal_weight;
     // these fields are for Qwen Mode model.
     // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
     std::shared_ptr<FfnLayerWeights>        shared_expert;
@@ -117,6 +118,7 @@ struct LayerWeights {
     AttentionLayerWeights                   self_attention_weights;
     std::shared_ptr<const DenseWeights>     pre_attention_smoother_weight;
     std::shared_ptr<const LayerNormWeights> post_layernorm;
+    std::shared_ptr<const DenseWeights>     post_layernorm_quant_scale;
     std::shared_ptr<const LayerNormWeights> post_layernorm_2;
     FfnLayerWeights                         ffn_weights;
     std::shared_ptr<const LayerNormWeights> post_ffn_layernorm;

@@ -70,11 +70,13 @@ TORCH_MODULE(Attention);
 class AttentionOpTest: public DeviceTestBase {
 public:
 
+
     void contextAttentionOpTest(size_t batch_size,
                                 size_t seq_len,
                                 size_t num_heads,
                                 size_t num_key_value_heads,
-                                size_t head_dim);
+                                size_t head_dim,
+				                const QScheme qscheme = QScheme::NoQuantize);
 
     void selfAttentionOpTest(size_t batch_size,
                              size_t seq_len,
@@ -84,11 +86,13 @@ public:
                              size_t head_dim);
 };
 
+
 void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
                                              size_t seq_len,
                                              size_t num_heads,
                                              size_t num_key_value_heads,
-                                             size_t head_dim) {
+                                             size_t head_dim,
+					                         const QScheme qscheme) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto state_dict = attention.ptr()->named_parameters();
@@ -108,6 +112,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
 
     auto qkv_states_host = torch::cat(
         {query_states_host, key_states_host, value_states_host}, 2);
+    auto scale_host = torch::ones({1});
 
     qkv_states_host = qkv_states_host.view({(int)(batch_size * seq_len),
                                             (int)(num_heads + 2 * num_key_value_heads),
@@ -136,6 +141,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto padding_offset_device  = createDeviceBuffer<int>(padding_offset_host);
     auto cu_seqlens_device      = createDeviceBuffer<int>(cu_seqlens_host);
     auto attention_mask_device  = createDeviceBuffer<half>(attention_mask_host);
+    auto scale_device           = createDeviceBuffer<float>(scale_host);
     auto rope_config            = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     auto common_inputs      = AttentionCommonInputs({*input_lengths, *sequence_lengths});
@@ -154,19 +160,23 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto attention_weight   = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
+    attention_weight.static_scale_reciprocal_weight = make_shared<const DenseWeights>(DenseWeights(scale_device));
+
     auto attention_config   = AttentionConfigs({num_heads,
                                                 num_key_value_heads,
                                                 head_dim,
                                                 rope_config});
 
+    auto output_data_type = qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : qkv_input_device->type();
     auto qkv_output = device_->allocateBuffer(
-        {qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}}
+        {output_data_type, {batch_size, seq_len, num_heads, head_dim}}
     );
     device_->contextAttention({0, *qkv_input_device,
                                *qkv_output,
                                 common_inputs,
                                 attention_weight,
-                                attention_config});
+                                attention_config,
+                                qscheme});
 
     auto result_ref = attention->forward(query_states_host,
                                          key_states_host,

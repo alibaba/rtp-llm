@@ -65,61 +65,63 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& scales_key,
                                         const std::string& zeros_key)
 {
-    if (map.count(kernel_key) > 0) {
-        const auto dense_weights = new DenseWeights();
-        if (!bias_key.empty()) {
-            dense_weights->bias = mayFindBuffer(map, bias_key);
-        }
-        if (map.count(scales_key) <= 0) {
-            dense_weights->kernel = mayFindBuffer(map, kernel_key);
-        } else if (map.count(zeros_key) <= 0) {
-            auto kernel = mayFindBuffer(map, kernel_key);
-            auto scales = mayFindBuffer(map, scales_key);
-            // construct qbuffer need kernel and scales has no ref.
-            FT_LOG_DEBUG("load qbuffer weight [%s] ", scales_key.c_str());
-            dense_weights->kernel = ConstBufferPtr(
-                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
-                                                     kernel->type(),
-                                                     kernel->shape(),
-                                                     kernel->data())),
-                                BufferPtr(new Buffer(scales->where(),
-                                                     scales->type(),
-                                                     scales->shape(),
-                                                     scales->data())),
-                                BufferPtr(new Buffer(scales->where(),
-                                                     scales->type(),
-                                                     {0},
-                                                     nullptr))));
-        } else {
-            auto kernel = mayFindBuffer(map, kernel_key);
-            auto scales = mayFindBuffer(map, scales_key);
-            auto zeros  = mayFindBuffer(map, zeros_key);
-            FT_LOG_DEBUG("load qbuffer weight [%s] ", zeros_key.c_str());
-            auto dtype_ = kernel->type();
-            auto shape_ = kernel->shape();
-            if (quant_algo_.getWeightBits() == 4) {
-                dtype_ = DataType::TYPE_INT4X2;
-                shape_[kernel->dim()-1] = shape_[kernel->dim()-1] * 2;
-            }
-            dense_weights->kernel = ConstBufferPtr(
-                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
-                                                     dtype_,
-                                                     shape_,
-                                                     kernel->data())),
-                                BufferPtr(new Buffer(scales->where(),
-                                                     scales->type(),
-                                                     scales->shape(),
-                                                     scales->data())),
-                                BufferPtr(new Buffer(zeros->where(),
-                                                     zeros->type(),
-                                                     zeros->shape(),
-                                                     zeros->data()))));
-            FT_LOG_DEBUG("weight shape is [%s] ", autil::StringUtil::toString(dense_weights->kernel->shape()).c_str());
-        }
-        return unique_ptr<const DenseWeights>(dense_weights);
-
+    if (map.count(kernel_key) <= 0) {
+        return nullptr;
     }
-    return nullptr;
+    const auto dense_weights = new DenseWeights();
+    auto kernel = mayFindBuffer(map, kernel_key);
+    if (!bias_key.empty()) {
+        dense_weights->bias = mayFindBuffer(map, bias_key);
+    }
+    if (quant_algo_.isSmoothQuant() || quant_algo_.isOmniQuant()) {
+        FT_LOG_DEBUG("load smooth qbuffer weight [%s]", scales_key.c_str());
+        auto scales = mayFindBuffer(map, scales_key);
+        auto shape = kernel->shape();
+        // actual tensor shape is [n, k], for gemm set shape [k, n]
+        std::reverse(shape.begin(), shape.end());
+        dense_weights->kernel = ConstBufferPtr(
+            new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),kernel->type(),kernel->shape(),kernel->data())),
+                            BufferPtr(new Buffer(scales->where(),scales->type(), scales->shape(), scales->data())),
+                            BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
+    } else if (quant_algo_.isFp8() && !scales_key.empty()) {
+        FT_LOG_DEBUG("load fp8 qbuffer weight kernel_key [%s] scale [%s]", kernel_key.c_str(), scales_key.c_str());
+        auto scales = mayFindBuffer(map, scales_key);
+        auto shape = kernel->shape();
+        // actual tensor shape is [n, k], for gemm set shape [k, n]
+        std::reverse(shape.begin(), shape.end());
+        dense_weights->kernel = ConstBufferPtr(
+            new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), DataType::TYPE_FP8_E4M3, kernel->shape(), kernel->data())),
+                            BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
+                            BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
+    } else if (quant_algo_.isQuant() && !scales_key.empty()) {
+        FT_LOG_DEBUG("load weight_only qbuffer weight [%s] scale [%s]", kernel_key.c_str(), scales_key.c_str());
+        auto scales = mayFindBuffer(map, scales_key);
+        auto dtype = kernel->type();
+        auto shape = kernel->shape();
+        if (quant_algo_.getWeightBits() == 4) {
+            dtype = DataType::TYPE_INT4X2;
+            shape[kernel->dim()-1] = shape[kernel->dim()-1] * 2;
+            // actual tensor shape is [n, k], for gemm set shape [k, n]
+            std::reverse(shape.begin(), shape.end());
+        }
+
+        if (quant_algo_.getGroupSize() > 0 && map.count(zeros_key) > 0) {
+            auto zeros  = mayFindBuffer(map, zeros_key);
+            dense_weights->kernel = ConstBufferPtr(
+                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
+                                BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
+                                BufferPtr(new Buffer(zeros->where(), zeros->type(), zeros->shape(), zeros->data()))));
+        } else {
+            dense_weights->kernel = ConstBufferPtr(
+                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
+                                BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
+                                BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
+        }
+    } else {
+        dense_weights->kernel = kernel;
+    }
+    return unique_ptr<const DenseWeights>(dense_weights);
+
 }
 
 ft::FfnLayerWeights
@@ -140,6 +142,8 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
 
     ffn_weights.intermediate_weight2_static_scale_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight2_s);
     ffn_weights.intermediate_weight2_static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight2_sr);
+    ffn_weights.intermediate_weight3_static_scale_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight3_s);
+    ffn_weights.intermediate_weight3_static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight2_sr);
 
     // for qwen moe
     if (ffn_weights.moe_gating_weight) {

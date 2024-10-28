@@ -27,7 +27,7 @@
 #endif
 
 #include "src/fastertransformer/kernels/logprob_kernels.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/utils/logger.h"
 
 namespace fastertransformer {

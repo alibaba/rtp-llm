@@ -4,6 +4,7 @@ from typing import Dict, Optional
 import logging
 
 class HippoHelper:
+    HIPPO_FUSE_PORT = 'HIPPO_FUSE_PORT'
     host_ip = os.environ.get('HIPPO_SLAVE_IP', '')
     try:
         # 获取主机名
@@ -17,6 +18,7 @@ class HippoHelper:
     role = os.environ.get('HIPPO_ROLE_SHORT_NAME', os.environ.get('HIPPO_ROLE', ''))
     app = os.environ.get('HIPPO_APP', '')
     group = os.environ.get('HIPPO_SERVICE_NAME', '')
+    app_workdir = os.environ.get('HIPPO_APP_WORKDIR', '')
     
 
     @staticmethod
@@ -32,3 +34,10 @@ class HippoHelper:
             'hippo_app': HippoHelper.app,
             'hippo_group': HippoHelper.group,
         } if HippoHelper.is_hippo_env() else {}
+
+    @staticmethod
+    def host_fuse_port() -> Optional[str]:
+        if HippoHelper.HIPPO_FUSE_PORT in os.environ:
+            return os.environ.get(HippoHelper.HIPPO_FUSE_PORT)
+        else:
+            return None

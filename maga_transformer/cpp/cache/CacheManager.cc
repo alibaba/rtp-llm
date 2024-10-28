@@ -9,6 +9,10 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
 
 using namespace std;
 using namespace fastertransformer;
@@ -117,6 +121,27 @@ void CacheManager::initKvCache() {
                                                          (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2
                                                              + kv_cache_.k_scale->sizeBytes());
     }
+#ifdef ENABLE_FP8
+    else if (config_.dtype == ft::DataType::TYPE_FP8_E4M3) {
+        kv_cache_.k_scale = std::make_unique<ft::Buffer>(
+                ft::MemoryType::MEMORY_GPU,
+                ft::DataType::TYPE_FP32,
+                std::vector<size_t>{(size_t)config_.layer_num,
+                    (size_t)config_.block_nums,
+                    (size_t)config_.local_head_num_kv,
+                    (size_t)config_.seq_size_per_block},
+                (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
+        kv_cache_.v_scale = std::make_unique<ft::Buffer>(
+                ft::MemoryType::MEMORY_GPU,
+                ft::DataType::TYPE_FP32,
+                std::vector<size_t>{(size_t)config_.layer_num,
+                    (size_t)config_.block_nums,
+                    (size_t)config_.local_head_num_kv,
+                    (size_t)config_.seq_size_per_block},
+                (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
+    }
+#endif
+
 }
 
 const CacheConfig& CacheManager::cacheConfig() const {

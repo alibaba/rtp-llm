@@ -37,16 +37,16 @@ struct LayerNormWeight {
     const T* beta  = nullptr;
 };
 
-template <typename T>
+template <typename T, typename QUANT_OUT_T=int8_t>
 void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream = 0,
     bool use_diff_of_squares = true, const float* scale = nullptr, float* dynamic_scale = nullptr,
-    int8_t* out_quant = nullptr, bool return_normed_output = false);
+    QUANT_OUT_T* out_quant = nullptr, bool return_normed_output = false);
 
-template <typename T>
+template <typename T, typename QUANT_OUT_T=int8_t>
 void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
     const int hidden_dim, cudaStream_t stream = 0, bool use_diff_of_squares = true, const float* scale = nullptr,
-    float* dynamic_scale = nullptr, int8_t* out_quant = nullptr, bool return_normed_output = false);
+    float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr, bool return_normed_output = false);
 
 
 template<typename T>

@@ -72,6 +72,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         checkUseTrtV1FMHA();
         checkUseTrtV2FMHA();
         checkUseOpenSourceFMHA();
+        checkSupportTrtFp8FMHA();
     }
     checkUseMultiBlockMode();
     checkUseGroupGemm();
@@ -178,8 +179,9 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
     bool found_cufmha_runner = false;
+    DataType fmha_datatype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : params.dtype;
     for (auto& runner: cufmha_runner_pool_) {
-        if (runner->checkSignature(params.dtype,
+        if (runner->checkSignature(fmha_datatype,
                                    params.configs.mask_type,
                                    params.configs.head_num,
                                    params.configs.kv_head_num,
@@ -206,6 +208,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = true;
         return output;
     }
+    use_fp8_fmha = useFp8Fmha(params);
     if (params.context_batch_size) {
         selectCuFMHARunner(params);
 
@@ -321,6 +324,26 @@ void CudaDevice::checkUseTrtV2FMHA() {
     FT_LOG_INFO("use TRTV2 fmha paged");
     use_trtv2_fmha_paged = true;
 }
+
+void CudaDevice::checkSupportTrtFp8FMHA() {
+    int sm = get_sm();
+    if (sm < 90 || !use_trtv2_fmha) {
+      FT_LOG_WARNING("sm is [%d], use_trtv2_fmha:[%d] not support fp8 fmha", sm, use_trtv2_fmha);
+        return;
+    }
+    FT_LOG_INFO("support fp8 fmha");
+    support_trt_fp8_fmha = true;
+}
+
+bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
+#ifdef ENABLE_FP8
+    if (support_trt_fp8_fmha && params.configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        return true;
+    }
+#endif
+    return false;
+}
+
 
 void CudaDevice::checkUseMultiBlockMode() {
     if constexpr (CompileConfig::cudart_version < 11070) {

@@ -35,6 +35,10 @@
 #include <cuda_bf16.h>
 #endif
 
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
+
 #ifndef _WIN32 // Linux
 #include <sys/sysinfo.h>
 #endif         // not WIN32
@@ -671,6 +675,13 @@ template<>                    struct packed_as<float2, 1>         { using type =
 #ifdef ENABLE_BF16
 template<> struct packed_as<__nv_bfloat16,  2> { using type = __nv_bfloat162; };
 template<> struct packed_as<__nv_bfloat162, 1> { using type = __nv_bfloat16;  };
+#endif
+
+#ifdef ENABLE_FP8
+template<> struct packed_as<__nv_fp8_e4m3,  2> { using type = __nv_fp8x2_e4m3; };
+template<> struct packed_as<__nv_fp8x2_e4m3, 1> { using type = __nv_fp8_e4m3;  };
+template<> struct packed_as<__nv_fp8_e5m2,  2> { using type = __nv_fp8x2_e5m2; };
+template<> struct packed_as<__nv_fp8x2_e5m2, 1> { using type = __nv_fp8_e5m2;  };
 #endif
 
 inline __device__ float2 operator*(float2 a, float2 b) { return make_float2(a.x * b.x, a.y * b.y); }

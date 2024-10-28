@@ -37,7 +37,8 @@ public:
     virtual uint64_t hashID(TKernelParam const& param) const = 0;
 
     TSharedCubinKernel(TKernelMeta const* pMetaStart, int32_t nMetaCount, int32_t sm)
-        : mKernelMeta(pMetaStart)
+        : mDriver(CUDADriverWrapper::getInstance())
+        , mKernelMeta(pMetaStart)
         , mKernelMetaCount(nMetaCount)
         , mSM(sm)
     {
@@ -77,16 +78,16 @@ public:
                 }
                 else
                 {
-                    cuErrCheck(mDriver.cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
+                    cuErrCheck(mDriver->cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
                     mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
                 }
 
                 Fp8Gemm1x1KernelInfo funcInfo;
                 funcInfo.mMetaInfoIndex = i;
-                cuErrCheck(mDriver.cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
+                cuErrCheck(mDriver->cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
                 if (kernelMeta.mSharedMemBytes >= DEFAULT_SMEM_SIZE)
                 {
-                    if (mDriver.cuFuncSetAttribute(funcInfo.mDeviceFunction,
+                    if (mDriver->cuFuncSetAttribute(funcInfo.mDeviceFunction,
                             CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes)
                         != CUDA_SUCCESS)
                     {
@@ -116,7 +117,7 @@ public:
         CUfunction const func = findIter->second.mDeviceFunction;
 
         void* kernelParams[] = {&params, nullptr};
-        cuErrCheck(mDriver.cuLaunchKernel(func, mProp.multiProcessorCount, 1, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+        cuErrCheck(mDriver->cuLaunchKernel(func, mProp.multiProcessorCount, 1, 1, kernelMeta.mThreadsPerCTA, 1, 1,
                         kernelMeta.mSharedMemBytes, ss, kernelParams, nullptr),
             mDriver);
     }
@@ -126,7 +127,7 @@ public:
 protected:
     cudaDeviceProp mProp;
 
-    CUDADriverWrapper mDriver;
+    std::shared_ptr<CUDADriverWrapper> mDriver;
 
     TKernelMeta const* mKernelMeta;
     int32_t mKernelMetaCount;

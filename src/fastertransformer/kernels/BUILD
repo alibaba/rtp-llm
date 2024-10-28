@@ -130,7 +130,6 @@ cc_library(
         "layernorm_kernels.h",
         "activation_kernels.h",
         "unfused_attention_kernels.h",
-        "reduce_kernel_utils.cuh",
         "sampling_topk_kernels.h",
         "sampling_topp_kernels.h",
         "sampling_penalty_kernels.h",

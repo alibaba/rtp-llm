@@ -117,6 +117,24 @@ public:
               const int         n,
               const int         k,
               const void*       A,
+              cudaDataType_t    Atype,
+              const int         lda,
+              const void*       B,
+              cudaDataType_t    Btype,
+              const int         ldb,
+              void*             C,
+              cudaDataType_t    Ctype,
+              const int         ldc,
+              cudaDataType_t    computeType,
+              float             f_alpha,
+              float             f_beta);
+
+    void Gemm(cublasOperation_t transa,
+              cublasOperation_t transb,
+              const int         m,
+              const int         n,
+              const int         k,
+              const void*       A,
               const int         lda,
               const void*       B,
               const int         ldb,
@@ -156,6 +174,9 @@ public:
 
     void setGemmConfig(cudaDataType_t aType, cudaDataType_t bType, cudaDataType_t cType, cudaDataType_t computeType);
 
+#ifdef ENABLE_FP8
+    void setFP8GemmConfig(cudaDataType_t outputType = CUDA_R_16F);
+#endif
     CublasDataType getCublasDataType(cudaDataType_t data_type);
 
 #if (CUDART_VERSION >= 11000)

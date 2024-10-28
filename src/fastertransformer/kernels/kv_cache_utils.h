@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "src/fastertransformer/utils/EnumUtils.h"
 #include <assert.h>
 #include <cmath>
 #include "src/fastertransformer/kernels/kv_cache_index.h"
@@ -106,7 +107,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
     int32_t mBubbleLen;
     // Enable one more block to save the kv tokens
     bool mEnableOneMoreBlock;
-    bool int8_mode = false;
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
     void* scale = nullptr;
     int mScaleBytesPerBlock = 1;
     void* pagedKVBlockOffsetsOnHost;

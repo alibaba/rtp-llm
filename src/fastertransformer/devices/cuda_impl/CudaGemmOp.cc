@@ -27,6 +27,10 @@ cudaDataType_t dtypeConvert(DataType dtype) {
         case DataType::TYPE_FP16 : return cudaDataType_t::CUDA_R_16F;
         case DataType::TYPE_BF16 : return cudaDataType_t::CUDA_R_16BF;
         case DataType::TYPE_FP32 : return cudaDataType_t::CUDA_R_32F;
+#ifdef ENABLE_FP8
+	case DataType::TYPE_FP8_E4M3 : return cudaDataType_t::CUDA_R_8F_E4M3;
+	case DataType::TYPE_QFP8_E4M3 : return cudaDataType_t::CUDA_R_8F_E4M3;
+#endif
         default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 };
@@ -86,6 +90,10 @@ struct CudaGemmArguments {
         if (ADtype == DataType::TYPE_QINT8 && BDtype == DataType::TYPE_QINT8) {
             DDtype = DataType::TYPE_FP16;
         }
+        // fp8 gemm
+        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
+            DDtype = DataType::TYPE_FP16;
+        }
 
         dim =  params.A.dim();
         batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2,
@@ -105,8 +113,15 @@ struct CudaGemmArguments {
         ldc = n;
         stride_c = m * n;
 
-        alpha = params.alpha;
-        beta  = params.beta;
+        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
+            float input_scale = getCudaValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
+            float weight_scale = getCudaValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
+            alpha = params.alpha * input_scale * weight_scale;
+        } else {
+            alpha = params.alpha;
+        }
+        
+        beta = params.beta;
     }
 
     void dump() {
@@ -239,6 +254,30 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     auto       a_op = opConvert(params.transA);
     auto       b_op = opConvert(params.transB);
 
+#ifdef ENABLE_FP8
+    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && QBufferDtype2BufferDtype(params.A.type()) == DataType::TYPE_FP8_E4M3) {
+        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP8_E4M3, TYPE_QFP8_E4M3});
+        cublas_mm_wrapper_->Gemm(CUBLAS_OP_T,
+                                 CUBLAS_OP_N,
+                                 arguments.n,
+                                 arguments.m,
+                                 arguments.k,
+                                 B,
+                                 B_data_type,
+                                 arguments.lda,
+                                 A,
+                                 A_data_type,
+                                 arguments.lda,
+                                 D,
+                                 D_data_type,
+                                 arguments.ldc,
+                                 computeType,
+                                 arguments.alpha,
+                                 arguments.beta);
+
+        sync_check_cuda_error();
+    } else
+#endif
     if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
@@ -303,7 +342,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
             output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
         }
 
-        if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
+        if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
             InvokeSmoothQaunt(params, arguments, output);
         } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
             InvokeWeightOnlyGemm(params, arguments, output);

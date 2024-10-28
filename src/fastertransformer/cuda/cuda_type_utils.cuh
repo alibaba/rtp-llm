@@ -364,27 +364,99 @@ template<> __device__ inline __nv_bfloat16 cuda_max(__nv_bfloat162 val) { return
 // Binary maximum: compute the max of two scalar types
 template<typename T> __device__ inline T cuda_max(T val1, T val2) { return (val1 > val2) ? val1 : val2; }
 
+template <typename int8_t>
+__inline__ __device__ float getAmax() {
+    return 1e-6f;
+}
+template <typename int8_t>
+__device__ float getScaleFactor() {
+    return 127.0f;
+}
+
 #ifdef ENABLE_FP8
-template<> __device__ inline float2 cuda_cast<float2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) { return bf1622float2(fp8x2_e4m3_to_bfloat2(&val)); }
-template<> __device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, float2>(float2 val) { return __nv_fp8x2_e4m3(bf1622float2(float22bf162(val))); }
+template <> __device__ inline float2 cuda_cast<float2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) 
+{ 
+    return bf1622float2(tensorrt_llm::common::fp8x2_e4m3_to_bfloat2(&val)); 
+}
 
-template<> __device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, half>(half val) { return __nv_fp8_e4m3(val); }
-template<> __device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, __nv_bfloat16>(__nv_bfloat16 val) { return __nv_fp8_e4m3(val); }
-template<> __device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, float>(float val) { return __nv_fp8_e4m3(val); }
-template<> __device__ inline float cuda_cast<float, __nv_fp8_e4m3>(__nv_fp8_e4m3 val) { return (float)val; }
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) { return fp8x2_e4m3_to_bfloat2(&val); }
+template<>
+__device__ inline half2 cuda_cast<half2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val)
+{
+    return tensorrt_llm::common::fp8x2_e4m3_to_half2(&val);
+}
 
-template<> __device__ inline int8_t cuda_cast<int8_t, __nv_fp8_e4m3>(__nv_fp8_e4m3 val)
+template <>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, float2>(float2 val)
+{
+    return __nv_fp8x2_e4m3(bf1622float2(float22bf162(val)));
+}
+
+template <>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, half2>(half2 val)
+{
+    return __nv_fp8x2_e4m3(cuda_cast<float2>(val));
+}
+
+template <>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, __nv_bfloat162>(__nv_bfloat162 val)
+{
+    return __nv_fp8x2_e4m3(cuda_cast<float2>(val));
+}
+
+template <>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, half>(half val)
+{
+    return __nv_fp8_e4m3(val);
+}
+
+template <>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, __nv_bfloat16>(__nv_bfloat16 val)
+{
+    return __nv_fp8_e4m3(val);
+}
+
+template <>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, float>(float val)
+{
+    return __nv_fp8_e4m3(val);
+}
+
+template <>
+__device__ inline float cuda_cast<float, __nv_fp8_e4m3>(__nv_fp8_e4m3 val)
+{
+    return (float) val;
+}
+
+template <>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val)
+{
+    return tensorrt_llm::common::fp8x2_e4m3_to_bfloat2(&val);
+}
+
+template <>
+__device__ inline int8_t cuda_cast<int8_t, __nv_fp8_e4m3>(__nv_fp8_e4m3 val)
 {
     // no impl
     return 0;
 }
 
-template<> __device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, int8_t>(int8_t val)
+template <>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, int8_t>(int8_t val)
 {
     return cuda_cast<__nv_fp8_e4m3>(cuda_cast<__nv_bfloat16>(cuda_cast<float>(val)));
 }
 
+template <>
+__inline__ __device__ float getAmax<__nv_fp8_e4m3>() {
+    // 针对 __nv_fp8_e4m3 类型的特化实现
+    return 1 / 512.0f;
+}
+
+template <>
+__inline__ __device__ float getScaleFactor<__nv_fp8_e4m3>() {
+    // 针对 __nv_fp8_e4m3 类型的特化实现
+    return tensorrt_llm::common::FP8_E4M3_MAX;
+}
 #endif // ENABLE_FP8
 
 }

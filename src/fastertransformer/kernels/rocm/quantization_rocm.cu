@@ -1,6 +1,6 @@
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/kernels/rocm/quantization_rocm.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/rocm/hip_utils.h"
 
 namespace fastertransformer {

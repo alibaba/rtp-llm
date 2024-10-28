@@ -46,6 +46,8 @@ constexpr bool IsCastingFloatToWorkT =
     std::is_same_v<DstT, WorkT> &&
     std::is_convertible_v<SrcT, DstT>;
 
+
+
 template<typename SrcT, typename DstT, std::enable_if_t<std::is_same<SrcT, DstT>::value, bool> = 0>
 inline DstT simpleCast(SrcT src) {
     return src;
@@ -55,6 +57,15 @@ template<typename SrcT, typename DstT,
          std::enable_if_t<(!std::is_same_v<SrcT, DstT>) && std::is_convertible_v<SrcT, DstT>, bool> = 0>
 inline DstT simpleCast(SrcT src) {
     return (DstT)src;
+}
+
+template<typename SrcT, typename DstT,
+         std::enable_if_t<
+             (!std::is_same_v<SrcT, DstT>) &&
+             (!std::is_convertible_v<SrcT, DstT>) &&
+              (std::is_pointer_v<SrcT> && std::is_pointer_v<DstT>), bool> = 0>
+inline DstT simpleCast(SrcT src) {
+    return reinterpret_cast<DstT>(src);
 }
 
 template<typename SrcT, typename DstT, typename WorkT,
@@ -107,6 +118,20 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     std::apply(func_name<T>, typed_args);                                                   \
 }
 
+#define ARG_CASTED_FUNC_CALL_TWO_TYPE(T1, T2, func_name, ...) {                                  \
+    using target_args_type = FunctionTraits<std::function<decltype(func_name<T1, T2>)>>::args;   \
+    auto typed_args = castArgs<target_args_type, std::tuple<T1, T2>>(std::make_tuple(__VA_ARGS__));          \
+    std::apply(func_name<T1, T2>, typed_args);                                                   \
+}
+
+#ifdef ENABLE_FP8
+#define ENABLE_FP8_CASE_NUMERIC(MACRO, ...) MACRO(DataType::TYPE_FP8_E4M3, __nv_fp8_e4m3, __VA_ARGS__)
+#define ENABLE_FP8_CASE_QUANT(MACRO, T1, ...) MACRO(DataType::TYPE_FP8_E4M3, T1, __nv_fp8_e4m3, __VA_ARGS__)
+#else
+#define ENABLE_FP8_CASE_NUMERIC(MACRO, ...)
+#define ENABLE_FP8_CASE_QUANT(MACRO, T1, ...)
+#endif
+
 #define DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, ...)         \
     MACRO(DataType::TYPE_FP32, float, __VA_ARGS__)         \
     MACRO(DataType::TYPE_FP16, half, __VA_ARGS__)          \
@@ -114,18 +139,31 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     default: \
         FT_CHECK(false);
 
-#define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)         \
-    MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)        \
-    MACRO(DataType::TYPE_INT32, int32_t, __VA_ARGS__)      \
-    MACRO(DataType::TYPE_INT64, int64_t, __VA_ARGS__)      \
-    MACRO(DataType::TYPE_UINT8, uint8_t, __VA_ARGS__)      \
-    MACRO(DataType::TYPE_UINT32, uint32_t, __VA_ARGS__)    \
-    MACRO(DataType::TYPE_UINT64, uint64_t, __VA_ARGS__)    \
-    DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, __VA_ARGS__)     \
+#define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)             \
+    MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)            \
+    MACRO(DataType::TYPE_INT32, int32_t, __VA_ARGS__)          \
+    MACRO(DataType::TYPE_INT64, int64_t, __VA_ARGS__)          \
+    MACRO(DataType::TYPE_UINT8, uint8_t, __VA_ARGS__)          \
+    MACRO(DataType::TYPE_UINT32, uint32_t, __VA_ARGS__)        \
+    MACRO(DataType::TYPE_UINT64, uint64_t, __VA_ARGS__)        \
+    ENABLE_FP8_CASE_NUMERIC(MACRO, __VA_ARGS__)                \
+    DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, __VA_ARGS__)
+
+#define DISPATCH_FOR_EACH_QUANT_TYPE(MACRO, T1, ...)               \
+    MACRO(DataType::TYPE_INT8, T1, int8_t, __VA_ARGS__)            \
+    ENABLE_FP8_CASE_QUANT(MACRO, T1, __VA_ARGS__)                  \
+    default:                                                       \
+        FT_CHECK_WITH_INFO(false, "unsupport quant type");
 
 #define DP_FUNCTION_CALL_CASE(data_type, T, ...) \
     case data_type: {                            \
         ARG_CASTED_FUNC_CALL(T, __VA_ARGS__);    \
+        break;                                   \
+    }
+
+#define DP_TWO_TYPE_FUNCTION_CALL_CASE(data_type, T1, T2, ...) \
+    case data_type: {                            \
+        ARG_CASTED_FUNC_CALL_TWO_TYPE(T1, T2, __VA_ARGS__);    \
         break;                                   \
     }
 
@@ -185,6 +223,24 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__) \
         default:                                                        \
         FT_CHECK(false);                                                \
+    }
+
+
+#define QUANT_OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                           \
+    case dtype1: {                                                                           \
+        switch (dtype2) {                                                                    \
+            DISPATCH_FOR_EACH_QUANT_TYPE(DP_TWO_TYPE_FUNCTION_CALL_CASE, T1, function, __VA_ARGS__);  \
+        }                                                                                    \
+        break;                                                                               \
+    }
+
+#define DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(dtype1, dtype2, function, ...)                  \
+    switch (dtype1) {                                                                              \
+        QUANT_OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
+        QUANT_OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
+        QUANT_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
+        default:                                                                                   \
+        FT_CHECK(false);                                                                           \
     }
 
 }  // namespace fastertransformer

@@ -1,14 +1,12 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
 
-
 #include <optional>
 #include <functional>
 #include <algorithm>
 #include <sstream>
 
 namespace fastertransformer {
-
 
 // target independence params check
 void GemmParams::check() const {

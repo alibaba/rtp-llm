@@ -56,6 +56,8 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
+    "auto_gptq",
+    "autoawq",
     "numpy",
     "safetensors",
     "einops",
@@ -103,6 +105,7 @@ py_library(
         ":lru-dict",
         ":cpm_kernels",
         ":prettytable",
+        "//maga_transformer/aios/kmonitor:kmonitor_py",
     ] + arch_dep
 )
 
@@ -160,6 +163,8 @@ py_library(
         ":Pillow",
         ":torch",
         ":torchvision",
+        ":auto_gptq",
+        ":autoawq",
         ":pyOpenSSL",
         ":einops",
         ":utils",

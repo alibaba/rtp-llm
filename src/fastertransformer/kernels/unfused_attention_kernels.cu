@@ -17,7 +17,7 @@
 
 #include "src/fastertransformer/utils/utils.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
@@ -1324,12 +1324,20 @@ template<>
 struct Vec_t<float> {
     using Type                = float2;
     static constexpr int size = 2;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_2_t;
+#endif
+
 };
 
 template<>
 struct Vec_t<half> {
     using Type                = uint32_t;
     static constexpr int size = 2;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_2_t;
+#endif
+
 };
 
 #ifdef ENABLE_BF16
@@ -1337,8 +1345,20 @@ template<>
 struct Vec_t<__nv_bfloat16> {
     using Type                = __nv_bfloat162;
     static constexpr int size = 2;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_2_t;
+#endif
 };
 #endif
+
+// Multiple calls of reinterpret_cast.
+template <typename type_in, typename type_out>
+inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset)
+{
+    return reinterpret_cast<type_out*>(reinterpret_cast<type_in*>(ptr) + offset);
+}
+
+// Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
@@ -1346,6 +1366,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    T*                               v_buf,
                                                    PrefixPromptBatchWeightsParam    param,
                                                    T*                               QKV,
+                                                   void*                            QuantizedQKV,
                                                    const int*  position_ids,
                                                    const T* __restrict qkv_bias,
                                                    const int*  padding_offset,
@@ -1377,6 +1398,11 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
+#ifdef ENABLE_FP8
+    // Quantized output only supports fp8 currently.
+    using QuantizedEltType = __nv_fp8_e4m3;
+    using QuantizedVecType = typename Vec_t<T>::QuantizedType;
+#endif
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
     const int token_idx            = blockIdx.x;
@@ -1468,9 +1494,35 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     if (store_qkv) {
         *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q;
         if (head_idx < head_num_kv) {
+#ifdef ENABLE_FP8
+            if (QuantizedQKV != nullptr) {
+                // use 1.0f scale currently for qkv input of FP8 FMHA.
+                convert_to_fp8(reinterpret_cast<QuantizedVecType*>(
+				                reinterpret_cast<QuantizedEltType*>(QuantizedQKV) + src_k_idx),
+						k);
+                convert_to_fp8(reinterpret_cast<QuantizedVecType*>(
+			                        reinterpret_cast<QuantizedEltType*>(QuantizedQKV) + src_v_idx),
+                   				v);
+            }
+#endif
             *reinterpret_cast<Vec_t*>(&QKV[src_k_idx]) = k;
             *reinterpret_cast<Vec_t*>(&QKV[src_v_idx]) = v;
         }
+#ifdef ENABLE_FP8
+        if (QuantizedQKV != nullptr) {
+            size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
+                            + seq_idx * size_per_head + tidx * vec_size;
+            if constexpr (USE_PAGED_FMHA) {
+                dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num
+                            + head_idx * size_per_head + tidx * vec_size;
+            }
+            *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+            QuantizedVecType* quantized_q_ptr = USE_PAGED_FMHA
+                        ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx)
+                        : reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+            convert_to_fp8(quantized_q_ptr, q);
+        }
+#endif
     }
 
     if (store_q) {
@@ -1481,7 +1533,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                         + head_idx * size_per_head + tidx * vec_size;
         }
 
-        *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
     if (store_kv) {
@@ -1505,14 +1557,19 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 float* v_scale_ptr = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
                 const int inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size);
                 const int inScaleIdx  = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
-                float local_max[2];
                 __shared__ float s_max[2];
-                local_max[0] = vector_abs_max(k);
-                local_max[1] = vector_abs_max(v);
-                blockReduceMaxV2<float, 2>(local_max);
-                if (threadIdx.x == 0) {
-                    s_max[0] = local_max[0];
-                    s_max[1] = local_max[1];
+                if constexpr (std::is_same<Tcache, int8_t>::value) {
+                    float local_max[2];
+                    local_max[0] = vector_abs_max(k);
+                    local_max[1] = vector_abs_max(v);
+                    blockReduceMaxV2<float, 2>(local_max);
+                    if (threadIdx.x == 0) {
+                        s_max[0] = local_max[0];
+                        s_max[1] = local_max[1];
+                    }
+                } else {
+                    s_max[0] = float(1 << (8 - 1));
+                    s_max[1] = float(1 << (8 - 1));
                 }
                 __syncthreads();
 
@@ -1537,6 +1594,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     T*                               v_buf,
                                     PrefixPromptBatchWeightsParam*   param_ptr,
                                     T*                               QKV,
+                                    void*                            QuantizedQKV,
                                     const int*                       position_ids,
                                     const T*                         qkv_bias,
                                     const int*                       padding_offset,
@@ -1565,7 +1623,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
 
     FT_SWITCH(param.max_prefix_prompt_length != 0, PREFIX_PROMPT, [&]{
         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&]{
-            FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
+            FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&]{
                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&]{
                     add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
                         <<<grid, block, smem_size, stream>>>(
@@ -1574,6 +1632,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                 v_buf,
                                 param,
                                 QKV,
+                                QuantizedQKV,
                                 position_ids,
                                 qkv_bias,
                                 padding_offset,
@@ -1671,7 +1730,7 @@ void invokeLoadPrefixKVCache(T*                               q_buf,
     dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
     dim3 grid(batch_size * param.max_prefix_prompt_length, head_num);
 
-    FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
+    FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&]{
         load_prefix_KVCache_kernel<T, Tcache>
             <<<grid, block, 0, stream>>>(
                     q_buf,
@@ -1763,6 +1822,7 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  T*                               v_buf,                               \
                                                  PrefixPromptBatchWeightsParam*   param,                               \
                                                  T*                               QKV,                                 \
+                                                 void*                            QuantizedQKV,                        \
                                                  const int*                       position_ids,                        \
                                                  const T*                         qkv_bias,                            \
                                                  const int*                       padding_offset,                      \

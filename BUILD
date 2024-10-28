@@ -43,6 +43,7 @@ cc_library(
     ],
     deps = [
         "//src/fastertransformer/utils:utils",
+	    "//src/fastertransformer/core:types"
     ] + torch_deps(),
     visibility = ["//visibility:public"],
 )

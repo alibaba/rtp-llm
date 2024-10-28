@@ -33,7 +33,7 @@
 using namespace fastertransformer::rocm;
 #endif
 
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 
     namespace fastertransformer {

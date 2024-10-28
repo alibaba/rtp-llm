@@ -255,7 +255,6 @@ public:
     }
 
 
-
     // Unified Contiguous QKV and Paged KV FMHA runner.
     template <typename Kernel_params>
     void run_template(Kernel_params& params, Launch_params& launch_params, cudaStream_t stream) const

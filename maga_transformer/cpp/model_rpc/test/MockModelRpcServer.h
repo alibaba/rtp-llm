@@ -1,18 +1,18 @@
-#include <chrono>
-#include <memory>
-#include <thread>
-#include <cuda_fp16.h>
-#include "gtest/gtest.h"
+#pragma once
+
+#include "src/fastertransformer/core/Types.h"
 
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
+#include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
+#include "src/fastertransformer/models/W.h"
+#include <memory>
 
 using namespace std;
-
+namespace W  = ft::W;
+namespace ft = fastertransformer;
 namespace rtp_llm {
-
-class LoraNormalEngineTest: public DeviceTestBase {
-protected:
 
 EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     auto params = GptInitParameter();
@@ -27,17 +27,19 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     params.reuse_cache_ = false;
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
-    params.kv_cache_data_type_ = DataType::TYPE_FP16;
-    const size_t inter_size    = 512;
+    params.kv_cache_data_type_      = DataType::TYPE_FP16;
+    const size_t inter_size         = 512;
     params.inter_size_         = inter_size;
     params.inter_padding_size_ = inter_size;
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
+    const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
+
     auto word_embeddings =
         make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
     auto lm_head =
@@ -45,6 +47,7 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
+
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights;
     for (int i = 0; i < params.num_layers_; ++i) {
         auto pre_layernorm_weights =
@@ -105,15 +108,63 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     return rtp_llm_params;
 }
 
-};
+using loraLayerMap = std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>;
 
-TEST_F(LoraNormalEngineTest, testSimple) {
-    EngineInitParams params = createMockEngineInitParams(device_);
-    NormalEngine engine = NormalEngine(params);
-    EXPECT_NE(engine.getLoraManager(), nullptr);
+std::array<loraLayerMap, 2> createMockLoraWeights(DeviceBase* device) {
+    size_t rank = 8;
+    size_t head_num_ = 2;
+    size_t size_per_head_ = 64;
+    size_t num_layers_ = 2;
+    size_t max_seq_len_ = 20;
+    size_t vocab_size_ = 20;
+    size_t hidden_size_ = 128;
+    size_t head_num_kv_ = 2;
+    size_t block_nums_  = 100;
+    const size_t inter_size    = 512;
+    size_t inter_size_         = inter_size;
+    size_t inter_padding_size_ = inter_size;
+    typedef half         T;
+    const at::ScalarType scalar_type  = at::ScalarType::Half;
+    const ft::DataType   data_type    = getTensorType<T>();
+    auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
+    const size_t         hidden_units = 128;
+    auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
+
+    loraLayerMap lora_a_weights;
+    loraLayerMap lora_b_weights;
+    for (int i = 0; i < num_layers_; ++i) {
+        auto qkv_weights_lora_a = make_unique<const ft::Buffer>(
+            mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
+        auto qkv_weights_lora_b = make_unique<const ft::Buffer>(
+            mem_type, data_type, vector<size_t>{rank, 3 * hidden_units}, data->data());
+        auto attention_output_weight_lora_a = make_unique<const ft::Buffer>(
+            mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
+        auto attention_output_weight_lora_b = make_unique<const ft::Buffer>(
+            mem_type, data_type, vector<size_t>{rank, hidden_units}, data->data());
+        auto ffn_weight_lora_a =
+            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
+        auto ffn_weight_lora_b =
+            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{rank, inter_size}, data->data());
+        auto ffn_output_weight_lora_a =
+            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size, rank}, data->data());
+        auto ffn_output_weight_lora_b =
+            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{rank, hidden_units}, data->data());
+        std::unordered_map<std::string, ft::ConstBufferPtr> weights_lora_a;
+        std::unordered_map<std::string, ft::ConstBufferPtr> weights_lora_b;
+        weights_lora_a.emplace(W::attn_qkv_w, std::move(qkv_weights_lora_a));
+        weights_lora_a.emplace(W::attn_o_w, std::move(attention_output_weight_lora_a));
+        weights_lora_a.emplace(W::ffn_w3, std::move(ffn_weight_lora_a));
+        weights_lora_a.emplace(W::ffn_w2, std::move(ffn_output_weight_lora_a));
+        weights_lora_b.emplace(W::attn_qkv_w, std::move(qkv_weights_lora_b));
+        weights_lora_b.emplace(W::attn_o_w, std::move(attention_output_weight_lora_b));
+        weights_lora_b.emplace(W::ffn_w3, std::move(ffn_weight_lora_b));
+        weights_lora_b.emplace(W::ffn_w2, std::move(ffn_output_weight_lora_b));
+        lora_a_weights.push_back(std::move(weights_lora_a));
+        lora_b_weights.push_back(std::move(weights_lora_b));
+    }
+    std::array<loraLayerMap, 2> result{lora_a_weights, lora_b_weights};
+    return result;
 }
-
-
 
 
 }  // namespace rtp_llm

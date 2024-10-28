@@ -22,7 +22,7 @@ namespace rtp_llm {
 
 struct CustomConfig {
     bool reuse_cache = false;
-    bool int8_kv_cache = false;
+    DataType kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
 };
 
@@ -39,7 +39,7 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     params.multi_task_prompt_tokens_ = config.multi_task_prompt_tokens;
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
-    params.int8_kv_cache_ = config.int8_kv_cache;
+    params.kv_cache_data_type_ = config.kv_cache_data_type;
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;

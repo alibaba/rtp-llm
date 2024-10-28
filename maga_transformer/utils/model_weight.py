@@ -7,6 +7,7 @@ import torch
 import torch.serialization
 import functools
 import copy
+from enum import Enum
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -64,7 +65,7 @@ def b_half_merge(ts: List[torch.Tensor]):
 def zeros(ts: List[torch.Tensor], shape: List[int]) -> torch.Tensor:
     return torch.zeros(shape, dtype=torch.half).contiguous()
 
-def ones(ts: List[torch.Tensor], shape: List[int]) -> torch.Tensor:
+def ones(ts: List[torch.Tensor], shape: List[int] = [1]) -> torch.Tensor:
     return torch.ones(shape, dtype=torch.half).contiguous()
 
 def transpose(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -81,6 +82,21 @@ def identity(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
 def multipy_identity(ts: List[torch.Tensor], scale: float) -> torch.Tensor:
     t = identity(ts)
     return t * scale
+
+def div(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
+    if len(ts) == 0:
+        if allow_empty:
+            return None
+        else:
+            raise Exception("ts is empty")
+    return (1.0/ts[0]).to(torch.float32).contiguous()
+    #return (torch.tensor(1.0, dtype=torch.float32, device="cuda:0")).contiguous()
+
+def get_tensor_reciprocal(ts: List[torch.Tensor]) -> torch.Tensor:
+    return 1.0 / ts[0].reshape(-1)
+
+def get_tensor_from_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
+    return ts[0].reshape(-1)
 
 def tolerate_failed(ts: List[torch.Tensor], origin_func: Callable[[List[torch.Tensor]], torch.Tensor]) -> torch.Tensor:
     try:
@@ -261,6 +277,11 @@ def merge_qkv_lora_B(ts: List[torch.Tensor]):
                       torch.cat((t_k, k,   t_k), dim=1),
                       torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
 
+def merge_te_qkv(ts: List[torch.Tensor]):
+    q, k, v = ts
+    qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
+    return qkv_weight
+
 class W:
     # global
     embedding = 'embedding'
@@ -401,6 +422,23 @@ class W:
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
+    
+    #per tensor quant
+    pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
+    pre_decoder_ln_static_quant_reciprocal = 'pre_decoder_layernorm.static_quant_reciprocal'
+    pre_ln_static_quant = 'pre_layernorm_weights.static_quant'
+    pre_ln_static_quant_reciprocal = 'pre_layernorm_weights.static_quant_reciprocal'
+    attention_output_static_quant = 'self_attention_weights.attention_output_weight.static_quant'
+    attention_output_static_quant_reciprocal = 'self_attention_weights.attention_output_weight.static_quant_reciprocal'
+    post_ln_static_quant = 'post_layernorm_weights.static_quant'
+    post_ln_static_quant_reciprocal = 'post_layernorm_weights.static_quant_reciprocal'
+    ffn_intermediate_weight2_static_quant = 'ffn_weights.intermediate_weight2.static_quant'
+    ffn_intermediate_weight2_static_quant_reciprocal = 'ffn_weights.intermediate_weight2.static_quant_reciprocal'
+    ffn_intermediate_weight3_static_quant = "ffn_weights.intermediate_weight3.static_quant"
+    ffn_intermediate_weight3_static_quant_reciprocal = "ffn_weights.intermediate_weight3.static_quant_reciprocal"
+
+    post_ffn_ln_static_quant = "post_ffn_layernorm_weights.static_quant"
+    post_ffn_ln_static_quant_reciprocal = "post_ffn_layernorm_weights.static_quant_reciprocal"
 
     # per tensor quant
     pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
@@ -503,6 +541,21 @@ class W:
 
     sq_quant_shifts = [
         attn_o_shift
+    ]
+    
+    static_quant_scales = [
+        pre_ln_static_quant,
+        pre_ln_static_quant_reciprocal,
+        attention_output_static_quant,
+        attention_output_static_quant_reciprocal,
+        post_ln_static_quant,
+        post_ln_static_quant_reciprocal,
+        ffn_intermediate_weight2_static_quant,
+        ffn_intermediate_weight2_static_quant_reciprocal,
+        ffn_intermediate_weight3_static_quant,
+        ffn_intermediate_weight3_static_quant_reciprocal,
+        post_ffn_ln_static_quant,
+        post_ffn_ln_static_quant_reciprocal
     ]
 
     static_quant_scales = [
@@ -798,6 +851,12 @@ class WeightInfo:
     def __repr__(self) -> str:
         return self.__str__()
 
+
+class Fp8WeightStyle(Enum):
+    NONE = 0
+    TRT_ENGINE = 1
+    TRANSFORMER_ENGINE = 2
+    
 class ModelWeightInfo:
     layer_weights: Union[List[WeightInfo], List[List[WeightInfo]]]
     weights: List[WeightInfo]
@@ -932,6 +991,8 @@ class ModelDeployWeightInfo:
         self.tie_word_embeddings = config.tie_word_embeddings
         self.need_ffn_act_scale = config.need_ffn_act_scale
         self.use_expert_attention = config.use_expert_attention
+        self.fp8_weight_stype = Fp8WeightStyle.NONE
+
 
         # for mla
         self.kv_lora_rank = config.kv_lora_rank

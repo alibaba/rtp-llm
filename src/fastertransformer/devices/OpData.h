@@ -147,7 +147,7 @@ struct LayernormParams {
                     double eps = 1e-5,
                     bool is_inplace = true,
                     bool return_normed_output = false,
-                    NormType norm_type = NormType::layernorm,
+                    NormType norm_type = NormType::layernorm,                    
                     QScheme qscheme = QScheme::NoQuantize) :
                     input(std::move(input)),
                     before_norm_output(std::move(before_norm_output)),
@@ -381,6 +381,7 @@ struct AttentionConfigs {
 
     // softmax config
     float softmax_extra_scale = 1.0f;
+    KvCacheDataType kv_cache_dtype = KvCacheDataType::BASE;
 };
 
 using AttentionModuleOutput = void;
@@ -394,6 +395,7 @@ struct AttentionModuleParams {
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
+    const QScheme                   qscheme;
 };
 
 struct AttentionLayerOutput {

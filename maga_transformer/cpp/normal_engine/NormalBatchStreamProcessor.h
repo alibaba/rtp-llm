@@ -23,7 +23,7 @@ public:
     NormalBatchStreamProcessor(const ft::GptInitParameter& params):
         num_layers_(params.num_layers_),
         vocab_size_(params.vocab_size_),
-        use_int8_kv_cache_(params.int8_kv_cache_),
+        use_int8_kv_cache_(params.kv_cache_data_type_ == ft::DataType::TYPE_INT8),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
         mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),

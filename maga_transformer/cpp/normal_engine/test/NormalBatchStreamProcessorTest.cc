@@ -24,7 +24,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     param.max_seq_len_   = 2048;
     param.vocab_size_    = 2048;
     param.num_layers_    = 2;
-    param.int8_kv_cache_ = true;
+    param.kv_cache_data_type_ = DataType::TYPE_INT8;
     NormalBatchStreamProcessor     processor(param);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
