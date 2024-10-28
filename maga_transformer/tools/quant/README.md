@@ -1,0 +1,4 @@
+examples:
+```bash
+LD_LIBRARY_PATH=/usr/local/cuda/compat/:/usr/local/nvidia/lib64/:/usr/lib64/:/usr/local/cuda/lib64/:${LD_LIBRARY_PATH} CUDA_VISIBLE_DEVICES="1,2,3,4" PYTHONPATH=/home/luoli.hn/work/FasterTransformer:$PYTHONPATH  /opt/conda310/bin/python maga_transformer/tools/quant/weights_quant.py --pretrained_model_dir="xxx" --output_dir_base="/home/luoli.hn/try/qwen-4bit" --dataset="/home/luoli.hn/work/try/taowise_sft_ec_agent_20240305_chatml_string.jsonl" --quant_type="GPTQ" --dataset_format="json" --quant_config='{"bits":4,"group_size":128, "desc_act": false}' --sample_strategy='{"distinct_attrs":["task"]}'
+```
