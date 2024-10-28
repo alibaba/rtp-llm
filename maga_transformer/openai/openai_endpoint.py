@@ -194,6 +194,9 @@ class OpenaiEndopoint():
     ) -> CompleteResponseAsyncGenerator:
         renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
         rendered_input = renderer.render_chat(chat_request)
+        if chat_request.prepopulate_str != "":
+            rendered_input.rendered_prompt += chat_request.prepopulate_str
+            rendered_input.input_ids += self.tokenizer.encode(chat_request.prepopulate_str)
         input_ids = rendered_input.input_ids
 
         generate_config = self._extract_generation_config(chat_request)

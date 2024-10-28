@@ -121,6 +121,7 @@ class ChatCompletionRequest(BaseModel):
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
     sp_advice_prompt: str = ""
     sp_edit: bool = False
+    prepopulate_str: str = ""
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
