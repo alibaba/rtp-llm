@@ -5,6 +5,7 @@
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <cuda_fp8.h>
 
 namespace unittest {
 
@@ -14,6 +15,7 @@ public:
     T5LayerNormOp(double eps):eps(eps){};
 
     torch::Tensor forward(torch::Tensor input, torch::Tensor gamma);
+    torch::Tensor forward_fp8(torch::Tensor input, torch::Tensor input_scale, torch::Tensor gamma);
 
 private:
     int64_t eps;
@@ -27,8 +29,26 @@ torch::Tensor T5LayerNormOp::forward(torch::Tensor input, torch::Tensor gamma) {
     auto d_model    = input.size(1);
 
     torch::Tensor output = torch::zeros_like(input);
-    fastertransformer::invokeGeneralRmsNorm((float*)output.data_ptr(), 
+    fastertransformer::invokeGeneralRmsNorm<float, int8_t>((float*)output.data_ptr(), 
             (float*)input.data_ptr(), (float*)gamma.data_ptr(), (float*)nullptr, (float)eps, (int)batch_size, (int)d_model, stream);
+    return output;
+}
+
+torch::Tensor T5LayerNormOp::forward_fp8(torch::Tensor input, torch::Tensor input_scale, torch::Tensor gamma) {
+
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+    auto batch_size = input.size(0);
+    auto d_model    = input.size(1);
+
+    float *scale = input_scale.data_ptr<float>();
+
+    torch::Tensor output = torch::zeros_like(input);
+#ifdef ENABLE_FP8
+    __nv_fp8_e4m3 *quant_output = reinterpret_cast<__nv_fp8_e4m3*>(output.data_ptr());
+    fastertransformer::invokeGeneralRmsNorm<float, __nv_fp8_e4m3>((float*)output.data_ptr(), 
+            (float*)input.data_ptr(), (float*)gamma.data_ptr(), (float*)nullptr, (float)eps, (int)batch_size, (int)d_model, stream, scale, nullptr, quant_output);
+#endif
     return output;
 }
 
@@ -37,4 +57,5 @@ torch::Tensor T5LayerNormOp::forward(torch::Tensor input, torch::Tensor gamma) {
 static auto T5LayerNormTHS =
     torch::jit::class_<unittest::T5LayerNormOp>("unittest", "T5LayerNormOp")
         .def(torch::jit::init<double>())
-        .def("forward", &unittest::T5LayerNormOp::forward);
+        .def("forward", &unittest::T5LayerNormOp::forward)
+        .def("forward_fp8", &unittest::T5LayerNormOp::forward_fp8);

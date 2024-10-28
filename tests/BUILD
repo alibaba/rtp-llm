@@ -14,6 +14,8 @@ cc_library(
         "gemm_group/*.cc",
         "int8_gemm/*.cc",
         "mla/*.cc",
+	    "fp8_gemm/*.cc",
+        "unittests/test_activation.cu",
     ]),
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
@@ -46,6 +48,21 @@ py_test(
     deps = [
         "//maga_transformer:torch",
         "//maga_transformer:transformers",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "generalLayerNorm",
+    srcs = [
+        "layernorm/generalLayerNorm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
     ],
     exec_properties = {'gpu':'A10'},
 )
