@@ -172,6 +172,8 @@ void CudaDevice::initCacheStore(const DeviceInitParams& device_params) {
     params.rdma_listen_port = device_params.cache_store_rdma_listen_port;
     params.rdma_connect_port = device_params.cache_store_rdma_connect_port;
     params.rdma_mode = device_params.cache_store_rdma_mode;
+    params.thread_count = 4;
+    params.queue_size = 500;
     FT_LOG_INFO("cache store listen port is [%ld], connect port is [%d], rdma_mode is [%d]",
         params.listen_port, params.connect_port, params.rdma_mode);
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);

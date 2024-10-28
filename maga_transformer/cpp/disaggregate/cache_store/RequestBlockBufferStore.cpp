@@ -111,7 +111,8 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
     auto iter = request_cache_map_.find(requestid);
     if (iter != request_cache_map_.end()) {
         if (iter->second == nullptr) {
-            FT_LOG_WARNING("request block buffer store try get expired request block buffer %s", requestid.c_str());
+            FT_LOG_WARNING("request block buffer store try get expired request block buffer, request id %s",
+                            requestid.c_str());
         }
         return iter->second;
     }
@@ -135,9 +136,15 @@ bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& b
 
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::shared_ptr<BlockBuffer>& block) {
     // addr allocated by MemoryUtil, will be mr addr in rdma
-    auto addr = std::shared_ptr<void>(memory_util_->mallocCPU(block->len), [memory_util = memory_util_](void* p) {
-        memory_util->deregUserMr(p, false);
-        memory_util->freeCPU(p);
+    auto addr = std::shared_ptr<void>(memory_util_->mallocCPU(block->len), [memory_util = memory_util_, block](void* p) {
+        if(p != nullptr){
+            FT_LOG_INFO("addr is not nullptr, address: %ld, block key: %s", p, block->key.c_str());
+            memory_util->deregUserMr(p, false);
+            memory_util->freeCPU(p);
+        }
+        else{
+            FT_LOG_INFO("addr is nullptr");
+        }
     });
 
     if (addr == nullptr) {
@@ -190,6 +197,7 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    FT_LOG_DEBUG("del request block buffer, request id %s", requestid.c_str());
     request_cache_map_[requestid] = nullptr;
 }
 

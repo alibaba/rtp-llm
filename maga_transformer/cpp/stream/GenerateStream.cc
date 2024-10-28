@@ -30,7 +30,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
-
 {
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
@@ -125,7 +124,7 @@ absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
 
 void GenerateStream::cancel() {
     cancelled_ = true;
-    setStop("cancel stream");
+    setStop(ErrorCode::CANCELLED, "cancel stream");
 }
 
 absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reserve_step) {
@@ -416,13 +415,17 @@ void GenerateStream::step() {
     }
 }
 
+int64_t GenerateStream::getTimeoutMs() const {
+    return generate_input_->generate_config->timeout_ms;
+}
+
 void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-    auto timeout_ms      = generate_input_->generate_config->timeout_ms;
+    auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        stopAndRelease("query has been running " + std::to_string(running_time_ms) + " ms, "
-                       + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout",
-                       absl::StatusCode::kDeadlineExceeded);
+        stopAndRelease(ErrorCode::GENERATE_TIMEOUT, 
+                       "query has been running " + std::to_string(running_time_ms) + " ms, "
+                       + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
@@ -430,20 +433,28 @@ bool GenerateStream::checkTokenId(int token_id) {
     return token_id >= 0 && token_id < vocab_size_;
 }
 
-void GenerateStream::setStop(const std::string& err_msg, absl::StatusCode err_code) {
+void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    FT_LOG_WARNING("stop stream [%d], error_msg: [%s]", streamId(), err_msg.c_str());
+    FT_LOG_WARNING("stop stream [%d], error_msg: [%s], current state [%s], "
+                    "input len [%d], seq len [%d]",
+                    streamId(), error_msg.c_str(), GenerateStateToString(generate_status_.status).c_str(),
+                    inputLength(), seqLength());
     generate_status_.status     = GenerateState::STOPPED;
-    generate_status_.error_code = err_code;
-    generate_status_.error_info = err_msg;
+    generate_status_.error_info = ErrorInfo(error_code, error_msg);
 }
 
-void GenerateStream::stopAndRelease(const std::string& err_msg, absl::StatusCode err_code) {
-    setStop(err_msg, err_code);
+void GenerateStream::stopAndRelease(ErrorCode error_code, const std::string& error_msg) {
+    setStop(error_code, error_msg);
     releaseResource();
 }
 
+ErrorInfo GenerateStream::statusInfo() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return generate_status_.error_info;
+}
+
 void GenerateStream::setPaused() {
+    // TODO(xinfei.sxf) fix mutex name
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (stoppedWithoutLock()) {
         return;
@@ -490,7 +501,7 @@ bool GenerateStream::paused() {
 
 std::string GenerateStream::stopReason() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_.error_info;
+    return generate_status_.error_info.ToString();
 }
 
 bool GenerateStream::finishedWithoutLock() {
@@ -503,11 +514,11 @@ bool GenerateStream::running() {
 
 void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (generate_status_.status == GenerateState::WAITING || generate_status_.status == GenerateState::REMOTE_RUNNING) {
+    if (generate_status_.status == GenerateState::WAITING
+            || generate_status_.status == GenerateState::REMOTE_RUNNING) {
         FT_LOG_WARNING("stop stream: %d %s", streamId(), "cancel stream in waiting or remote_running");
         generate_status_.status = GenerateState::STOPPED;
-        generate_status_.error_code = absl::StatusCode::kInternal;
-        generate_status_.error_info = "cancel stream in waiting";
+        generate_status_.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting");
     }
 }
 
@@ -544,13 +555,13 @@ size_t GenerateStream::maxBlockSize() const {
     return stream_cache_resource_.maxBlockSize();
 }
 
-size_t GenerateStream::max_token_num() const {
+size_t GenerateStream::maxTokenNum() const {
     return std::min(max_seq_len_,
         generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
-    return seq_length_ >= max_token_num() || needFinishBySPTokens();
+    return seq_length_ >= maxTokenNum() || needFinishBySPTokens();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -651,9 +662,9 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();;
         first_token_latency_us_ = first_token_time_us_ - begin_time_us_;
     }
-    size_t max_token_nums = max_token_num();
-    if (seq_length_ + num_new_tokens > max_token_nums) {
-        num_new_tokens = max_token_nums - seq_length_;
+    size_t max_token_num = maxTokenNum();
+    if (seq_length_ + num_new_tokens > max_token_num) {
+        num_new_tokens = max_token_num - seq_length_;
     }
 
     // # NOTE: new tokens indicate num of newly genearted tokens
@@ -665,7 +676,9 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!checkTokenId(current_token_id)) {
-                setStop("output token id:" + to_string(current_token_id) + " out of vocab size: " + to_string(vocab_size_));
+                setStop(ErrorCode::OUT_OF_VOCAB_RANGE, 
+                        "output token id:" + to_string(current_token_id) + 
+                        " out of vocab size: " + to_string(vocab_size_));
                 return;
             }
         }
@@ -716,7 +729,7 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
 void GenerateStream::reportMetric() {
     if (metrics_reporter_) {
         RtpLLMStreamMetricsCollector collector;
-        collector.qps        = finished() || cancelled_;
+        collector.qps        = true;
         collector.cancel_qps = cancelled_;
         collector.error_qps  = stopped() && !cancelled_;
         if (finished() || cancelled_) {

@@ -58,12 +58,10 @@ public:
     ~CacheManager();
 
     const CacheConfig&     cacheConfig() const;
-    const BlockRefCounter& blockRefCounter() const;
-    const BlockCache&      blockCache() const;
     size_t                 freeBlockNums() const;
     size_t                 availableBlockNums() const;
     KVCacheInfo            getKVCacheInfo() const;
-    size_t                 cacheItemNum() const;
+    uint32_t               maxSeqLen() const;
     const KVCacheBuffer&   kvCacheBuffer() const;
 
     std::tuple<bool, KVCacheBlockAddr> malloc(int nums = 1);
@@ -72,7 +70,7 @@ public:
                                                        bool need_loss = false);
     int                                match(const std::vector<int>& token_ids);
     void                               reserveBlocks(int nums);
-    void                               incrBlockRefCounter(const std::vector<int>& indices);
+    void                               incrRefCounter(const std::vector<int>& blocks);
 
     void free(const std::vector<KVCacheBlockAddr>& resource);
     void free(const std::vector<int>& indice);
@@ -86,23 +84,27 @@ public:
     void blockCopy(int src_block_index, int dest_block_index);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
-    void reportMetricsLoop();
 
     void beamSearchKvUpdate(ft::BufferPtr src_block_offset,
-                            ft::BufferPtr  target_block_offset);
+                            ft::BufferPtr target_block_offset);
 
 private:
+    const BlockCache&                       blockCache() const;
+    size_t                                  cacheItemNum() const;
     uint32_t                                totalBlocks() const;
     void                                    initFreeBlock();
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndTpSync();
     void                                    initKvCache();
-    MatchInfo                               matchImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds);
+    MatchInfo                               matchImpl(const std::vector<int>& token_ids,
+                                                      const std::vector<std::vector<int>>& mm_bounds);
     void                                    regUserMr();
     void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
-    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds = {}, bool need_loss = false);
+    MatchInfo                               mallocWithCacheImpl(const std::vector<int>& token_ids,
+                                                                const std::vector<std::vector<int>>& mm_bounds = {},
+                                                                bool need_loss = false);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);
@@ -111,12 +113,17 @@ private:
                          const std::vector<float>& loss,
                          bool                      is_resident);
 
-    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& target_index);
+    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
+                                const std::vector<int>& src_index, const std::vector<int>& target_index);
     SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
-    void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
+    void copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
+    const BlockRefCounter& blockRefCounter() const;
+    void incrBlockRefCounter(const std::vector<int>& blocks);
     void incrQueryRefCounter(const std::vector<int>& blocks);
     void decrQueryRefCounter(const std::vector<int>& blocks);
+
+    void reportMetricsLoop();
 
 private:
     CacheConfig     config_;

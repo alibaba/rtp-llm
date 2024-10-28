@@ -1,5 +1,4 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-
 #include "maga_transformer/cpp/utils/Logger.h"
 
 #include <cstring>
@@ -11,7 +10,7 @@ namespace rtp_llm {
 MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtilBase> impl): instance_(std::move(impl)) {
     auto err = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
     if (err != cudaError_t::cudaSuccess) {
-        throw std::runtime_error("failed to create stream");
+        throw std::runtime_error("failed to create stream, error is " + std::string(cudaGetErrorString(err)));
     }
 }
 
@@ -29,31 +28,35 @@ MemoryUtilBase& MemoryUtil::getInstance() {
 
 void* MemoryUtil::mallocCPU(size_t size) {
     void* ptr = nullptr;
-    if (cudaMallocHost(&ptr, size) != cudaSuccess) {
-        FT_LOG_WARNING("cuda malloc host failed, size %lu", size);
+    cudaError_t err = cudaMallocHost(&ptr, size);
+    if (err != cudaSuccess) {
+        FT_LOG_WARNING("cuda malloc host failed, size %lu, error is %s", size, cudaGetErrorString(err));
         return nullptr;
     }
     return ptr;
 }
 
 void MemoryUtil::freeCPU(void* ptr) {
-    if (cudaFreeHost(ptr) != cudaSuccess) {
-        FT_LOG_WARNING("cuda free host failed");
+    cudaError_t err = cudaFreeHost(ptr);
+    if (err != cudaSuccess) {
+        FT_LOG_WARNING("cuda free host failed, size %lu, error is %s,  error code is %d", cudaGetErrorString(err), err);
     }
 }
 
 void* MemoryUtil::mallocGPU(size_t size) {
     void* ptr = nullptr;
-    if (cudaMallocHost(&ptr, size) != cudaSuccess) {
-        FT_LOG_WARNING("cuda malloc host failed, size %lu", size);
+    cudaError_t err = cudaMallocHost(&ptr, size);
+    if (err != cudaSuccess) {
+        FT_LOG_WARNING("cuda malloc host failed, size %lu, error is %s", size, cudaGetErrorString(err));
         return nullptr;
     }
     return ptr;
 }
 
 void MemoryUtil::freeGPU(void* ptr) {
-    if (cudaFreeHost(ptr) != cudaSuccess) {
-        FT_LOG_WARNING("cuda free host failed");
+    cudaError_t err = cudaFreeHost(ptr);
+    if (err != cudaSuccess) {
+        FT_LOG_WARNING("cuda free host failed, size %lu, error is %s, error code is %d", cudaGetErrorString(err), err);
     }
 }
 
@@ -111,7 +114,11 @@ bool MemoryUtil::gpuEventBarrier(void* event) {
     if (event == nullptr) {  // wait event only when pass event
         return true;
     }
-    return cudaEventSynchronize(*(cudaEvent_t*)event) == cudaSuccess;
+    cudaError_t err = cudaEventSynchronize(*(cudaEvent_t*)event);
+    if (err != cudaSuccess) {
+        FT_LOG_WARNING("cuda event sync failed, error is %s", cudaGetErrorString(err));
+    }
+    return err == cudaSuccess;
 }
 
 }  // namespace rtp_llm

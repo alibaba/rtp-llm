@@ -14,25 +14,45 @@ public:
     grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) override;
 
-    grpc::Status remote_generate(grpc::ServerContext*                                            context,
-                                 grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
-        return decode_server_->remote_generate(context, stream);
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implememt GenerateStreamCall";
+            FT_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return prefill_server_->GenerateStreamCall(context, request, writer);
     }
 
-    grpc::Status generate_stream(grpc::ServerContext*                   context,
-                                 const GenerateInputPB*                 request,
-                                 grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        return prefill_server_->generate_stream(context, request, writer);
+    grpc::Status RemoteFinish(grpc::ServerContext* context,
+                              const RemoteFinishRequestPB* request, EmptyPB* response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implememt RemoteFinish";
+            FT_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return prefill_server_->RemoteFinish(context, request, response);
     }
 
-    grpc::Status remote_load(grpc::ServerContext* context,
-                             const RemoteLoadRequestPB* request, EmptyPB* response) override {
-        return decode_server_->remote_load(context, request, response);
+    grpc::Status RemoteLoad(grpc::ServerContext* context,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB* response) override {
+        if (!decode_server_) {
+            auto error_msg = "server not implememt RemoteLoad";
+            FT_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return decode_server_->RemoteLoad(context, request, response);
     }
 
-    grpc::Status remote_finish(grpc::ServerContext* context,
-                               const RemoteFinishRequestPB* request, EmptyPB* response) override {
-        return prefill_server_->remote_finish(context, request, response);
+    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
+        if (!decode_server_) {
+            auto error_msg = "server not implememt RemoteGenerate";
+            FT_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return decode_server_->RemoteGenerate(context, stream);
     }
 
     bool ready() override {

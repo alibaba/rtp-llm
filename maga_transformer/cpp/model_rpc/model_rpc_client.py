@@ -20,7 +20,11 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
 from maga_transformer.distribute.worker_info import g_master_info
 from maga_transformer.distribute.worker_info import g_worker_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+
 request_counter = AtomicCounter()
+
+MAX_GRPC_TIMEOUT_SECONDS = 60 * 3
 
 def trans_option(pb_object, py_object, name):
     if getattr(py_object, name):
@@ -144,20 +148,29 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
 
 class ModelRpcClient(object):
 
-    def __init__(self, address: Optional[str] = None):
+    def __init__(self, config: GptInitModelParameters, address: Optional[str] = None):
         # 创建到服务器的连接
         if not address:
             address = f'localhost:{g_worker_info.rpc_server_port}'
         logging.info("client connect to rpc address: " + address)
         self._address = address
+        self.model_config = config
 
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         input_pb = trans_input(input)
         response_iterator = None
+        request_timeout_ms = input.generate_config.timeout_ms
+        rpc_timeout_ms = self.model_config.max_rpc_timeout_ms \
+                            if self.model_config.max_rpc_timeout_ms > 0 else MAX_GRPC_TIMEOUT_SECONDS
+        if request_timeout_ms == None or request_timeout_ms <= 0:
+            grpc_timeout_seconds = rpc_timeout_ms
+        else:
+            grpc_timeout_seconds = request_timeout_ms / 1000
+
         try:
             async with grpc.aio.insecure_channel(self._address) as channel:
                 stub = RpcServiceStub(channel)
-                response_iterator = stub.generate_stream(input_pb)
+                response_iterator = stub.GenerateStreamCall(input_pb, timeout=grpc_timeout_seconds)
                 # 调用服务器方法并接收流式响应
                 count = 0
                 async for response in response_iterator.__aiter__():
@@ -167,12 +180,16 @@ class ModelRpcClient(object):
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            logging.error(f"request: [{input_pb.request_id}] RPC failed: {e.code()}, {e.details()}")
             error_details = ErrorDetailsPB()
             metadata = e.trailing_metadata()
             if 'grpc-status-details-bin' in metadata and error_details.ParseFromString(metadata['grpc-status-details-bin']):
-                raise FtRuntimeException(error_details.error_code, error_details.error_message)
+                logging.error(f"request: [{input_pb.request_id}] RPC failed: "
+                              f"{e.code()}, {e.details()}, detail error code is "
+                              f"{ExceptionType.from_value(error_details.error_code)}")
+                raise FtRuntimeException(ExceptionType(error_details.error_code), error_details.error_message)
             else:
+                logging.error(f"request: [{input_pb.request_id}] RPC failed: "
+                              f"{e.code()}, {e.details()}")
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:
             logging.error(f'rpc unknown error:{str(e)}')

@@ -51,8 +51,8 @@ void EmbeddingStream::waitFinish() {
     while (generate_state_ != GenerateState::FINISHED && generate_state_ != GenerateState::STOPPED) {
         cond_.wait_for(lock, std::chrono::milliseconds(5));
     }
-    if (embedding_output_->error_info.has_error) {
-        throw std::runtime_error("run stream failed: " + embedding_output_->error_info.error_message);
+    if (!embedding_output_->error_info.ok()) {
+        throw std::runtime_error("run stream failed: " + embedding_output_->error_info.ToString());
     }
 }
 

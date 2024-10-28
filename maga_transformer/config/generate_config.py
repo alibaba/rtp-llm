@@ -12,7 +12,8 @@ class RequestFormat:
 class GenerateConfig(BaseModel):
     max_new_tokens: int = 1000
     num_beams: int = 1
-    # 0 mean not use num_return_sequences
+    # 0 mean not use num_return_sequences,
+    # whether to enable num_return_sequences, the output format of the results is inconsistent.
     num_return_sequences: int = 0
     top_k: Union[List[int], int] = 0
     top_p: Union[List[float], float] = 0.95

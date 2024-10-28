@@ -14,33 +14,62 @@ class MutableMetric;
 
 namespace rtp_llm {
 
-class RPCMetricsCollector final {
+class RpcMetricsCollector final {
 public:
-    bool    qps                         = false;
-    bool    cancel_qps                  = false;
-    bool    error_qps                   = false;
-    int     retry_times                 = 0;
-    int64_t onflight_request            = 0;
-    int64_t load_latency_us             = 0;
-    int64_t wait_load_latency_us        = 0;
-    int64_t remote_compute_latency_us   = 0;
-    int64_t total_latency_us            = 0;
+    // rpc server metrics
+    bool    qps                             = false;
+    bool    cancel_qps                      = false;
+    bool    error_qps                       = false;
+    int64_t onflight_request                = 0;
+    int64_t total_rt_us                     = 0;
+
+    // pd-sep prefill and decode metrics
+    int     retry_times                     = 0;
+    int     loading_cache_request           = 0;
+
+    // pd-sep prefill metrics
+    int64_t get_rpc_connection_rt_us        = 0;
+    int64_t remote_allocate_resource_rt_us  = 0;
+    int64_t enqueue_request_rt_us           = 0;
+    int64_t remote_load_cache_rt_us         = 0;
+    int64_t poll_local_output_rt_us         = 0;
+    int64_t remote_generate_rt_us           = 0;
+    int64_t poll_remote_output_rt_us        = 0;
+
+    // pd-sep decode stage metrics
+    int64_t prepare_generate_context_rt_us  = 0;
+    int64_t allocate_resource_rt_us         = 0;
+    int64_t load_cache_from_prefill_rt_us   = 0;
+    int64_t local_generate_rt_us            = 0;
 };
 
-class RPCMetrics: public kmonitor::MetricsGroup {
+class RpcMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RPCMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* qps_metric                         = nullptr;
-    kmonitor::MutableMetric* cancel_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* error_qps_metric                   = nullptr;
-    kmonitor::MutableMetric* onflight_request_metric            = nullptr;
-    kmonitor::MutableMetric* load_latency_us_metric             = nullptr;
-    kmonitor::MutableMetric* wait_load_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* remote_compute_latency_us_metric   = nullptr;
-    kmonitor::MutableMetric* total_latency_us_metric            = nullptr;
+    kmonitor::MutableMetric* qps_metric                                 = nullptr;
+    kmonitor::MutableMetric* cancel_qps_metric                          = nullptr;
+    kmonitor::MutableMetric* error_qps_metric                           = nullptr;
+    kmonitor::MutableMetric* onflight_request_metric                    = nullptr;
+    kmonitor::MutableMetric* total_rt_us_metric                         = nullptr;
+
+    kmonitor::MutableMetric* retry_times_metric                         = nullptr;
+    kmonitor::MutableMetric* loading_cache_request_metric               = nullptr;
+
+    kmonitor::MutableMetric* get_rpc_connection_rt_us_metric            = nullptr;
+    kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric      = nullptr;
+    kmonitor::MutableMetric* enqueue_request_rt_us_metric               = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_rt_us_metric             = nullptr;
+    kmonitor::MutableMetric* poll_local_output_rt_us_metric             = nullptr;
+    kmonitor::MutableMetric* remote_generate_rt_us_metric               = nullptr;
+    kmonitor::MutableMetric* poll_remote_output_rt_us_metric            = nullptr;
+
+    kmonitor::MutableMetric* prepare_generate_context_rt_us_metric      = nullptr;
+    kmonitor::MutableMetric* allocate_resource_rt_us_metric             = nullptr;
+    kmonitor::MutableMetric* load_cache_from_prefill_rt_us_metric       = nullptr;
+    kmonitor::MutableMetric* local_generate_rt_us_metric                = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

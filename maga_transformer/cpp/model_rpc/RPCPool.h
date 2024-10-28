@@ -21,18 +21,17 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         auto iter = connection_pool_.find(peer);
         if (iter == connection_pool_.end()
-            || iter->second.channel->GetState(false) == GRPC_CHANNEL_SHUTDOWN
-            || iter->second.channel->GetState(false) == GRPC_CHANNEL_TRANSIENT_FAILURE) {
+            || iter->second.channel->GetState(true) == GRPC_CHANNEL_SHUTDOWN
+            || iter->second.channel->GetState(true) == GRPC_CHANNEL_TRANSIENT_FAILURE) {
             grpc::ChannelArguments args;
             args.SetInt(GRPC_ARG_MAX_CONNECTION_IDLE_MS, 60000);
-            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 200);
+            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 5000);
+            args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
             auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
-            if (!grpc_channel) { 
+            if (!grpc_channel) {
                 std::string error_msg = "create grpc channel for " + peer + " failed";
                 return absl::InternalError(error_msg);
             }
-            // TODO(xinfei.sxf) grpc_stub是unique ptr，本意是阻止共享。
-            // 多个请求，使用同一个grpc stub/channel会串行发送吗，特别是stream请求并发度。
             auto grpc_stub    = RpcService::NewStub(grpc_channel);
             if (!grpc_stub) {
                 std::string error_msg = "create grpc stub for " + peer + " failed";

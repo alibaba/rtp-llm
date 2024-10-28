@@ -329,6 +329,9 @@ class GptInitModelParameters:
         self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
         logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
 
+        self.max_rpc_timeout_ms = int(os.environ.get('MAX_RPC_TIMEOUT_MS', 0))
+        logging.info(f'max_rpc_timeout_ms: {self.max_rpc_timeout_ms}')
+
         self.pd_separation = bool(int(os.environ.get('PD_SEPARATION', 0)))
         logging.info(f'pd_separation: {self.pd_separation}')
         if self.pd_separation:
@@ -346,6 +349,14 @@ class GptInitModelParameters:
             logging.info(f'cache_store_rdma_mode: {self.cache_store_rdma_mode}')
             self.load_cache_timeout_ms = int(os.environ.get('LOAD_CACHE_TIMEOUT_MS', 0))
             logging.info(f'load_cache_timeout_ms: {self.load_cache_timeout_ms}')
+
+            self.decode_retry_times = int(os.environ.get('DECODE_RETRY_TIMES', 0))
+            logging.info(f'decode_retry_times: {self.prefill_retry_times}')
+            self.decode_retry_timeout_ms = int(os.environ.get('DECODE_RETRY_TIMEOUT_MS', 0))
+            logging.info(f'decode_retry_timeout_ms: {self.decode_retry_timeout_ms}')
+
+            self.rdma_connect_retry_times = int(os.environ.get('RDMA_CONNECT_RETRY_TIMES', 0))
+            logging.info(f'rdma_connect_retry_times: {self.rdma_connect_retry_times}')
 
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')

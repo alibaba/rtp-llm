@@ -14,7 +14,6 @@ namespace rtp_llm {
 
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
-    // TODO(xinfei.sxf) 这里面有些选项是没有值的，这样会得到0
     generate_config->max_new_tokens                 = config_proto->max_new_tokens();
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
@@ -37,7 +36,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         }
         generate_config->stop_words_list.push_back(stop_words);
     }
-
 
     for (const auto& token_id : config_proto->sp_advice_prompt_token_ids()) {
         generate_config->sp_advice_prompt_token_ids.push_back(token_id);

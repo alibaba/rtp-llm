@@ -15,6 +15,7 @@ namespace rtp_llm {
 grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     maga_init_params_ = maga_init_params;
+    metrics_reporter_ = maga_init_params.metrics_reporter;
     if (propose_params) {
         FT_LOG_INFO("init speculative engine");
         if (!mm_process_engine.is_none()) {
@@ -40,18 +41,20 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(int64_t request_id, ErrorCode error_code, const std::string& error_msg) {
+grpc::Status LocalRpcServer::serializeErrorMsg(int64_t request_id, ErrorInfo error_info) {
+    const auto& error_msg = error_info.ToString();
     FT_LOG_WARNING("request id [%lu], error code [%s], error message [%s]",
-            request_id, toString(error_code).c_str(), error_msg.c_str());
+              request_id, ErrorCodeToString(error_info.code()).c_str(), error_msg.c_str());
+    auto grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
-    error_details.set_error_code(static_cast<int>(error_code));
+    error_details.set_error_code(static_cast<int>(error_info.code()));
     error_details.set_error_message(error_msg);
     std::string error_details_serialized;
     if (error_details.SerializeToString(&error_details_serialized)) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg, error_details_serialized);
+        return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        FT_LOG_WARNING("request:[%ld] SerializeToString error", request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        FT_LOG_WARNING("request:[%ld] error details serialize to string error", request_id);
+        return grpc::Status(grpc_error_code, error_msg);
     }
 }
 
@@ -61,20 +64,24 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                                               grpc::internal::WriterInterface<GenerateOutputsPB>* writer,
                                               std::shared_ptr<GenerateStream>&       stream) {
     while (!stream->finished() || stream->hasOutput()) {
-        const auto output_status = stream->nextOutput();
-        if (!output_status.ok()) {
-            auto           status = output_status.status();
-            auto           error_code = transErrorCode(status.code());
-            return serializeErrorMsg(request_id, error_code, status.ToString());
+        const auto result = stream->nextOutput();
+        if (!result.ok()) {
+            if (result.status().code() != ErrorCode::FINISHED) {
+                return serializeErrorMsg(request_id, result.status());
+            } else {
+                break;
+            }
         }
         FT_LOG_DEBUG("request:[%ld] generate next output success", request_id);
         GenerateOutputsPB outputs_pb;
-        QueryConverter::transResponse(&outputs_pb, &(output_status.value()));
+        QueryConverter::transResponse(&outputs_pb, &(result.value()));
         if (context->IsCancelled()) {
-            FT_LOG_WARNING("request:[%ld] cancel", request_id);
+            stream->cancel();
+            FT_LOG_WARNING("request:[%ld] cancelled by user", request_id);
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
+            stream->cancel();
             FT_LOG_WARNING("request:[%ld] write outputs pb failed", request_id);
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
@@ -87,13 +94,13 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::generate_stream(grpc::ServerContext*                   context,
-                                             const GenerateInputPB*                 request,
-                                             grpc::ServerWriter<GenerateOutputsPB>* writer) {
+grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                    context,
+                                                const GenerateInputPB*                  request,
+                                                grpc::ServerWriter<GenerateOutputsPB>*  writer) {
     AtomicGuard request_guard(onflight_requests_);
     auto request_id = request->request_id();
     FT_LOG_DEBUG("receive request %ld", request_id);
-    auto generate_context = GenerateContext(request->request_id());
+    auto generate_context = GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_);
     auto input = QueryConverter::transQuery(request);
 
     // need to check client has buffer at first
@@ -101,9 +108,10 @@ grpc::Status LocalRpcServer::generate_stream(grpc::ServerContext*               
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
+            generate_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
         }
     }
+    CHECK_ERROR_STATUS(generate_context);
 
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
@@ -111,13 +119,8 @@ grpc::Status LocalRpcServer::generate_stream(grpc::ServerContext*               
     generate_context.stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request_id);
 
-    return pollStreamOutput(context, request_id, writer, generate_context.stream);
-}
-
-void LocalRpcServer::reportMetrics(RPCMetricsCollector* collector) {
-    if (metrics_reporter_) {
-        metrics_reporter_->report<RPCMetrics, RPCMetricsCollector>(nullptr, collector);
-    }
+    generate_context.error_status = pollStreamOutput(context, request_id, writer, generate_context.stream);
+    return generate_context.error_status;
 }
 
 LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo() {

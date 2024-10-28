@@ -1,3 +1,4 @@
+#include "maga_transformer/cpp/utils/NetUtil.h"
 #include "maga_transformer/cpp/model_rpc/RemoteRpcServer.h"
 
 using namespace std;
@@ -19,13 +20,18 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
 }
 
 void RemoteRpcServer::initLocalHostInfo() {
-    char hostname[HOST_NAME_MAX];
-    FT_CHECK_WITH_INFO(gethostname(hostname, HOST_NAME_MAX) == 0, "failed to get local hostname");
-
-    auto pid           = getpid();
-    auto process_start_time = autil::TimeUtility::currentTimeInMicroSeconds();
-    process_id_ = "hostname_" + string(hostname) + "_pid_" + std::to_string(pid)
-                        + "_timestamp_" + std::to_string(process_start_time);
+    string  local_id;
+    auto    local_ip   = getLocalIP();
+    auto    pid        = getpid();
+    auto    start_time = currentTimeUs();
+    if (local_ip.empty()) {
+        FT_LOG_WARNING("failed to get local ip, use hostname instead");
+        local_id = "hostname_" + getHostName();
+    } else {
+        local_id = "ip_" + local_ip;
+    }
+    process_id_ = local_id + "_pid_" + std::to_string(pid)
+                        + "_timestamp_" + std::to_string(start_time);
     FT_LOG_INFO("local process id is %s", process_id_.c_str());
 }
 
@@ -38,19 +44,21 @@ void RemoteRpcServer::initLocalPeerInfo() {
     if (maga_init_params_.gpt_init_parameter.tp_rank_ > 0) {
         return;
     }
-    for (int i = 1; i < maga_init_params_.gpt_init_parameter.tp_size_; i++) {
+    // worker 0 is master
+    for (int i = 0; i < maga_init_params_.gpt_init_parameter.tp_size_; i++) {
         int port = maga_init_params_.gpt_init_parameter.model_rpc_port_;
-        workers_.push_back("localhost:" + std::to_string((port + i * maga_init_params_.gpt_init_parameter.worker_port_offset_)));
+        resource_.workers.push_back("localhost:" + std::to_string((port + i * maga_init_params_.gpt_init_parameter.worker_port_offset_)));
     }
-    for (auto& worker : workers_) {
-        FT_LOG_INFO("worker address = %s, ", worker.c_str());
+    string worker_info = "worker address is ";
+    for (auto& worker : resource_.workers) {
+        worker_info += worker + ", ";
     }
-    FT_LOG_INFO("\n");
+    FT_LOG_INFO(worker_info);
 }
 
 void RemoteRpcServer::initCacheStore() {
-    cache_store_ = engine_->getDevice()->cacheStore();
-    if (maga_init_params_.gpt_init_parameter.use_cache_store_ && !cache_store_) {
+    resource_.cache_store = engine_->getDevice()->cacheStore();
+    if (maga_init_params_.gpt_init_parameter.use_cache_store_ && !resource_.cache_store) {
         FT_FAIL("cache store is nullptr");
     }
 }

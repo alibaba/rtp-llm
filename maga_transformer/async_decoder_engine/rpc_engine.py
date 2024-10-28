@@ -26,7 +26,7 @@ class RPCEngine(BaseEngine):
         else:
             self.mm_engine = None
         self.rtp_llm_op_ = RtpLLMOp(model, self.mm_engine, propose_model, self.token_processor)
-        self.model_rpc_client = ModelRpcClient()
+        self.model_rpc_client = ModelRpcClient(self.config)
 
     @override
     def start(self) -> None:

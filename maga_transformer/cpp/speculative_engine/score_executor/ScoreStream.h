@@ -33,9 +33,9 @@ public:
 
     ~ScoreStream() {}
 
-    absl::StatusOr<GenerateOutputs> nextOutput() override {
+    ErrorResult<GenerateOutputs> nextOutput() override {
         FT_FAIL("ScoreStream::nextOutput should not be called");
-        return absl::OkStatus();
+        return ErrorInfo::OkStatus();
     };
 
     void updateOutput(const ft::BufferPtr& new_tokens,

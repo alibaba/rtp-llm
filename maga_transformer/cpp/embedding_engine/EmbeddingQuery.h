@@ -65,9 +65,8 @@ public:
     void setMapOutput(std::vector<std::map<std::string, torch::Tensor>>& m) {
         output.setMapOutput(m);
     }
-    void setError(const std::string& error) {
-        this->error_info.has_error     = true;
-        this->error_info.error_message = error;
+    void setError(const std::string& error_msg) {
+        error_info = ErrorInfo(ErrorCode::UNKNOWN_ERROR, error_msg);
     }
 
     TypedOutput output;

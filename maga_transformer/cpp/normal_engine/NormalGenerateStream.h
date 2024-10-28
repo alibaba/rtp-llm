@@ -25,7 +25,7 @@ public:
         generate_outputs_queue_.wakeup();
     }
 
-    absl::StatusOr<GenerateOutputs> nextOutput() override;
+    ErrorResult<GenerateOutputs> nextOutput() override;
 
     bool hasOutput() override;
 

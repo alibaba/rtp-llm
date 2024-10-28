@@ -76,6 +76,10 @@ uint32_t CacheManager::totalBlocks() const {
     return config_.block_nums - 1;
 }
 
+uint32_t CacheManager::maxSeqLen() const {
+    return totalBlocks() * seq_size_per_block_;
+}
+
 void CacheManager::reportMetricsLoop() {
     while (!stop_) {
         if (metrics_reporter_) {
@@ -252,6 +256,10 @@ CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_id
             vector<float>(match_result.loss.begin(), match_result.loss.begin() + std::min((int)match_result.loss.size(), reuse_length))};
 }
 
+void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
+    block_ref_counter_.incrementRefCounter(indices);
+}
+
 void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
     query_ref_counter_.incrementRefCounter(blocks);
     for (auto block : blocks) {
@@ -270,7 +278,8 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     }
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
+CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids,
+                                                          const std::vector<std::vector<int>>& mm_bounds, bool need_loss) {
     auto match_info = matchImpl(token_ids, mm_bounds);
     if (match_info.loss.empty() && need_loss) {
         return {0, {}, {}};
@@ -385,8 +394,9 @@ void CacheManager::insertIntoCache(const std::vector<int>&   block_indices,
     }
 }
 
-void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
-    block_ref_counter_.incrementRefCounter(indices);
+void CacheManager::incrRefCounter(const std::vector<int>& indices) {
+    incrBlockRefCounter(indices);
+    incrQueryRefCounter(indices);
 }
 
 void CacheManager::setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer) {

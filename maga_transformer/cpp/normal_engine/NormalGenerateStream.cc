@@ -5,17 +5,20 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-absl::StatusOr<GenerateOutputs> NormalGenerateStream::nextOutput() {
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
         generate_outputs_queue_.waitNotEmpty();
     }
     if (stopped()) {
-        std::lock_guard<std::mutex> lock(*output_mutex_);
-        return absl::Status(generate_status_.error_code, generate_status_.error_info);
+        return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {
-        return absl::InternalError("no output any more");
+        if (finished()) {
+            return ErrorInfo(ErrorCode::FINISHED, "");
+        } else {
+            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+        }
     }
     return generate_outputs_queue_.getAndPopFront();
 }
@@ -118,7 +121,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs generate_result
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        setStop("queue is full");
+        setStop(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(generate_results);
     }

@@ -6,7 +6,7 @@
 
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, RPCMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -29,29 +29,54 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
         REPORT_MUTABLE_METRIC(name##_metric, collector->name);                                                         \
     }
 
-
-bool RPCMetrics::init(kmonitor::MetricsGroupManager* manager) {
+bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_rpc_qps");
     REGISTER_QPS_MUTABLE_METRIC(error_qps_metric, "rtp_llm_rpc_error_qps");
     REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_rpc_cancel_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(onflight_request_metric, "rtp_llm_rpc_onflight_request");
-    REGISTER_GAUGE_MUTABLE_METRIC(load_latency_us_metric, "rtp_llm_rpc_load_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(wait_load_latency_us_metric, "rtp_llm_rpc_wait_load_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(remote_compute_latency_us_metric, "rtp_llm_rpc_remote_compute_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_rpc_total_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_rt_us_metric, "rtp_llm_rpc_total_rt_us");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(retry_times_metric, "rtp_llm_rpc_retry_times");
+    REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_request_metric, "rtp_llm_rpc_loading_cache_request");
     
+    REGISTER_GAUGE_MUTABLE_METRIC(get_rpc_connection_rt_us_metric, "rtp_llm_rpc_get_rpc_connection_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_allocate_resource_rt_us_metric, "rtp_llm_rpc_remote_allocate_resource_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(enqueue_request_rt_us_metric, "rtp_llm_rpc_enqueue_request_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_rt_us_metric, "rtp_llm_rpc_remote_load_cache_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(poll_local_output_rt_us_metric, "rtp_llm_rpc_poll_local_output_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_generate_rt_us_metric, "rtp_llm_rpc_remote_generate_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(poll_remote_output_rt_us_metric, "rtp_llm_rpc_poll_remote_output_rt_us");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(prepare_generate_context_rt_us_metric, "rtp_llm_rpc_prepare_generate_context_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(allocate_resource_rt_us_metric, "rtp_llm_rpc_allocate_resource_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_cache_from_prefill_rt_us_metric, "rtp_llm_rpc_load_cache_from_prefill_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(local_generate_rt_us_metric, "rtp_llm_rpc_local_generate_rt_us");
+
     return true;
 }
 
-void RPCMetrics::report(const kmonitor::MetricsTags* tags, RPCMetricsCollector* collector) {
+void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
     REPORT_QPS(qps);
     REPORT_QPS(cancel_qps);
     REPORT_QPS(error_qps);
     REPORT_GAUGE(onflight_request);
-    REPORT_GAUGE(load_latency_us);
-    REPORT_GAUGE(wait_load_latency_us);
-    REPORT_GAUGE(remote_compute_latency_us);
-    REPORT_GAUGE(total_latency_us);
+    REPORT_GAUGE(total_rt_us);
+
+    REPORT_GAUGE(retry_times);
+    REPORT_GAUGE(loading_cache_request);
+
+    REPORT_GAUGE(get_rpc_connection_rt_us);
+    REPORT_GAUGE(remote_allocate_resource_rt_us);
+    REPORT_GAUGE(enqueue_request_rt_us);
+    REPORT_GAUGE(remote_load_cache_rt_us);
+    REPORT_GAUGE(poll_local_output_rt_us);
+    REPORT_GAUGE(remote_generate_rt_us);
+    REPORT_GAUGE(poll_remote_output_rt_us);
+
+    REPORT_GAUGE(prepare_generate_context_rt_us);
+    REPORT_GAUGE(allocate_resource_rt_us);
+    REPORT_GAUGE(load_cache_from_prefill_rt_us);
+    REPORT_GAUGE(local_generate_rt_us);
 }
 
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {

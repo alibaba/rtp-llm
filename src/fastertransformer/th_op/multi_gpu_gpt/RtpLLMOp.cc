@@ -42,7 +42,6 @@ void RtpLLMOp::init(py::object model,
 
 rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
-
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
         rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
         if (gpt_init_params.tp_rank_ == 0) {

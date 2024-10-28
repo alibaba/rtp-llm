@@ -4,6 +4,7 @@
 
 namespace rtp_llm {
 
+// TODO(xinfei.sxf) return uint64_t hash value
 inline int32_t hashInt32Array(int32_t hash, int32_t* begin, int32_t* end) {
     std::hash<int32_t> hasher;
     auto hashValue = [&](int32_t hash, int32_t& value) {

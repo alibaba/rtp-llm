@@ -1,14 +1,13 @@
 #pragma once
 
+#include "absl/status/statusor.h"
+#include "autil/TimeUtility.h"
+#include "autil/SynchronizedQueue.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-
-#include "autil/TimeUtility.h"
-#include "autil/SynchronizedQueue.h"
-#include "absl/status/statusor.h"
-#include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
 namespace ft = fastertransformer;
@@ -30,7 +29,7 @@ public:
     // Exported to python world.
     void                                cancel();
 
-    virtual absl::StatusOr<GenerateOutputs>     nextOutput() = 0;
+    virtual ErrorResult<GenerateOutputs>     nextOutput() = 0;
     virtual bool hasOutput() {return false;}
 
     virtual void updateOutput(
@@ -104,7 +103,7 @@ public:
     int prefixLength() const;
     int inputPrefixLength() const;
     int reuseLength() const;
-    size_t max_token_num() const;
+    size_t maxTokenNum() const;
     void setReuseLength(int reuse_length);
     int fallbackPrefixLength() const;
     void setFallbackPrefixLength(int fallback_prefix_length);
@@ -132,10 +131,12 @@ public:
     ft::BufferPtr multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;
 
+    int64_t getTimeoutMs() const;
     void checkTimeout();
     bool checkTokenId(int token_id);
-    void setStop(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
-    void stopAndRelease(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
+    void setStop(ErrorCode error_code, const std::string& error_msg);
+    void stopAndRelease(ErrorCode error_code, const std::string& error_msg);
+    ErrorInfo statusInfo();
     bool isDoneWithoutLock(int batch_id) const;
     void setPaused();
     bool setRunning();
@@ -246,7 +247,7 @@ public:
     struct TimeInfo {
         int64_t begin_time_us;
         int64_t first_token_time_us;
-        int64_t first_token_latency_us;
+        int64_t first_token_rt_us;
     };
     TimeInfo getTimeInfo();
     bool queryPdSep() const;
@@ -278,6 +279,7 @@ protected:
     int                                 fallback_blocks_        = 0;
     int                                 fallback_times_         = 0;
     int                                 fallback_prefix_length_ = 0;
+    // TOOD(xinfei.sxf) fix state
     bool                                done_                   = false;
     bool                                cancelled_              = false;
     bool                                released_               = false;

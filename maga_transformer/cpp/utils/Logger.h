@@ -124,11 +124,11 @@ private:
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
         return "[RANK " + std::to_string(rank_)
-               + "][" + file + ":" + std::to_string(line) + "][" + func + "]";
+               + "][" + file + ":" + std::to_string(line) + "][" + func + "] ";
     }
 
     inline const std::string getTracePrefix() {
-        return "[RANK " + std::to_string(rank_) + "]";
+        return "[RANK " + std::to_string(rank_) + "] ";
     }
 
     inline const std::string getLevelName(const uint32_t level) {

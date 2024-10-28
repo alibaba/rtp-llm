@@ -31,9 +31,9 @@ public:
         }
     }
 
-    absl::StatusOr<GenerateOutputs> nextOutput() override {
+    ErrorResult<GenerateOutputs> nextOutput() override {
         FT_FAIL("VanillaStream::nextOutput should not be called");
-        return absl::OkStatus();
+        return ErrorInfo::OkStatus();
     };
 
     void updateOutput(const ft::BufferPtr& new_tokens,

@@ -1,6 +1,8 @@
 #pragma once
 #include "maga_transformer/cpp/model_rpc/RPCPool.h"
+#include "maga_transformer/cpp/model_rpc/RpcErrorCode.h"
 #include "maga_transformer/cpp/model_rpc/LocalRpcServer.h"
+#include "maga_transformer/cpp/model_rpc/RemoteServerResource.h"
 
 namespace rtp_llm {
 
@@ -11,14 +13,8 @@ public:
     grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
-    const auto& workers() const {
-        return workers_;
-    }
-    auto& cacheStore() {
-        return cache_store_;
-    }
-    auto& rpcPool() {
-        return rpc_pool_;
+    auto& resource() {
+        return resource_;
     }
 
 private:
@@ -28,9 +24,8 @@ private:
 
 protected:
     std::string process_id_;
-    std::vector<std::string> workers_;
-    std::shared_ptr<NormalCacheStore> cache_store_;
-    RPCPool rpc_pool_;
+    RemoteServerResource resource_;
+    std::atomic<size_t> loading_cache_requests_{0};
 };
 
 }

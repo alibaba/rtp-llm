@@ -22,10 +22,10 @@ public:
         return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }
 
-    grpc::Status generate_stream(grpc::ServerContext*                   context,
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                context,
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        return local_server_->generate_stream(context, request, writer);
+        return local_server_->GenerateStreamCall(context, request, writer);
     }
 
     LoadBalanceInfo getLoadBalanceInfo() {

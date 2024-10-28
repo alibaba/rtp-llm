@@ -20,6 +20,7 @@ public:
 
 class NormalBatchStreamProcessor {
 public:
+    // TODO(xinfei.sxf) fix param var
     NormalBatchStreamProcessor(const ft::GptInitParameter& params, bool warm_up,
                                 size_t block_size, size_t scale_block_size):
         num_layers_(params.num_layers_),

@@ -136,7 +136,7 @@ class InferenceServer(object):
             format_e = format_exception(e)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
                 "source": request.get("source", "unkown"),
-                "error_code": str(format_e.get("error_code", -1))
+                "error_code": str(format_e.get("error_code_str", -1))
             })
             yield response_data_prefix + \
                 json.dumps(format_e, ensure_ascii=False) + "\r\n\r\n"
@@ -208,7 +208,7 @@ class InferenceServer(object):
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
-        error_code = exception_json.get('error_code', 500)
+        error_code_str = exception_json.get('error_code_str', "")
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):
@@ -217,11 +217,11 @@ class InferenceServer(object):
         else:
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
                 "source": request.get("source", "unknown"),
-                "error_code": str(error_code)
+                "error_code": error_code_str
             })
             self._access_logger.log_exception_access(request, e)
 
-        rep = ORJSONResponse(exception_json, status_code=error_code)
+        rep = ORJSONResponse(exception_json, status_code=500)
         return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):

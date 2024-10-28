@@ -11,7 +11,7 @@ void KVCacheBlockAddr::clear() {
 
 KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_manager) const {
     if (!offset.empty()) {
-        cache_manager->incrBlockRefCounter(offset);
+        cache_manager->incrRefCounter(offset);
     }
     return *this;
 }

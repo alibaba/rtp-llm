@@ -132,8 +132,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         auto result = (*it)->incrKVBlock(token_capacity_, reserve_step);
         if (!result.ok()) {
-            (*it)->setStop("incrKVBlock failed");
-            (*it)->releaseResource();
+            (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
             FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
             error_streams++;
@@ -179,23 +178,27 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-        // TODO(xinfei.sxf) set detail stop reason to stream
+        auto& stream = *it;
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
-            FT_LOG_DEBUG("stream [%ld %p] add to new queue", (*it)->streamId(), (*it).get());
+            FT_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
-            if ((*it)->setRunning()) {
-                new_streams.emplace_back(*it);
+            if (stream->setRunning()) {
+                new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);
             } else {
-                (*it)->releaseResource();
+                FT_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
+                stream->releaseResource();
                 it++;
             }
         } else if (running_streams_.empty() && new_streams.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
-            FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
-            // TODO(xinfei.sxf) Return some tokens...
-            (*it)->setStop("LACK MEM", absl::StatusCode::kResourceExhausted);
-            (*it)->releaseResource();
+            FT_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
+            if (stream->inputLength() > cache_manager_->maxSeqLen()) {
+                stream->stopAndRelease(ErrorCode::LONG_PROMPT_ERROR, "input len " + std::to_string(stream->inputLength()) +
+                                        " is greater than kv cache max seq len " + std::to_string(cache_manager_->maxSeqLen()));
+            } else {
+                stream->stopAndRelease(ErrorCode::MALLOC_FAILED, "LACK MEM");
+            }
             it++;
         } else {
             // try to join new streams in the next schedule cycle

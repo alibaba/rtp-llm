@@ -4,12 +4,12 @@
 #include <sstream>
 #include <string>
 #include <torch/python.h>
-#include "absl/status/status.h"
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
+#include "maga_transformer/cpp/utils/ErrorCode.h"
+#include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
 namespace ft = fastertransformer;
 
@@ -108,19 +108,13 @@ public:
     std::optional<ft::ConstBufferPtr>                all_probs;
 };
 
-// TODO: add error code.
-class ErrorInfo {
-public:
-    bool        has_error = false;
-    std::string error_message;
-};
 
 class GenerateOutput {
 public:
     ft::ConstBufferPtr              output_ids;
     bool                            finished;
-    ErrorInfo                       error_info;
     AuxInfo                         aux_info;
+    ErrorInfo                       error_info;
 
     std::optional<ft::ConstBufferPtr> hidden_states;
     std::optional<ft::ConstBufferPtr> logits;
@@ -142,10 +136,28 @@ enum class GenerateState {
     REMOTE_RUNNING
 };
 
+inline std::string GenerateStateToString(GenerateState state) {
+    switch (state) {
+        case GenerateState::WAITING:
+            return "WAITING";
+        case GenerateState::RUNNING:
+            return "RUNNING";
+        case GenerateState::PAUSED:
+            return "PAUSED";
+        case GenerateState::STOPPED:
+            return "STOPPED";
+        case GenerateState::FINISHED:
+            return "FINISHED";
+        case GenerateState::REMOTE_RUNNING:
+            return "REMOTE_RUNNING";
+        default:
+            return "Error: Unrecognized Generate State";
+    }
+}
+
 struct GenerateStatus {
-    GenerateState    status = GenerateState::WAITING;
-    absl::StatusCode error_code;
-    std::string      error_info;
+    GenerateState status = GenerateState::WAITING;
+    ErrorInfo     error_info;
 };
 
 void registerMultimodalInput(const py::module& m);

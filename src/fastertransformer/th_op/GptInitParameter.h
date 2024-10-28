@@ -188,8 +188,12 @@ public:
     int64_t     remote_rpc_server_port_     = 0;
     int64_t     prefill_retry_times_        = 0;
     int64_t     prefill_retry_timeout_ms_   = 0;
+    int64_t     decode_retry_times_         = 0;
+    int64_t     decode_retry_timeout_ms_    = 0;
+    int64_t     rdma_connect_retry_times_   = 0;
     bool        pd_sep_enable_fallback_     = false;
     int64_t     load_cache_timeout_ms_      = 0;
+    int64_t     max_rpc_timeout_ms_         = 0;
     int64_t     worker_port_offset_         = 0;
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;

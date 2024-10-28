@@ -29,8 +29,6 @@ public:
     bool ready();
     rtp_llm::LoadBalanceInfo getLoadBalanceInfo();
 
-    // std::shared_ptr<rtp_llm::GenerateStream> forward(std::shared_ptr<rtp_llm::GenerateInput> query);
-
 private:
     void _init(int64_t model_rpc_port,
                int64_t http_port,

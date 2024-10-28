@@ -113,11 +113,32 @@ message GenerateOutputsPB {
     int64 load_done_time = 6;
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
+    RpcErrorPB error_info = 9;
 }
 
+// return to python client
 message ErrorDetailsPB {
     int64 error_code = 1;
-    string error_message = 3;
+    string error_message = 2;
+}
+
+enum ErrorCodePB {
+    NONE_ERROR = 0;
+    UNKNOWN_ERROR = 1;
+    CANCELLED = 2;
+    LOAD_CACHE_TIMEOUT = 3;
+    CACHE_STORE_LOAD_CONNECT_FAILED = 4;
+    CACHE_STORE_LOAD_SEND_REQUEST_FAILED = 5;
+    CACHE_STORE_CALL_PREFILL_TIMEOUT = 6;
+    CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
+    CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
+    CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+}
+
+// transfer between prefill and decode
+message RpcErrorPB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
 }
 
 message EmptyPB {}
@@ -137,7 +158,8 @@ message GenerateRequestPB {
     GenerateInputPB input = 6;
 }
 
-message RemoteLoadRequestPB {
+// in tp case, decode master broadcast to decode worker
+message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
     string peer_ip = 3;
@@ -145,6 +167,11 @@ message RemoteLoadRequestPB {
     repeated int32 block_ids = 5;
     int64 block_num = 6;
     int64 reuse_block_size = 7;
+    int64 timeout_ms = 8;
+}
+
+message BroadcastLoadResponsePB {
+    RpcErrorPB error_info = 1;
 }
 
 message RemoteFinishRequestPB {
@@ -152,8 +179,8 @@ message RemoteFinishRequestPB {
 }
 
 service RpcService {
-    rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputsPB);
-    rpc remote_load(RemoteLoadRequestPB) returns (EmptyPB);
-    rpc remote_generate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
-    rpc remote_finish(RemoteFinishRequestPB) returns (EmptyPB);
+    rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
+    rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
+    rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
 }
