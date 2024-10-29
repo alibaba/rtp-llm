@@ -42,7 +42,7 @@ public:
         if (logger_ == nullptr) {
             throw std::runtime_error("getLogger should not be nullptr");
         }
-        alog::Logger::MAX_MESSAGE_LENGTH = 102400;
+        alog::Logger::MAX_MESSAGE_LENGTH = 1024000;
 
         int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
         if (use_console_append) {
@@ -52,10 +52,10 @@ public:
         } else {
             std::string file_appender_path = autil::EnvUtil::getEnv("LOG_PATH", "logs") + "/" + submodule_name + ".log";
             file_appender_ = (alog::FileAppender*)alog::FileAppender::getAppender(file_appender_path.c_str());
-            file_appender_->setCacheLimit(1024);
-            file_appender_->setHistoryLogKeepCount(5);
-            file_appender_->setFlushIntervalInMS(1000);
-            file_appender_->setFlushThreshold(1000);
+            file_appender_->setAutoFlush(true);
+            file_appender_->setAsyncFlush(false);
+            file_appender_->setFlushIntervalInMS(100);
+            file_appender_->setFlushThreshold(1);
             logger_->setAppender(file_appender_);
         }
 
