@@ -9,7 +9,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& pa
     int local_head_num_kv = (param.head_num_kv_ > 1) ? param.head_num_kv_ / param.tp_size_ : param.head_num_kv_;
 #if defined(__aarch64__)
     // Arm attention operator support FP32 data type only
-    auto dtype = param.kv_cache_data_type_ == DataType::TYPE_INT8 ? ft::TYPE_INT8 : ft::TYPE_FP32;
+    auto dtype = param.kv_cache_data_type_ == ft::DataType::TYPE_INT8 ? ft::TYPE_INT8 : ft::TYPE_FP32;
 #else
     auto dtype = param.kv_cache_data_type_;
 #endif
