@@ -108,6 +108,13 @@ public:
                                       size_t seq_len_q,
                                       size_t max_seq_len_kv = 0,
                                       bool   paged = false);
+
+    bool checkSignature(DataType dtype,
+                        AttentionMaskType mtype,
+                        size_t head_num,
+                        size_t kv_head_num,
+                        size_t size_per_head,
+                        float  q_scaling);
 private:
     bool initTrtV1FmhaAndCheckSupport();
 

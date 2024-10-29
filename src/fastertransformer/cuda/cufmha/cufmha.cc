@@ -36,6 +36,17 @@ void cufmha::setup(DataType dtype,
     reset(dtype, mtype, head_num, kv_head_num, size_per_head, q_scaling, use_linear_bias_slopes);
 }
 
+bool cufmha::checkSignature(DataType dtype,
+                    AttentionMaskType mtype,
+                    size_t head_num,
+                    size_t kv_head_num,
+                    size_t size_per_head,
+                    float  q_scaling) {
+    return dtype == dtype_ && mtype == mtype_ && head_num == head_num_ &&
+            kv_head_num == kv_head_num_ && size_per_head == size_per_head_ &&
+            q_scaling == q_scaling_;
+}
+
 void cufmha::reset(DataType dtype,
                    AttentionMaskType mtype,
                    size_t head_num,

@@ -11,6 +11,7 @@
 #include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+#include <memory>
 
 namespace trt_plugins = tensorrt_llm::plugins;
 
@@ -98,6 +99,7 @@ protected:
     void InvokeGeneralGemm(const GemmParams&       params,
                            const CudaGemmArguments arguments,
                            BufferPtr               output);
+    void selectCuFMHARunner(const DevicePrepParams& params);
 
 protected:
     cudaStream_t stream_;
@@ -110,7 +112,10 @@ protected:
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
     FMHAType fmha_type_ = FMHAType::NONE;
-    std::unique_ptr<cufmha> cufmha_runner_;
+    // for speculative decoding, draft model and score model has different config such as kv_head_num
+    // here we need separate cufmha_runner for them to avoid frequently setup cufmha runner with different config
+    std::vector<std::shared_ptr<cufmha>> cufmha_runner_pool_;
+    std::shared_ptr<cufmha> cufmha_runner_;
     std::unique_ptr<cuggemm> cuggemm_runner_;
     bool use_multi_block_mode       = false;
 

@@ -62,8 +62,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
         NCCLCHECK(ncclGroupEnd());
     }
-    cufmha_runner_.reset(new cufmha());
-    cufmha_runner_->init(stream_);
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
 
@@ -178,6 +176,28 @@ DeviceProperties CudaDevice::getDeviceProperties() {
     return *prop;
 }
 
+void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
+    bool found_cufmha_runner = false;
+    for (auto& runner: cufmha_runner_pool_) {
+        if (runner->checkSignature(params.dtype,
+                                   params.configs.mask_type,
+                                   params.configs.head_num,
+                                   params.configs.kv_head_num,
+                                   params.configs.size_per_head,
+                                   params.configs.q_scaling / params.configs.softmax_extra_scale)) {
+            cufmha_runner_ = runner;
+            found_cufmha_runner = true;
+            return;
+        }
+    }
+
+    if (!found_cufmha_runner) {
+        cufmha_runner_pool_.emplace_back();
+        cufmha_runner_pool_.back().reset(new cufmha());
+        cufmha_runner_ = cufmha_runner_pool_.back();
+    }
+}
+
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     fmha_type_ = FMHAType::NONE;
@@ -187,6 +207,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         return output;
     }
     if (params.context_batch_size) {
+        selectCuFMHARunner(params);
+
         cufmha_runner_->setup(params.dtype,
                               params.configs.mask_type,
                               params.configs.head_num,
