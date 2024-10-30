@@ -70,21 +70,34 @@ BufferPtr transposeWeight(ConstBufferPtr input) {
 
     size_t element_num = k * n;
     size_t data_size = data_type == DataType::TYPE_FP32 ? sizeof(float) : sizeof(float16_t);
-    const void *data = malloc(element_num * data_size);
-    output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
-                                                    data_type,
-                                                    weight_workspace_shape,
-                                                    data)),
+    //const void *data = malloc(element_num * data_size);
+    //output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+    //                                                data_type,
+    //                                                weight_workspace_shape,
+    //                                                data)),
+    size_t transposed_size = element_num * data_size;
+    void *transposed_data = malloc(transposed_size);
 
     wei_tensor.allocator()->init(wei_data_info);
     wei_tran_tensor.allocator()->init(wei_tran_info);
     wei_tensor.allocator()->import_memory(input->data());
-    wei_tran_tensor.allocator()->import_memory(output->data());
+    //wei_tran_tensor.allocator()->import_memory(output->data());
+    wei_tran_tensor.allocator()->import_memory(transposed_data);
 
     transB.configure(&wei_tensor, &wei_tran_tensor);
     transB.run();
 
-    return output;
+    //return output;
+    // Update input buffer with transposed data, reduce memory usage
+    FT_CHECK_WITH_INFO(input->sizeBytes() >= transposed_size, "transpose dst size < src size");
+    memcpy(input->data(), transposed_data, transposed_size);
+    free(transposed_data);
+
+    auto packedBuffer = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                        data_type,
+                                                        weight_workspace_shape,
+                                                        input->data()));
+    return packedBuffer;
 }
 
 BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose) {
