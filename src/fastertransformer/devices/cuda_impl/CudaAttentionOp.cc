@@ -303,7 +303,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {"v_output"});
     
     BufferPtr qkv_buf_fp8;
-    FT_LOG_DEBUG("use fp8_fmha:%d", use_fp8_fmha);
     if (use_fp8_fmha) {
         qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3,
                                         {batch_size, (head_num + kv_head_num*2), seq_len_with_prefix, size_per_head},

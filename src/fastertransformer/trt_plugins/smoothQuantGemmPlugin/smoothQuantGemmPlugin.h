@@ -17,6 +17,7 @@
 #pragma once
 
 #include "src/fastertransformer/utils/quantization.h"
+#include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/cutlass/interface.h"
 #include <cassert>
 #include <memory>

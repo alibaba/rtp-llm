@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/utils/QuantInfo.h"
 #include "stdlib.h"
 #include <cstdint>
 
