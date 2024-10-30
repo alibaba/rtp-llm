@@ -211,8 +211,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     use_fp8_fmha = useFp8Fmha(params);
     if (params.context_batch_size) {
         selectCuFMHARunner(params);
-
-        cufmha_runner_->setup(params.dtype,
+        DataType fmha_datatype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : params.dtype;
+        cufmha_runner_->setup(fmha_datatype,
                               params.configs.mask_type,
                               params.configs.head_num,
                               params.configs.kv_head_num,

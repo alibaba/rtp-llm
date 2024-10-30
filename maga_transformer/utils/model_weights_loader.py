@@ -271,7 +271,7 @@ class ModelWeightsLoader:
                         qweight_tensor = qweight_tensor.reshape(qweight_tensor.shape[-1], -1)
                     results.append((layer_id, qweight[0].name, qweight_tensor))
 
-                    # logging.info(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}")
+                    logging.debug(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}")
 
                 except Exception as e:
                     logging.error(f'load smooth_quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
