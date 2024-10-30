@@ -72,7 +72,7 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     } else
 #endif
     if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
-        FT_LOG_INFO("now use kv_cache int8");
+        FT_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     } 
     kv_cache_buffer.cache_type = cache_type;    
@@ -489,7 +489,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     } else if (params.configs.kv_cache_dtype == KvCacheDataType::FP8 && use_fp8_fmha) {
         kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
     }
-    FT_LOG_DEBUG("kv_cache_quant_mode:%d, use_fp8_fmha:%d", kv_cache_quant_mode, use_fp8_fmha);
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
         qkv_buf_ptr,
         bias_ptr,
