@@ -97,7 +97,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     "name": "get_current_weather",
                     "arguments": "{\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}"
                 },
-                "tool_calls": None
+                "tool_calls": None,
+                "partial": False,
             },
             "finish_reason": "function_call"
         })
@@ -181,7 +182,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     "name": "get_current_weather",
                     "arguments": "{\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}"
                 },
-                "tool_calls": None
+                "tool_calls": None,
+                "partial": False,
             },
             "finish_reason": "function_call"
         })
@@ -203,7 +205,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "role": "assistant",
                 "content": ": 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}",
                 "function_call": None,
-                "tool_calls": None
+                "tool_calls": None,
+                "partial": False,
             },
             "finish_reason": "stop"
         })

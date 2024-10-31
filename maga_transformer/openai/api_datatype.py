@@ -74,6 +74,7 @@ class ChatMessage(BaseModel):
     content: Union[str, None, List[ContentPart]] = ""
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
+    partial: Optional[bool] = False
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
 # see `openai/types/chat/chat_completion_chunk.py`
@@ -121,7 +122,6 @@ class ChatCompletionRequest(BaseModel):
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
     sp_advice_prompt: str = ""
     sp_edit: bool = False
-    prepopulate_str: str = ""
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
