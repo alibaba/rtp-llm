@@ -145,6 +145,16 @@ BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose) {
                 gemm_kernel.gemm_pack_weight_FP16toBF16_arm(n, k, weight_k_pack, B_fp16_ptr, weight_workspace_cur_ptr);
             }
         }
+	// Update original buffer with packed data to save memory usage
+        FT_CHECK_WITH_INFO(input->sizeBytes() >= weight_workspace->sizeBytes(), "gemm pack dst size < src size");
+        memcpy(input->data(), weight_workspace->data(), weight_workspace->sizeBytes());
+        free(weight_workspace->data());
+
+        auto packedBuffer = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                        DataType::TYPE_BF16,
+                                                        weight_workspace_shape,
+                                                        input->data()));
+        return packedBuffer;
     }
     return weight_workspace;
 }
