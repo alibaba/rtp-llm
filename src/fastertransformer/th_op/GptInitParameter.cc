@@ -308,6 +308,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(pd_sep_enable_fallback, pd_sep_enable_fallback_)       \
     DEF_PROPERTY(load_cache_timeout_ms, load_cache_timeout_ms_)         \
     DEF_PROPERTY(max_rpc_timeout_ms, max_rpc_timeout_ms_)               \
+    DEF_PROPERTY(ep_size, ep_size_)                                     \
+    DEF_PROPERTY(ep_rank, ep_rank_)                                     \
     DEF_PROPERTY(use_kvcache, use_kvcache_)                             \
     DEF_PROPERTY(use_expert_attention, use_expert_attention_)           \
     DEF_PROPERTY(local_rank, local_rank_)                               \

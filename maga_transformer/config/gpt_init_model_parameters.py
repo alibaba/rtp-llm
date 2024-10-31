@@ -169,6 +169,8 @@ class GptInitModelParameters:
 
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
+        self.ep_size = g_parallel_info.ep_size
+        self.ep_rank = g_parallel_info.ep_rank
         self.add_special_tokens = True
         self.template_type = TemplateType.chat
         self.build_position_ids = False
@@ -217,7 +219,7 @@ class GptInitModelParameters:
             self.layer_inter_size = sparse_config.layer_inter_size
             self.is_sparse_head = True
 
-    def update_inter_padding_size(self, tp_size: int):
+    def update_inter_padding_size(self, tp_size: int, ep_size: int):
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
         else:
@@ -236,6 +238,8 @@ class GptInitModelParameters:
             self.inter_padding_size = self.inter_size
         if self.moe_inter_padding_size <= 0:
             self.moe_inter_padding_size = self.inter_size
+        if tp_size / ep_size > 1:
+            self.moe_inter_padding_size = self.moe_inter_padding_size + (get_pad_size(self.moe_inter_padding_size, align_size) if self.quant_algo.isQuant() else 0)
 
     def update_task_prompt_tokens_id(self, tokenizer):
         if self.multi_task_prompt:
@@ -278,6 +282,7 @@ class GptInitModelParameters:
                       max_seq_len: int,
                       seq_size_per_block: int,
                       tp_size: int,
+                      ep_size: int,
                       gen_num_per_circle: int,
                       ref_module: Optional[torch.nn.Module] = None,
                       ref_dict: Dict[str, torch.Tensor] = {}):
@@ -298,7 +303,7 @@ class GptInitModelParameters:
         logging.info(f'max_seq_len: {self.max_seq_len}')
 
         self.update_config_with_sparse_config(ckpt_path)
-        self.update_inter_padding_size(tp_size)
+        self.update_inter_padding_size(tp_size, ep_size)
         self.update_task_prompt_config()
         self.update_task_type_use_kvcache()
 

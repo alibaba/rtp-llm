@@ -75,8 +75,8 @@ private:
     bool mHasZeros;
     int mGroupSize;
     // tensorrt_llm::common::QuantMode mQuantMode;
-    int mTPSize{};
-    int mTPRank{};
+    int mEPSize = 1;
+    int mEPRank = 0;
     // MOEParallelismMode mParallelismMode{};
     MOEExpertScaleNormalizationMode mNormalizationMode{};
 

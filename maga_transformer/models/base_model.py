@@ -224,6 +224,7 @@ class BaseModel(object):
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,
             tp_size=g_parallel_info.tp_size,
+            ep_size=g_parallel_info.ep_size,
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,

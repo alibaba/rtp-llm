@@ -177,6 +177,8 @@ public:
     int64_t     model_rpc_port_ = 0;
     int64_t     tp_size_        = 1;
     int64_t     tp_rank_        = 0;
+    int64_t     ep_size_        = 1;
+    int64_t     ep_rank_        = 0;
 
     // pd speration
     bool        pd_separation_              = false;

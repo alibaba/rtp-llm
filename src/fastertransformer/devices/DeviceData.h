@@ -22,6 +22,8 @@ struct DeviceInitParams {
 
     size_t tp_rank         = 0;
     size_t tp_size         = 1;
+    size_t ep_rank         = 0;
+    size_t ep_size         = 1;
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
     // they are only needed when tp_size > 1.

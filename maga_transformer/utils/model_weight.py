@@ -128,11 +128,26 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tens
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
-def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
-    print('here', t.shape)
+def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, **kwargs: Any) -> torch.Tensor:
+    if ep > 1:
+        tp = int(tp / ep)
+        tp_rank = int(tp_rank / ep)
+    t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
+    if ep > 1:
+        t1 = torch.split(t1, t1.shape[0]// ep, dim=0)[ep_rank]
+    return t1 
+
+
+def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **kwargs: Any) -> torch.Tensor:
     # [expert_num, 2*n, k]
+    if ep > 1:
+        tp = int(tp / ep)
+        tp_rank = int(tp_rank / ep)
     t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
     t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
+    t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]]) 
+    if ep > 1:
+        t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
     t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
     return t3
 
@@ -719,14 +734,14 @@ class W:
         ffn_act_s: sp_0,
         ffn_smoother: sp_0,
 
-        moe_w1: sp_0,
-        moe_z1: sp_0,
-        moe_s1: sp_0,
-        moe_b1: sp_0,
-        moe_w2: sp_0,
-        moe_z2: sp_0,
-        moe_s2: sp_0,
-        moe_b2: sp_0,
+        moe_w1: sp_moe_w1,
+        moe_z1: sp_moe_w1,
+        moe_s1: sp_moe_w1,
+        moe_b1: sp_moe_neg1,
+        moe_w2: sp_moe_neg1,
+        moe_z2: sp_moe_neg1,
+        moe_s2: sp_moe_neg1,
+        moe_b2: sp_moe_neg1,
 
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
@@ -958,7 +973,7 @@ class ModelWeightInfo:
 
 class ModelDeployWeightInfo:
 
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int, ep_size: int, ep_rank: int):
         self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size
@@ -967,6 +982,8 @@ class ModelDeployWeightInfo:
         self._head_num_kv = config.head_num_kv
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num

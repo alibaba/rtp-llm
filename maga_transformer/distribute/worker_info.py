@@ -11,12 +11,14 @@ WORKER_INFO_PORT_NUM = 6
 MASTER_INFO_PORT_NUM = 4
 
 class ParallelInfo(object):
+    # EP从TP里分
     def __init__(
-            self, tp_size: int, pp_size: int,
+            self, tp_size: int, ep_size: int, pp_size: int,
             world_size: int, world_rank: int,
             local_world_size: int
     ):
         self.tp_size = tp_size
+        self.ep_size = ep_size
         self.pp_size = pp_size
         self.world_size = world_size
         self.world_rank = world_rank
@@ -31,6 +33,11 @@ class ParallelInfo(object):
     def tp_rank(self) -> int:
         return self.world_rank % self.tp_size
 
+    # ep_rank只在MOE plugin生效
+    @property
+    def ep_rank(self) -> int:
+        return self.tp_rank % self.ep_size
+
     @property
     def local_rank(self) -> int:
         return self.world_rank % self.local_world_size
@@ -43,13 +50,14 @@ class ParallelInfo(object):
     def from_env() -> ParallelInfo:
         info = ParallelInfo(
                 tp_size=int(os.environ.get('TP_SIZE', '1')),
+                ep_size=int(os.environ.get('EP_SIZE', '1')),
                 pp_size=int(os.environ.get('PP_SIZE', '1')),
                 world_size=int(os.environ.get('WORLD_SIZE', '1')),
                 world_rank=int(os.environ.get('WORLD_RANK', '0')),
                 local_world_size=int(os.environ.get('LOCAL_WORLD_SIZE', '1')))
         if (info.tp_size * info.pp_size != info.world_size or
             info.world_rank >= info.world_size):
-            raise Exception(f'tp_size:{info.tp_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
+            raise Exception(f'tp_size:{info.tp_size}, ex_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
             raise Exception("not support info.world_size mod info.local_world_size != 0")

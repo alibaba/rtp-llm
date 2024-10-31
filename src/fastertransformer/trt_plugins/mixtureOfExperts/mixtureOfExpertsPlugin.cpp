@@ -37,7 +37,7 @@ MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k,
 
 void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size,
     int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
-    nvinfer1::DataType weight_type, bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode, int tp_size, int tp_rank)
+    nvinfer1::DataType weight_type, bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode, int ep_size, int ep_rank)
 {
     mNumExperts = number_of_experts;
     mK = top_k;
@@ -50,8 +50,8 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     mHasZeros = has_zeros;
     mGroupSize = group_size;
     mNormalizationMode = normalization_mode;
-    mTPSize = tp_size;
-    mTPRank = tp_rank;
+    mEPSize = ep_size;
+    mEPRank = ep_rank;
     if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4)
     {
         FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16,
@@ -83,6 +83,7 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     }
 
     // mMOERunner->setTactic(mMOERunner->getTactics()[0], mMOERunner->getTactics()[0]);
+    TLLM_LOG_WARNING("moe plugin: ep_size: %d ep_rank: %d", mEPSize, mEPRank);
 }
 
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
@@ -97,7 +98,7 @@ size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
 MOEParallelismConfig MixtureOfExpertsPlugin::getParallelismConfig() const
 {
     // 默认MOE都走EP
-    return MOEParallelismConfig(1, 0, mTPSize, mTPRank);
+    return MOEParallelismConfig(1, 0, mEPSize, mEPRank);
     // return {};
     // switch (mParallelismMode)
     // {

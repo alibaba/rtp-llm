@@ -62,8 +62,8 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
                       group_size > 0,
                       group_size,
                       normalization_mode,
-                      moe_conf.tp_size,
-                      moe_conf.tp_rank);
+                      moe_conf.ep_size,
+                      moe_conf.ep_rank);
     const auto ws_size   = moe_plugin_->getWorkspaceSize(token_num);
     const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}});
 

@@ -42,10 +42,10 @@ public:
                 (size_t)params.expert_num_,
                 (size_t)params.moe_k_,
                 params.moe_normalize_expert_scale_,
-                params.moe_inter_padding_size_,
+                params.moe_inter_padding_size_ / (params.tp_size_ / params.ep_size_),
                 params.has_moe_norm_,
-                (int)params.tp_size_,
-                (int)params.tp_rank_
+                (int)params.ep_size_,
+                (int)params.ep_rank_
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{
             ft::getActivationType(params.activation_type_str_),
