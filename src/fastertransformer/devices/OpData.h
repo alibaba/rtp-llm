@@ -92,6 +92,15 @@ struct CloneParams {
 struct CopyParams {
     const Buffer& dst;
     const Buffer& src;
+
+    void check() const {
+        FT_CHECK_WITH_INFO(src.type() == dst.type(),
+                       "copy dst[%d] and src[%d] need has same type.",
+                       src.type(), dst.type());
+        FT_CHECK_WITH_INFO(src.sizeBytes() == dst.sizeBytes(),
+            "src and dst copy size mismatch: [%s] vs [%s]",
+            src.debugString().c_str(), dst.debugString().c_str());
+    }
 };
 
 using SelectOutput = BufferPtr;

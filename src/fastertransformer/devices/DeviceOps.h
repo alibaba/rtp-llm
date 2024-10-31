@@ -58,6 +58,9 @@ public:
     virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
 
     virtual BufferPtr quantize(const QuantizeParams& params);
+
+    // for multi thread no block copy
+    virtual void noBlockCopy(const CopyParams& params);
 };
 
 }  // namespace fastertransformer

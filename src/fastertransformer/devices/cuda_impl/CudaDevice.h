@@ -66,6 +66,7 @@ public:
 
 public:
     void copy(const CopyParams& params) override;
+    void noBlockCopy(const CopyParams& params) override;
     void bufMemset(Buffer& buf, int val) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     AddBiasOutput addbias(const AddBiasParams& params) override;
@@ -107,6 +108,7 @@ protected:
 
 protected:
     cudaStream_t stream_;
+    cudaStream_t no_block_copy_stream_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
 
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;

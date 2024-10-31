@@ -142,4 +142,8 @@ void DeviceOps::bufMemset(Buffer& buf, int val) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::noBlockCopy(const CopyParams& params) {
+    copy(params);
+}
+
 } // namespace fastertransformer

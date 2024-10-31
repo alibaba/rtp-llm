@@ -18,8 +18,9 @@ ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& 
     if (need_copy_) {
         auto new_buffer = device_->allocateBuffer({buffer->type(),
                                                    buffer->shape(),
-                                                   AllocationType::HOST});
-        device_->copy({*new_buffer, *buffer});
+                                                   AllocationType::DEVICE});
+
+        device_->noBlockCopy({*new_buffer, *buffer});
         return new_buffer;
     } else {
         return buffer;

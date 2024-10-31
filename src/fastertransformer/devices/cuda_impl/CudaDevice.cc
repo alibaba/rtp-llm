@@ -24,6 +24,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
     stream_ = at::cuda::getCurrentCUDAStream().stream();
+    check_cuda_error(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));
@@ -138,6 +139,7 @@ CudaDevice::~CudaDevice() {
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
     check_cuda_error(cudaStreamDestroy(stream_));
+    check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
     if (nccl_param_.nccl_comm_) {

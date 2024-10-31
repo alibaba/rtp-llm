@@ -15,10 +15,7 @@ using namespace std;
 namespace fastertransformer {
 
 void CudaDevice::copy(const CopyParams& params) {
-    FT_CHECK_WITH_INFO(params.src.type() == params.dst.type(),
-                       "copy dst[%d] and src[%d] need has same type.",
-                       params.src.type(), params.dst.type());
-
+    params.check();
     if (params.dst.isQBuffer() && params.src.isQBuffer()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
         auto src_ptr = reinterpret_cast<const QBuffer*>(&params.src);
@@ -30,10 +27,6 @@ void CudaDevice::copy(const CopyParams& params) {
 
     const auto& src = params.src;
     const auto& dst = params.dst;
-
-    RUNTIME_ASSERT_OP_ARG(src.sizeBytes() == dst.sizeBytes(),
-        "src and dst copy size mismatch: [%s] vs [%s]",
-        src.debugString().c_str(), dst.debugString().c_str());
 
     if (src.data() == dst.data()) {
         return;
@@ -60,6 +53,15 @@ void CudaDevice::copy(const CopyParams& params) {
         cudaStreamSynchronize(stream_);
     }
 
+    sync_check_cuda_error();
+}
+
+void CudaDevice::noBlockCopy(const CopyParams& params) {
+    params.check();
+    const auto& src = params.src;
+    const auto& dst = params.dst;
+    cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), cudaMemcpyDefault, no_block_copy_stream_);
+    cudaStreamSynchronize(no_block_copy_stream_);
     sync_check_cuda_error();
 }
 
@@ -275,7 +277,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
                           "Invalid reduce op: %d", int(params.op));
- 
+
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
     return AllReduceOutput{params.buffer};
