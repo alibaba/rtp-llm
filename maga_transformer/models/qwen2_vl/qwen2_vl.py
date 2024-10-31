@@ -27,6 +27,8 @@ from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo,
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     ModelDeployWeightInfo, CkptWeightInfo, \
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad, ones
+from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
+
 
 class QwenVL2VitWeight(BaseVitWeights):
     def _set_weight_prefix(self):
@@ -52,6 +54,25 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
             WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
 
+        layer_weights: List[List[WeightInfo]] = []
+        for layer in range(self._num_layers):
+            if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
+                w = self._get_hf_quant_weight_info(layer)
+                layer_weights.append(w)
+            elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
+                inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+                w = self._get_hf_layer_weight_info(layer)
+                w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
+                layer_weights.append(w)
+            else:
+                w = self._get_hf_layer_weight_info(layer)
+                layer_weights.append(w)
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
+                               tp_strategy=self._get_gpt_style_tp_strategy())
+    
+    def _get_hf_layer_weight_info(self, layer_id):
+        inter_padding_size = self._inter_padding_size
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
             WeightInfo(W.attn_qkv_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
@@ -68,9 +89,8 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
             WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity)   
         ]
+        return layer_weights
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
-                               tp_strategy=self._get_gpt_style_tp_strategy())
 
 class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
