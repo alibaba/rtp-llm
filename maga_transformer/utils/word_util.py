@@ -65,6 +65,11 @@ def get_stop_word_slices(stop_word_list: List[Union[str, List[int]]]) -> List[Un
             result.append(stop_word[:-i])
     return result
 
+def is_truncated(input_str: str, trunc_strs: List[str]):
+    if len(input_str) > 0 and len(truncate_response_with_stop_words(input_str, trunc_strs)) != len(input_str):
+        return True
+    return False
+
 def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
     for stop_word in stop_word_strs:
         if stop_word and response.endswith(stop_word):

@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any, Union, Callable, AsyncGenerator
+import functools
 import os
 import torch
 import asyncio
@@ -17,8 +18,90 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo, PromptTokensDetails
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
+
+class StreamStatus:
+    index: int = 0
+    output: GenerateOutput
+    origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    last_output_ids: List[int] = []
+    last_token_length: int = 0
+    finish_reason = None
+    tokenizer = None
+    responded_string = ""
+    delta_output_string = ""
+    
+    def update_output(self, output: GenerateOutput, clean_output_func, check_finish_func, remove_stop_word_ids_func):
+        self.index += 1
+        self.output = output
+        self.origin_output_ids = torch.cat((self.origin_output_ids, output.output_ids), dim=1)
+        self.output_ids = clean_output_func(self.origin_output_ids)
+        self.finish_reason = check_finish_func(self.output_ids, self.input_token_length)
+        self.output_ids = remove_stop_word_ids_func(self.output_ids)
+
+    def update_result(self):
+        self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
+        self.last_output_ids = self.output_ids
+        self.responded_string += self.delta_output_string
+
+    @property
+    def output_token_length(self):
+        return len(self.output_ids)
+    
+    @property
+    def input_token_length(self):
+        return self.output.aux_info.input_len
+
+    @property
+    def reuse_length(self):
+        return self.output.aux_info.reuse_len
+    
+    @property
+    def prev_token_id(self):
+        return self.last_output_ids[-self.last_token_length:]
+    
+    @property
+    def tokens_to_decode(self):
+        return self.prev_token_id + self.output_ids[len(self.last_output_ids):]
+    
+def generate_stream_response(status: StreamStatus, request = None, is_first: bool = False, is_last: bool = False):
+        choices = None
+        usage = None
+        aux_info = None
+        if is_first:
+            choices=[ChatCompletionResponseStreamChoice(
+                    index=status.index,
+                    delta=DeltaMessage(
+                        role=RoleEnum.assistant,
+                        content="",
+                    )
+            )]
+        else:
+            usage=UsageInfo(
+                    prompt_tokens=status.input_token_length,
+                    total_tokens=status.input_token_length + status.output_token_length,
+                    completion_tokens=status.output_token_length,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=status.reuse_length) if status.reuse_length > 0 else None
+                )
+            if is_last:
+                choices=[ChatCompletionResponseStreamChoice(
+                    index=status.index + 1,
+                    delta=DeltaMessage(
+                        content="",
+                    ),
+                    finish_reason=status.finish_reason
+                )]
+                aux_info=output.aux_info if request.aux_info else None
+            else:
+                choices=[ChatCompletionResponseStreamChoice(
+                        index=status.index,
+                        delta=DeltaMessage(
+                            content=status.delta_output_string,
+                        ),
+                    )]
+        return StreamResponseObject(choices=choices, usage=usage, aux_info=aux_info)
 
 @dataclass
 class StreamResponseObject:
@@ -159,104 +242,42 @@ class CustomChatRenderer():
             request: ChatCompletionRequest,
             generate_config: GenerateConfig
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        index = 0
-        output_token_length = 0
-        responded_output_ids = []
-        responded_string = ""
-        finish_reason = None
-        last_token_length = 0
-        delta_output_string = ""
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
+        status = StreamStatus()
 
-        def generate_stream_response(index: int, output_str: str, input_token_length: int, output_token_length: int, reuse_length: int):
-            return StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
-                        delta=DeltaMessage(
-                            content=output_str,
-                        ),
-                    )],
-                    usage=UsageInfo(
-                        prompt_tokens=input_token_length,
-                        total_tokens=input_token_length + output_token_length,
-                        completion_tokens=output_token_length,
-                        prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
-                    )
-                )
-
-        output: GenerateOutput = None
-        output_tokens_list = torch.empty(0, dtype=torch.int32)
         async for outputs in output_generator:
-            if index == 0:
-                yield StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
-                        delta=DeltaMessage(
-                            role=RoleEnum.assistant,
-                            content="",
-                        ),
-                    )]
-                )
+            if status.index == 0:
+                yield generate_stream_response(status, is_first=True)
 
-            index += 1
             output = outputs.generate_outputs[0]
-            # all model incremental return output_ids
-            input_token_length = output.aux_info.input_len
-            reuse_length = output.aux_info.reuse_len
-            output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
-            output.output_ids = output_tokens_list
-            output_ids = output.output_ids
-            output_ids = self._clean_output_ids(output_ids)
-            output_token_length = len(output_ids)
-            finish_reason = self._check_finish_reason(output_ids, input_token_length, generate_config.max_new_tokens)
-            output_ids = self._remove_stop_word_ids(output_ids)
+            status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=generate_config.max_new_tokens), self._remove_stop_word_ids)
+            
+            decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
+            decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-            decoded_prev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
-            tokens_to_decode = responded_output_ids[-last_token_length:] + output_ids[len(responded_output_ids):]
-            decoded_string = self.tokenizer.decode(tokens_to_decode)
             if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):
                 continue
-            delta_output_string = decoded_string[len(decoded_prev_token):]
-            trunc_string = truncate_response_with_stop_words(delta_output_string, generate_config.stop_words_str)
-            if len(trunc_string) != len(delta_output_string):
-                if finish_reason == None:
-                    finish_reason = FinisheReason.stop
+            status.delta_output_string = decoded_string[len(decoded_prev_token):]
+            if is_truncated(status.delta_output_string, generate_config.stop_words_str):
+                status.finish_reason = FinisheReason.stop
                 break
 
-            trunc_string = truncate_response_with_stop_words(delta_output_string, stop_word_slice_list)
-            if len(delta_output_string) > 0 and trunc_string == delta_output_string:
-                last_token_length = len(output_ids) - len(responded_output_ids)
-                responded_output_ids = output_ids
-                responded_string += delta_output_string
-                stream_response = generate_stream_response(index, delta_output_string, input_token_length, output_token_length, reuse_length)
-                delta_output_string = ""
+            if not is_truncated(status.delta_output_string, stop_word_slice_list):
+                status.update_result()
+                stream_response = generate_stream_response(status)
+                status.delta_output_string = ""
                 yield stream_response
 
-        trunc_string = truncate_response_with_stop_words(delta_output_string, generate_config.stop_words_str)
-        if len(delta_output_string) > 0 and trunc_string == delta_output_string:
-            responded_string += delta_output_string
-            yield generate_stream_response(index, delta_output_string, input_token_length, output_token_length, reuse_length)
+        if not is_truncated(status.delta_output_string, generate_config.stop_words_str):
+            status.responded_string += status.delta_output_string
+            yield generate_stream_response(status)
 
-        if finish_reason == None:
-            logging.debug(f"output [{responded_string}] found no stop reason! use stop as default.")
-            finish_reason = FinisheReason.stop
+        if status.finish_reason == None:
+            logging.debug(f"output [{status.responded_string}] found no stop reason! use stop as default.")
+            status.finish_reason = FinisheReason.stop
 
-        yield StreamResponseObject(
-            choices=[ChatCompletionResponseStreamChoice(
-                index=index + 1,
-                delta=DeltaMessage(
-                    content="",
-                ),
-                finish_reason=finish_reason
-            )],
-            usage=UsageInfo(
-                prompt_tokens=input_token_length,
-                total_tokens=input_token_length + output_token_length,
-                completion_tokens=output_token_length,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
-            ),
-            aux_info=output.aux_info if request.aux_info else None
-        )
+        yield generate_stream_response(status, is_last=True, request=request)
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1) -> Optional[FinisheReason]:
         stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list

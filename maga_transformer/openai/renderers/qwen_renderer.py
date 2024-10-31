@@ -5,6 +5,7 @@ import logging
 import torch
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
+import functools
 
 from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.config.generate_config import GenerateConfig
@@ -12,12 +13,12 @@ from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
-    DeltaMessage, FinisheReason, UsageInfo, RendererInfo
+    DeltaMessage, FinisheReason, UsageInfo, RendererInfo, PromptTokensDetails
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs
+    StreamResponseObject, RenderedInputs, StreamStatus, generate_stream_response
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
@@ -46,6 +47,26 @@ DUMMY_THOUGHT = {
 }
 
 _TEXT_COMPLETION_CMD = object()
+
+class QwenStreamStatus(StreamStatus):
+    generating_function_call: bool = False
+    total_output_string: str = ""
+
+    def update_result(self):
+        self.responded_string = self.total_output_string[: - len('\nAction:')]
+    
+    @property
+    def responded_length(self):
+        return len(self.responded_string)
+    
+    @property
+    def output_length(self):
+        return len(self.total_output_string)
+    
+    def check_stop_reason(self):
+        if self.finish_reason == None:
+            logging.debug(f"output [{self.responded_string}] found no stop reason! use stop as default.")
+            self.finish_reason = FinisheReason.stop
 
 @dataclass
 class ProcessedOutput:
@@ -307,132 +328,65 @@ class QwenRenderer(CustomChatRenderer):
             request: ChatCompletionRequest,
             generate_config: GenerateConfig
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        index = 0
-        output_string = ""
-        output_length = 0
-        responded_string = ""
-        responded_length = 0
-        output_token_length = 0
-        finish_reason: Optional[FinisheReason] = None
-        generating_function_call = False
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
-        output_tokens_list = torch.empty(0, dtype=torch.int32)
+        status = QwenStreamStatus()
         async for output in output_generator:
-            if output_token_length == 0:
-                yield StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
-                        delta=DeltaMessage(
-                            role=RoleEnum.assistant,
-                            content="",
-                        ),
-                    )]
-                )
+            if status.index == 0:
+                yield generate_stream_response(status, is_first=True)
             output = output.generate_outputs[0]
-            # all mode incremental return output_ids
-            input_token_length = output.aux_info.input_len
-            output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
-            output.output_ids = output_tokens_list
-            processed_output = self._process_output_ids_tensor(
-                input_token_length, output.output_ids, generate_config.max_new_tokens, output.finished)
-            output_string = processed_output.output_str.strip()
-            output_length = len(processed_output.output_str)
-            finish_reason = processed_output.finish_reason
-            output_token_length = processed_output.output_token_length
-            delta_string = output_string[responded_length : output_length]
-            trunc_string = truncate_response_with_stop_words(delta_string, generate_config.stop_words_str)
-            logging.debug(f"delta_string:{delta_string}, output_string:{output_string}, trunc_string:{trunc_string}")
-            if len(trunc_string) != len(delta_string):
-                if finish_reason == None:
-                    finish_reason = FinisheReason.stop
+            status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=generate_config.max_new_tokens), self._remove_stop_word_ids)
+            status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
+            if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
+                continue
+
+            if (status.total_output_string.endswith("\nAction:")):
+                status.generating_function_call = True
+                continue
+
+            if (status.generating_function_call):
+                continue
+
+            if is_truncated(status.total_output_string, generate_config.stop_words_str):
+                status.finish_reason = FinisheReason.stop
                 break
 
-            if (output_string.endswith("\nAction:")):
-                generating_function_call = True
-                continue
-
-            if (generating_function_call):
-                continue
-
-            if (output_length > responded_length + len('\nAction:')):
-                delta_string = output_string[responded_length : output_length - len('\nAction:')]
-                trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list)
-                if trunc_string != delta_string:
+            if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
+                status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
+                if is_truncated(status.delta_output_string, stop_word_slice_list):
                     continue
-                responded_string = output_string[: output_length - len('\nAction:')]
-                responded_length = len(responded_string)
+                status.update_result()
+                yield generate_stream_response(status)
 
-                yield StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
-                        delta=DeltaMessage(
-                            content=delta_string,
-                        ),
-                    )],
-                    usage=UsageInfo(
-                        prompt_tokens=input_token_length,
-                        total_tokens=input_token_length + output_token_length,
-                        completion_tokens=output_token_length
-                    )
-                )
-
-        if (generating_function_call):
-            function_message = self._parse_function_response(output_string[responded_length:])
+        if (status.generating_function_call):
+            function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
             if (function_message == None):
-                logging.warn(f"output [{output_string}] failed to parse function from [{responded_length}]. "
+                logging.warn(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
                                 "regarded as normal output.")
             else:
-                finish_reason = FinisheReason.function_call
-                responded_string = output_string
-                responded_length = output_length
+                status.finish_reason = FinisheReason.function_call
+                status.responded_string = status.total_output_string
                 yield StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
+                        index=status.index,
                         delta=function_message,
-                        finish_reason=finish_reason,
+                        finish_reason=status.finish_reason,
                     )],
                     usage=UsageInfo(
-                        prompt_tokens=input_token_length,
-                        total_tokens=input_token_length + output_token_length,
-                        completion_tokens=output_token_length
+                        prompt_tokens=status.input_token_length,
+                        total_tokens=status.input_token_length + status.output_token_length,
+                        completion_tokens=status.output_token_length,
+                        prompt_tokens_details=PromptTokensDetails(cached_tokens=status.reuse_length) if status.reuse_length > 0 else None
                     )
                 )
 
-        if finish_reason == None:
-            logging.debug(f"output [{responded_string}] found no stop reason! use stop as default.")
-            finish_reason = FinisheReason.stop
+        status.check_stop_reason()
 
-        if responded_length < output_length:
-            index += 1
-            yield StreamResponseObject(
-                choices=[ChatCompletionResponseStreamChoice(
-                    index=index,
-                    delta=DeltaMessage(
-                        content=truncate_response_with_stop_words(output_string[responded_length:], generate_config.stop_words_str),
-                    ),
-                )],
-                usage=UsageInfo(
-                    prompt_tokens=input_token_length,
-                    total_tokens=input_token_length + output_token_length,
-                    completion_tokens=output_token_length
-                )
-            )
+        if status.responded_length < status.output_length:
+            status.index += 1
+            status.delta_output_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], generate_config.stop_words_str)
+            yield generate_stream_response(status)
 
-        yield StreamResponseObject(
-            choices=[ChatCompletionResponseStreamChoice(
-                index=index + 1,
-                delta=DeltaMessage(
-                    content="",
-                ),
-                finish_reason=finish_reason
-            )],
-            usage=UsageInfo(
-                prompt_tokens=input_token_length,
-                total_tokens=input_token_length + output_token_length,
-                completion_tokens=output_token_length
-            ),
-            aux_info=output.aux_info if request.aux_info else None
-        )
+        yield generate_stream_response(status, request=request, is_last=True)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
