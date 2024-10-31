@@ -30,9 +30,7 @@ namespace fastertransformer {
 using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
-    RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
-    ROCM_CHECK(hipInit(0));
-    ROCM_CHECK(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
+    ROCM_CHECK(hipSetDevice(params.device_id));
     ROCM_CHECK(hipStreamCreate(&stream_));
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 

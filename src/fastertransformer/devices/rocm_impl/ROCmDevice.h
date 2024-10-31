@@ -51,6 +51,7 @@ public:
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
+    void preRun() override { ROCM_CHECK(hipSetDevice(device_id_)); }
 
     BufferPtr quantize(const QuantizeParams& params) override;
     BufferPtr dequantize(const QuantizeParams& params);
