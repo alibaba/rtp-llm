@@ -52,9 +52,11 @@ void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     auto A_device = createHostBuffer<float>({m, k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
     auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
 
-    B_device = prepareGemmOptWeight(B_device);
+    //B_device = prepareGemmOptWeight(B_device);
+    auto B_packed = prepareGemmOptWeight(B_device);
 
-    GemmParams params{*A_device, *B_device};
+    //GemmParams params{*A_device, *B_device};
+    GemmParams params{*A_device, *B_packed};
     auto       C_device = device_->gemm(params);
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kFloat);
