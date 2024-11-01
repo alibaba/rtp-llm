@@ -12,19 +12,21 @@ namespace fastertransformer{
 class cufmha {
 
 public:
-    cufmha() = default;
-    ~cufmha() = default;
+    cufmha(DataType          dtype,
+           AttentionMaskType mtype,
+           size_t            head_num,
+           size_t            kv_head_num,
+           size_t            size_per_head,
+           float             q_scaling,
+           bool              use_linear_bias_slopes,
+           bool              can_use_trtv1_fmha,
+           bool              can_use_trtv2_fmha,
+           bool              can_use_trtv2_fmha_paged,
+           bool              can_use_open_source_fmha,
+           bool              can_use_open_source_fmha_paged,
+           cudaStream_t      stream);
 
-    void init(cudaStream_t      stream) {
-        stream_ = stream;
-    }
-    void setup(DataType          dtype,
-               AttentionMaskType mtype,
-               size_t            head_num,
-               size_t            kv_head_num,
-               size_t            size_per_head,
-               float             q_scaling,
-               bool              use_linear_bias_slopes);
+    ~cufmha() = default;
 
     bool trtV1FmhaSupport() {
         return support_trt_v1_fmha_;
@@ -115,7 +117,8 @@ public:
                         size_t head_num,
                         size_t kv_head_num,
                         size_t size_per_head,
-                        float  q_scaling);
+                        float  q_scaling,
+                        bool use_linear_bias_slopes);
 private:
     bool initTrtV1FmhaAndCheckSupport();
 
@@ -125,13 +128,6 @@ private:
 
     bool initOpenSourceFmhaAndCheckSupport();
 
-    void reset(DataType          dtype,
-               AttentionMaskType mtype,
-               size_t            head_num,
-               size_t            kv_head_num,
-               size_t            size_per_head,
-               float             q_scaling,
-               bool              use_linear_bias_slopes);
     static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
@@ -162,8 +158,6 @@ private:
 #endif
     DataType dtype_;
     AttentionMaskType mtype_;
-
-    bool init_done_ = false;
 
     size_t head_num_;
     size_t kv_head_num_;

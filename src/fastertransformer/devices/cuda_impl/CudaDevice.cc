@@ -181,6 +181,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
     bool found_cufmha_runner = false;
+    use_fp8_fmha = useFp8Fmha(params);
     DataType fmha_datatype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : params.dtype;
     for (auto& runner: cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
@@ -188,7 +189,8 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                                    params.configs.head_num,
                                    params.configs.kv_head_num,
                                    params.configs.size_per_head,
-                                   params.configs.q_scaling / params.configs.softmax_extra_scale)) {
+                                   params.configs.q_scaling / params.configs.softmax_extra_scale,
+                                   params.has_alibi_slopes)) {
             cufmha_runner_ = runner;
             found_cufmha_runner = true;
             return;
@@ -197,7 +199,20 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
 
     if (!found_cufmha_runner) {
         cufmha_runner_pool_.emplace_back();
-        cufmha_runner_pool_.back().reset(new cufmha());
+        cufmha_runner_pool_.back().reset(
+            new cufmha(fmha_datatype,
+                       params.configs.mask_type,
+                       params.configs.head_num,
+                       params.configs.kv_head_num,
+                       params.configs.size_per_head,
+                       params.configs.q_scaling / params.configs.softmax_extra_scale, // div scale for DeepSeek V2
+                       params.has_alibi_slopes,
+                       use_trtv1_fmha, 
+                       use_trtv2_fmha, 
+                       use_trtv2_fmha_paged,
+                       use_open_source_fmha,
+                       use_open_source_fmha_paged,
+                       stream_));
         cufmha_runner_ = cufmha_runner_pool_.back();
     }
 }
@@ -210,17 +225,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = true;
         return output;
     }
-    use_fp8_fmha = useFp8Fmha(params);
     if (params.context_batch_size) {
         selectCuFMHARunner(params);
-        DataType fmha_datatype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : params.dtype;
-        cufmha_runner_->setup(fmha_datatype,
-                              params.configs.mask_type,
-                              params.configs.head_num,
-                              params.configs.kv_head_num,
-                              params.configs.size_per_head,
-                              params.configs.q_scaling / params.configs.softmax_extra_scale, // div scale for DeepSeek V2
-                              params.has_alibi_slopes);
         bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && !params.int8_kv_cache && !params.sprase_head;
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {

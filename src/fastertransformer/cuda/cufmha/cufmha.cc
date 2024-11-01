@@ -20,56 +20,46 @@ tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
 
 }
 
-void cufmha::setup(DataType dtype,
-                   AttentionMaskType mtype,
-                   size_t head_num,
-                   size_t kv_head_num,
-                   size_t size_per_head,
-                   float  q_scaling,
-                   bool   use_linear_bias_slopes) {
-    if (init_done_) {
-        if (dtype != dtype_ || mtype != mtype_ || head_num != head_num_ ||
-            kv_head_num != kv_head_num_ || size_per_head != size_per_head_ ||
-            q_scaling != q_scaling_) {
-            FT_LOG_INFO("cufmha: setup with different arguments, reset again");
-            reset(dtype, mtype, head_num, kv_head_num, size_per_head, q_scaling, use_linear_bias_slopes);
-        }
-        return;
+cufmha::cufmha(DataType dtype,
+               AttentionMaskType mtype,
+               size_t head_num,
+               size_t kv_head_num,
+               size_t size_per_head,
+               float  q_scaling,
+               bool   use_linear_bias_slopes,
+               bool can_use_trtv1_fmha,
+               bool can_use_trtv2_fmha,
+               bool can_use_trtv2_fmha_paged,
+               bool can_use_open_source_fmha,
+               bool can_use_open_source_fmha_paged,
+               cudaStream_t stream) {
+
+        dtype_ = dtype;
+        mtype_ = mtype;
+        head_num_ = head_num;
+        kv_head_num_ = kv_head_num;
+        size_per_head_ = size_per_head;
+        q_scaling_ = q_scaling;
+        use_linear_bias_slopes_ = use_linear_bias_slopes;
+        support_trt_v1_fmha_       = can_use_trtv1_fmha && initTrtV1FmhaAndCheckSupport();
+        support_trt_v2_fhma_       = can_use_trtv2_fmha && initTrtV2FmhaAndCheckSupport();
+        support_trt_v2_paged_fmha_ = can_use_trtv2_fmha_paged && initTrtV2FmhaPagedAndCheckSupport();
+        support_open_source_fmha_  = (can_use_open_source_fmha || can_use_open_source_fmha_paged) && initOpenSourceFmhaAndCheckSupport();
+        stream_ = stream;
     }
-    reset(dtype, mtype, head_num, kv_head_num, size_per_head, q_scaling, use_linear_bias_slopes);
-}
 
 bool cufmha::checkSignature(DataType dtype,
                     AttentionMaskType mtype,
                     size_t head_num,
                     size_t kv_head_num,
                     size_t size_per_head,
-                    float  q_scaling) {
+                    float  q_scaling,
+                    bool use_linear_bias_slopes) {
     return dtype == dtype_ && mtype == mtype_ && head_num == head_num_ &&
             kv_head_num == kv_head_num_ && size_per_head == size_per_head_ &&
-            q_scaling == q_scaling_;
+            q_scaling == q_scaling_ && use_linear_bias_slopes == use_linear_bias_slopes_;
 }
 
-void cufmha::reset(DataType dtype,
-                   AttentionMaskType mtype,
-                   size_t head_num,
-                   size_t kv_head_num,
-                   size_t size_per_head,
-                   float  q_scaling,
-                   bool   use_linear_bias_slopes) {
-    dtype_ = dtype;
-    mtype_ = mtype;
-    head_num_ = head_num;
-    kv_head_num_ = kv_head_num;
-    size_per_head_ = size_per_head;
-    q_scaling_ = q_scaling;
-    use_linear_bias_slopes_ = use_linear_bias_slopes;
-    support_trt_v1_fmha_ = initTrtV1FmhaAndCheckSupport();
-    support_trt_v2_fhma_ = initTrtV2FmhaAndCheckSupport();
-    support_trt_v2_paged_fmha_ = initTrtV2FmhaPagedAndCheckSupport();
-    support_open_source_fmha_ = initOpenSourceFmhaAndCheckSupport();
-    init_done_ = true;
-}
 
 bool cufmha::initTrtV1FmhaAndCheckSupport() {
 #ifdef USE_OLD_TRT_FMHA
