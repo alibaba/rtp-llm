@@ -66,9 +66,15 @@ void* TrackerAllocator::malloc(size_t size) {
         ptr = memory_tracker_->allocate(size);
     }
     if (!ptr) {
-        FT_LOG_WARNING("TrackerAllocator failed to allocate %ld bytes of memory [%d]. "
+        const auto tracker_status = memory_tracker_->getStatus();
+        FT_LOG_WARNING("TrackerAllocator failed to allocate %ld MB of memory [%d]. "
+                       "Current memory tracker has %ld MB available, with %ld MB fragmented. "
+                       "Reserved %ld MB in total. "
                        "Use real allocator directly as fallback.",
-                       size, real_allocator_->memoryType());
+                       size / 1024 / 1024, real_allocator_->memoryType(),
+                       tracker_status.available_size  / 1024 / 1024,
+                       tracker_status.fragmented_size  / 1024 / 1024,
+                       (tracker_status.available_size + tracker_status.allocated_size) / 1024 / 1024);
         ptr = real_allocator_->malloc(size);
     }
     return ptr;
