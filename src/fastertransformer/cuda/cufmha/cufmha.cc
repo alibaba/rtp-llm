@@ -327,7 +327,12 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
         flash_fwd_params.softmax_lseaccum_ptr = (char*)workspace + sizeof(float) * batch_size * head_num_ * seq_len_round;
         flash_fwd_params.oaccum_ptr = (char*)(flash_fwd_params.softmax_lseaccum_ptr) + sizeof(float) * flash_fwd_params.num_splits * batch_size * head_num_ * seq_len_round;
     }
-    run_mha_fwd(flash_fwd_params, stream_, block_table);
+    try {
+        run_mha_fwd(flash_fwd_params, stream_, block_table);
+    } catch (const std::exception& e) {
+        FT_LOG_WARNING("run opensource paged flash attention failed, err: %s", e.what());
+        throw;
+    }
     sync_check_cuda_error();
 }
 
@@ -343,7 +348,12 @@ void cufmha::runOpenSourceFmha(void* q,
                                float softmax_extra_scale)
 {
     Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_seqlens, workspace, batch_size, seq_len, seq_len, linear_bias_slopes, softmax_extra_scale);
-    run_mha_fwd(flash_fwd_params, stream_, false);
+    try {
+        run_mha_fwd(flash_fwd_params, stream_, false);
+    } catch (const std::exception& e) {
+        FT_LOG_WARNING("run opensource flash attention failed, err: %s", e.what());
+        throw;
+    }
     sync_check_cuda_error();
 }
 
