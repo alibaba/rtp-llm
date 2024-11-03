@@ -181,8 +181,8 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
     bool found_cufmha_runner = false;
-    use_fp8_fmha = useFp8Fmha(params);
-    DataType fmha_datatype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : params.dtype;
+    use_fp8_fmha_ = useFp8Fmha(params);
+    DataType fmha_datatype = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.dtype;
     for (auto& runner: cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
                                    params.configs.mask_type,
@@ -227,7 +227,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     }
     if (params.context_batch_size) {
         selectCuFMHARunner(params);
-        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && !params.int8_kv_cache && !params.sprase_head;
+        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && (params.kv_cache_dtype==KvCacheDataType::BASE) && !params.sprase_head;
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;

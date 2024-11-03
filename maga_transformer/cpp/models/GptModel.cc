@@ -153,7 +153,7 @@ void GptModel::prepareAttentionInputs(
             context_batch_size,
             (bool)inputs.k_cache_buffer,
             attention_inputs.max_prefix_length > 0,
-            (bool)inputs.k_scale_buffer,
+            description_.attention_conf.kv_cache_dtype,
             (bool)weights_.linear_bias_slopes,
             false // sparse head not support now
         });

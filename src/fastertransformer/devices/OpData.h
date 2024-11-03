@@ -588,11 +588,11 @@ struct DevicePrepParams {
     const AttentionConfigs& configs;
     DataType dtype;
     size_t context_batch_size;
-    bool has_kv_cache     = true;
-    bool diff_qkv_len     = false;
-    bool int8_kv_cache    = false;
-    bool has_alibi_slopes = false;
-    bool sprase_head      = false;
+    bool            has_kv_cache     = true;
+    bool            diff_qkv_len     = false;
+    KvCacheDataType kv_cache_dtype   = KvCacheDataType::BASE;
+    bool            has_alibi_slopes = false;
+    bool            sprase_head      = false;
 };
 
 struct DevicePrepOutput {

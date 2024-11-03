@@ -151,7 +151,7 @@ protected:
     bool use_open_source_fmha_paged = false;
     bool use_group_gemm             = false;
     bool support_trt_fp8_fmha       = false;
-    bool use_fp8_fmha               = false;
+    bool use_fp8_fmha_              = false;
 
 };
 
