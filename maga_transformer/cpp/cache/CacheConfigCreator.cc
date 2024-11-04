@@ -39,6 +39,22 @@ absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const ft::GptIn
                            kv_cache_mem_size / 1024 / 1024);
         }
     }
+    if (param.tp_size_ > 1) {
+        const auto runtime_left_mem_bytes = (int64_t)free_bytes - kv_cache_mem_size;
+        const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::min(4, (int)param.tp_size_);
+        if (runtime_left_mem_bytes < minimal_runtime_bytes) {
+            const auto lack_mem_bytes = minimal_runtime_bytes - runtime_left_mem_bytes;
+            kv_cache_mem_size -= lack_mem_bytes;
+            FT_LOG_WARNING("tp_size %d needs at least %d MiB memory for runtime, "
+                           "but only %ld MB reserved memory left. "
+                           "thus we shrink kv cache memory size by %ld MB to %ld MB",
+                           param.tp_size_,
+                           minimal_runtime_bytes / 1024 / 1024,
+                           runtime_left_mem_bytes / 1024 / 1024,
+                           lack_mem_bytes / 1024 / 1024,
+                           kv_cache_mem_size / 1024 / 1024);
+        }
+    }
     if (kv_cache_mem_size <= 0) {
         return absl::InternalError("kv cache mem size = " + std::to_string(kv_cache_mem_size) + ", it's <= 0");
     }
