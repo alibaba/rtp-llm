@@ -146,6 +146,11 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
 }
 
 void RtpLLMOp::startHttpServer(py::object tokenizer, py::object render) {
+    if (http_server_ == nullptr) {
+        FT_LOG_INFO("skip startHttpServer in case of tp.");
+        return;
+    }
+
     if (http_server_->start()) {
         FT_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {

@@ -73,6 +73,10 @@ class InferenceServer(object):
             else:
                 self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
                 if isinstance(self._inference_worker.model, AsyncModel):
+                    # uply hack :(
+                    self._inference_worker.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
+                            self._openai_endpoint.tokenizer,
+                            self._openai_endpoint.chat_renderer)
                     self._lora_manager = LoraManager(self._inference_worker.model)
 
     @property
