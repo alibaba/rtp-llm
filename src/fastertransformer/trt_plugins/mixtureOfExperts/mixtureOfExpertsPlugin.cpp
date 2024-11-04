@@ -83,7 +83,6 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     }
 
     // mMOERunner->setTactic(mMOERunner->getTactics()[0], mMOERunner->getTactics()[0]);
-    TLLM_LOG_WARNING("moe plugin: ep_size: %d ep_rank: %d", mEPSize, mEPRank);
 }
 
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)

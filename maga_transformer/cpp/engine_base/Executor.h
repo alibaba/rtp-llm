@@ -37,6 +37,7 @@ public:
             (size_t)params.v_head_dim_,
             params.softmax_extra_scale_,
             kv_cache_dtype};
+        // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto moe_configs = params.moe_style_ ?
             (std::optional<ft::MoeConfigs>)ft::MoeConfigs({
                 (size_t)params.expert_num_,

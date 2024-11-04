@@ -165,7 +165,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const* inputs_after_softmax
             {
                 int const prior_winning_expert = indices[k * block_row + prior_k];
 
-                if (prior_winning_expert == expert)
+                if (prior_winning_expert ==  (expert - start_expert))
                 {
                     inp_kvp = thread_kvp;
                 }
