@@ -289,7 +289,7 @@ class ModelWeightsLoader:
         results = []
         is_moe = self._weights_info.expert_num_ > 0 and layer_id in self._weights_info.moe_layer_index_
         is_gated_activation = self._weights_info._is_gated_activation
-        def convert_weight(weight_lists, apply_func):
+        def convert_weight(weight_lists, apply_func, datatype):
             for weight_list in weight_lists:
                 qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
                 scale_name = weight_list[1]
@@ -298,7 +298,7 @@ class ModelWeightsLoader:
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:
-                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id)
+                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
                     if self._merge_lora:
                         qweight_tensor = self.apply_lora(qweight_tensor, qweight[0], layer_id)
                     qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0])
@@ -320,8 +320,8 @@ class ModelWeightsLoader:
             W.int8_attn_vision_weights.clear()
             W.int8_vision_ffn_weights.clear()
 
-        convert_weight(W.int8_attn_weights, self.apply_int8)
-        convert_weight(W.int8_attn_vision_weights, self.apply_int8)
+        convert_weight(W.int8_attn_weights, self.apply_int8, self._data_type)
+        convert_weight(W.int8_attn_vision_weights, self.apply_int8, self._data_type)
 
         if is_gated_activation:
             ffn_weight_lists = W.int8_ffn_weights if is_moe == False else W.int8_partial_moe_weights
@@ -329,14 +329,14 @@ class ModelWeightsLoader:
             ffn_weight_lists = W.int8_ffn_weights_2 if is_moe == False else W.int8_partial_moe_weights_2
 
         if is_moe:
-            convert_weight(ffn_weight_lists, self.moe_apply_int8)
+            convert_weight(ffn_weight_lists, self.moe_apply_int8, self._data_type)
         else:
-            convert_weight(ffn_weight_lists, self.apply_int8)
-            convert_weight(W.int8_vision_ffn_weights, self.apply_int8)
+            convert_weight(ffn_weight_lists, self.apply_int8, self._data_type)
+            convert_weight(W.int8_vision_ffn_weights, self.apply_int8, self._data_type)
 
         if self._weights_info.moe_style_ == 2:
             # convert_weight(W.int8_partial_moe_weights, self.moe_apply_int8)
-            convert_weight(W.int8_ffn_weights, self.apply_int8)
+            convert_weight(W.int8_ffn_weights, self.apply_int8, self._data_type)
 
         return results
 

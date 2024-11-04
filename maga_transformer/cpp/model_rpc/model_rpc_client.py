@@ -102,7 +102,7 @@ def trans_tensor(t: TensorPB):
 
 
 def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
-    logging.debug("outputs_pb = ", outputs_pb)
+    logging.debug("outputs_pb = " +  str(outputs_pb))
     outputs_py = GenerateOutputs()
     for output_pb in outputs_pb.generate_outputs:
         output_py = GenerateOutput()
