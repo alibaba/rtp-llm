@@ -49,7 +49,11 @@ def get_bytes_io_from_url(url: str):
     if cached_res is None:
         try:
             if url.startswith("http") or url.startswith("https"):
-                res = BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)
+                response = requests.get(url, stream=True, headers=HTTP_HEADS, timeout=10)
+                if response.status_code == 200:
+                    res = BytesIO(response.content)
+                else:
+                    raise Exception(f'download failed, error code: {response.status_code}')
             elif url.startswith("oss"):
                 res = get_bytes_io_from_oss_path(url)
             else:
