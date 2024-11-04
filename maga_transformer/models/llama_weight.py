@@ -160,7 +160,8 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             logging.info('load default llama1 style weight')
             self._names = DefaultWeightNames
             self._merge_qkv = merge_qkv
-        elif self._prefix + HfWeightNames.OUTPUT in weight_keys:
+        # when use llama3.2 1b, lm_head is shared with embedding        
+        elif self._prefix + HfWeightNames.FFN_NORM.format(i='0') in weight_keys:
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
             self._merge_qkv = merge_qkv_hf

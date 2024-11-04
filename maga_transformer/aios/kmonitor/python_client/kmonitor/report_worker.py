@@ -83,12 +83,13 @@ class ReportWorker(object):
 
     def do_report(self) -> None:
         events = self.get_report_events()
-        logging.debug(f'kmonitor collected {len(events)} events.')
+        # logging.debug(f'kmonitor collected {len(events)} events.')
         if self.flume:
             self.flume.send_batch(events)
         else:
             for event in events:
-                logging.debug(event.body)
+                pass
+                # logging.debug(event.body)
 
     def report_cycle(self) -> None:
         try:

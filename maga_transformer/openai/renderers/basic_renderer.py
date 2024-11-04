@@ -147,13 +147,18 @@ class BasicRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         template = self._get_template(request)
-        request_dict = json.loads(request.model_dump_json())
+        request_dict = json.loads(request.model_dump_json(exclude_none=True))        
+        render_args = {
+            "messages": request_dict['messages'],
+            "json": json,
+            "add_generation_prompt": self.add_generation_prompt,
+        }
+        render_args.update(self.special_tokens_map)
+        # functions with none value may occur exception in llama3 template
+        if request_dict.get('functions', None):
+            render_args['functions'] = request_dict['functions']
         rendered = template.render(
-            messages=request_dict['messages'],
-            functions=request_dict['functions'],
-            json=json,
-            add_generation_prompt=self.add_generation_prompt,
-            **self.special_tokens_map
+            **render_args
         )
         logging.debug(f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]")
         return RenderedInputs(input_ids=self.tokenizer.encode(rendered))

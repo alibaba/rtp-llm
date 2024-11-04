@@ -37,8 +37,8 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
                             .dtype(dataTypeToTorchType(buffer.type()))
     );
     std::stringstream ss;
-    ss << "Buffer " << hint << " : " << tensor;
-    FT_LOG_TRACE("%s", ss.str().c_str());
+    ss << "\nBuffer " << hint << " : " << tensor;
+    FT_LOG_INFO("%s", ss.str().c_str());
 }
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {
