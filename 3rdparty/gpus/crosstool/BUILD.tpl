@@ -39,10 +39,12 @@ cc_toolchain_suite(
 
 cc_toolchain(
     name = "cc-compiler-local",
-    all_files = "%{linker_files}",
-    compiler_files = ":empty",
-    dwp_files = ":empty",
-    linker_files = "%{linker_files}",
+    all_files = "%{compiler_deps}",
+    compiler_files = "%{compiler_deps}",
+    ar_files = "%{compiler_deps}",
+    as_files = "%{compiler_deps}",
+    dwp_files = "%{compiler_deps}",
+    linker_files = "%{compiler_deps}",
     objcopy_files = ":empty",
     strip_files = ":empty",
     # To support linker flags that need to go to the start of command line

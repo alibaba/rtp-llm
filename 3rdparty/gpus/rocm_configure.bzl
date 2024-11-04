@@ -877,6 +877,7 @@ def _create_local_rocm_repository(repository_ctx):
                                                                             _rocm_include_path(repository_ctx, rocm_config))
 
     rocm_defines["%{linker_files}"] = "clang/bin/crosstool_wrapper_driver_is_not_gcc"
+    rocm_defines["%{compiler_deps}"] = "clang/bin/crosstool_wrapper_driver_is_not_gcc"
 
     rocm_defines["%{win_linker_files}"] = ":empty"
 
