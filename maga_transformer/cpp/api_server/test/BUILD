@@ -33,6 +33,8 @@ test_deps = [
 cc_test(
     name = "api_server_unittest",
     srcs = [
+        "mock/MockHttpResponseWriter.h",
+        "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
     ],
     deps = test_deps + [

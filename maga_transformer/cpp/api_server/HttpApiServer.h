@@ -15,6 +15,8 @@
 
 namespace rtp_llm {
 
+class HealthService;
+
 class HttpApiServer {
 public:
     // normal engine
@@ -55,6 +57,7 @@ private:
 
 private:
     bool registerServices();
+    bool registerHealthService();
 
 private:
     std::atomic_bool                      is_stoped_{true};
@@ -69,6 +72,7 @@ private:
     std::optional<EmbeddingEndpoint> embedding_endpoint_;
 
     std::unique_ptr<http_server::HttpServer> http_server_;
+    std::shared_ptr<HealthService>           health_service_;
 };
 
 }  // namespace rtp_llm

@@ -14,7 +14,7 @@ class HttpResponse;
 class HttpResponseWriter {
 public:
     explicit HttpResponseWriter(const std::shared_ptr<anet::Connection> &conn) : _connection(conn) {}
-    ~HttpResponseWriter();
+    virtual ~HttpResponseWriter();
 
 public:
     enum class WriteType {
@@ -23,9 +23,9 @@ public:
         Stream, // 流式响应
     };
     void SetWriteType(WriteType type) { _type = type; }
-    // not thread safe
-    bool Write(const std::string &data);
-    bool WriteDone();
+    // not thread safe. `virtual` for test.
+    virtual bool Write(const std::string &data);
+    virtual bool WriteDone();
 
     void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
     void SetStatus(int code, const std::string message) {

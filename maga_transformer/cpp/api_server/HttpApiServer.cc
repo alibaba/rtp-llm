@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
+#include "maga_transformer/cpp/api_server/HealthService.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -38,8 +39,46 @@ bool HttpApiServer::start() {
 }
 
 bool HttpApiServer::registerServices() {
+    // add uri:
+    // GET: / /health /GraphService/cm2_status /SearchService/cm2_status
+    // POST: /health /GraphService/cm2_status /SearchService/cm2_status /health_check
+    if (!registerHealthService()) {
+        FT_LOG_WARNING("HttpApiServer register health service failed.");
+        return false;
+    }
+
     FT_LOG_INFO("HttpApiServer register services success.");
     return true;
+}
+
+bool HttpApiServer::registerHealthService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register health service failed, http server is null");
+        return false;
+    }
+
+    health_service_.reset(new HealthService());
+    auto raw_resp_callback = [health_service = health_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                                const http_server::HttpRequest& request) -> void {
+        health_service->healthCheck(writer, request);
+    };
+
+    auto json_resp_callback = [health_service =
+                                   health_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                    const http_server::HttpRequest&                  request) -> void {
+        health_service->healthCheck2(writer, request);
+    };
+
+    return http_server_->RegisterRoute("GET", "/health", raw_resp_callback)
+           && http_server_->RegisterRoute("POST", "/health", raw_resp_callback)
+           && http_server_->RegisterRoute("GET", "/GraphService/cm2_status", raw_resp_callback)
+           && http_server_->RegisterRoute("POST", "/GraphService/cm2_status", raw_resp_callback)
+           && http_server_->RegisterRoute("GET", "/SearchService/cm2_status", raw_resp_callback)
+           && http_server_->RegisterRoute("POST", "/SearchService/cm2_status", raw_resp_callback)
+           && http_server_->RegisterRoute("GET", "/status", raw_resp_callback)
+           && http_server_->RegisterRoute("POST", "/status", raw_resp_callback)
+           && http_server_->RegisterRoute("POST", "/health_check", raw_resp_callback)
+           && http_server_->RegisterRoute("GET", "/", json_resp_callback);
 }
 
 void HttpApiServer::stop() {
