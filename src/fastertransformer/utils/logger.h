@@ -101,7 +101,12 @@ public:
              const std::string func,
              const std::string format,
              const Args&... args) {
-        std::string fmt    = getPrefix(file, line, func) + format;
+        std::string fmt;
+        if (isTraceMode()) {
+            fmt = getTracePrefix() + format;
+        } else {
+            fmt = getPrefix(file, line, func) + format;
+        }
         std::string logstr = fmtstr(fmt, args...);
         logger_->log(level, "%s", logstr.c_str());
         tryFlush(level);
@@ -145,6 +150,10 @@ private:
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
         return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_) + "][" + file + ":"
                + std::to_string(line) + "][" + func + "]";
+    }
+
+    inline const std::string getTracePrefix() {
+        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_) + "]";
     }
 
     inline const std::string getLevelName(const uint32_t level) {
