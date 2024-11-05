@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 class Pipeline {
 public:
-    Pipeline(py::object token_processor);
+    Pipeline(py::object token_processor): token_processor_(token_processor) {}
 
 private:
     // TODO: change to tokenizer wrapper

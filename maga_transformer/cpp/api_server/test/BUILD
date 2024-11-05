@@ -45,5 +45,4 @@ cc_test(
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
     exec_properties = {'gpu':'A10'},
-    linkstatic = True,  # 这个很关键, 单测必须要加这个
 )
