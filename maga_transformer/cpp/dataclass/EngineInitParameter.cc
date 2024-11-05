@@ -118,7 +118,6 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2, W::ffn_z2);
 
     ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
-    ffn_weights.moe_up_weight     = mayCreateDenseWeights(map, W::moe_w3, W::moe_b3, W::moe_s3, W::moe_z3);
     ffn_weights.moe_gate_weight   = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1, W::moe_z1);
     ffn_weights.moe_down_weight   = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2, W::moe_z2);
 

@@ -91,7 +91,6 @@ struct AttentionLayerWeights {
 
 struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
-    std::shared_ptr<const DenseWeights>     moe_up_weight;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
     std::shared_ptr<const DenseWeights>     moe_gate_weight;

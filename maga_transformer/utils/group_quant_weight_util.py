@@ -3,7 +3,7 @@ import functools
 
 from maga_transformer.utils.model_weight import (W, WeightInfo, CkptWeightInfo,
                                                  identity, transpose, pad,
-                                                 merge_qkv_hf, stack_)
+                                                 merge_qkv_hf, stack_, stack_moe_w1)
 
 QW_SUFFIX = '.qweight'
 QZ_SUFFIX = '.qzeros'
@@ -58,7 +58,7 @@ def get_qkv_quant_weight_info(weights: List[CkptWeightInfo]) -> List[WeightInfo]
 def get_ffn_quant_weight_info(weights: List[CkptWeightInfo], quant_algo: Any,
                               ffn_w_name: str, inter_padding_size: int) -> List[WeightInfo]:
     assert weights[0].name.endswith(W_SUFFIX)
-    assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2, W.moe_w3]
+    assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
     if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
         assert len(weights) == 1
     w_name = weights[0].name[:-len(W_SUFFIX)]
@@ -87,27 +87,25 @@ def get_ffn_quant_weight_info(weights: List[CkptWeightInfo], quant_algo: Any,
                                   group_size,
                                   dim=0))
         ]
-    elif ffn_w_name in [W.moe_w2, W.moe_w1, W.moe_w3]:
+    elif ffn_w_name in [W.moe_w2, W.moe_w1]:
         if ffn_w_name == W.moe_w1:
             w, z, s = (W.moe_w1, W.moe_z1, W.moe_s1)
+            stack = stack_moe_w1
         elif ffn_w_name == W.moe_w2:
             w, z, s = (W.moe_w2, W.moe_z2, W.moe_s2)
-        else:
-            w, z, s = (W.moe_w3, W.moe_z3, W.moe_s3)
+            stack = stack_
 
         w_name = [weight.name[:-len(W_SUFFIX)] for weight in weights]
-        expert_num = len(w_name)
-
         return [
             WeightInfo(
-                w, [CkptWeightInfo(w_name[i] + QW_SUFFIX, transpose) \
-                                    for i in range(expert_num)], stack_),
+                w, [CkptWeightInfo(name + QW_SUFFIX, transpose) \
+                    for name in w_name], stack),
             WeightInfo(
-                z, [CkptWeightInfo(w_name[i] + QZ_SUFFIX, transpose) \
-                                    for i in range(expert_num)], stack_),
+                z, [CkptWeightInfo(name + QZ_SUFFIX, transpose) \
+                    for name in w_name], stack),
             WeightInfo(
-                s, [CkptWeightInfo(w_name[i] + QS_SUFFIX, transpose) \
-                                    for i in range(expert_num)], stack_),
+                s, [CkptWeightInfo(name + QS_SUFFIX, transpose) \
+                    for name in w_name], stack),
         ]
 
     else:
@@ -157,7 +155,7 @@ def get_layer_group_quant_weight_info(
                            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                            identity)
             ])
-        elif weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2, W.moe_w3]:
+        elif weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]:
             quant_weights.extend(
                 get_ffn_quant_weight_info(weight_info.weights, quant_algo,
                                           weight_info.name,

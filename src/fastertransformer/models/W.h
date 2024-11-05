@@ -89,8 +89,6 @@ static const std::string cross_attn_o_b   = "cross_attention_weights.output_weig
 static const std::string shared_expert_gate_w = "ffn_weights.shared_expert_gate.kernel";
 static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";
 static const std::string moe_b1   = "partial_moe_weights.intermediate_weight.bias";
-static const std::string moe_w3   = "partial_moe_weights.intermediate_weight3.kernel";
-static const std::string moe_b3   = "partial_moe_weights.intermediate_weight3.bias";
 static const std::string moe_w2   = "partial_moe_weights.intermediate_weight2.kernel";
 static const std::string moe_b2   = "partial_moe_weights.intermediate_weight2.bias";
 static const std::string moe_gate = "partial_moe_weights.gate.kernel";
@@ -113,8 +111,6 @@ static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_
 static const std::string vision_ffn_s2 = "vision_ffn_weights.intermediate_weight2.weight_only_quant_scale";
 static const std::string moe_z1 = "partial_moe_weights.intermediate_weight.zero";
 static const std::string moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale";
-static const std::string moe_z3 = "partial_moe_weights.intermediate_weight3.zero";
-static const std::string moe_s3 = "partial_moe_weights.intermediate_weight3.weight_only_quant_scale";
 static const std::string moe_z2 = "partial_moe_weights.intermediate_weight2.zero";
 static const std::string moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale";
 

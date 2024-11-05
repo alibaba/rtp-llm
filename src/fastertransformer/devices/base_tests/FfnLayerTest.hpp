@@ -266,7 +266,6 @@ public:
 
         FfnLayerWeights weights;
         weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
-        weights.moe_up_weight     = std::make_unique<const DenseWeights>(DenseWeights(up));
         weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
         weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
 

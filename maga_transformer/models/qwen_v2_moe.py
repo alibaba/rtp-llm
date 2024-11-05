@@ -2,15 +2,15 @@ import torch
 import unicodedata
 import types
 import functools
+import itertools
 import os
 import json
 from typing import List, Any
 
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
-from maga_transformer.utils.model_weight import W, WeightInfo, CkptWeightInfo, identity, transpose_pad, transpose, stack_
+from maga_transformer.utils.model_weight import W, WeightInfo, CkptWeightInfo, identity, transpose_pad, transpose, stack_, stack_moe_w1
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
-
 
 class QWenV2MoeWeight(QWenV2Weight):
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
@@ -23,12 +23,10 @@ class QWenV2MoeWeight(QWenV2Weight):
             WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.gate_proj.weight', identity)], transpose),
             WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.down_proj.weight', identity)], transpose),
             WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.up_proj.weight', identity)], transpose),
-            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) \
-                                    for expert_id in range(self.expert_num_)], stack_),
+            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in range(self.expert_num_)] + \
+                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
             WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight', identity) \
-                                    for expert_id in range(self.expert_num_)], stack_),
-            WeightInfo(W.moe_w3, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) \
-                                    for expert_id in range(self.expert_num_)], stack_),
+                                  for expert_id in range(self.expert_num_)], stack_),
             WeightInfo(W.shared_expert_gate, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert_gate.weight', identity)], transpose),
         ]
 

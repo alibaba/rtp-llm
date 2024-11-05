@@ -7,7 +7,7 @@ import torch
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, \
-    identity, zeros, transpose, concat_1, concat_0, merge_qkv_lora_A, merge_qkv_lora_B, stack_
+    identity, zeros, transpose, concat_1, concat_0, merge_qkv_lora_A, merge_qkv_lora_B, stack_, stack_moe_w1
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
@@ -15,8 +15,6 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
     qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
     return qkv_weight
-
-
 
 class MixtralWeightInfo(ModelDeployWeightInfo):
     def _get_weight_info(self):
@@ -42,14 +40,14 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         ffn_w1 = []
         ffn_w2 = []
         ffn_w3 = []
-        for num_experts in range(self.expert_num_):
-            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1.weight', identity))
-            ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2.weight', identity))
-            ffn_w3.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3.weight', identity))
+        for expert_id in range(self.expert_num_):
+            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3.weight', identity))
+        for expert_id in range(self.expert_num_):
+            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1.weight', identity))
+            ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2.weight', identity))
 
-        layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_))
+        layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_moe_w1))
         layer_weights.append(WeightInfo(W.moe_w2, ffn_w2, stack_))
-        layer_weights.append(WeightInfo(W.moe_w3, ffn_w3, stack_))
 
 
         lora_base_name = "base_model.model.{}.{}.weight"
@@ -59,17 +57,17 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
             ffn_w1_lora = []
             ffn_w2_lora = []
             ffn_w3_lora = []
-            for num_experts in range(self.expert_num_):
+            for expert_id in range(self.expert_num_):
                 ffn_w1_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1', lora_name), transpose))
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3', lora_name), transpose))
+            for expert_id in range(self.expert_num_):
+                ffn_w1_lora.append(CkptWeightInfo(
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1', lora_name), transpose))
                 ffn_w2_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2', lora_name), transpose))
-                ffn_w3_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3', lora_name), transpose))
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2', lora_name), transpose))
 
-            lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_))
+            lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_moe_w1))
             lora_weights.append(WeightInfo(W.moe_w2 + "." + lora_name, ffn_w2_lora, stack_))
-            lora_weights.append(WeightInfo(W.moe_w3 + "." + lora_name, ffn_w3_lora, stack_))
 
             lora_weights.append(
                 WeightInfo(W.moe_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))

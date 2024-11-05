@@ -17,7 +17,7 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto& hidden       = params.input;
     const auto& weights      = params.weights;
     const auto  compute_type = hidden.type();
-    const auto  weights_type = weights.moe_up_weight->kernel->type();
+    const auto  weights_type = weights.moe_down_weight->kernel->type();
     const auto  num_token    = hidden.shape()[0];
     const auto  model_dim    = hidden.shape()[1];
     const auto  num_expert   = params.weights.moe_gating_weight->kernel->shape()[1];

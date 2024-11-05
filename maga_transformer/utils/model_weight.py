@@ -117,9 +117,10 @@ def shift_one(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor
     return (ts[0] + 1.0).contiguous()
 
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
-    if (t.dim() == 3):
-        return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
+
+def sp_1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
@@ -127,8 +128,25 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tens
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
+def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    print('here', t.shape)
+    # [expert_num, 2*n, k]
+    t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
+    t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
+    t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
+    return t3
+
 def stack_(ts: List[torch.Tensor]):
     return torch.stack(ts, dim=0)
+
+def stack_moe_w1(ts: List[torch.Tensor]):
+    gate = ts[:len(ts) // 2]
+    up = ts[len(ts) // 2:]
+    ws = []
+    for w1, w3 in zip(gate, up):
+        ws.append(torch.concat([w1, w3], dim=0))
+    x =  torch.stack(ws, dim=0)
+    return x
 
 def get_sp_tensor(t: torch.Tensor, head_num: int, head_num_kv: int, size_per_head: int,
                   tp: int, tp_rank: int, **kwargs):
@@ -367,8 +385,6 @@ class W:
     shared_expert_gate = 'ffn_weights.shared_expert_gate.kernel'
     moe_w1   = 'partial_moe_weights.intermediate_weight.kernel'
     moe_b1   = 'partial_moe_weights.intermediate_weight.bias'
-    moe_w3   = 'partial_moe_weights.intermediate_weight3.kernel'
-    moe_b3   = 'partial_moe_weights.intermediate_weight3.bias'
     moe_w2   = 'partial_moe_weights.intermediate_weight2.kernel'
     moe_b2   = 'partial_moe_weights.intermediate_weight2.bias'
     moe_gate = 'partial_moe_weights.gate.kernel'
@@ -412,8 +428,6 @@ class W:
     vision_ffn_s2 = 'vision_ffn_weights.intermediate_weight2.weight_only_quant_scale'
     moe_z1 = 'partial_moe_weights.intermediate_weight.zero'
     moe_s1 = 'partial_moe_weights.intermediate_weight.weight_only_quant_scale'
-    moe_z3 = 'partial_moe_weights.intermediate_weight3.zero'
-    moe_s3 = 'partial_moe_weights.intermediate_weight3.weight_only_quant_scale'
     moe_z2 = 'partial_moe_weights.intermediate_weight2.zero'
     moe_s2 = 'partial_moe_weights.intermediate_weight2.weight_only_quant_scale'
 
@@ -462,8 +476,6 @@ class W:
         moe_b1,
         moe_w2,
         moe_b2,
-        moe_w3,
-        moe_b3,
         moe_gate,
         shared_expert_gate
     ])
@@ -481,7 +493,6 @@ class W:
         vision_ffn_w3,
         moe_w1,
         moe_w2,
-        moe_w3,
         attn_qkv_s,
         attn_o_s,
         ffn_s1,
@@ -516,8 +527,6 @@ class W:
         moe_s1,
         moe_z2,
         moe_s2,
-        moe_z3,
-        moe_s3
     ])
 
     sq_quant_weights = [
@@ -607,7 +616,6 @@ class W:
 
     int8_partial_moe_weights = [
         [moe_w1, moe_s1],
-        [moe_w3, moe_s3],
         [moe_w2, moe_s2]
     ]
 
@@ -634,7 +642,6 @@ class W:
 
     groupwise_partial_moe_weights = [
         [moe_w1, moe_z1, moe_s1],
-        [moe_w3, moe_z3, moe_s3],
         [moe_w2, moe_z2, moe_s2]
     ]
 
@@ -712,14 +719,10 @@ class W:
         ffn_act_s: sp_0,
         ffn_smoother: sp_0,
 
-        moe_w1: sp_0,
-        moe_z1: sp_0,
-        moe_s1: sp_0,
-        moe_b1: sp_0,
-        moe_w3: sp_0,
-        moe_z3: sp_0,
-        moe_s3: sp_0,
-        moe_b3: sp_0,
+        moe_w1: sp_moe_w1,
+        moe_z1: sp_moe_w1,
+        moe_s1: sp_moe_w1,
+        moe_b1: sp_1,
         moe_w2: sp_neg1,
         moe_z2: sp_neg1,
         moe_s2: sp_neg1,

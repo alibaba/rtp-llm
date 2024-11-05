@@ -13,7 +13,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto& hidden = params.input;
     const auto& weights = params.weights;
     const auto type = hidden.type();
-    const auto weight_type = weights.moe_up_weight->kernel->type();
+    const auto weight_type = weights.moe_down_weight->kernel->type();
     const auto token_num = hidden.shape()[0];
     const auto hidden_dim = hidden.shape()[1];
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
@@ -76,10 +76,6 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
         BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
-        weights.moe_up_weight->kernel->data(),
-        BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_up_weight->kernel),
-        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_up_weight->kernel),
-        OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_up_weight->bias),
         token_num,
         worksapce->data<char>(),
         // output
