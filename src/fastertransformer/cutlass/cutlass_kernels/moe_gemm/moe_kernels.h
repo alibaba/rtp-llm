@@ -509,7 +509,7 @@ public:
         mBias = bias;
         mUseLora = false;
         mParallelismConfig = parallelism_config;
-        mSM = fastertransformer::getSMVersion();
+        mSM = fastertransformer::get_sm();
         mSorter.updateNumExperts(mNumExperts);
     }
 

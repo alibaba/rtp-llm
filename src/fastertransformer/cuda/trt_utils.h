@@ -41,7 +41,7 @@ namespace tensorrt_llm::common
 {
 
 using fastertransformer::ceilDiv;
-using fastertransformer::getSMVersion;
+using fastertransformer::get_sm;
 
 constexpr static size_t getDTypeSize(nvinfer1::DataType type)
 {
