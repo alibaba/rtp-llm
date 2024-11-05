@@ -18,7 +18,7 @@ from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.utils.concurrency_controller import ConcurrencyException
 
 
-def format_exception(e: Exception):
+def format_exception(e: BaseException):
     def _format(errcode: int, message: str) -> Dict[str, Any]:
         return {'error_code': errcode, "message": message}
 

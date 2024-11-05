@@ -37,6 +37,9 @@ from maga_transformer.model_factory import AsyncModel
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
+USAGE_HEADER = "USAGE"
+STATUS_CODE_HEADER = "STATUS_CODE"
+
 class InferenceServer(object):
     def __init__(self):
         if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
@@ -173,7 +176,7 @@ class InferenceServer(object):
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         request[request_id_field_name] = self._atomic_count.increment()
-        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unkown")})
+        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
         try:
             with self._controller:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
@@ -194,23 +197,22 @@ class InferenceServer(object):
     async def classifier(self, request: Dict[str, Any], raw_request: Request):
         return await self.embedding(request, raw_request)
 
-    def _handle_exception(self, request: Dict[str, Any], e: Exception):
+    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+        exception_json = format_exception(e)
+        error_code = exception_json.get('error_code', 500)
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-            error_code = 409
         elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
-            error_code = 499
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
             self._access_logger.log_exception_access(request, e)
         else:
-            error_code = 500
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
-                "source": request.get("source", "unkown"),
-                "error_code": str(format_exception(e).get("error_code", -1))
+                "source": request.get("source", "unknown"),
+                "error_code": str(error_code)
             })
             self._access_logger.log_exception_access(request, e)
 
-        rep = ORJSONResponse(format_exception(e), status_code=error_code)
+        rep = ORJSONResponse(exception_json, status_code=error_code)
         return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
