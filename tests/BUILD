@@ -118,6 +118,22 @@ py_test(
 )
 
 py_test(
+    name = "th_fp8_gemm",
+    srcs = [
+        "fp8_gemm/th_fp8_gemm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:numpy",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "th_gemm_dequantize",
     srcs = [
         "gemm_dequantize/th_gemm_dequantize.py"

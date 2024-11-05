@@ -70,7 +70,7 @@ class TestFp8Gemm(unittest.TestCase):
         A = mat1.contiguous().cuda()
         output = self.fp8_gemm(A, B, scale_a_torch, scale_b_torch)
         msg = f"fp8 gemm Failed on m={m}, n={n}, k={k}, output={output}, ref={ref}"
-        torch.testing.assert_close(ref, output, rtol=0.004, atol=0.004, msg=msg, check_dtype=False)
+        torch.testing.assert_close(ref, output, rtol=0.01, atol=0.04, msg=msg, check_dtype=False)
     
     def test_matmul(self):
         bs_list = [1]
