@@ -37,36 +37,10 @@ namespace fastertransformer {
 
 class Logger {
 public:
-    Logger(const std::string& submodule_name) {
-        logger_ = alog::Logger::getLogger(submodule_name.c_str());
-        if (logger_ == nullptr) {
-            throw std::runtime_error("getLogger should not be nullptr");
-        }
-        alog::Logger::MAX_MESSAGE_LENGTH = 1024000;
-
-        int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
-        if (use_console_append) {
-            console_appender_ = (alog::ConsoleAppender*)alog::ConsoleAppender::getAppender();
-            console_appender_->setAutoFlush(true);
-            logger_->setAppender(console_appender_);
-        } else {
-            std::string file_appender_path = autil::EnvUtil::getEnv("LOG_PATH", "logs") + "/" + submodule_name + ".log";
-            file_appender_ = (alog::FileAppender*)alog::FileAppender::getAppender(file_appender_path.c_str());
-            file_appender_->setAutoFlush(true);
-            file_appender_->setAsyncFlush(false);
-            file_appender_->setFlushIntervalInMS(100);
-            file_appender_->setFlushThreshold(1);
-            logger_->setAppender(file_appender_);
-        }
-
-        logger_->setInheritFlag(false);
-        base_log_level_ = getLevelfromstr("LOG_LEVEL");
-        logger_->setLevel(base_log_level_);
-    }
+    Logger(const std::string& submodule_name);
 
     Logger(Logger const&) = delete;
     void operator=(Logger const&) = delete;
-
 
     static Logger& getEngineLogger() {
         static Logger engine_logger_("engine");
@@ -83,16 +57,7 @@ public:
         return stack_trace_logger_;
     }
 
-    void setBaseLevel(const uint32_t base_level) {
-        base_log_level_ = base_level;
-        logger_->setLevel(base_log_level_);
-        log(alog::LOG_LEVEL_INFO,
-            __FILE__,
-            __LINE__,
-            __PRETTY_FUNCTION__,
-            "Set logger level to: [%s]",
-            getLevelName(base_level).c_str());
-    }
+    void setBaseLevel(const uint32_t base_level);
 
     template<typename... Args>
     void log(uint32_t          level,
@@ -100,7 +65,7 @@ public:
              int               line,
              const std::string func,
              const std::string format,
-             const Args&... args) {
+             const Args&... args)  {
         std::string fmt;
         if (isTraceMode()) {
             fmt = getTracePrefix() + format;
@@ -113,7 +78,13 @@ public:
     }
 
     void log(std::exception const& ex, uint32_t level = alog::LOG_LEVEL_ERROR) {
-        log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__,"%s: %s", FTException::demangle(typeid(ex).name()).c_str(), ex.what());
+        log(level,
+            __FILE__,
+            __LINE__,
+            __PRETTY_FUNCTION__,
+            "%s: %s",
+            FTException::demangle(typeid(ex).name()).c_str(),
+            ex.what());
     }
 
     void setRank(int32_t rank) {
@@ -148,12 +119,13 @@ private:
     uint32_t getLevelfromstr(const char* s);
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
-        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_) + "][" + file + ":"
-               + std::to_string(line) + "][" + func + "]";
+        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_)
+               + "][" + file + ":" + std::to_string(line) + "][" + func + "]";
     }
 
     inline const std::string getTracePrefix() {
-        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_) + "]";
+        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_)
+               + "]";
     }
 
     inline const std::string getLevelName(const uint32_t level) {
@@ -165,8 +137,8 @@ private:
     alog::FileAppender*    file_appender_;
     alog::ConsoleAppender* console_appender_;
 
-    uint32_t base_log_level_ = alog::LOG_LEVEL_INFO;
-    const std::map<const uint32_t, const std::string> level_name_ = {{alog::LOG_LEVEL_TRACE1, "TRACE"},
+    uint32_t                                          base_log_level_ = alog::LOG_LEVEL_INFO;
+    const std::map<const uint32_t, const std::string> level_name_     = {{alog::LOG_LEVEL_TRACE1, "TRACE"},
                                                                      {alog::LOG_LEVEL_DEBUG, "DEBUG"},
                                                                      {alog::LOG_LEVEL_INFO, "INFO"},
                                                                      {alog::LOG_LEVEL_WARN, "WARNING"},
@@ -206,7 +178,6 @@ private:
 #define FT_ACCESS_LOG_WARNING(...) FT_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define FT_ACCESS_LOG_ERROR(...) FT_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define FT_ACCESS_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
-
 
 #define FT_STACKTRACE_LOG(level, ...)                                                                                  \
     do {                                                                                                               \
