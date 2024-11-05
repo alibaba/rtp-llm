@@ -37,6 +37,7 @@ private:
     absl::Status trySaveStepError() const;
     absl::Status initCacheManager();
     absl::Status initSystemPrompt();
+    void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics(int64_t                         propose_begin_time_us,
                                int64_t                         score_begin_time_us,
                                int64_t                         sampler_begin_time_us,

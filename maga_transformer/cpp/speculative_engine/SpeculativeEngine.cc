@@ -225,6 +225,20 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr
     return stream;
 }
 
+void SpeculativeEngine::tpSyncDisableSPRun(bool& all_streams_disable_sp_run) {
+    if (device_->getDeviceProperties().tp_size <= 1) {
+        return;
+    }
+    auto disable_sp_run = device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST});
+    auto disable_sp_run_ptr = disable_sp_run->data<int32_t>();
+    disable_sp_run_ptr[(size_t)0] = all_streams_disable_sp_run;
+
+    device_->broadcast({{disable_sp_run}, 0});
+    device_->syncCommunication(false);
+    device_->syncAndCheck();
+    all_streams_disable_sp_run = disable_sp_run_ptr[(size_t)0];
+}
+
 absl::Status SpeculativeEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -248,7 +262,7 @@ absl::Status SpeculativeEngine::step() {
     }
 
     bool all_streams_disable_sp_run = !streams.empty() && std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
-
+    tpSyncDisableSPRun(all_streams_disable_sp_run);
     int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     int64_t score_begin_time_us = 0;
     int64_t sampler_begin_time_us = 0;
