@@ -165,9 +165,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
             if (need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds(device_);
-                memcpy(combo_position_ids + (token_idx - stream->reuseLength()) * position_id_len_factor_, 
-                        context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_), 
-                        (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_) * context_pos_ids->typeSize());
+                memcpy(combo_position_ids + token_idx * position_id_len_factor_, 
+                       context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_), 
+                       (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_) * context_pos_ids->typeSize());
             }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
