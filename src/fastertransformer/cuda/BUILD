@@ -39,6 +39,7 @@ cc_library(
     ],
     hdrs = [
         "cufmha/cufmha.h",
+        "cufmha/fmha_profiling_interface.h"
     ],
     deps = [
         ":fa_hdrs",

@@ -1,4 +1,5 @@
 #include "cufmha.h"
+#include "fmha_profiling_interface.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/utils/compiler_config.h"
@@ -317,12 +318,30 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
         flash_fwd_params.softmax_lseaccum_ptr = (char*)workspace + sizeof(float) * batch_size * head_num_ * seq_len_round;
         flash_fwd_params.oaccum_ptr = (char*)(flash_fwd_params.softmax_lseaccum_ptr) + sizeof(float) * flash_fwd_params.num_splits * batch_size * head_num_ * seq_len_round;
     }
+    // export FMHA_SHOW_PARAMS=1
+    fastertransformer::fmha::FmhaProfParam fmha_prof_params;
+    if (fastertransformer::fmha::ProfilingInterface::Instance().get_op_info()){
+        fmha_prof_params.set_flash_attn_params(
+            true/*dir*/, flash_fwd_params.is_bf16/*data_type*/,
+            flash_fwd_params.is_causal/*custom_mask*/, flash_fwd_params.b/*batch_size*/,
+            flash_fwd_params.h/*num_heads*/, flash_fwd_params.h_k/*num_heads_k*/,
+            flash_fwd_params.d/*head_dim*/, flash_fwd_params.d/*head_dim_value*/,
+            flash_fwd_params.seqlen_q/*seqlen_q*/, flash_fwd_params.seqlen_k/*seqlen_k*/,
+            flash_fwd_params.p_dropout/*dropout*/, flash_fwd_params.scale_softmax/*scale*/,
+            flash_fwd_params.window_size_left, /*window_size_left*/
+            flash_fwd_params.window_size_right,/*window_size_right*/
+            true/*is_fixed_seqs**/,
+            flash_fwd_params.alibi_slopes_ptr != nullptr/*alibi*/
+        );
+    }
+    fastertransformer::fmha::ProfilingInterface::Instance().instrument(true, fmha_prof_params);
     try {
         run_mha_fwd(flash_fwd_params, stream_, block_table);
     } catch (const std::exception& e) {
         FT_LOG_WARNING("run opensource paged flash attention failed, err: %s", e.what());
         throw;
     }
+    fastertransformer::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
     sync_check_cuda_error();
 }
 
@@ -338,12 +357,30 @@ void cufmha::runOpenSourceFmha(void* q,
                                float softmax_extra_scale)
 {
     Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_seqlens, workspace, batch_size, seq_len, seq_len, linear_bias_slopes, softmax_extra_scale);
+    // export FMHA_SHOW_PARAMS=1
+    fastertransformer::fmha::FmhaProfParam fmha_prof_params;
+    if (fastertransformer::fmha::ProfilingInterface::Instance().get_op_info()){
+        fmha_prof_params.set_flash_attn_params(
+            true/*dir*/, flash_fwd_params.is_bf16/*data_type*/,
+            flash_fwd_params.is_causal/*custom_mask*/, flash_fwd_params.b/*batch_size*/,
+            flash_fwd_params.h/*num_heads*/, flash_fwd_params.h_k/*num_heads_k*/,
+            flash_fwd_params.d/*head_dim*/, flash_fwd_params.d/*head_dim_value*/,
+            flash_fwd_params.seqlen_q/*seqlen_q*/, flash_fwd_params.seqlen_k/*seqlen_k*/,
+            flash_fwd_params.p_dropout/*dropout*/, flash_fwd_params.scale_softmax/*scale*/,
+            flash_fwd_params.window_size_left, /*window_size_left*/
+            flash_fwd_params.window_size_right,/*window_size_right*/
+            true/*is_fixed_seqs**/,
+            flash_fwd_params.alibi_slopes_ptr != nullptr/*alibi*/
+        );
+    }
+    fastertransformer::fmha::ProfilingInterface::Instance().instrument(true, fmha_prof_params);
     try {
         run_mha_fwd(flash_fwd_params, stream_, false);
     } catch (const std::exception& e) {
         FT_LOG_WARNING("run opensource flash attention failed, err: %s", e.what());
         throw;
     }
+    fastertransformer::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
     sync_check_cuda_error();
 }
 
