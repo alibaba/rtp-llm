@@ -23,7 +23,7 @@ cc_library(
         "//src/fastertransformer/devices:devices_base_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/cuda:allocator_cuda",
-        "//src/fastertransformer/cuda:torch_cuda_allocator",
+        "//src/fastertransformer/core:torch_cuda_allocator",
         "//src/fastertransformer/kernels:kernels",
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",

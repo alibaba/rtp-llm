@@ -122,3 +122,20 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "torch_cuda_allocator",
+    srcs = [
+        "torch_utils/torch_cuda_allocator.cc"
+    ],
+    hdrs = [
+        "torch_utils/torch_cuda_allocator.h"
+    ],
+    copts = copts(),
+    deps = [
+        "//src/fastertransformer/core:allocator",
+        "//src/fastertransformer/devices:devices_base",
+    ] + torch_deps(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)

@@ -9,7 +9,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/compiler_config.h"
-#include "src/fastertransformer/cuda/torch_cuda_allocator.h"
+#include "src/fastertransformer/core/torch_utils/torch_cuda_allocator.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
@@ -108,10 +108,10 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         allocator_.reset(allocator_ptr);
     }
 
+    // hijack torch cuda allocator
     origin_torch_cuda_allocator_ = at::cuda::CUDACachingAllocator::allocator;
-    initTorchCUDAAllocator(allocator_.get(), device_id_);
-    // change torch cuda gpu allocate
-    at::cuda::CUDACachingAllocator::allocator.store(getTorchCUDAAllocator());
+    managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
+    at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
 
     if (params.host_reserve_memory_bytes) {
         RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
@@ -135,6 +135,7 @@ CudaDevice::~CudaDevice() {
     // change torch cuda gpu allocate
     if (origin_torch_cuda_allocator_) {
         at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
+        origin_torch_cuda_allocator_ = nullptr;
     }
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
@@ -149,7 +150,8 @@ CudaDevice::~CudaDevice() {
 
 void CudaDevice::init() {
     DeviceBase::init();
-    FT_LOG_INFO("max batch size: %d\n", init_params_.max_batch_size);
+
+    FT_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer(
         {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
@@ -207,8 +209,8 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                        params.configs.size_per_head,
                        params.configs.q_scaling / params.configs.softmax_extra_scale, // div scale for DeepSeek V2
                        params.has_alibi_slopes,
-                       use_trtv1_fmha, 
-                       use_trtv2_fmha, 
+                       use_trtv1_fmha,
+                       use_trtv2_fmha,
                        use_trtv2_fmha_paged,
                        use_open_source_fmha,
                        use_open_source_fmha_paged,

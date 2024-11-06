@@ -129,6 +129,7 @@ private:
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> host_allocator_;
     c10::cuda::CUDACachingAllocator::CUDAAllocator *origin_torch_cuda_allocator_;
+    std::unique_ptr<c10::cuda::CUDACachingAllocator::CUDAAllocator> managed_torch_cuda_allocator_;
 
     cublasHandle_t cublas_handle_;
     cublasLtHandle_t cublaslt_handle_;
