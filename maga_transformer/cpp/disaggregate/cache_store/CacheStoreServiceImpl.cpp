@@ -1,28 +1,30 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImpl.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
+
+#include "src/fastertransformer/utils/logger.h"
+
 #include "autil/TimeUtility.h"
 #include <unistd.h>
 
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, CacheStoreServiceImpl);
-AUTIL_LOG_SETUP(rtp_llm, TcpCacheStoreServiceImpl);
-
 CacheStoreServiceImpl::CacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&              memory_util,
                                              const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
-                                             const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter):
+                                             const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
+                                             const std::shared_ptr<arpc::TimerManager> &timer_manager):
     memory_util_(memory_util),
     request_block_buffer_store_(request_block_buffer_store),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter),
+    timer_manager_(timer_manager) {}
 
 void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
                                  const ::CacheLoadRequest*          request,
                                  ::CacheLoadResponse*               response,
                                  ::google::protobuf::Closure*       done) {
     if (request_block_buffer_store_ == nullptr) {
-        AUTIL_LOG(WARN,
-                  "cache store service has no block cache store, request failed, request from [%s:%u], request id [%s]",
+        FT_LOG_WARNING(
+                  "cache store service has no block cache store, request failed, request from [%s], request id [%s]",
                   request->client_ip().c_str(),
-                  request->client_port(),
                   request->requestid().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
@@ -31,80 +33,69 @@ void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
     loadImpl(controller, request, response, done);
 }
 
-TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&              memory_util,
-                                             const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
-                                             const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter): CacheStoreServiceImpl(memory_util, request_block_buffer_store, metrics_reporter) {}
+TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
+                                                   const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
+                                                   const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
+                                                   const std::shared_ptr<arpc::TimerManager> &timer_manager)
+                                                   : CacheStoreServiceImpl(memory_util, request_block_buffer_store, metrics_reporter, timer_manager) {}
 
 void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* controller,
-                                          const ::CacheLoadRequest*          request,
-                                          ::CacheLoadResponse*               response,
-                                          ::google::protobuf::Closure*       done) {
+                                        const ::CacheLoadRequest*          request,
+                                        ::CacheLoadResponse*               response,
+                                        ::google::protobuf::Closure*       done) {
     int64_t start_time_us        = autil::TimeUtility::currentTimeInMicroSeconds();
     int64_t request_send_cost_us = start_time_us - request->request_send_start_time_us();
     auto    collector            = metrics_reporter_->makeServerLoadMetricsCollector(
         request->blocks_size(), request->blocks_size() ? request->blocks(0).len() : 0, request_send_cost_us);
-
-    auto retcode = loadTcpBlocks(request, response, collector);
-    if (retcode != KvCacheStoreServiceErrorCode::EC_SUCCESS) {
-        AUTIL_LOG(WARN,
-                  "cache store service load failed, request %s from [%s:%u]",
-                  request->requestid().c_str(),
-                  request->client_ip().c_str(),
-                  request->client_port());
-        CacheStoreServerLoadMetricsCollector::markEnd(collector, false);
-        response->clear_blocks();
-        response->set_error_code(retcode);
-        done->Run();
-        return;
-    }
-
-    CacheStoreServerLoadMetricsCollector::markEnd(collector, true);
-    response->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);
-    response->set_response_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
-    response->set_direct_write_response(false);
-
-    done->Run();
+   loadTcpBlocks(request, response, collector, done);
 }
 
-KvCacheStoreServiceErrorCode
-TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*                                    request,
+void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*                                    request,
                                      ::CacheLoadResponse*                                         response,
-                                     const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector) {
-    std::map<std::string, BlockBufferInfo> unloaded_blocks;
-    for (int i = 0; i < request->blocks_size(); i++) {
-        unloaded_blocks[request->blocks(i).key()] = request->blocks(i);
+                                     const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                                     ::google::protobuf::Closure*       done) {
+    auto context = std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done);
+    if (!context) {
+        FT_LOG_WARNING("cache store service new context failed");
+        response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+        done->Run();
+        return ;
     }
-
-    auto request_send_start_time = request->request_send_start_time_us();
-    auto start_time_ms           = autil::TimeUtility::currentTimeInMilliSeconds();
-    bool first_block             = true;
-    while (!unloaded_blocks.empty()
-           && autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms < request->timeout_ms()) {
-        for (auto it = unloaded_blocks.begin(); it != unloaded_blocks.end();) {
-            auto block = request_block_buffer_store_->getBlockBuffer(request->requestid(), it->first);
-            if (block == nullptr) {
-                it++;
-                continue;
-            }
-            if (first_block) {
-                CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(
-                    collector, autil::TimeUtility::currentTimeInMicroSeconds() - request_send_start_time);
-            }
-            auto* block_info = response->add_blocks();
-            block_info->set_key(it->first);
-            block_info->set_len(block->len);
-
-            auto block_content = block_info->mutable_content();
-            block_content->assign(
-                std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>(block->addr.get())),
-                size_t(block->len));
-
-            it = unloaded_blocks.erase(it);
+    auto timer_callback = [context](){
+        context->setTimeOut();
+        if(!context->isAllLoaded()){
+            FT_LOG_WARNING("cache store service load blocks time out");
+            context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
         }
-        usleep(100);
+    };
+    auto timer = timer_manager_->addTimer(request->timeout_ms(), std::move(timer_callback));
+    if(timer == nullptr){
+        FT_LOG_WARNING("cache store service add timer failed");
+        response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+        done->Run();
+        return ;
     }
-    return unloaded_blocks.empty() ? KvCacheStoreServiceErrorCode::EC_SUCCESS :
-                                     KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER;
-}
 
-}  // namespace rtp_llm
+    StoreBlockBufferCallbackFunc callback = [context](std::shared_ptr<BlockBuffer> block){
+        if(context->isTimeOut()){
+            return;
+        }
+        context->loadBlockOnTcp(block);       
+    };
+    context->setTimer(timer);
+    context->setUnLoadedBlocks();
+    request_block_buffer_store_->setStoreBlockBufferCallBack(request->requestid(), std::move(callback));
+    
+    for(int i = 0; i < request->blocks_size(); i++){
+        auto block = request_block_buffer_store_->getBlockBuffer(request->requestid(), request->blocks(i).key());
+        if(block == nullptr){
+            continue;
+        }
+        if(context->isTimeOut()){
+            return;
+        }
+        FT_LOG_DEBUG("load out callback %s", request->blocks(i).key().c_str());
+        context->loadBlockOnTcp(block); 
+    }
+}
+}// namespace rtp_llm

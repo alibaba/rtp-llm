@@ -88,18 +88,19 @@ void CacheStoreServerStoreMetricsCollector::markEnd(
         collector->success_     = success;
     }
 }
-void CacheStoreServerLoadMetricsCollector::setConnectCost(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t connect_cost_us){
-    if (collector) {    
+void CacheStoreServerLoadMetricsCollector::setConnectCost(
+    const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t connect_cost_us) {
+    if (collector) {
         collector->load_connect_cost_us_ = connect_cost_us;
     }
 }
 
-void CacheStoreServerLoadMetricsCollector::setStartWriteTime(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector){
-    if (collector) {    
+void CacheStoreServerLoadMetricsCollector::setStartWriteTime(
+    const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector) {
+    if (collector) {
         collector->start_write_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 }
-
 
 bool CacheStoreServerStoreMetricsCollector::success() const {
     return success_;
@@ -112,10 +113,10 @@ uint32_t CacheStoreServerStoreMetricsCollector::blockCount() const {
 int64_t CacheStoreServerStoreMetricsCollector::totalCostUs() const {
     return subZeroOrAbove(end_time_us_, start_time_us_);
 }
-int64_t  CacheStoreServerLoadMetricsCollector::connectCostUs() const{
+int64_t CacheStoreServerLoadMetricsCollector::connectCostUs() const {
     return load_connect_cost_us_;
 }
-int64_t  CacheStoreServerLoadMetricsCollector::writeCostUs() const{
+int64_t CacheStoreServerLoadMetricsCollector::writeCostUs() const {
     return subZeroOrAbove(end_time_us_, start_write_time_us_);
 }
 
@@ -160,12 +161,12 @@ void CacheStoreClientLoadMetricsCollector::markEnd(
     }
 }
 
-void CacheStoreClientLoadMetricsCollector::setResponseReceiveCost(const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector, int64_t response_receive_cost_us){
-    if (collector) {    
+void CacheStoreClientLoadMetricsCollector::setResponseReceiveCost(
+    const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector, int64_t response_receive_cost_us) {
+    if (collector) {
         collector->response_receive_cost_us_ = response_receive_cost_us;
     }
 }
-
 
 int64_t CacheStoreClientLoadMetricsCollector::responseReceiveCostUs() const {
     return response_receive_cost_us_;
@@ -195,10 +196,16 @@ int64_t CacheStoreClientLoadMetricsCollector::remoteLoadCostUs() const {
     return subZeroOrAbove(end_time_us_, local_request_begin_time_us_);
 }
 
-
 CacheStoreServerLoadMetricsCollector::CacheStoreServerLoadMetricsCollector(
-    const std::shared_ptr<CacheStoreMetricsReporter>& reporter, uint32_t block_count, uint32_t block_size, int64_t request_send_cost_us):
-    reporter_(reporter), block_count_(block_count), block_size_(block_size), start_time_us_(autil::TimeUtility::currentTimeInMicroSeconds()), request_send_cost_us_(request_send_cost_us) {}
+    const std::shared_ptr<CacheStoreMetricsReporter>& reporter,
+    uint32_t                                          block_count,
+    uint32_t                                          block_size,
+    int64_t                                           request_send_cost_us):
+    reporter_(reporter),
+    block_count_(block_count),
+    block_size_(block_size),
+    start_time_us_(autil::TimeUtility::currentTimeInMicroSeconds()),
+    request_send_cost_us_(request_send_cost_us) {}
 
 CacheStoreServerLoadMetricsCollector::~CacheStoreServerLoadMetricsCollector() {
     auto reporter = reporter_.lock();
@@ -215,7 +222,8 @@ void CacheStoreServerLoadMetricsCollector::markEnd(
     }
 }
 
-void CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t first_block_cost_us){
+void CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(
+    const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t first_block_cost_us) {
     if (collector) {
         collector->first_block_cost_us_ = first_block_cost_us;
     }

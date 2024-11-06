@@ -5,8 +5,6 @@
 
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, MemoryUtil);
-
 MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtilBase> impl): instance_(std::move(impl)) {}
 
 bool MemoryUtil::rdmaMode() {

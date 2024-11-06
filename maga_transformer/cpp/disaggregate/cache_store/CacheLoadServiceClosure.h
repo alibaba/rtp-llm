@@ -31,11 +31,15 @@ public:
     ~CacheLoadServiceClosure();
 
 public:
-    virtual void Run() override;
+    void Run() override;
 
-    void end(bool success);
+public:
+    CacheStoreErrorCode fromArpcErrorCode(arpc::ErrorCode ec);
+    CacheStoreErrorCode fromResponseErrorCode(KvCacheStoreServiceErrorCode ec);
 
-private:
+    void end(bool success, CacheStoreErrorCode ec);
+
+protected:
     std::shared_ptr<MemoryUtil>                           memory_util_;
     std::shared_ptr<RequestBlockBuffer>                   request_block_buffer_;
     arpc::ANetRPCController*                              controller_{nullptr};
@@ -43,9 +47,6 @@ private:
     CacheLoadResponse*                                    response_{nullptr};
     CacheStoreLoadDoneCallback                            callback_{nullptr};
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

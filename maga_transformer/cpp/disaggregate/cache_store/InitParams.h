@@ -16,8 +16,10 @@ public:
     // memory util
     void*    stream{nullptr};
     bool     rdma_mode{true};
+    uint32_t rdma_connect_port{0};
+    uint32_t rdma_listen_port{0};
 
-    bool     enable_metric{true};
+    bool enable_metric{true};
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;

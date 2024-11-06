@@ -1,9 +1,9 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
-namespace rtp_llm {
+#include "src/fastertransformer/utils/logger.h"
 
-AUTIL_LOG_SETUP(rtp_llm, CacheLoadServiceClosure);
+namespace rtp_llm {
 
 CacheLoadServiceClosure::~CacheLoadServiceClosure() {
     if (controller_) {
@@ -20,25 +20,22 @@ CacheLoadServiceClosure::~CacheLoadServiceClosure() {
 void CacheLoadServiceClosure::Run() {
     CacheStoreClientLoadMetricsCollector::setResponseReceiveCost(
         collector_, autil::TimeUtility::currentTimeInMicroSeconds() - response_->response_send_start_time_us());
-    if (controller_->Failed() || response_->error_code() != KvCacheStoreServiceErrorCode::EC_SUCCESS) {
-        AUTIL_LOG(WARN,
-                  "cache load request failed, controller err is %d, response err is %d",
-                  controller_->GetErrorCode(),
-                  response_->error_code());
-        end(false);
+    if (controller_->Failed()) {
+        FT_LOG_WARNING("cache load request failed, controller err is %d", controller_->GetErrorCode());
+        end(false, fromArpcErrorCode(controller_->GetErrorCode()));
         return;
     }
 
-    if (memory_util_->rdmaMode()) {
-        // write成功, 直接回调
-        end(true);
+    if (response_->error_code() != KvCacheStoreServiceErrorCode::EC_SUCCESS) {
+        FT_LOG_WARNING("cache load request failed, response err is %d", response_->error_code());
+        end(false, fromResponseErrorCode(response_->error_code()));
         return;
     }
 
     // TCP Mode 下需要Copy数据
     if (response_->blocks_size() != request_block_buffer_->getBlocksCount()) {
-        AUTIL_LOG(WARN, "cache load response block count not equal to request block buffer");
-        end(false);
+        FT_LOG_WARNING("cache load response block count not equal to request block buffer");
+        end(false, CacheStoreErrorCode::LoadBufferTimeout);
         return;
     }
 
@@ -47,33 +44,63 @@ void CacheLoadServiceClosure::Run() {
         auto        unload_block = request_block_buffer_->getBlock(block.key());
 
         if (unload_block == nullptr || block.len() != unload_block->len) {
-            AUTIL_LOG(WARN,
+            FT_LOG_WARNING(
                       "can not find match block %s from response, request is %s",
                       block.key().c_str(),
                       request_block_buffer_->getRequestId().c_str());
-            end(false);
+            end(false, CacheStoreErrorCode::LoadBufferTimeout);
             return;
         }
 
-        if (!memory_util_->memcopy(unload_block->addr.get(),
-                                   unload_block->gpu_mem,
-                                   block.content().data(),
-                                   false,
-                                   block.len())) {
-            AUTIL_LOG(WARN,
+        if (!memory_util_->memcopy(
+                unload_block->addr.get(), unload_block->gpu_mem, block.content().data(), false, block.len())) {
+            FT_LOG_WARNING(
                       "copy load response to dst block failed, block %s, request %s",
                       block.key().c_str(),
                       request_block_buffer_->getRequestId().c_str());
-            end(false);
+            end(false, CacheStoreErrorCode::LoadBufferTimeout);
             return;
         }
     }
-    end(true);
+    end(true, CacheStoreErrorCode::None);
 }
 
-void CacheLoadServiceClosure::end(bool success) {
+CacheStoreErrorCode CacheLoadServiceClosure::fromArpcErrorCode(arpc::ErrorCode ec) {
+    switch (ec) {
+        case arpc::ARPC_ERROR_TIMEOUT:
+            return CacheStoreErrorCode::CallPrefillTimeout;
+        case arpc::ARPC_ERROR_CONNECTION_CLOSED:
+        case arpc::ARPC_ERROR_METHOD_NOT_FOUND:
+        case arpc::ARPC_ERROR_POST_PACKET:
+            return CacheStoreErrorCode::LoadSendRequestFailed;
+        case arpc::ARPC_ERROR_PUSH_WORKITEM:
+        case arpc::ARPC_ERROR_QUEUE_FULL:
+            return CacheStoreErrorCode::PushWorkerItemFailed;
+        default:
+            return CacheStoreErrorCode::LoadErrorUnknown;
+    }
+}
+
+CacheStoreErrorCode CacheLoadServiceClosure::fromResponseErrorCode(KvCacheStoreServiceErrorCode ec) {
+    switch (ec) {
+        case KvCacheStoreServiceErrorCode::EC_SUCCESS:
+            return CacheStoreErrorCode::None;
+        case KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ:
+            return CacheStoreErrorCode::LoadSendRequestFailed;
+        case KvCacheStoreServiceErrorCode::EC_FAILED_RDMA_CONNECTION:
+            return CacheStoreErrorCode::LoadRdmaConnectFailed;
+        case KvCacheStoreServiceErrorCode::EC_FAILED_RDMA_WRITE:
+            return CacheStoreErrorCode::LoadRdmaWriteFailed;
+        case KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER:
+            return CacheStoreErrorCode::LoadBufferTimeout;
+        default:
+            return CacheStoreErrorCode::LoadErrorUnknown;
+    }
+}
+
+void CacheLoadServiceClosure::end(bool success, CacheStoreErrorCode ec) {
     CacheStoreClientLoadMetricsCollector::markEnd(collector_, success);
-    callback_(success);
+    callback_(success, ec);
     delete this;
 }
 

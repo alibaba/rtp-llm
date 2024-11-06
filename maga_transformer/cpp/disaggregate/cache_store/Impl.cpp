@@ -16,14 +16,16 @@ std::unique_ptr<MessagerClient> createMessagerClient(const std::shared_ptr<Memor
 std::unique_ptr<CacheStoreServiceImpl>
 createCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
                             const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
-                            const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter) {
-    return std::make_unique<TcpCacheStoreServiceImpl>(memory_util, request_block_buffer_store, metrics_reporter);
+                            const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
+                            const std::shared_ptr<arpc::TimerManager>&        timer_manager) {
+    return std::make_unique<TcpCacheStoreServiceImpl>(memory_util, request_block_buffer_store, metrics_reporter, timer_manager);
 }
 
 std::unique_ptr<MessagerServer>
 createMessagerServer(const std::shared_ptr<MemoryUtil>&                memory_util,
                      const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
-                     const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter) {
-    return std::make_unique<MessagerServer>(memory_util, request_block_buffer_store, metrics_reporter);
+                     const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
+                     const std::shared_ptr<arpc::TimerManager>&        timer_manager) {
+    return std::make_unique<MessagerServer>(memory_util, request_block_buffer_store, metrics_reporter, timer_manager);
 }
 }  // namespace rtp_llm

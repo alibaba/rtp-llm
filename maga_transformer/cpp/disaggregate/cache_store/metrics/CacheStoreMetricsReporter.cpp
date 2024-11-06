@@ -1,15 +1,14 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsReporter.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/KMonitor.h"
+#include "src/fastertransformer/utils/logger.h"
 
 namespace rtp_llm {
-
-AUTIL_LOG_SETUP(rtp_llm, CacheStoreMetricsReporter);
 
 bool CacheStoreMetricsReporter::init() {
     auto kMonitor = kmonitor::KMonitorFactory::GetKMonitor("cache_store");
     if (kMonitor == nullptr) {
-        AUTIL_LOG(WARN, "arpc kmonitor client metric reporter init failed");
+        FT_LOG_WARNING("arpc kmonitor client metric reporter init failed");
         return false;
     }
     kMonitor->SetServiceName("rtp_llm.cache_store");
@@ -19,7 +18,7 @@ bool CacheStoreMetricsReporter::init() {
         std::string metricName = (name);                                                                               \
         target.reset(kMonitor->RegisterMetric(metricName, (metricType), (level)));                                     \
         if (nullptr == target) {                                                                                       \
-            AUTIL_LOG(ERROR, "failed to register metric:[%s]", metricName.c_str());                                    \
+            FT_LOG_ERROR("failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \
         }                                                                                                              \
     } while (0)
@@ -79,9 +78,11 @@ CacheStoreMetricsReporter::makeClientLoadMetricsCollector(uint32_t block_count) 
     return enable_ ? std::make_shared<CacheStoreClientLoadMetricsCollector>(shared_from_this(), block_count) : nullptr;
 }
 
-std::shared_ptr<CacheStoreServerLoadMetricsCollector>
-CacheStoreMetricsReporter::makeServerLoadMetricsCollector(uint32_t block_count, uint32_t block_size, int64_t request_send_cost_us) {
-    return enable_ ? std::make_shared<CacheStoreServerLoadMetricsCollector>(shared_from_this(), block_count, block_size, request_send_cost_us) : nullptr;
+std::shared_ptr<CacheStoreServerLoadMetricsCollector> CacheStoreMetricsReporter::makeServerLoadMetricsCollector(
+    uint32_t block_count, uint32_t block_size, int64_t request_send_cost_us) {
+    return enable_ ? std::make_shared<CacheStoreServerLoadMetricsCollector>(
+               shared_from_this(), block_count, block_size, request_send_cost_us) :
+                     nullptr;
 }
 
 std::shared_ptr<CacheStoreClientStoreMetricsCollector>
@@ -134,7 +135,13 @@ void CacheStoreMetricsReporter::reportClientLoad(CacheStoreClientLoadMetricsColl
     client_load_local_load_cost_us_->Report(collector->localLoadCostUs());
     client_load_remote_load_cost_us_->Report(collector->remoteLoadCostUs());
     response_receive_cost_us_->Report(collector->responseReceiveCostUs());
-    AUTIL_LOG(DEBUG, "cache client load metrics: success: %d; load count: %d, remote load count: %d, total cost: %ldus, remote load cost %ldus", collector->success(), collector->blockCount(), collector->remoteLoadBlockCount(), collector->totalCostUs(), collector->remoteLoadCostUs());
+    FT_ACCESS_LOG_DEBUG(
+        "cache client load metrics: success: %d; load count: %d, remote load count: %d, total cost: %ldus, remote load cost %ldus",
+        collector->success(),
+        collector->blockCount(),
+        collector->remoteLoadBlockCount(),
+        collector->totalCostUs(),
+        collector->remoteLoadCostUs());
 }
 
 void CacheStoreMetricsReporter::reportServerLoad(CacheStoreServerLoadMetricsCollector* collector) {

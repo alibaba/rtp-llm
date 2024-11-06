@@ -2,35 +2,25 @@
 
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 
+#include "src/fastertransformer/utils/logger.h"
+
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"
-
 
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, MessagerClient);
-
 MessagerClient::MessagerClient(const std::shared_ptr<MemoryUtil>& memory_util): memory_util_(memory_util) {}
 
 MessagerClient::~MessagerClient() {
-    if (rpc_channel_manager_) {
-        rpc_channel_transport_->stop();
-        rpc_channel_transport_->wait();
-
-        rpc_channel_manager_->Close();
-        rpc_channel_manager_.reset();
-
-        rpc_channel_transport_.reset();
-    }
-
+    stopTcpClient();
 }
 
-bool MessagerClient::init(uint32_t connect_port, bool enable_metric) {
+bool MessagerClient::init(uint32_t connect_port, uint32_t rdma_connect_port, bool enable_metric) {
     connect_port_ = connect_port;
     if (!initTcpClient(enable_metric)) {
-        AUTIL_LOG(WARN, "messager client init failed, tcp client init failed");
+        FT_LOG_WARNING("messager client init failed, tcp client init failed");
         return false;
     }
     return true;
@@ -54,31 +44,43 @@ bool MessagerClient::initTcpClient(bool enable_metric) {
         metricConfig.metricLevel                 = kmonitor::NORMAL;
         auto metricReporter = std::make_shared<arpc::KMonitorANetClientMetricReporter>(metricConfig);
         if (!metricReporter->init(rpc_channel_transport_.get())) {
-            AUTIL_LOG(ERROR, "anet metric reporter init failed");
+            FT_LOG_ERROR("anet metric reporter init failed");
             return false;
         }
         rpc_channel_manager_->SetMetricReporter(metricReporter);
     }
-    AUTIL_LOG(INFO, "layer cache messager client init tcp client success");
+    FT_LOG_INFO("layer cache messager client init tcp client success");
     return true;
 }
 
-void MessagerClient::sendLoadRequest(const std::string&                                           ip,
-                                     const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
-                                     CacheStoreLoadDoneCallback                                   callback,
-                                     uint32_t                                                     timeout_ms,
-                                     const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) {
+void MessagerClient::stopTcpClient() {
+    if (rpc_channel_manager_) {
+        rpc_channel_transport_->stop();
+        rpc_channel_transport_->wait();
+
+        rpc_channel_manager_->Close();
+        rpc_channel_manager_.reset();
+
+        rpc_channel_transport_.reset();
+    }
+}
+
+void MessagerClient::load(const std::string&                                           ip,
+                          const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
+                          CacheStoreLoadDoneCallback                                   callback,
+                          uint32_t                                                     timeout_ms,
+                          const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) {
     auto channel = getChannel(ip);
     if (channel == nullptr) {
-        AUTIL_LOG(WARN, "messager client get channel failed, ip %s", ip.c_str());
-        callback(false);
+        FT_LOG_WARNING("messager client get channel failed, ip %s", ip.c_str());
+        callback(false, CacheStoreErrorCode::LoadConnectFailed);
         return;
     }
 
     auto request = makeLoadRequest(request_block_buffer, timeout_ms - 10);  // TODO: 10 is message transfer time
     if (request == nullptr) {
-        AUTIL_LOG(WARN, "messager client generate laod request failed");
-        callback(false);
+        FT_LOG_WARNING("messager client generate load request failed");
+        callback(false, CacheStoreErrorCode::LoadSendRequestFailed);
         return;
     }
 
@@ -88,10 +90,6 @@ void MessagerClient::sendLoadRequest(const std::string&                         
     CacheLoadResponse*       response = new CacheLoadResponse;
     CacheLoadServiceClosure* closure  = new CacheLoadServiceClosure(
         memory_util_, request_block_buffer, controller, request, response, callback, collector);
-
-    request->set_client_ip(autil::NetUtil::getBindIp());
-    request->set_client_port(0);
-    request->set_request_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
 
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
@@ -107,37 +105,13 @@ CacheLoadRequest* MessagerClient::makeLoadRequest(const std::shared_ptr<RequestB
         auto block_msg = request->add_blocks();
         block_msg->set_key(block->key);
         block_msg->set_len(block->len);
-
-        // if (memory_util_->rdmaMode()) {
-        //     if (!appendRdmaInfo(block_msg, block)) {
-        //         return nullptr;
-        //     }
-        // }
     }
     request->set_timeout_ms(timeout_ms);
     request->set_requestid(request_block_buffer->getRequestId());
+    request->set_client_ip(autil::NetUtil::getBindIp());
+    request->set_request_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
     return request;
 }
-
-// bool MessagerClient::appendRdmaInfo(BlockBufferInfo* block_info, const std::shared_ptr<BlockBuffer>& block) {
-//     auto rdma_info = block_info->mutable_rdma_info();
-
-//     ::accl::barex::memp_t mem;
-//     if (!memory_util_->findMemoryMr(mem, block->addr.get(), block->len, block->gpu_mem, block->adopted)
-//         != ::accl::barex::BAREX_SUCCESS) {
-//         AUTIL_LOG(WARN, "messager client find buffer mr failed, block is %s", block->key.c_str());
-//         return false;
-//     }
-
-//     rdma_info->set_addr(reinterpret_cast<uint64_t>(block->addr.get()));
-
-//     for (auto& [nicid, mr] : mem.mrs) {
-//         auto nic_rkey = rdma_info->add_nic_rkeys();
-//         nic_rkey->set_nicid(nicid);
-//         nic_rkey->set_rkey(mr->rkey);
-//     }
-//     return true;
-// }
 
 std::shared_ptr<arpc::RPCChannelBase> MessagerClient::getChannel(const std::string& ip) {
     std::lock_guard<std::mutex> lock(channel_map_mutex_);
@@ -151,13 +125,14 @@ std::shared_ptr<arpc::RPCChannelBase> MessagerClient::getChannel(const std::stri
         return nullptr;
     }
 
-    AUTIL_LOG(INFO, "new channel connect to %s", ip.c_str());
+    FT_LOG_INFO("new channel connect to %s", ip.c_str());
     channel_map_[ip] = new_channel;
     return new_channel;
 }
 
 std::shared_ptr<arpc::RPCChannelBase> MessagerClient::openChannel(const std::string& ip) {
     if (!rpc_channel_manager_) {
+        FT_LOG_WARNING("messager client open channel failed, rpc channel manager is null");
         return nullptr;
     }
 

@@ -1,20 +1,26 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
+#include "src/fastertransformer/utils/logger.h"
+
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
 
-#include <cuda.h>
-#include <cuda_runtime.h>
-
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, MemoryUtil);
-
-MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtilBase> impl): instance_(std::move(impl)) {}
+MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtilBase> impl): instance_(std::move(impl)) {
+    auto err = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+    if (err != cudaError_t::cudaSuccess) {
+        throw std::runtime_error("failed to create stream");
+    }
+}
 
 bool MemoryUtil::rdmaMode() {
     return getInstance().isRdmaMode();
+}
+
+void MemoryUtil::setRdmaMode(bool rdma_mode) {
+    rdma_mode_ = rdma_mode;
 }
 
 MemoryUtilBase& MemoryUtil::getInstance() {
@@ -22,17 +28,24 @@ MemoryUtilBase& MemoryUtil::getInstance() {
 }
 
 void* MemoryUtil::mallocCPU(size_t size) {
-    return malloc(size);
+    void* ptr = nullptr;
+    if (cudaMallocHost(&ptr, size) != cudaSuccess) {
+        FT_LOG_WARNING("cuda malloc host failed, size %lu", size);
+        return nullptr;
+    }
+    return ptr;
 }
 
 void MemoryUtil::freeCPU(void* ptr) {
-    free(ptr);
+    if (cudaFreeHost(ptr) != cudaSuccess) {
+        FT_LOG_WARNING("cuda free host failed");
+    }
 }
 
 void* MemoryUtil::mallocGPU(size_t size) {
     void* ptr = nullptr;
     if (cudaMallocHost(&ptr, size) != cudaSuccess) {
-        AUTIL_LOG(WARN, "cuda malloc host failed, size %lu", size);
+        FT_LOG_WARNING("cuda malloc host failed, size %lu", size);
         return nullptr;
     }
     return ptr;
@@ -40,7 +53,7 @@ void* MemoryUtil::mallocGPU(size_t size) {
 
 void MemoryUtil::freeGPU(void* ptr) {
     if (cudaFreeHost(ptr) != cudaSuccess) {
-        AUTIL_LOG(WARN, "cuda free host failed");
+        FT_LOG_WARNING("cuda free host failed");
     }
 }
 
@@ -68,6 +81,14 @@ bool MemoryUtil::memsetGPU(void* ptr, int value, size_t len) {
     return cudaMemset(ptr, value, len) == cudaSuccess;
 }
 
+bool MemoryUtil::memcpyImpl(void* dst, const void* src, size_t count, enum cudaMemcpyKind kind) {
+    auto succ = cudaMemcpyAsync(dst, src, count, kind, stream_);
+    if (succ != cudaSuccess) {
+        return false;
+    }
+    return cudaStreamSynchronize(stream_);
+}
+
 bool MemoryUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
     if (src == nullptr || dst == nullptr || size == 0) {
         return false;
@@ -75,12 +96,12 @@ bool MemoryUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu,
 
     if (dst_gpu) {
         if (src_gpu) {
-            return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess;
+            return memcpyImpl(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess;
         }
-        return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice) == cudaSuccess;
+        return memcpyImpl(dst, src, size, cudaMemcpyHostToDevice) == cudaSuccess;
     }
     if (src_gpu) {
-        return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost) == cudaSuccess;
+        return memcpyImpl(dst, src, size, cudaMemcpyDeviceToHost) == cudaSuccess;
     }
     memcpy(dst, src, size);
     return true;

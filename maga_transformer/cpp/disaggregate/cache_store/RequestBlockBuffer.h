@@ -1,7 +1,7 @@
 #pragma once
 
-#include "autil/Log.h"
 #include <shared_mutex>
+#include <unordered_map>
 
 namespace rtp_llm {
 

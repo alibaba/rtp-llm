@@ -9,9 +9,6 @@ public:
     bool isMemoryMr(void* ptr, uint64_t size, bool gpu, bool adopted) override;
     bool findMemoryMr(void* mem_info, void* buf, uint64_t size, bool gpu, bool adopted) override;
     bool isRdmaMode() override;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
-}
+}  // namespace rtp_llm

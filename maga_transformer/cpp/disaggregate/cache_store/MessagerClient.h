@@ -18,22 +18,22 @@ public:
     virtual ~MessagerClient();
 
 public:
-    virtual bool init(uint32_t connect_port, bool enable_metric);
-    virtual void sendLoadRequest(const std::string&                                           ip,
-                         const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
-                         CacheStoreLoadDoneCallback                                   callback,
-                         uint32_t                                                     timeout_ms,
-                         const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector);
+    virtual bool init(uint32_t connect_port, uint32_t rdma_connect_port, bool enable_metric);
+    virtual void load(const std::string&                                           ip,
+                      const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
+                      CacheStoreLoadDoneCallback                                   callback,
+                      uint32_t                                                     timeout_ms,
+                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector);
 
 private:
     bool initTcpClient(bool enable_metric);
+    void stopTcpClient();
 
-    std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip);
     std::shared_ptr<arpc::RPCChannelBase> openChannel(const std::string& ip);
+    CacheLoadRequest* makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& cache, uint32_t timeout_ms);
 
 protected:
-    virtual CacheLoadRequest* makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& cache, uint32_t timeout_ms);
-    // bool              appendRdmaInfo(BlockBufferInfo* info, const std::shared_ptr<BlockBuffer>& block);
+    std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip);
 
 protected:
     std::shared_ptr<MemoryUtil> memory_util_;
@@ -44,7 +44,6 @@ private:
     std::shared_ptr<arpc::ANetRPCChannelManager>                           rpc_channel_manager_;
     std::mutex                                                             channel_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<arpc::RPCChannelBase>> channel_map_;
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

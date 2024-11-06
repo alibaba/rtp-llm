@@ -13,7 +13,8 @@ public:
     std::shared_ptr<CacheStoreClientStoreMetricsCollector> makeClientStoreMetricsCollector(uint32_t block_count);
     std::shared_ptr<CacheStoreServerStoreMetricsCollector> makeServerStoreMetricsCollector(uint32_t block_count);
     std::shared_ptr<CacheStoreClientLoadMetricsCollector>  makeClientLoadMetricsCollector(uint32_t block_count);
-    std::shared_ptr<CacheStoreServerLoadMetricsCollector>  makeServerLoadMetricsCollector(uint32_t block_count, uint32_t block_size,int64_t request_send_cost_us);
+    std::shared_ptr<CacheStoreServerLoadMetricsCollector>
+    makeServerLoadMetricsCollector(uint32_t block_count, uint32_t block_size, int64_t request_send_cost_us);
 
     void reportClientStore(CacheStoreClientStoreMetricsCollector* collector);
     void reportServerStore(CacheStoreServerStoreMetricsCollector* collector);
@@ -57,9 +58,6 @@ private:
     std::unique_ptr<kmonitor::MutableMetric> server_store_failed_qps_;
     std::unique_ptr<kmonitor::MutableMetric> server_store_block_count_;
     std::unique_ptr<kmonitor::MutableMetric> server_store_total_cost_us_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

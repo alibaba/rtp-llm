@@ -1,12 +1,15 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
+#include "src/fastertransformer/utils/logger.h"
+
+#include <atomic>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-namespace rtp_llm {
+#include <atomic>
 
-AUTIL_LOG_SETUP(rtp_llm, BlockBufferUtil);
+namespace rtp_llm {
 
 BlockBufferUtil::BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util): memory_util_(memory_util) {}
 
@@ -16,7 +19,7 @@ std::shared_ptr<BlockBuffer>
 BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val, bool gpu) {
     void* buffer = gpu ? memory_util_->mallocGPU(len) : memory_util_->mallocCPU(len);
     if (buffer == nullptr) {
-        AUTIL_LOG(WARN, "block buffer util malloc failed");
+        FT_LOG_WARNING("block buffer util malloc failed");
         return nullptr;
     }
 
@@ -30,13 +33,13 @@ BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val,
     });
 
     if (!memory_util_->regUserMr(buffer, len, true)) {
-        AUTIL_LOG(WARN, "block buffer reg user mr failed");
+        FT_LOG_WARNING("block buffer reg user mr failed");
         return nullptr;
     }
 
     if (gpu) {
         if (!memory_util_->memsetGPU(buffer, val, len)) {
-            AUTIL_LOG(WARN, "block buffer memset gpu failed");
+            FT_LOG_WARNING("block buffer memset gpu failed");
             return nullptr;
         }
     } else {
@@ -53,12 +56,12 @@ std::vector<std::shared_ptr<RequestBlockBuffer>> BlockBufferUtil::makeRequestBlo
     void* mem;
     auto  ret = cudaMalloc(&mem, mem_len);
     if (ret != cudaSuccess) {
-        AUTIL_LOG(WARN, "block buffer util malloc gpu failed, len is %lu, ret is %d", mem_len, ret);
+        FT_LOG_WARNING("block buffer util malloc gpu failed, len is %lu, ret is %d", mem_len, ret);
         return {};
     }
 
     if (!memory_util_->regUserMr(mem, mem_len, true)) {
-        AUTIL_LOG(WARN, "block buffer util reg user mr failed, len is %lu", mem_len);
+        FT_LOG_WARNING("block buffer util reg user mr failed, len is %lu", mem_len);
         return {};
     }
 

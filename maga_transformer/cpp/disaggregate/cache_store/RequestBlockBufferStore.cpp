@@ -1,17 +1,37 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "src/fastertransformer/utils/logger.h"
 
 namespace rtp_llm {
 
-AUTIL_LOG_SETUP(rtp_llm, RequestBlockBufferStore);
-
 RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, void* stream):
     memory_util_(memory_util), stream_(stream) {}
+
+void RequestBlockBufferStore::setStoreBlockBufferCallBack(const std::string& requestid, StoreBlockBufferCallbackFunc&& callback){
+    std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    auto it = request_cache_map_.find(requestid);
+    if (it == request_cache_map_.end()) {
+        FT_LOG_DEBUG("set call back not find requestid %s", requestid.c_str());
+        request_cache_map_.insert(std::make_pair(requestid, std::make_shared<RequestBlockBufferInfo>(std::make_shared<RequestBlockBuffer>(requestid), nullptr)));
+    }
+    request_cache_map_[requestid]->callback_ = std::move(callback);
+}
+
+void RequestBlockBufferStore::runStoreBlockBufferCallBack(const std::string& requestid, const std::shared_ptr<BlockBuffer>& block){
+    std::shared_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    if (request_cache_map_.find(requestid) == request_cache_map_.end()) {
+        return;
+    }
+    StoreBlockBufferCallbackFunc callback = request_cache_map_[requestid]->callback_;
+    if(callback){
+        callback(block);
+    }
+}
 
 bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     // event to sync wait compute
     if (request_block_buffer->getEvent()) {
         if (!memory_util_->gpuEventBarrier(request_block_buffer->getEvent().get())) {
-            AUTIL_LOG(WARN,
+            FT_LOG_WARNING(
                       "set request block buffer to request block buffer store failed, request id %s",
                       request_block_buffer->getRequestId().c_str());
             return false;
@@ -20,7 +40,7 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
 
     auto store_request_block_buffer = getOrInsertRequestBlockBuffer(request_block_buffer->getRequestId());
     if (store_request_block_buffer == nullptr) {
-        AUTIL_LOG(WARN,
+        FT_LOG_WARNING(
                   "set request block buffer to request block buffer store failed, request id %s",
                   request_block_buffer->getRequestId().c_str());
         return false;
@@ -31,20 +51,37 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         auto& block = iter.second;
         if (isValidBlock(block)) {
             store_request_block_buffer->addBlock(block);
+            runStoreBlockBufferCallBack(request_block_buffer->getRequestId(), block);
             continue;
         }
 
         auto valid_block = makeValidBlock(block);
         if (!valid_block) {
-            AUTIL_LOG(WARN,
+            FT_LOG_WARNING(
                       "set request block buffer to request block buffer store failed, request id %s",
                       request_block_buffer->getRequestId().c_str());
             return false;
         }
         store_request_block_buffer->addBlock(valid_block);
-    }
 
+        runStoreBlockBufferCallBack(request_block_buffer->getRequestId(), valid_block);
+    }    
     return true;
+}
+
+void RequestBlockBufferStore::debugInfo() {
+    std::string                         debug = "";
+    std::shared_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    for (auto block : request_cache_map_) {
+        std::ostringstream single;
+        single << "request id: " << block.first << " block ids: ";
+        for (auto s: block.second->block_buffer_->getBlocks()) {
+            single << s.first << " ";
+        }
+        single << "\n";
+        debug += single.str();
+    }
+    FT_LOG_INFO("reqeut block buffer debug info: %s", debug.c_str());
 }
 
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::getBlockBuffer(const std::string& requestid,
@@ -61,7 +98,7 @@ std::shared_ptr<RequestBlockBuffer> RequestBlockBufferStore::getRequestBlockBuff
 
     auto iter = request_cache_map_.find(requestid);
     if (iter != request_cache_map_.end()) {
-        return iter->second;
+        return iter->second->block_buffer_;
     }
     return nullptr;
 }
@@ -72,18 +109,18 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 
     auto iter = request_cache_map_.find(requestid);
     if (iter != request_cache_map_.end()) {
-        return iter->second;
+        return iter->second->block_buffer_;
     }
 
-    auto ret = request_cache_map_.insert(std::make_pair(requestid, std::make_shared<RequestBlockBuffer>(requestid)));
+    auto ret = request_cache_map_.insert(std::make_pair(requestid, std::make_shared<RequestBlockBufferInfo>(std::make_shared<RequestBlockBuffer>(requestid), nullptr)));
     if (!ret.second) {
-        AUTIL_LOG(WARN,
+        FT_LOG_WARNING(
                   "request block buffer store new request block buffer to request map failed, request id %s",
                   requestid.c_str());
         return nullptr;
     }
 
-    return ret.first->second;
+    return ret.first->second->block_buffer_;
 }
 
 bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& block) {
@@ -101,12 +138,12 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
     });
 
     if (addr == nullptr) {
-        AUTIL_LOG(WARN, "make valid block failed, alloc buffer failed, block %s", block->key.c_str());
+        FT_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
         return nullptr;
     }
 
     if (!memory_util_->regUserMr(addr.get(), block->len, false)) {
-        AUTIL_LOG(WARN, "malloc valid block mr failed, block %s", block->key.c_str());
+        FT_LOG_WARNING("malloc valid block mr failed, block %s", block->key.c_str());
         return nullptr;
     }
 
@@ -130,10 +167,8 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
         return true;
     }
 
-    AUTIL_INTERVAL_LOG(1000, INFO, "copy block cache once, may affect performance");
-
     if (dst_block->len != src_block->len) {
-        AUTIL_LOG(WARN,
+        FT_LOG_WARNING(
                   "copy block cache failed, block %s len %d vs %d not equal",
                   src_block->key.c_str(),
                   src_block->len,
@@ -141,11 +176,11 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
         return false;
     }
 
-    AUTIL_LOG(INFO, "copy block cache once, may affect performance");
+    FT_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
 
     if (!memory_util_->memcopy(
             dst_block->addr.get(), dst_block->gpu_mem, src_block->addr.get(), src_block->gpu_mem, src_block->len)) {
-        AUTIL_LOG(WARN, "block cache store copy from gpu to gpu failed");
+        FT_LOG_WARNING("block cache store copy failed");
         return false;
     }
     return true;

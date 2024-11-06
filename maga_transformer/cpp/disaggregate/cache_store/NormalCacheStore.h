@@ -5,7 +5,6 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
-#include "autil/Log.h"
 #include "autil/ThreadPool.h"
 
 #include <memory>
@@ -28,8 +27,10 @@ public:
               CacheStoreLoadDoneCallback                 callback,
               const std::string&                         ip         = "",
               uint32_t                                   timeout_ms = 1000);
-    
+
     void markRequestEnd(const std::string& requestid);
+
+    void debugInfo();
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const;
 
@@ -55,9 +56,7 @@ private:
     std::unique_ptr<MessagerClient>            messager_client_;
     std::unique_ptr<MessagerServer>            messager_server_;
     autil::ThreadPoolBasePtr                   thread_pool_;  // task executor
-
-private:
-    AUTIL_LOG_DECLARE();
+    std::shared_ptr<arpc::TimerManager>        timer_manager_;
 };
 
 }  // namespace rtp_llm

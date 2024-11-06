@@ -19,9 +19,6 @@ public:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

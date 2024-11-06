@@ -28,16 +28,6 @@ cc_library(
     ],
     visibility=['//visibility:public'],
 )
- 
-cc_library(
-    name = "cm_subscribe",
-    srcs = [],
-    hdrs = [],
-    deps = [
-        "@havenask//aios/apps/facility/cm2/cm_sub:cm_sub",
-    ],
-    visibility=['//visibility:public'],
-)
 
 cc_library(
     name = "cache_store_base",
@@ -45,11 +35,14 @@ cc_library(
         "RequestBlockBuffer.cpp",
         "RequestBlockBufferStore.cpp",
         "CacheStoreServiceImpl.cpp",
+        "CacheStoreServiceImplContext.cpp",
         "MessagerServer.cpp",
         "CacheLoadServiceClosure.cpp",
         "MessagerClient.cpp",
         "NormalCacheStore.cpp",
-        "NoRdmaMemoryUtilImpl.cpp"
+        "NoRdmaMemoryUtilImpl.cpp",
+        "TimerManager.cpp",
+        "Timer.cpp"
     ] + select({
         "//:using_cuda": ["MemoryUtil.cpp"],
         "//conditions:default": ["FakeMemoryUtil.cpp"]
@@ -63,14 +56,18 @@ cc_library(
         "RequestBlockBufferStore.h",
         "InitParams.h",
         "CacheStoreServiceImpl.h",
+        "CacheStoreServiceImplContext.h",
         "MessagerServer.h",
         "CacheLoadServiceClosure.h",
         "MessagerClient.h",
         "NormalCacheStore.h",
+        "TimerManager.h",
+        "Timer.h"
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//maga_transformer/cpp/disaggregate/cache_store/metrics:metrics",
+        "//src/fastertransformer/utils:logger",
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
@@ -95,5 +92,6 @@ cc_library(
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-    ]
+    ],
+    visibility=['//visibility:public'],
 )

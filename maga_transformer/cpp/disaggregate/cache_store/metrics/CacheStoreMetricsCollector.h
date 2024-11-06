@@ -23,8 +23,8 @@ public:
 public:
     bool     success() const;
     uint32_t blockCount() const;
-    int64_t  totalCostUs() const;            // store操作的总耗时
-    int64_t  localStoreCostUs() const;       // store到本地的耗时
+    int64_t  totalCostUs() const;        // store操作的总耗时
+    int64_t  localStoreCostUs() const;   // store到本地的耗时
     int64_t  remoteStoreCostUs() const;  // store到对端的耗时, 包含对端的处理延迟
 
 private:
@@ -74,7 +74,9 @@ public:
     static void markLoadRequestBegin(const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
                                      uint32_t                                                     block_count);
     static void markEnd(const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector, bool success);
-    static void setResponseReceiveCost(const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector, int64_t response_receive_cost_us);
+    static void setResponseReceiveCost(const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                                       int64_t response_receive_cost_us);
+
 public:
     bool     success() const;               // 是否成功
     uint32_t blockCount() const;            // 需要load的block数量
@@ -107,9 +109,11 @@ public:
 
 public:
     static void markEnd(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, bool success);
-    static void setConnectCost(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t connect_cost_us);
+    static void setConnectCost(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                               int64_t                                                      connect_cost_us);
     static void setStartWriteTime(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector);
-    static void setFirstBlockCostUs(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, int64_t first_block_cost_us);
+    static void setFirstBlockCostUs(const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                                    int64_t                                                      first_block_cost_us);
 
 public:
     bool     success() const;
@@ -132,7 +136,6 @@ private:
     int64_t                                  load_connect_cost_us_{0};
     int64_t                                  start_write_time_us_{0};
     int64_t                                  first_block_cost_us_{0};
-    
 };
 
 }  // namespace rtp_llm

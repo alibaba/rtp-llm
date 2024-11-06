@@ -1,3 +1,5 @@
+#include <mutex>
+#include <unordered_map>
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 
 namespace rtp_llm {
