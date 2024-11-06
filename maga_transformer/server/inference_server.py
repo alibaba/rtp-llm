@@ -1,4 +1,5 @@
 import os
+import orjson
 import json
 import time
 import copy
@@ -38,7 +39,6 @@ from maga_transformer.model_factory import AsyncModel
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
-STATUS_CODE_HEADER = "STATUS_CODE"
 
 class InferenceServer(object):
     def __init__(self):
@@ -187,7 +187,10 @@ class InferenceServer(object):
                 end_time = time.time()
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
                 kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
-                return ORJSONResponse(result)
+                usage = result.get('usage', {})
+                if not isinstance(usage, dict):
+                    usage = {}
+                return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
         except BaseException as e:
             return self._handle_exception(request, e)
 
