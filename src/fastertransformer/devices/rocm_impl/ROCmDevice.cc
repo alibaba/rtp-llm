@@ -25,7 +25,8 @@ using namespace rocm;
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipSetDevice(params.device_id));
     stream_ = at::hip::getCurrentHIPStream().stream();
-    ROCM_CHECK(hipStreamCreateWithFlags(&no_block_copy_stream_, hipStreamNonBlocking));
+    ROCM_CHECK(hipStreamCreate(&assist_stream_));
+    current_stream_ = stream_;
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
@@ -119,6 +120,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     moe_runner_.reset(new rocmMoeWrapper());
+    ck_gemm_runner_.reset(new CKGemmWrapper());
 }
 
 ROCmDevice::~ROCmDevice() {
@@ -128,7 +130,7 @@ ROCmDevice::~ROCmDevice() {
     }
     hipblas_mm_wrapper_.reset();
     ROCM_CHECK(hipStreamDestroy(stream_));
-    ROCM_CHECK(hipStreamDestroy(no_block_copy_stream_));
+    ROCM_CHECK(hipStreamDestroy(assist_stream_));
     ROCM_CHECK(hipblasDestroy(hipblas_handle_));
     ROCM_CHECK(hipblasLtDestroy(hipblaslt_handle_));
     curandstate_buf_.reset();

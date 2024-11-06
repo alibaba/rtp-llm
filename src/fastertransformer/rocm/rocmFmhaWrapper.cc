@@ -105,6 +105,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     float    p_drop      = 0.;
     uint64_t drop_seed   = 1.;
     uint64_t drop_offset = 0.;
+    bool     drop_prefs  = false;
     if (p_drop < 0.0f || p_drop > 1.0f) {
         std::cerr << "The value of p_drop should be 0~1" << std::endl;
         return false;

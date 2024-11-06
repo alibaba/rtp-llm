@@ -1,0 +1,28 @@
+#include "int4_dequant_comm.h"
+
+namespace fastertransformer {
+
+    void int4_dequant_gemm_128x128x16x128_16_16x16_4x1_16x8x1_8x16x1_16_1x16x1x8_2_intrawave_v3(const ckGemmParam& params)
+    {
+        using DeviceInt4GemmInstance = DeviceInt4GemmHelper<
+            128, 
+            128, 
+            16, 
+            128,
+            16, 
+            16, 
+            16,
+            4, 
+            1, 
+            S<16, 8, 1>,
+            S<8, 16, 1>,
+            16, 
+            S<1, 16, 1, 8>, 
+            2,
+            ck::BlockGemmPipelineScheduler::Intrawave,
+            ck::BlockGemmPipelineVersion::v3>;
+
+        int4Gemm_impl<DeviceInt4GemmInstance>(params);
+    }
+
+} //namespace fastertransformer

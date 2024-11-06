@@ -13,9 +13,11 @@ cc_library(
     name = "rocm_utils",
     srcs = glob([
         "*.cc",
+        "int4_gemm_kernels/*.cc",
     ]),
     hdrs = glob([
         "*.h",
+        "int4_gemm_kernels/*.h",
         "*.cuh",
     ]),
     deps = [

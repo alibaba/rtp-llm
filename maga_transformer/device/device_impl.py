@@ -165,3 +165,59 @@ class RocmImpl(GpuImpl):
         used = rocml.smi_get_device_memory_used(id)
         total = rocml.smi_get_device_memory_total(id)
         return MemInfo(total - used, used)
+    
+    def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str,
+                                           gptq: bool, awq: bool, weight_bits: int):
+        GPTQ_FLAG = 1 if gptq == True else 0
+        qweight = qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
+        qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
+        scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
+        packer = self.exported_device.pack_int8_tensor_to_packed_int4
+        preprocessor = self.exported_device.preprocess_weights_for_mixed_gemm
+        is_int8 = weight_bits == 8
+        if is_int8:
+            zero_shift = 128
+            quant_type = torch.int8
+        else:
+            zero_shift = 8
+            quant_type = torch.quint4x2
+
+        if awq:
+            qweight = self.unpack_int32_into_int16(qweight, is_int8).contiguous() - zero_shift
+            qweight = self.reverse_awq_order(qweight)
+        elif gptq:
+            qweight = self.unpack_int32_into_int16(qweight.T, is_int8).T.contiguous() - zero_shift
+
+        qweight = qweight.to(torch.int8)
+        if not is_int8:
+            qweight = packer(qweight)
+        qweight_interleaved = preprocessor(qweight, quant_type)
+
+        # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
+        # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
+        qzeros = self.unpack_int32_into_int16(qzeros, is_int8)
+        if awq:
+            qzeros = self.reverse_awq_order(qzeros)
+
+        # zeros = zeros * scales
+        UINT_TO_INT_FLAG = 1
+        zeros_x_scales_fp16 = (-qzeros + zero_shift * UINT_TO_INT_FLAG -
+                               GPTQ_FLAG) * scales_fp16
+        zeros_x_scales_fp16 = zeros_x_scales_fp16.half()
+
+        ###########################################################
+        # scales row major -> scales column major layout to match CK kernel layout
+        # TODO: need add device infomation for selection
+        scales_fp16_t = scales_fp16.transpose(0, 1).contiguous()
+        scales_fp16 = scales_fp16_t.transpose(1, 0).cpu()
+        
+        # zeros_x_scales row major -> zeros_x_scales column major layout to match CK kernel layout
+        zeros_x_scales_fp16_t = zeros_x_scales_fp16.transpose(0, 1).contiguous()
+        zeros_x_scales_fp16 = zeros_x_scales_fp16_t.transpose(1, 0).cpu()
+        ###########################################################
+
+        # return processed interleaved weight, original scales and zeros * scales
+        # return qweight_interleaved.contiguous().to(device),  zeros_x_scales_fp16.contiguous().to(device), scales_fp16.contiguous().to(device)
+        # kernel, scales, zeros all need for column major layout
+        return qweight_interleaved.to(device),  zeros_x_scales_fp16.to(device), scales_fp16.to(device)
+

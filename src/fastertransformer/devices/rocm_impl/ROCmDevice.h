@@ -19,6 +19,7 @@
 #include "src/fastertransformer/rocm/rocmFmhaWrapper.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
 #include "src/fastertransformer/rocm/rocmMoeWrapper.h"
+#include "src/fastertransformer/rocm/CKGemmWrapper.h"
 
 #include "torch_hip_allocator.h"
 #include "custom_ar_comm.h"
@@ -60,6 +61,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
+    FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params) override;
     MemoryStatus getDeviceMemoryStatus() override;
@@ -91,8 +93,10 @@ private:
     std::unique_ptr<IAllocator> hostAllocator_;
     c10::hip::HIPCachingAllocator::HIPAllocator *origin_torch_hip_allocator_;
 
-    hipStream_t stream_ = nullptr;
-    hipStream_t no_block_copy_stream_;
+    hipStream_t     stream_ = nullptr;
+    hipStream_t     no_block_copy_stream_;
+    hipStream_t     assist_stream_  = nullptr;
+    hipStream_t     current_stream_ = nullptr;
     hipDeviceProp_t device_prop_;
 
     BufferPtr curandstate_buf_; // for sampler use.
@@ -117,6 +121,10 @@ private:
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+    //CK gemm
+    std::unique_ptr<CKGemmWrapper> ck_gemm_runner_;
+
 
 protected:
     bool use_multi_block_mode       = true;

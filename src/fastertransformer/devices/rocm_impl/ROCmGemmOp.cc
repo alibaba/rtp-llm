@@ -203,6 +203,24 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             const QBuffer& QB  = reinterpret_cast<const QBuffer&>(params.B);
             auto           fpB = allocateBuffer({params.A.type(), {params.B.shape()}, AllocationType::DEVICE}, {"fpB"});
 
+#if USING_CK_INT4
+        // Using CK int4-dequant fusion Gemm kernel
+        auto ck_gemm_params = ckGemmParam({params.A.data(),
+                                            QB.kernel().data(),
+                                            QB.scales().data(),
+                                            QB.zeros().data(),
+                                            output->data(),
+                                            arguments.m,
+                                            arguments.n,
+                                            arguments.k,
+                                            group_size,
+                                            arguments.k,      // arguments.lda,
+                                            arguments.k,      // arguments.ldb,
+                                            arguments.n,      // arguments.ldc,
+                                            stream_});
+        ck_gemm_runner_->runCKGemm(ck_gemm_params,params.A.type(),params.B.type());
+
+#else
             // dequant B
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.A.type(),
                                              invokePerColDequantizationInt4x2,
@@ -248,6 +266,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                     arguments.stride_c,
                                                     arguments.batch_size,
                                                     computeType);
+#endif
             return move(output);
         } else {
             ROCM_FAIL("[GEMM]: Other weight quantization not implemented");
@@ -274,7 +293,8 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
         auto       D    = output->data();
         auto       a_op = opConvert(params.transA);
         auto       b_op = opConvert(params.transB);
-
+        
+        hipblas_mm_wrapper_->setStream(current_stream_);
         hipblas_mm_wrapper_->Gemm(
             b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, A, arguments.lda, D, arguments.ldc);
 

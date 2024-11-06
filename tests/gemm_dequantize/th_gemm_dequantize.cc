@@ -453,8 +453,14 @@ TORCH_LIBRARY(gemm_dq_unit_ops, m) {
     m.def("gemm_config_select", gemm_config_select);
     m.def("benchmark_against_cublas_fp", benchmark_against_cublas_fp);
     m.def("unpack_int4_packed_tensor_to_int8", unpack_int4_packed_tensor_to_int8);
+#if USING_CUDA
     m.def("pack_int8_tensor_to_packed_int4", ft::CudaDevice::packInt8TensorToPackedInt4);
     m.def("preprocess_weights_for_mixed_gemm", ft::CudaDevice::preprocessWeightsForMixedGemm);
+#endif
+#if USING_ROCM
+    m.def("pack_int8_tensor_to_packed_int4", ft::ROCmDevice::packInt8TensorToPackedInt4);
+    m.def("preprocess_weights_for_mixed_gemm", ft::ROCmDevice::preprocessWeightsForMixedGemm);
+#endif
     m.def("_symmetric_quantize_last_axis_of_batched_matrix", _symmetric_quantize_last_axis_of_batched_matrix);
 }
 
