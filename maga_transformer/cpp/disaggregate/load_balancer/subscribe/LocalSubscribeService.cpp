@@ -1,13 +1,13 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/LocalSubscribeService.h"
 
-namespace rtp_llm {
+#include "src/fastertransformer/utils/logger.h"
 
-AUTIL_LOG_SETUP(rtp_llm, LocalSubscribeService);
+namespace rtp_llm {
 
 bool LocalSubscribeService::init(const LocalSubscribeServiceConfig& config) {
     for (auto& node_config : config.nodes) {
         if (!node_config.validate()) {
-            AUTIL_LOG(WARN,
+            FT_LOG_WARNING(
                       "local subscribe service init failed, node config is invalid, config is [%s]",
                       autil::legacy::ToJsonString(node_config).c_str());
             return false;

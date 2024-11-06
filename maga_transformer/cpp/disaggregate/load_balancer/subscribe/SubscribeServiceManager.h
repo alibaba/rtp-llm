@@ -19,9 +19,6 @@ public:
 
 private:
     std::vector<std::shared_ptr<SubscribeService>> subscribe_service_vec_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

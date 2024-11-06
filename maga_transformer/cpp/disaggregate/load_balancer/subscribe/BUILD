@@ -4,9 +4,7 @@ cc_library(
     name = "subscribe",
     srcs = [
         "TopoNode.cpp",
-        "SubscribeServiceConfig.cpp",
-        "SubscribeService.cpp",
-        "CM2SubscribeService.cpp",
+        "SubscribeServiceConfig.cpp",        
         "LocalSubscribeService.cpp",
         "SubscribeServiceManager.cpp",
     ],
@@ -14,13 +12,21 @@ cc_library(
         "TopoNode.h",
         "SubscribeServiceConfig.h",
         "SubscribeService.h",
-        "CM2SubscribeService.h",
         "LocalSubscribeService.h",
         "SubscribeServiceManager.h",
+        "SubscribeServiceCreator.h"
     ],
     deps = [
         "@havenask//aios/autil:json",
-        "@havenask//aios/apps/facility/cm2/cm_sub:cm_sub"
+        "//src/fastertransformer/utils:utils",
     ],
-    
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "subscribe_service_impl",
+    deps = [":subscribe"],
+    srcs = ["SubscribeServiceCreator.cpp"],
+    visibility = ["//visibility:public"],
+    alwayslink = True,
 )

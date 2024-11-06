@@ -1,20 +1,29 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
 
-namespace rtp_llm {
+#include "src/fastertransformer/utils/logger.h"
 
-AUTIL_LOG_SETUP(rtp_llm, RRLoadBalancer);
+namespace rtp_llm {
 
 bool RRLoadBalancer::init(const LoadBalancerInitParams& params) {
 
     subscribe_service_manager_.reset(new SubscribeServiceManager);
     if (!subscribe_service_manager_->init(params.subscribe_config)) {
-        AUTIL_LOG(WARN, "random load balancer init failed, subscribe service manager init failed");
+        FT_LOG_WARNING( "random load balancer init failed, subscribe service manager init failed");
         return false;
     }
 
     service_discovery_thread_ = autil::LoopThread::createLoopThread(
         std::bind(&RRLoadBalancer::discovery, this), params.update_interval_ms * 1000, "discovery");
     return true;
+}
+
+bool RRLoadBalancer::isReady(const std::string& biz) {
+    std::shared_lock<std::shared_mutex> lock(biz_hosts_mutex_);
+    auto                                iter = biz_hosts_.find(biz);
+    if (iter == biz_hosts_.end() || iter->second == nullptr) {
+        return false;
+    }
+    return iter->second->hosts.size() > 0;
 }
 
 void RRLoadBalancer::discovery() {
@@ -24,7 +33,7 @@ void RRLoadBalancer::discovery() {
 
     std::vector<std::shared_ptr<const TopoNode>> topo_nodes;
     if (!subscribe_service_manager_->getTopoNodes(topo_nodes)) {
-        AUTIL_LOG(WARN, "random load balancer discovery failed, get cluster info map failed");
+        FT_LOG_WARNING( "random load balancer discovery failed, get cluster info map failed");
         return;
     }
 

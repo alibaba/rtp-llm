@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shared_mutex>
+#include <mutex>
 #include "autil/Log.h"
 #include "autil/LoopThread.h"
 #include "autil/legacy/jsonizable.h"
@@ -28,6 +29,7 @@ class RRLoadBalancer {
 public:
     bool                        init(const LoadBalancerInitParams& params);
     std::shared_ptr<const Host> chooseHost(const std::string& biz) const;
+    bool                        isReady(const std::string& biz);
 
 private:
     void discovery();
@@ -44,9 +46,6 @@ private:
 
     mutable std::shared_mutex                        biz_hosts_mutex_;
     std::map<std::string, std::shared_ptr<BizHosts>> biz_hosts_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

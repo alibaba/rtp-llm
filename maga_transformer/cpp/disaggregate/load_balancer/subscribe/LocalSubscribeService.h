@@ -19,9 +19,6 @@ public:
 private:
     bool                                         inited_{false};
     std::vector<std::shared_ptr<const TopoNode>> nodes_;
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 }  // namespace rtp_llm

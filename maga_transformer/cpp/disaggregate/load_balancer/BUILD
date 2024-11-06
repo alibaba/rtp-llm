@@ -1,3 +1,6 @@
+load("//bazel:arch_select.bzl", "subscribe_deps")
+subscribe_deps()
+
 cc_library(
     name = "load_balancer",
     srcs = [
@@ -9,7 +12,7 @@ cc_library(
     deps = [
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:thread",
-        "//maga_transformer/cpp/disaggregate/load_balancer/subscribe:subscribe",
+        ":subscribe_deps"
     ],
     visibility=['//visibility:public'],
 )

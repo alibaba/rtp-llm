@@ -1,20 +1,20 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/SubscribeServiceManager.h"
+#include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/SubscribeServiceCreator.h"
+
+#include "src/fastertransformer/utils/logger.h"
 
 namespace rtp_llm {
-
-AUTIL_LOG_SETUP(rtp_llm, SubscribeServiceManager);
 
 SubscribeServiceManager::~SubscribeServiceManager() {}
 
 bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
     if (!config.validate()) {
-        AUTIL_LOG(
-            ERROR, "subscribe service config is invalid, config is [%s]", autil::legacy::ToJsonString(config).c_str());
+        FT_LOG_ERROR("subscribe service config is invalid, config is [%s]", autil::legacy::ToJsonString(config).c_str());
         return false;
     }
 
     for (auto& cm2_config : config.cm2_configs) {
-        auto service = SubscribeService::createInstance(cm2_config);
+        auto service = createInstanceFromCm2Config(cm2_config);
         if (!service) {
             return false;
         }
@@ -22,14 +22,14 @@ bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
     }
 
     for (auto& local_config : config.local_configs) {
-        auto service = SubscribeService::createInstance(local_config);
+        auto service = createInstanceFromLocalConfig(local_config);
         if (!service) {
             return false;
         }
         subscribe_service_vec_.push_back(service);
     }
 
-    AUTIL_LOG(INFO,
+    FT_LOG_INFO(
               "subscribe service manager init success, config is [%s]",
               autil::legacy::ToJsonString(config, true).c_str());
     return true;
