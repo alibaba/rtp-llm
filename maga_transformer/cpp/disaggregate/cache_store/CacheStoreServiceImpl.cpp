@@ -11,7 +11,7 @@ namespace rtp_llm {
 CacheStoreServiceImpl::CacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&              memory_util,
                                              const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
                                              const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
-                                             const std::shared_ptr<arpc::TimerManager> &timer_manager):
+                                             const std::shared_ptr<arpc::TimerManager>&        timer_manager):
     memory_util_(memory_util),
     request_block_buffer_store_(request_block_buffer_store),
     metrics_reporter_(metrics_reporter),
@@ -23,9 +23,9 @@ void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
                                  ::google::protobuf::Closure*       done) {
     if (request_block_buffer_store_ == nullptr) {
         FT_LOG_WARNING(
-                  "cache store service has no block cache store, request failed, request from [%s], request id [%s]",
-                  request->client_ip().c_str(),
-                  request->requestid().c_str());
+            "cache store service has no block cache store, request failed, request from [%s], request id [%s]",
+            request->client_ip().c_str(),
+            request->requestid().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
         return;
@@ -33,11 +33,12 @@ void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
     loadImpl(controller, request, response, done);
 }
 
-TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
-                                                   const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
-                                                   const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
-                                                   const std::shared_ptr<arpc::TimerManager> &timer_manager)
-                                                   : CacheStoreServiceImpl(memory_util, request_block_buffer_store, metrics_reporter, timer_manager) {}
+TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(
+    const std::shared_ptr<MemoryUtil>&                memory_util,
+    const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
+    const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
+    const std::shared_ptr<arpc::TimerManager>&        timer_manager):
+    CacheStoreServiceImpl(memory_util, request_block_buffer_store, metrics_reporter, timer_manager) {}
 
 void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* controller,
                                         const ::CacheLoadRequest*          request,
@@ -47,55 +48,36 @@ void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* contr
     int64_t request_send_cost_us = start_time_us - request->request_send_start_time_us();
     auto    collector            = metrics_reporter_->makeServerLoadMetricsCollector(
         request->blocks_size(), request->blocks_size() ? request->blocks(0).len() : 0, request_send_cost_us);
-   loadTcpBlocks(request, response, collector, done);
+    loadTcpBlocks(request, response, collector, done);
 }
 
 void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*                                    request,
-                                     ::CacheLoadResponse*                                         response,
-                                     const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
-                                     ::google::protobuf::Closure*       done) {
+                                             ::CacheLoadResponse*                                         response,
+                                             const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                                             ::google::protobuf::Closure*                                 done) {
     auto context = std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done);
     if (!context) {
         FT_LOG_WARNING("cache store service new context failed");
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
-        return ;
+        return;
     }
-    auto timer_callback = [context](){
-        context->setTimeOut();
-        if(!context->isAllLoaded()){
-            FT_LOG_WARNING("cache store service load blocks time out");
-            context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
-        }
-    };
+
+    auto timer_callback = [context]() { context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER); };
+
     auto timer = timer_manager_->addTimer(request->timeout_ms(), std::move(timer_callback));
-    if(timer == nullptr){
+    if (timer == nullptr) {
         FT_LOG_WARNING("cache store service add timer failed");
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
-        return ;
+        return;
     }
-
-    StoreBlockBufferCallbackFunc callback = [context](std::shared_ptr<BlockBuffer> block){
-        if(context->isTimeOut()){
-            return;
-        }
-        context->loadBlockOnTcp(block);       
-    };
     context->setTimer(timer);
-    context->setUnLoadedBlocks();
-    request_block_buffer_store_->setStoreBlockBufferCallBack(request->requestid(), std::move(callback));
-    
-    for(int i = 0; i < request->blocks_size(); i++){
-        auto block = request_block_buffer_store_->getBlockBuffer(request->requestid(), request->blocks(i).key());
-        if(block == nullptr){
-            continue;
-        }
-        if(context->isTimeOut()){
-            return;
-        }
-        FT_LOG_DEBUG("load out callback %s", request->blocks(i).key().c_str());
-        context->loadBlockOnTcp(block); 
-    }
+
+    RequestBlockBuffer::WatchFunc watch_func = [context](bool                                             ok,
+                                                         const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+        context->loadBlockOnTcp(ok, blocks);
+    };
+    request_block_buffer_store_->setRequestBlockBufferWatchFunc(request->requestid(), std::move(watch_func));
 }
-}// namespace rtp_llm
+}  // namespace rtp_llm

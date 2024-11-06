@@ -7,47 +7,50 @@
 
 namespace rtp_llm {
 
-class CacheStoreServiceImplContext:public std::enable_shared_from_this<CacheStoreServiceImplContext>{
+class CacheStoreServiceImplContext: public std::enable_shared_from_this<CacheStoreServiceImplContext> {
 public:
-    CacheStoreServiceImplContext(const CacheLoadRequest* request, CacheLoadResponse* response, const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, ::google::protobuf::Closure* done);
+    CacheStoreServiceImplContext(const CacheLoadRequest*                                      request,
+                                 CacheLoadResponse*                                           response,
+                                 const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                                 ::google::protobuf::Closure*                                 done);
     virtual ~CacheStoreServiceImplContext();
 
 public:
-    std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
-    bool isAllLoaded();
-    void setUnLoadedBlocks();
-    void loadBlockOnTcp(std::shared_ptr<BlockBuffer> block);
-
-    void setTimer(const std::shared_ptr<arpc::Timer> &timer) { timer_ = std::weak_ptr<arpc::Timer>(timer); }
-    bool isTimeOut(){ return is_timeout_; }
-    void setTimeOut(){ is_timeout_ = true; }
-    void stopTimer();
-
-    void runSuccess(bool direct_write);
+    void loadBlockOnTcp(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& block);
+    void setTimer(const std::shared_ptr<arpc::Timer>& timer) {
+        timer_ = std::weak_ptr<arpc::Timer>(timer);
+    }
     void runFailed(KvCacheStoreServiceErrorCode error_code);
 
-    std::shared_ptr<std::atomic_bool> getAllSuccess() const {return all_success_;}
-    std::shared_ptr<CacheStoreServerLoadMetricsCollector> getCollector()const {return collector_;}
-    std::shared_ptr<std::atomic_int> getWriteCnt() const{return write_cnt_;}
-    const CacheLoadRequest* getRequest() const{return request_;}
+protected:
+    std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
+    void stopTimer();
+    void runSuccess(bool direct_write);
+
+private:
+    bool writeResponseBlock(const std::shared_ptr<BlockBuffer>&     block,
+                            const std::shared_ptr<BlockBufferInfo>& peer_block);
 
 protected:
     const CacheLoadRequest* request_;
-    
-    std::mutex response_mutex_;
+    const int64_t           request_send_start_time_us_{0};
+    const uint32_t          total_block_count_{0};
+    const std::string       request_id_;
+    const std::string       peer_ip_;
+
+    std::mutex         response_mutex_;
     CacheLoadResponse* response_;
 
     std::shared_ptr<CacheStoreServerLoadMetricsCollector> collector_;
-    
-    std::atomic_bool reentrant_flag_{false};
+
+    std::atomic_bool             done_run_{false};
     ::google::protobuf::Closure* done_;
 
     std::weak_ptr<arpc::Timer> timer_;
-    bool is_timeout_{false};
-    
-    std::shared_ptr<std::atomic_bool> all_success_;
-    std::shared_ptr<std::atomic_int> write_cnt_;
-    std::shared_mutex unloaded_blocks_mutex_;
+
+    std::atomic_int  write_cnt_{0};
+
+    std::shared_mutex                                                 unloaded_blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBufferInfo>> unloaded_blocks_;
 };
-}
+}  // namespace rtp_llm

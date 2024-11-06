@@ -17,11 +17,11 @@ cc_test(
         "main.cpp",
         "NormalCacheStoreTest.cpp",
         "MemoryUtilTest.cpp",
-        "RequestBlockBufferTest.cpp",
-        "RequestBlockBufferStoreTest.cpp",
         "MessagerClientTest.cpp",
         "CacheLoadServiceClosureTest.cpp",
         "CacheStoreServiceImplContextTest.cpp",
+        "RequestBlockBufferTest.cpp",
+        "RequestBlockBufferStoreTest.cpp",
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
@@ -30,6 +30,9 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         ":cache_store_gmock",
     ],
+    env = {
+        "CACHE_STORE_RDMA_MODE": "0",
+    },
     copts = ["-fno-access-control",],
     tags = ["manual"],
     exec_properties = {'gpu':'A10'},

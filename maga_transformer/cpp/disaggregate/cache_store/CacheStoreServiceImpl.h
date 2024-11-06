@@ -12,7 +12,7 @@ public:
     CacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
                           const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
                           const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
-                          const std::shared_ptr<arpc::TimerManager> &timer_manager);
+                          const std::shared_ptr<arpc::TimerManager>&        timer_manager);
     virtual ~CacheStoreServiceImpl() = default;
 
     void load(::google::protobuf::RpcController* controller,
@@ -38,7 +38,7 @@ public:
     TcpCacheStoreServiceImpl(const std::shared_ptr<MemoryUtil>&                memory_util,
                              const std::shared_ptr<RequestBlockBufferStore>&   request_block_buffer_store,
                              const std::shared_ptr<CacheStoreMetricsReporter>& metrics_reporter,
-                             const std::shared_ptr<arpc::TimerManager> &timer_manager);
+                             const std::shared_ptr<arpc::TimerManager>&        timer_manager);
     virtual ~TcpCacheStoreServiceImpl() = default;
 
 protected:
@@ -48,9 +48,9 @@ protected:
                   ::google::protobuf::Closure*       done) override;
 
     void loadTcpBlocks(const ::CacheLoadRequest*                                    request,
-                                               ::CacheLoadResponse*                                         response,
-                                               const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
-                                               ::google::protobuf::Closure*       done);
+                       ::CacheLoadResponse*                                         response,
+                       const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+                       ::google::protobuf::Closure*                                 done);
 };
 
 }  // namespace rtp_llm

@@ -5,117 +5,167 @@
 
 namespace rtp_llm {
 
-CacheStoreServiceImplContext::CacheStoreServiceImplContext(const CacheLoadRequest* request, CacheLoadResponse* response, const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector, ::google::protobuf::Closure* done)
-:request_(request), response_(response), collector_(collector), done_(done), all_success_(std::make_shared<std::atomic_bool>(true)), write_cnt_(std::make_shared<std::atomic_int>(0)){}
-
-CacheStoreServiceImplContext::~CacheStoreServiceImplContext(){}
-void CacheStoreServiceImplContext::stopTimer(){
-    if (auto timer_shared_ptr = timer_.lock()) {
-        timer_shared_ptr->stop();
-        timer_shared_ptr.reset();
-    }
-}
-
-std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoadedBlock(const std::string& block_key){
-    std::shared_ptr<BlockBufferInfo> block_info;
-    std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);
-    auto it = unloaded_blocks_.find(block_key);
-    if(it == unloaded_blocks_.end()){
-        return nullptr;
-    }
-
-    block_info = it->second;
-    unloaded_blocks_.erase(it);
-    return block_info; 
-}
-void CacheStoreServiceImplContext::runSuccess(bool direct_write){
-    FT_LOG_DEBUG("run success");
-    bool expected = false;
-    if(!reentrant_flag_.compare_exchange_strong(expected,true)){
-        return ;
-    }
-    stopTimer();
-    CacheStoreServerLoadMetricsCollector::markEnd(collector_, true);
-    response_mutex_.lock();
-    response_->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);
-    response_->set_response_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
-    response_->set_direct_write_response(direct_write);
-    if(done_){ 
-        done_->Run();
-        done_=nullptr;
-    }
-    response_=nullptr;
-    response_mutex_.unlock();
-}
-
-void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_code){
-    bool expected = false;
-    if(!reentrant_flag_.compare_exchange_strong(expected,true)){
-        return ;
-    }
-    stopTimer();
-    FT_LOG_WARNING(
-                  "cache store service load failed, request %s from [%s], error code is %d",
-                  request_->requestid().c_str(),
-                  request_->client_ip().c_str(),
-                  error_code);
-    CacheStoreServerLoadMetricsCollector::markEnd(collector_, false);
-    response_mutex_.lock();
-    response_->clear_blocks();
-    response_->set_error_code(error_code);
-    if(done_){     
-        done_->Run();
-        done_=nullptr;
-    }
-    response_=nullptr;
-    response_mutex_.unlock();
-}
-
-void CacheStoreServiceImplContext::setUnLoadedBlocks(){
+CacheStoreServiceImplContext::CacheStoreServiceImplContext(
+    const CacheLoadRequest*                                      request,
+    CacheLoadResponse*                                           response,
+    const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
+    ::google::protobuf::Closure*                                 done):
+    request_(request),
+    request_send_start_time_us_(request->request_send_start_time_us()),
+    total_block_count_(request_->blocks_size()),
+    request_id_(request_->requestid()),
+    peer_ip_(request->client_ip()),
+    response_(response),
+    collector_(collector),
+    done_(done),
+    write_cnt_(0) {
+    // init set unloaded blocks
     std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);
     for (int i = 0; i < request_->blocks_size(); i++) {
         unloaded_blocks_[request_->blocks(i).key()] = std::make_shared<BlockBufferInfo>(request_->blocks(i));
     }
 }
 
-bool CacheStoreServiceImplContext::isAllLoaded(){
-    return write_cnt_->load()==request_->blocks_size();
+CacheStoreServiceImplContext::~CacheStoreServiceImplContext() {}
+
+void CacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+    if (done_run_) {
+        // already done run, most likely timeout, no need load
+        return;
+    }
+
+    if (!ok) {
+        // request been canceled in cache store, just failed
+        runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
+        return;
+    }
+
+    for (auto& block : blocks) {
+        auto unloaded_block_info = getAndEraseUnLoadedBlock(block->key);
+        if (unloaded_block_info == nullptr) {
+            // block already loaded
+            continue;
+        }
+
+        if (unloaded_block_info->len() != block->len) {
+            FT_LOG_WARNING(
+                "cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
+                block->key.c_str(),
+                unloaded_block_info->len(),
+                block->len,
+                peer_ip_.c_str());
+            runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
+            return;
+        }
+
+        if (!writeResponseBlock(block, unloaded_block_info)) {
+            runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+            return;
+        }
+        
+        if (++write_cnt_ == 1) {
+            CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(
+            collector_, autil::TimeUtility::currentTimeInMicroSeconds() - request_send_start_time_us_);
+        }
+    }
+
+    if (write_cnt_ == total_block_count_) {
+        runSuccess(false);
+    }
 }
 
-void CacheStoreServiceImplContext::loadBlockOnTcp(std::shared_ptr<BlockBuffer> block){
-    auto unloaded_block_info = getAndEraseUnLoadedBlock(block->key);
-    if(unloaded_block_info == nullptr){
-        return ;
-    }
-    
-    if(unloaded_block_info->len()!=block->len){
-        runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
-        return ; 
+std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoadedBlock(const std::string& block_key) {
+    std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);
+    auto                                it = unloaded_blocks_.find(block_key);
+    if (it == unloaded_blocks_.end()) {
+        return nullptr;
     }
 
-    response_mutex_.lock();
-    if(response_ == nullptr){
-        response_mutex_.unlock();
-        return ;
+    auto block_info = it->second;
+    unloaded_blocks_.erase(it);
+    return block_info;
+}
+
+bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<BlockBuffer>&     block,
+                                                      const std::shared_ptr<BlockBufferInfo>& peer_block) {
+    std::lock_guard<std::mutex> lock(response_mutex_);
+    if (response_ == nullptr) {
+        // try write response while already done
+        return false;
     }
+
     auto* block_info = response_->add_blocks();
     block_info->set_key(block->key);
     block_info->set_len(block->len);
     auto block_content = block_info->mutable_content();
-    block_content->assign(
-        std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>(block->addr.get())),
-        size_t(block->len));
-    response_mutex_.unlock();
+    block_content->assign(std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>(block->addr.get())),
+                          size_t(block->len));
+    return true;
+}
 
-    if (++(*write_cnt_) == 1) {
-        CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(
-            collector_, autil::TimeUtility::currentTimeInMicroSeconds() - request_->request_send_start_time_us());
+void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
+    FT_LOG_DEBUG("run success");
+    bool expected = false;
+    if (!done_run_.compare_exchange_strong(expected, true)) {
+        return;
     }
-    
-    FT_LOG_DEBUG("load in callback %s", block->key.c_str());
-    if(all_success_->load() && isAllLoaded()){
-        runSuccess(false);
-    } 
+
+    stopTimer();
+
+    CacheStoreServerLoadMetricsCollector::markEnd(collector_, true);
+
+    // run success, set response
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        if (response_ != nullptr) {
+            response_->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);
+            response_->set_response_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
+            response_->set_direct_write_response(direct_write);
+            response_ = nullptr;
+        }
+    }
+
+    // call callback
+    if (done_) {
+        done_->Run();
+        done_ = nullptr;
+    }
 }
 
+void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_code) {
+    bool expected = false;
+    if (!done_run_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    stopTimer();
+    FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d",
+                   request_id_.c_str(),
+                   peer_ip_.c_str(),
+                   error_code);
+
+    CacheStoreServerLoadMetricsCollector::markEnd(collector_, false);
+
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        if (response_ != nullptr) {
+            response_->clear_blocks();
+            response_->set_error_code(error_code);
+            response_ = nullptr;
+        }
+    }
+
+    if (done_) {
+        done_->Run();
+        done_ = nullptr;
+    }
 }
+
+void CacheStoreServiceImplContext::stopTimer() {
+    if (auto timer_shared_ptr = timer_.lock()) {
+        timer_shared_ptr->stop();
+        timer_shared_ptr.reset();
+    }
+}
+
+}  // namespace rtp_llm

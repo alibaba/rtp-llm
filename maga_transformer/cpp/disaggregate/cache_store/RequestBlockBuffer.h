@@ -3,6 +3,8 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <memory>
+#include <vector>
+#include <functional>
 
 namespace rtp_llm {
 
@@ -26,6 +28,8 @@ public:
     RequestBlockBuffer(const std::string& requestid);
     RequestBlockBuffer(const std::string& requestid, const std::shared_ptr<void>& event);
 
+    ~RequestBlockBuffer();
+
 public:
     const std::string&           getRequestId() const;
     const std::shared_ptr<void>& getEvent() const;
@@ -36,8 +40,16 @@ public:
 
     void addBlock(const std::shared_ptr<BlockBuffer>& block);
     void addBlock(const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted);
+    void addBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
 
     bool isValid() const;
+
+    // change with true callback, dtor with false callback
+    typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
+    bool setWatchFunc(WatchFunc&& watch_func);
+
+private:
+    void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
     std::string           requestid_;
@@ -45,6 +57,9 @@ private:
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;
+
+    mutable std::shared_mutex watch_func_mutex_;
+    WatchFunc                 watch_func_{nullptr};
 };
 
 }  // namespace rtp_llm
