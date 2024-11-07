@@ -7,6 +7,9 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 from PIL import Image
+from pillow_heif import register_heif_opener
+register_heif_opener()
+
 from torchvision import transforms
 
 from maga_transformer.distribute.worker_info import g_parallel_info

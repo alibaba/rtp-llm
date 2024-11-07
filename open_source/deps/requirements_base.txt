@@ -44,3 +44,4 @@ pyOpenSSL==24.1.0
 nest_asyncio
 librosa
 av
+pillow-heif
