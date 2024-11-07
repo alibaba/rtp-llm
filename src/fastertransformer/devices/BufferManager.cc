@@ -58,9 +58,6 @@ void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {
 
 void BufferManager::setTraceMemory(bool trace_memory) {
     trace_memory_ = trace_memory;
-    if (!trace_memory) {
-        device_min_preserved_bytes_ = 0;
-    }
 }
 
 void BufferManager::recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer) {
@@ -74,13 +71,15 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
         FT_LOG_DEBUG("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
                      buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
         auto status = queryStatus();
-        device_min_preserved_bytes_ = device_min_preserved_bytes_ ? std::min(device_min_preserved_bytes_, status.device_free_bytes) : status.device_free_bytes;
-        if (status.device_allocated_bytes > device_max_allocated_bytes_) {
-            FT_LOG_INFO("Device allocated size or fragmented size reached new maximum %zu, \n"
+        const auto device_consumed_bytes = status.device_allocated_bytes + status.device_fragmented_bytes;
+        if (device_consumed_bytes > device_max_consumed_bytes_) {
+            FT_LOG_INFO("Device allocated size + fragmented size reached new maximum %zu, \n"
                         "previous is %zu bytes, current stack trace id[%lu]\n  %s",
-                        status.device_allocated_bytes,
-                        device_max_allocated_bytes_, stack_trace_id,
+                        device_consumed_bytes, device_max_allocated_bytes_, stack_trace_id,
                         printAllocationRecords(device_allocator_).c_str());
+            device_max_consumed_bytes_ = device_consumed_bytes;
+        }
+        if (status.device_allocated_bytes > device_max_allocated_bytes_) {
             device_max_allocated_bytes_ = status.device_allocated_bytes;
         }
     }
@@ -112,9 +111,7 @@ BufferStatus BufferManager::queryStatus() {
         status.device_preserved_bytes = tracker_status.available_size;
         status.device_fragmented_bytes = tracker_status.fragmented_size;
         status.device_free_bytes = tracker_status.free_size;
-        if (trace_memory_) {
-            status.device_min_preserved_bytes = device_min_preserved_bytes_;
-        }
+        status.device_max_consumed_bytes = device_max_allocated_bytes_;
     }
     return status;
 }

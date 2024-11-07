@@ -18,7 +18,7 @@ namespace rtp_llm {
 
 class CacheConfigCreatorTest: public DeviceTestBase {
     void SetUp() override {
-        device_reserve_memory_size_ = 20L * 1024 * 1024;
+        device_reserve_memory_size_ = 300L * 1024 * 1024;
         DeviceTestBase::SetUp();
     }
 
@@ -33,17 +33,21 @@ TEST_F(CacheConfigCreatorTest, testGetKVCacheMemorySize) {
     param.kv_cache_mem_mb_ = 10;
     CacheConfigCreator creator;
     auto result1 = creator.getKVCacheMemorySize(param);
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(10 * 1024 * 1024, result1.value());
+    ASSERT_EQ(10 * 1024 * 1024, result1);
 
     param.kv_cache_mem_mb_ = 0;
     auto result2 = creator.getKVCacheMemorySize(param);
-    ASSERT_TRUE(result2.ok());
-    ASSERT_TRUE(result2.value() > 0);
+    ASSERT_TRUE(result2 > 0);
 
     param.reserve_runtime_mem_mb_ = 200000;
-    auto result3 = creator.getKVCacheMemorySize(param);
-    ASSERT_FALSE(result3.ok());
+    std::string exception = "";
+    try {
+        creator.getKVCacheMemorySize(param);
+    } catch (const std::exception& e) {
+        exception = e.what();
+        printf("exception: %s", e.what());
+    }
+    ASSERT_STREQ("[FT][ERROR] device reserved memory", exception.substr(0, 34).c_str());
 }
 
 TEST_F(CacheConfigCreatorTest, testCreateConfig) {
@@ -55,20 +59,18 @@ TEST_F(CacheConfigCreatorTest, testCreateConfig) {
     param.seq_size_per_block_ = 8;
     CacheConfigCreator creator;
     auto result1 = creator.createConfig(param);
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().block_nums, 200);
-    ASSERT_EQ(result1.value().local_head_num_kv, 4);
+    ASSERT_EQ(result1.block_nums, 200);
+    ASSERT_EQ(result1.local_head_num_kv, 4);
 
     param.block_nums_ = 0;
     auto result2 = creator.createConfig(param);
-    ASSERT_TRUE(result2.ok());
-    ASSERT_TRUE(result2.value().block_nums > 0);
-    ASSERT_EQ(result2.value().local_head_num_kv, 4);
+    ASSERT_TRUE(result2.block_nums > 0);
+    ASSERT_EQ(result2.local_head_num_kv, 4);
 
-    param.kv_cache_mem_mb_ = 1;
-    param.head_num_kv_ = 1024 * 1024;
+    param.kv_cache_mem_mb_ = 32;
+    param.head_num_kv_ = 1024;
     auto result3 = creator.createConfig(param);
-    ASSERT_FALSE(result3.ok());
+    ASSERT_EQ(result3.block_nums, 8);
 }
 
 }  // namespace rtp_llm

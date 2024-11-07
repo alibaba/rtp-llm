@@ -51,7 +51,7 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle) :
                     sp_type(sp_type), gen_num_per_circle(gen_num_per_circle) {}
-    
+
     bool gpt_model() {
         return sp_type == "vanilla";
     }
@@ -62,6 +62,11 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     py::object                        eagle_model;
     py::object                        medusa_model;
     kmonitor::MetricsReporterPtr      metrics_reporter = nullptr;
+};
+
+struct WarmUpResult {
+    size_t device_reserved_bytes  = 0;
+    size_t max_used_memory        = 0;
 };
 
 class WeightsConverter {

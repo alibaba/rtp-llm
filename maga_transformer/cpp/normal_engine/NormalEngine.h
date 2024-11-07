@@ -43,11 +43,11 @@ public:
     }
 
 private:
-    size_t warmUp(const EngineInitParams& params);
+    WarmUpResult warmUp(const EngineInitParams& params);
     void   initLoadBalance();
     absl::Status trySaveStepError() const;
     void         loop();
-    void         initCacheManager(size_t kv_cache_mem_size);
+    void         initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status initSystemPrompt();
 
 private:

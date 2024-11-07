@@ -48,7 +48,7 @@ cc_library(
     deps = torch_deps() + [
         ":utils",
         ":common",
-        ":cache",
+        ":metrics",
         ":system_prompt",
         ":position_ids_generator",
         "//:gpt_init_params_hdr",
@@ -79,6 +79,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":models",
+        ":cache",
         ":dataclass",
     ],
     visibility = ["//visibility:public"],
@@ -156,6 +157,7 @@ cc_library(
         ":utils",
         ":metrics",
         ":common",
+        ":dataclass",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -222,6 +224,7 @@ cc_library(
         ":metrics",
         ":utils",
         ":common",
+        ":cache",
         ":components",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

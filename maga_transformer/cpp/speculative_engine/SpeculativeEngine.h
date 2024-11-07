@@ -29,7 +29,7 @@ public:
     }
 
 private:
-    size_t       warmUp();
+    WarmUpResult       warmUp();
     void         initLoadBalance();
     absl::Status step();
     absl::Status startLoop();

@@ -4,7 +4,7 @@
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/dataclass/BatchKVCacheBlockAddr.h"
+#include "maga_transformer/cpp/cache/BatchKVCacheBlockAddr.h"
 #include <memory>
 
 namespace rtp_llm {

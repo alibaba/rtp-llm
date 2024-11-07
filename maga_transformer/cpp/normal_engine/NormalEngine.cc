@@ -22,29 +22,20 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     metrics_reporter_(params.metrics_reporter)
 {
     FT_LOG_INFO(__PRETTY_FUNCTION__);
-    size_t max_left_free_bytes = 0;
+    std::optional<WarmUpResult> warm_up_result = std::nullopt;
     if (params_.warm_up_) {
         // warm up
         FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
-        max_left_free_bytes = warmUp(params);
-        size_t max_runtime_buffer = device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes;
-        size_t other_reserve_mem = 0;
-        size_t sample_need_mem = (size_t)params_.max_generate_batch_size_ * params_.vocab_size_ * 4 * 8; // just estimated value
-        if (sample_need_mem > max_runtime_buffer) {
-            other_reserve_mem = std::min(sample_need_mem - max_runtime_buffer, (size_t)2048 * 1024 * 1024); // not allow to large than 2G
-        }
-        if (max_left_free_bytes > 1024L * 1024 * 1024) {
-            if (params_.is_multimodal_) {
-                other_reserve_mem += 1024L * 1024 * 1024; // just reserve 1024M for vit
-            } else {
-                other_reserve_mem += (size_t)128 * 1024 * 1024; // just reserve 128M for other, maybe can rm
-            }
-        }
-        FT_CHECK_WITH_INFO(max_left_free_bytes > other_reserve_mem, "max_left_free_bytes %ld need to be larger than other_reserve_mem %ld", max_left_free_bytes, other_reserve_mem);
-        max_left_free_bytes -= other_reserve_mem;
-        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld", max_left_free_bytes, other_reserve_mem + max_runtime_buffer);
+        warm_up_result = warmUp(params);
+        FT_LOG_INFO("warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
+                    warm_up_result->max_used_memory,
+                    warm_up_result->max_used_memory / 1024 / 1024,
+                    warm_up_result->device_reserved_bytes,
+                    warm_up_result->device_reserved_bytes / 1024 / 1024);
+    } else {
+        FT_LOG_INFO("skip warm up.");
     }
-    initCacheManager(max_left_free_bytes);
+    initCacheManager(warm_up_result);
     FT_LOG_INFO("create cache manager done");
     executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     FT_LOG_INFO("create normal executor done");
@@ -73,7 +64,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     return streams.front();
 }
 
-size_t NormalEngine::warmUp(const EngineInitParams& params) {
+WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
@@ -84,10 +75,12 @@ size_t NormalEngine::warmUp(const EngineInitParams& params) {
     device_->setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
-    size_t min_preserved_bytes = device_->getDeviceStatus().device_memory_status.min_preserved_bytes;
+    const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
     (void)executor_.reset(nullptr);
-    return min_preserved_bytes;
+    return WarmUpResult({
+        device_status.device_memory_status.preserved_bytes,
+        device_status.device_memory_status.max_consumed_bytes});
 }
 
 void NormalEngine::initLoadBalance() {
@@ -107,15 +100,11 @@ void NormalEngine::initLoadBalance() {
     FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)", step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
 }
 
-void NormalEngine::initCacheManager(size_t kv_cache_mem_size) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     auto result = CacheConfigCreator::createConfig(params_);
-    THROW_IF_STATUS_ERROR(result.status());
-    if (kv_cache_mem_size) {
-        uint32_t new_block_nums = kv_cache_mem_size / result.value().block_size;
-        FT_LOG_INFO("try adjust block num %d to %d for warm up test result", result.value().block_nums, new_block_nums);
-        result.value().block_nums = std::min(new_block_nums, result.value().block_nums); // choose min when both warm up and set reserve_runtime_mem_mb
-    }
-    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
+    FT_LOG_INFO("create cache manager with block nums %d, block size %ld MiB",
+                result.block_nums, result.block_size / 1024 / 1024);
+    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, metrics_reporter_);
 }
 
 absl::Status NormalEngine::initSystemPrompt() {

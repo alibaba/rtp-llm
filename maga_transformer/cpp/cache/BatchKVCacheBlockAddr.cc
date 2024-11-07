@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/dataclass/BatchKVCacheBlockAddr.h"
+#include "maga_transformer/cpp/cache/BatchKVCacheBlockAddr.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include <memory>
 #include <sstream>

@@ -5,18 +5,24 @@
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/cache/CacheConfig.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 namespace rtp_llm {
 
 class CacheConfigCreator {
 public:
-    static absl::StatusOr<CacheConfig> createConfig(const ft::GptInitParameter& param);
-
-    static absl::StatusOr<std::tuple<CacheConfig, CacheConfig>> createSpConfig(const ft::GptInitParameter& score_param, const ft::GptInitParameter& propose_param);
+    static CacheConfig createConfig(
+        const ft::GptInitParameter& param,
+        const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
+    static std::tuple<CacheConfig, CacheConfig> createSpConfig(
+        const ft::GptInitParameter& score_param,
+        const ft::GptInitParameter& propose_param);
 
 private:
     static CacheConfig createBasicConfig(const ft::GptInitParameter& param);
-    static absl::StatusOr<int64_t> getKVCacheMemorySize(const ft::GptInitParameter& param);
+    static size_t getDefaultRuntimeMemorySize(const ft::GptInitParameter& param);
+    static size_t getKVCacheMemorySize(const ft::GptInitParameter& param,
+                                       const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
 };
 
 }  // namespace rtp_llm
