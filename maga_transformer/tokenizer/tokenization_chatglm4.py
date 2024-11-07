@@ -1,97 +1,55 @@
+import regex as re
+import base64
 import os
+import tiktoken
 from typing import List, Optional, Union, Dict
-from sentencepiece import SentencePieceProcessor
 from transformers import PreTrainedTokenizer
 from transformers.utils import PaddingStrategy
 from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
 
 
-class SPTokenizer:
-    def __init__(self, model_path: str):
-        # reload tokenizer
-        assert os.path.isfile(model_path), model_path
-        self.sp_model = SentencePieceProcessor(model_file=model_path)
-
-        # BOS / EOS token IDs
-        self.n_words: int = self.sp_model.vocab_size()
-        self.bos_id: int = self.sp_model.bos_id()
-        self.eos_id: int = self.sp_model.eos_id()
-        self.pad_id: int = self.sp_model.eos_id()
-        assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
-
-        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop"]
-        self.special_tokens = {}
-        self.index_special_tokens = {}
-        for token in special_tokens:
-            self.special_tokens[token] = self.n_words
-            self.index_special_tokens[self.n_words] = token
-            self.n_words += 1
-
-    def tokenize(self, s: str):
-        return self.sp_model.EncodeAsPieces(s)
-
-    def encode(self, s: str, bos: bool = False, eos: bool = False) -> List[int]:
-        assert type(s) is str
-        t = self.sp_model.encode(s)
-        if bos:
-            t = [self.bos_id] + t
-        if eos:
-            t = t + [self.eos_id]
-        return t
-
-    def decode(self, t: List[int]) -> str:
-        return self.sp_model.decode(t)
-
-    def decode_tokens(self, tokens: List[str]) -> str:
-        text = self.sp_model.DecodePieces(tokens)
-        return text
-
-    def convert_token_to_id(self, token):
-        """ Converts a token (str) in an id using the vocab. """
-        if token in self.special_tokens:
-            return self.special_tokens[token]
-        return self.sp_model.PieceToId(token)
-
-    def convert_id_to_token(self, index):
-        """Converts an index (integer) in a token (str) using the vocab."""
-        if index in self.index_special_tokens:
-            return ""
-        return self.sp_model.IdToPiece(index)
-
-
-class ChatGLMTokenizer(PreTrainedTokenizer):
+class ChatGLM4Tokenizer(PreTrainedTokenizer):
     vocab_files_names = {"vocab_file": "tokenizer.model"}
-
     model_input_names = ["input_ids", "attention_mask", "position_ids"]
 
-    def __init__(self, vocab_file, padding_side="left", **kwargs):
-        self.tokenizer = SPTokenizer(vocab_file)
-        super().__init__(padding_side=padding_side, **kwargs)
-        self.name = "GLMTokenizer"
+    def __init__(
+            self,
+            vocab_file,
+            clean_up_tokenization_spaces=False,
+            **kwargs
+    ):
+        self.name = "GLM4Tokenizer"
+        self.vocab_file = vocab_file
+        pat_str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+        self.pat_str = re.compile(pat_str)
 
-        self.special_tokens = {
-            "<bos>": self.tokenizer.bos_id,
-            "<eos>": self.tokenizer.eos_id,
-            "<pad>": self.tokenizer.pad_id
-        }
+        mergeable_ranks = {}
+        with open(vocab_file) as f:
+            for line in f:
+                token, rank = line.strip().split()
+                rank = int(rank)
+                token = base64.b64decode(token)
+                mergeable_ranks[token] = rank
 
-    def get_command(self, token):
-        if token in self.special_tokens:
-            return self.special_tokens[token]
-        assert token in self.tokenizer.special_tokens, f"{token} is not a special token for {self.name}"
-        return self.tokenizer.special_tokens[token]
+        self.mergeable_ranks = mergeable_ranks
 
-    @property
-    def pad_token(self) -> str:
-        return "</s>"
+        self.tokenizer = tiktoken.Encoding(
+            name="my_tokenizer",
+            pat_str=pat_str,
+            mergeable_ranks=mergeable_ranks,
+            special_tokens={}
+        )
+        self.decoder = {rank: token for token, rank in mergeable_ranks.items()}
+        self.n_words = len(self.decoder)
 
-    @property
-    def pad_token_id(self):
-        return self.get_command("<pad>")
+        super().__init__(
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            **kwargs
+        )
 
     @property
     def vocab_size(self):
-        return self.tokenizer.n_words
+        return self.n_words
 
     def get_vocab(self):
         """ Returns vocab as a dict """
@@ -99,19 +57,40 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         vocab.update(self.added_tokens_encoder)
         return vocab
 
+    def convert_tokens_to_string(self, tokens: List[Union[bytes, str, int]]) -> str:
+        """
+        Converts a sequence of tokens in a single string.
+        """
+        text = ""
+        temp = b""
+        for t in tokens:
+            if isinstance(t, int):
+                t = chr(t)
+            if isinstance(t, str):
+                if temp:
+                    text += temp.decode("utf-8", errors="replace")
+            elif isinstance(t, bytes):
+                temp += t
+            else:
+                raise TypeError("token should only be of type int, bytes or str")
+        if temp:
+            text += temp.decode("utf-8", errors="replace")
+        return text
+
     def _tokenize(self, text, **kwargs):
-        return self.tokenizer.tokenize(text)
+        tokens = []
+        ids = self.tokenizer.encode(text)
+        for t in ids:
+            tokens.append(self.decoder[t])
+        return tokens
 
     def _convert_token_to_id(self, token):
         """ Converts a token (str) in an id using the vocab. """
-        return self.tokenizer.convert_token_to_id(token)
+        return self.mergeable_ranks[token]
 
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
-        return self.tokenizer.convert_id_to_token(index)
-
-    def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        return self.tokenizer.decode_tokens(tokens)
+        return self.decoder.get(index, "")
 
     def save_vocabulary(self, save_directory, filename_prefix=None):
         """
@@ -142,8 +121,19 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return (vocab_file,)
 
     def get_prefix_tokens(self):
-        prefix_tokens = [self.get_command("[gMASK]"), self.get_command("sop")]
+        prefix_tokens = [self.convert_tokens_to_ids("[gMASK]"), self.convert_tokens_to_ids("<sop>")]
         return prefix_tokens
+
+    def build_single_message(self, role, metadata, message, tokenize=True):
+        assert role in ["system", "user", "assistant", "observation"], role
+        if tokenize:
+            role_tokens = [self.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.encode(f"{metadata}\n",
+                                                                                              disallowed_special=())
+            message_tokens = self.tokenizer.encode(message, disallowed_special=())
+            tokens = role_tokens + message_tokens
+            return tokens
+        else:
+            return str(f"<|{role}|>{metadata}\n{message}")
 
     def build_inputs_with_special_tokens(
             self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
@@ -167,15 +157,15 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         prefix_tokens = self.get_prefix_tokens()
         token_ids_0 = prefix_tokens + token_ids_0
         if token_ids_1 is not None:
-            token_ids_0 = token_ids_0 + token_ids_1 + [self.get_command("<eos>")]
+            token_ids_0 = token_ids_0 + token_ids_1 + [self.convert_tokens_to_ids("<eos>")]
         return token_ids_0
 
     def _pad(
             self,
             encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
             max_length: Optional[int] = None,
+            padding_side: str = "left",
             padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
-            padding_side: Optional[str] = None,
             pad_to_multiple_of: Optional[int] = None,
             return_attention_mask: Optional[bool] = None,
     ) -> dict:

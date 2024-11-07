@@ -158,7 +158,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        return AutoProcessor.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
 
     @staticmethod
     def get_weight_cls():

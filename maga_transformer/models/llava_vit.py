@@ -9,13 +9,14 @@ from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
+from maga_transformer.distribute.worker_info import g_parallel_info
 
 class LlavaImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         if config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
         else:
-            self.vision_tower = self.build_vision_tower(config).half()
+            self.vision_tower = self.build_vision_tower(config).to(g_parallel_info.device).half()
         self.mm_projector = self.build_vision_projector(config).half()
         if "unpad" in config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(

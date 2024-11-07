@@ -5,8 +5,7 @@ import math
 import importlib
 import einops
 
-from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLinearScalingRotaryEmbedding
-from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXDynamicNTKScalingRotaryEmbedding
+from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXRotaryEmbedding
 from transformers.models.gpt_neox.modeling_gpt_neox import apply_rotary_pos_emb
 from yarn_rotary_embedding import FlashYaRNRotaryEmbedding
 from transformers.models.llama.modeling_llama import LlamaConfig, LlamaRotaryEmbedding
@@ -87,11 +86,11 @@ class TestRope(unittest.TestCase):
         for scale in range(1, 10, 5):
             for seq_len in range(1024, 4096, 1024):
                 self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, scale, 1, 1)
-                self.Rope = GPTNeoXLinearScalingRotaryEmbedding(dim, max_position_embeddings, base, cuda, scale)
+                self.Rope = GPTNeoXRotaryEmbedding(dim, max_position_embeddings, base, cuda, scale, rope_type="linear")
                 x = torch.rand(batch_size, seq_len, headsize, dim).cuda()
                 position_ids = torch.arange(0, seq_len, dtype=torch.long).cuda()
                 position_ids = position_ids.unsqueeze(0).view(-1, seq_len)
-                cos, sin = self.Rope(x.permute(0, 2, 1, 3), seq_len)
+                cos, sin = self.Rope(x.permute(0, 2, 1, 3), position_ids)
                 result, _ = apply_rotary_pos_emb(x.permute(0, 2, 1, 3), x.permute(0, 2, 1, 3), cos, sin, position_ids)
                 test = self.RopeOP.forward(x, 0)
                 torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
@@ -107,11 +106,11 @@ class TestRope(unittest.TestCase):
         for scale in [1, 4]:
             for seq_len in [100, 200, 300]:
                 self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, scale, 3, 1)
-                self.Rope = GPTNeoXDynamicNTKScalingRotaryEmbedding(dim, max_position_embeddings, base, cuda, scale)
+                self.Rope = GPTNeoXRotaryEmbedding(dim, max_position_embeddings, base, cuda, scale, rope_type="dynamic")
                 x = torch.rand(batch_size, seq_len, headsize, dim).cuda() + 1
                 position_ids = torch.arange(0, seq_len, dtype=torch.long).cuda()
                 position_ids = position_ids.unsqueeze(0).view(-1, seq_len)
-                cos, sin = self.Rope(x.permute(0, 2, 1, 3), seq_len)
+                cos, sin = self.Rope(x.permute(0, 2, 1, 3), position_ids)
                 result, _ = apply_rotary_pos_emb(x.permute(0, 2, 1, 3), x.permute(0, 2, 1, 3), cos, sin, position_ids)
                 test = self.RopeOP.forward(x.clone(), 0)
                 torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
@@ -157,7 +156,7 @@ class TestRope(unittest.TestCase):
                 position_ids = torch.arange(0, seq_len, dtype=torch.long).cuda()
                 position_ids = position_ids.unsqueeze(0).view(-1, seq_len)
                 cos, sin = self.Rope(x.permute(0, 2, 1, 3))
-                result, _ = apply_rotary_pos_emb(x.permute(0, 2, 1, 3), x.permute(0, 2, 1, 3), cos, sin, position_ids)
+                result, _ = apply_rotary_pos_emb(x.permute(0, 2, 1, 3), x.permute(0, 2, 1, 3), cos.unsqueeze_(0), sin.unsqueeze_(0), position_ids)
                 test = self.RopeOP.forward(x, 0)
                 torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
 

@@ -99,7 +99,6 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         vocab_file,
-        padding_side="left",
         clean_up_tokenization_spaces=False,
         encode_special_tokens=False,
         **kwargs
@@ -116,7 +115,6 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         self.encode_special_tokens = encode_special_tokens
 
         super().__init__(
-            padding_side=padding_side,
             clean_up_tokenization_spaces=clean_up_tokenization_spaces,
             **kwargs
         )
@@ -269,6 +267,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
         max_length: Optional[int] = None,
         padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        padding_side: Optional[str] = None,
         pad_to_multiple_of: Optional[int] = None,
         return_attention_mask: Optional[bool] = None,
     ) -> dict:

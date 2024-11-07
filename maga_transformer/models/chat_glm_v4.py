@@ -4,11 +4,12 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.chat_glm_v3 import ChatGlmV3
+from maga_transformer.tokenizer.tokenization_chatglm4 import ChatGLM4Tokenizer
 
 class ChatGlmV4(ChatGlmV3):
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters) -> PreTrainedTokenizerBase:
-        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+        return ChatGLM4Tokenizer.from_pretrained(config.tokenizer_path)
     
     @classmethod
     def update_stop_words(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
