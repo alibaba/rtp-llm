@@ -360,7 +360,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==4.39.3",
+    "transformers==4.46.2",
     "sentencepiece==0.1.99",
     "fastapi==0.108.0",
     "uvicorn==0.21.1",

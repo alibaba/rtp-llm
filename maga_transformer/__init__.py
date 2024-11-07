@@ -34,5 +34,8 @@ if not file_logger_init_success:
 
 logging.info("init logger end")
 
+import transformers
+logging.info(f"transformers version: {transformers.__version__}")
+
 # load th_transformer.so
 from .ops import *
