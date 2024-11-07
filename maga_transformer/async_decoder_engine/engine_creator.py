@@ -1,4 +1,5 @@
 import logging
+import torch
 from enum import Enum
 from typing import Optional
 from maga_transformer.models.propose_model.propose_model import ProposeModel
@@ -21,6 +22,7 @@ def check_exeutor_type(model: BaseModel):
 
 
 def create_engine(model: BaseModel, propose_model: Optional[ProposeModel] = None) -> BaseEngine:
+    torch.ops.fastertransformer.init_engine()
     executor_type = check_exeutor_type(model)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:

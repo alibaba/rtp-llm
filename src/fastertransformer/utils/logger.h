@@ -119,13 +119,12 @@ private:
     uint32_t getLevelfromstr(const char* s);
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
-        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_)
+        return "[RANK " + std::to_string(rank_)
                + "][" + file + ":" + std::to_string(line) + "][" + func + "]";
     }
 
     inline const std::string getTracePrefix() {
-        return "[" + std::to_string(getpid()) + ":" + std::to_string(gettid()) + "][RANK " + std::to_string(rank_)
-               + "]";
+        return "[RANK " + std::to_string(rank_) + "]";
     }
 
     inline const std::string getLevelName(const uint32_t level) {

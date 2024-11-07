@@ -19,30 +19,16 @@
 namespace fastertransformer {
 
 Logger::Logger(const std::string& submodule_name) {
-    logger_ = alog::Logger::getLogger(submodule_name.c_str());
+    int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
+    if (use_console_append) {
+        logger_ = alog::Logger::getLogger("console");
+    } else {
+        logger_ = alog::Logger::getLogger(submodule_name.c_str());
+    }
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
     }
-    alog::Logger::MAX_MESSAGE_LENGTH = 1024000;
-
-    int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
-    if (use_console_append) {
-        console_appender_ = (alog::ConsoleAppender*)alog::ConsoleAppender::getAppender();
-        console_appender_->setAutoFlush(true);
-        logger_->setAppender(console_appender_);
-    } else {
-        std::string file_appender_path = autil::EnvUtil::getEnv("LOG_PATH", "logs") + "/" + submodule_name + ".log";
-        file_appender_ = (alog::FileAppender*)alog::FileAppender::getAppender(file_appender_path.c_str());
-        file_appender_->setAutoFlush(true);
-        file_appender_->setAsyncFlush(false);
-        file_appender_->setFlushIntervalInMS(100);
-        file_appender_->setFlushThreshold(1);
-        logger_->setAppender(file_appender_);
-    }
-
-    logger_->setInheritFlag(false);
-    base_log_level_ = getLevelfromstr("LOG_LEVEL");
-    logger_->setLevel(base_log_level_);
+    base_log_level_ = logger_->getLevel();
 }
 
 void Logger::setBaseLevel(const uint32_t base_level) {

@@ -15,8 +15,6 @@ RtpEmbeddingOp::RtpEmbeddingOp() {}
 
 void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
-        AUTIL_ROOT_LOG_CONFIG();
-        AUTIL_ROOT_LOG_SETLEVEL(INFO);
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
         rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
         py::object py_render = model.attr("custom_module").attr("renderer");

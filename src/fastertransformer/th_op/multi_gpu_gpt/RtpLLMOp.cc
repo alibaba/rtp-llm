@@ -28,8 +28,6 @@ void RtpLLMOp::init(py::object model,
                     py::object mm_process_engine,
                     py::object propose_model,
                     py::object token_processor) {
-    AUTIL_ROOT_LOG_CONFIG();
-    AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     rtp_llm::EngineInitParams params = initModel(model);
