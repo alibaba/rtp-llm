@@ -112,8 +112,6 @@ DeviceStatus ArmCpuDevice::getDeviceStatus() {
     status.device_memory_status.preserved_bytes = status.device_memory_status.free_bytes;
     status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
     status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
-
-    status.device_memory_status.min_preserved_bytes = 128 * 1024 * 1024; // 128M for warm up
     return status;
 }
 
