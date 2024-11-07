@@ -20,6 +20,10 @@ absl::StatusOr<GenerateOutputs> NormalGenerateStream::nextOutput() {
     return generate_outputs_queue_.getAndPopFront();
 }
 
+bool NormalGenerateStream::hasOutput() {
+    return !generate_outputs_queue_.isEmpty();
+}
+
 void NormalGenerateStream::updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs) {
     if (loss) {
         setLoss(*loss);
@@ -29,9 +33,12 @@ void NormalGenerateStream::updateState(const ft::BufferPtr& loss, const ft::Buff
     if (finished_) {
         setFinishedWithoutLock();
     }
-    // unfinshed beam search also need to update cum_log_probs.
     if (cum_log_probs) {
         device_->copy({*cum_log_probs_, *cum_log_probs});
+    }
+    //TODO: move it to better position
+    if (!finished_ && generate_input_->generate_config->pd_separation) {
+        need_remote_generate_ = true;
     }
 }
 
@@ -100,8 +107,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr&
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
         generate_output.aux_info.output_len      = seq_length_ - generate_input_->inputLength();
         generate_output.aux_info.step_output_len = output_len;
-        ;
         generate_output.aux_info.reuse_len = reuse_length_;
+        generate_output.aux_info.pd_sep = queryPdSep();
 
         generate_output.aux_info.cum_log_probs =
             device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
@@ -132,11 +139,16 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                                         const ft::BufferPtr& logits,
                                         const ft::BufferPtr& cum_log_probs,
                                         const ft::BufferPtr& all_probs,
-                                        const ft::BufferPtr& loss) {
+                                        const ft::BufferPtr& loss,
+                                        bool                 update_queue) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
     updateState(loss, cum_log_probs);
 
     if (!isStreaming() && !finished_) {
+        return;
+    }
+    if (!update_queue) {
         return;
     }
 

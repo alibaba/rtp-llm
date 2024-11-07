@@ -42,7 +42,7 @@ struct GptModelInputs {
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
     ft::BufferPtr lm_output_indexes; // [context_batch_size]
-    ft::BufferPtr prefix_lengths;    // [context_batch_size, seq_len]
+    ft::BufferPtr prefix_lengths;    // [context_batch_size]
 
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
     ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
@@ -56,7 +56,7 @@ struct GptModelInputs {
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    ft::BufferPtr kv_cache_offset;   // [batch_size, block_nums], kv cache block offset
+    ft::BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
     ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     ft::BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     ft::BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
@@ -66,7 +66,16 @@ struct GptModelInputs {
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
     ft::BufferPtr                             mm_features_locs;    // features index
 
-    bool need_all_logits = false;
+    ft::BufferPtr                             query_id;            // int64, [context_batch_size]
+    ft::BufferPtr                             query_pd_separation; // bool, [context_batch_size]
+    ft::BufferPtr                             cache_keys;          // [context_batch_size]
+    size_t                                    block_size;
+    size_t                                    scale_block_size;
+    bool                                      pd_separation = false;
+
+    bool                                      need_all_logits = false;
+    bool                                      warmup          = false;
+
 public:
     std::string debugString() const {
         if (!ft::Logger::getEngineLogger().isDebugMode()) {
@@ -93,6 +102,17 @@ public:
         if (attention_mask) {
             debug_string << ", attention_mask: " << attention_mask->debugString();
         }
+        if (query_id) {
+            debug_string << ", query_id: " << query_id->debugString();
+        }
+        if (query_pd_separation) {
+            debug_string << ", query_pd_separation: " << query_pd_separation->debugString();
+        }
+        if (cache_keys) {
+            debug_string << ", cache_keys: " << cache_keys->debugString();
+        }
+        debug_string << ", block_size: " << block_size;
+        debug_string << ", pd_separation: " << pd_separation;
         debug_string << "}";
         return debug_string.str();
     }
@@ -161,7 +181,14 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         device->syncAndCheck();
     }
 
+    auto max_blocks = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
+    auto text_tokens_mask_size = shape_hints_ptr[GptModelInputIndex::textTokensMask];
+    auto mm_features_locs_size = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+
     if (device->getDeviceProperties().tp_rank) {
+        auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
+        
         inputs.combo_tokens = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]}, ft::AllocationType::HOST});
         inputs.input_lengths = device->allocateBuffer(
@@ -169,18 +196,23 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         inputs.sequence_lengths = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, ft::AllocationType::HOST});
         inputs.prefix_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths]}, ft::AllocationType::HOST});
-        if (shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]) {
+             {ft::DataType::TYPE_INT32, {context_batch_size}, ft::AllocationType::HOST});
+        if (max_blocks != 0) {
             inputs.kv_cache_offset = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
-                         (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]},
-                     ft::AllocationType::HOST});
+                    {ft::DataType::TYPE_INT32,
+                    {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, ft::AllocationType::HOST});
+            inputs.cache_keys = device->allocateBuffer(
+                    {ft::DataType::TYPE_INT32, {context_batch_size, max_blocks}, ft::AllocationType::HOST});
         }
+        inputs.query_id = device->allocateBuffer(
+            {ft::DataType::TYPE_INT64, {context_batch_size}, ft::AllocationType::HOST});
+        inputs.query_pd_separation = device->allocateBuffer(
+            {ft::DataType::TYPE_BOOL, {context_batch_size}, ft::AllocationType::HOST});
         inputs.lm_output_indexes = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
-        if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
+        if (combo_position_ids_size) {
             inputs.combo_position_ids = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboPositionIds]}, ft::AllocationType::HOST});
+                {ft::DataType::TYPE_INT32, {(size_t)combo_position_ids_size}, ft::AllocationType::HOST});
         }
         if (shape_hints_ptr[GptModelInputIndex::loraIds]) {
             inputs.lora_ids = device->allocateBuffer(
@@ -190,13 +222,13 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             inputs.lora_input_lengths = device->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, ft::AllocationType::HOST});
         }
-        if (shape_hints_ptr[GptModelInputIndex::textTokensMask]) {
+        if (text_tokens_mask_size) {
             inputs.text_tokens_mask = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::textTokensMask]}, ft::AllocationType::HOST});
+                {ft::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size}, ft::AllocationType::HOST});
         }
-        if (shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]) {
+        if (mm_features_locs_size) {
             inputs.mm_features_locs = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]}, ft::AllocationType::HOST});
+                {ft::DataType::TYPE_INT32, {(size_t)mm_features_locs_size}, ft::AllocationType::HOST});
         }
         if (mm_features_num) {
             std::vector<ft::BufferPtr> mm_features;
@@ -210,24 +242,28 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             inputs.multimodal_features = std::move(mm_features);
         }
     }
+
     std::vector<ft::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
     buffers.emplace_back(inputs.input_lengths);
     buffers.emplace_back(inputs.sequence_lengths);
     buffers.emplace_back(inputs.prefix_lengths);
-    if (shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]) {
+    if (max_blocks) {
         buffers.emplace_back(inputs.kv_cache_offset);
+        buffers.emplace_back(inputs.cache_keys);
     }
+    buffers.emplace_back(inputs.query_id);
+    buffers.emplace_back(inputs.query_pd_separation);
     buffers.emplace_back(inputs.lm_output_indexes);
-    if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
+    if (combo_position_ids_size) {
         buffers.emplace_back(inputs.combo_position_ids);
     }
     buffers.emplace_back(inputs.lora_ids);
     buffers.emplace_back(inputs.lora_input_lengths);
-    if (shape_hints_ptr[GptModelInputIndex::textTokensMask]) {
+    if (text_tokens_mask_size) {
         buffers.emplace_back(inputs.text_tokens_mask);
     }
-    if (shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]) {
+    if (mm_features_locs_size) {
         buffers.emplace_back(inputs.mm_features_locs);
     }
     if (mm_features_num) {

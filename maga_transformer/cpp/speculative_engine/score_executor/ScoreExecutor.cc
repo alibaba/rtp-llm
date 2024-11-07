@@ -16,7 +16,8 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
     for (const GenerateStreamPtr& stream : streams) {
         size_t propose_step = proposer_output.outputs[stream_index]->propose_step;
         score_output.outputs[stream_index]->propose_step = propose_step;
-        score_streams.emplace_back(std::make_shared<ScoreStream>(*stream, proposer_output.outputs[stream_index], score_output.outputs[stream_index], propose_step));
+        score_streams.emplace_back(std::make_shared<ScoreStream>(
+            *stream, proposer_output.outputs[stream_index], score_output.outputs[stream_index], propose_step));
         stream_index++;
     }
 

@@ -75,6 +75,8 @@ message GenerateInputPB {
     repeated int32 token_ids = 2;
     repeated MulitmodalInputPB multimodal_inputs = 3;
     GenerateConfigPB generate_config = 4;
+    string client_id = 5;
+    int64 start_time = 6;
 }
 
 message AuxInfoPB {
@@ -88,6 +90,7 @@ message AuxInfoPB {
     int32 fallback_times = 8;
     TensorPB cum_log_probs = 9;
     int32 step_output_len = 10;
+    bool pd_sep = 11;
 }
 
 message GenerateOutputPB {
@@ -102,13 +105,53 @@ message GenerateOutputPB {
 message GenerateOutputsPB {
     int64 request_id = 1;
     repeated GenerateOutputPB generate_outputs = 2;
+    int64 receive_load_time = 3;
+    int64 start_load_time = 4;
+    int64 receive_generate_time = 5;
+    int64 load_done_time = 6;
+    int64 begin_compute_time = 7;
+    int64 compute_done_time = 8;
 }
 
 message ErrorDetailsPB {
     int64 error_code = 1;
-    string error_message = 2;
+    string error_message = 3;
 }
 
-service ModelRpcService {
+message EmptyPB {}
+
+enum RemoteStage {
+    ALLOCATE = 0;
+    LOAD = 1;
+    GENERATE = 2;
+}
+
+message GenerateRequestPB {
+    RemoteStage stage = 1;
+    int64 request_id = 2;
+    string client_id = 3;
+    int64 start_time = 4;
+    int32 first_generate_token_id = 5;
+    GenerateInputPB input = 6;
+}
+
+message RemoteLoadRequestPB {
+    int64 request_id = 1;
+    string request_key = 2;
+    string peer_ip = 3;
+    repeated int32 cache_keys = 4;
+    repeated int32 block_ids = 5;
+    int64 block_num = 6;
+    int64 reuse_block_size = 7;
+}
+
+message RemoteFinishRequestPB {
+    int64 request_id = 1;
+} 
+
+service RpcService {
     rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc remote_load(RemoteLoadRequestPB) returns (EmptyPB);    
+    rpc remote_generate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
+    rpc remote_finish(RemoteFinishRequestPB) returns (EmptyPB); 
 }

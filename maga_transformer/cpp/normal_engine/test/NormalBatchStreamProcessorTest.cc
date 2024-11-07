@@ -25,7 +25,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     param.vocab_size_    = 2048;
     param.num_layers_    = 2;
     param.kv_cache_data_type_ = DataType::TYPE_INT8;
-    NormalBatchStreamProcessor     processor(param);
+    NormalBatchStreamProcessor     processor(param, 0, 0, 0);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -99,7 +99,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(model_input.attention_mask->size(), 2 * 3 * 4);
     }
     {
-        NormalBatchStreamProcessor processor(param);
+        NormalBatchStreamProcessor processor(param, 0, 0, 0);
         StreamGroups               stream_groups(streams);
         auto                       merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
@@ -149,7 +149,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     for (const auto& stream : streams) {
         stream->setRunning();
     }
-    NormalBatchStreamProcessor processor(param);
+    NormalBatchStreamProcessor processor(param, 0, 0, 0);
     StreamGroups               stream_groups(streams);
     auto                       merge_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(merge_input_status.ok());

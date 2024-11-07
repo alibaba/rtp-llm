@@ -37,6 +37,9 @@ class AsyncModel:
     def stop(self):
         self.decoder_engine_.stop()
 
+    def ready(self):
+        return self.decoder_engine_.ready()
+
     @torch.no_grad()
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:

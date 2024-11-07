@@ -40,4 +40,8 @@ void* Allocator<AllocatorType::TH>::malloc(size_t size) {
     return ptr;
 }
 
+void* Allocator<AllocatorType::TH>::mallocSync(size_t size) {
+    return malloc(size);
+}
+
 }

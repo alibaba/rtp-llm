@@ -16,6 +16,12 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
         members.append(WorkerInfo(
             server_port=server_port,
             gang_hb_port=-1,
+            rpc_server_port=-1,
+            remote_rpc_server_port=-1,
+            cache_store_listen_port=-1,
+            cache_store_connect_port=-1,
+            cache_store_rdma_connect_port=-1,
+            cache_store_rdma_listen_port=-1,
             name=info['name'], ip=info['ip'], info=info))
     masters = [member for member in members if member.name.endswith('part0')]
     if len(masters) != 1:
@@ -67,7 +73,7 @@ def get_gang_info() -> GangInfo:
         else:
             members = get_c2_members()
     else:
-        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, 'local', None)]
+        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, -1, -1, -1, -1, -1, -1, 'local', None)]
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
@@ -78,8 +84,14 @@ def get_gang_info() -> GangInfo:
         for local_rank in range(g_parallel_info.local_world_size):
             new_member = WorkerInfo(
                 ip=member.ip,
-                server_port=g_worker_info.server_port_offset(local_rank, member.server_port),
-                gang_hb_port=g_worker_info.gang_hb_port_offset(local_rank, member.server_port),
+                server_port=WorkerInfo.server_port_offset(local_rank, member.server_port),
+                gang_hb_port=WorkerInfo.gang_hb_port_offset(local_rank, member.server_port),
+                rpc_server_port=WorkerInfo.rpc_server_port_offset(local_rank, member.server_port),
+                cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(local_rank, member.server_port),
+                cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(local_rank, member.server_port),
+                remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
+                cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
+                cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
                 name=member.name + '_' + str(local_rank),
                 info=member.info)
             all_members.append(new_member)

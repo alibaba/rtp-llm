@@ -24,15 +24,22 @@ enum class SpaceComplexityType {
     QUADRATIC
 };
 
+enum class BufferAllocateType {
+    SYNC,
+    ASYNC,
+};
+
 struct BufferHints {
     BufferHints(const std::string& tag = "",
                 BufferLifecycleType lifecycle = BufferLifecycleType::SHORT,
-                SpaceComplexityType space_complexity = SpaceComplexityType::UNKNOWN)
-    : tag(tag), lifecycle(lifecycle), space_complexity(space_complexity) {}
+                SpaceComplexityType space_complexity = SpaceComplexityType::UNKNOWN,
+                BufferAllocateType allocate_type = BufferAllocateType::ASYNC)
+    : tag(tag), lifecycle(lifecycle), space_complexity(space_complexity), allocate_type(allocate_type) {}
 
-    std::string tag;
-    BufferLifecycleType lifecycle;
-    SpaceComplexityType space_complexity;
+    std::string tag = "";
+    BufferLifecycleType lifecycle = BufferLifecycleType::SHORT;
+    SpaceComplexityType space_complexity = SpaceComplexityType::UNKNOWN;
+    BufferAllocateType allocate_type = BufferAllocateType::ASYNC;
 };
 
 // Buffer is similar to Tensor, but with more limited functionality.

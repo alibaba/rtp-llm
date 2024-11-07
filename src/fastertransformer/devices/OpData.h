@@ -338,6 +338,11 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef multimodal_locs;
 };
 
+struct CacheStoreInputs {
+    BufferPtr input_lengths_host;
+    BufferPtr prefix_lengths_host;
+    BufferPtr host_kv_cache_offset;
+};
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
@@ -345,6 +350,7 @@ struct AttentionCommonInputs {
     const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
     std::optional<KvCacheInfo> kv_cache;
+    std::optional<CacheStoreInputs> cache_store_inputs;
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr padding_offset;
@@ -362,6 +368,16 @@ struct AttentionCommonInputs {
     int32_t   max_prefix_length;
 
     lora::AttentionLayerLoraInput lora_input;
+
+    int layer_id;
+    BufferPtr                                 query_id;            // [context_batch_size]
+    BufferPtr                                 query_pd_separation; // [context_batch_size]
+    BufferPtr                                 cache_keys;          // [context_batch_size]
+    size_t                                    block_size;
+    size_t                                    scale_block_size;
+    bool                                      pd_separation;
+
+    bool warmup;
 };
 
 struct AttentionConfigs {

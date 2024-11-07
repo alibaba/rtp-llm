@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/utils/HashUtil.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
@@ -23,8 +24,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , max_seq_len_(params.max_seq_len_)
     , vocab_size_(params.vocab_size_)
     , stream_cache_resource_(this, resource_context, input->need_release_resource)
-    , need_release_resource_(input->need_release_resource)
     , enable_fast_gen_(params.enable_fast_gen_)
+    , use_cache_store_(params.use_cache_store_)
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
@@ -53,6 +54,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                generate_input_->input_ids->sizeBytes());
     }
 
+    constructCacheKey();
+
     cum_log_probs_ =
         device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
@@ -70,6 +73,27 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
     // TODO: need fix context block copy
     perf_test_ = true;
+}
+
+void GenerateStream::constructCacheKey() {
+    if (!stream_cache_resource_.resourceContext().cache_manager) {
+        return;
+    }
+    if (!use_cache_store_) {
+        return;
+    }
+    cache_keys_.reserve(stream_cache_resource_.singleBatchNeedBlocks(seq_length_));
+    auto seq_size_per_block = seqSizePerBlock();
+    auto data = generate_input_->input_ids->data<int32_t>();
+    int32_t hash = 0;
+    for (int pos = 0; pos < seq_length_; pos += seq_size_per_block) {
+        hash = hashInt32Array(hash, data + pos, data + min(seq_length_, pos + seq_size_per_block));
+        cache_keys_.push_back(hash);
+    }
+}
+
+const std::vector<int32_t>& GenerateStream::cacheKeys() const {
+    return cache_keys_;
 }
 
 absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
@@ -122,9 +146,10 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
 }
 
 void GenerateStream::releaseResource() {
-    if (need_release_resource_) {
-        stream_cache_resource_.releaseResource();
-    }
+    stream_cache_resource_.releaseResource();
+}
+void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
+    stream_cache_resource_.setNeedReleaseResource(need_release_resource);
 }
 int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
     // TODO: maybe need fix when context and reuse
@@ -270,6 +295,10 @@ void GenerateStream::setFallbackPrefixLength(int fallback_prefix_length) {
     fallback_prefix_length_ = fallback_prefix_length;
 }
 
+void GenerateStream::incLastOutputPos() {
+    last_output_pos_++;
+}
+
 bool GenerateStream::isContextStream() const {
     return is_context_stream_;
 }
@@ -397,7 +426,7 @@ bool GenerateStream::checkTokenId(int token_id) {
 
 void GenerateStream::setStop(const std::string& err_msg, absl::StatusCode err_code) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    FT_LOG_WARNING("stop stream: %d %s", streamId(), err_msg.c_str());
+    FT_LOG_WARNING("stop stream [%d], error_msg: [%s]", streamId(), err_msg.c_str());
     generate_status_.status     = GenerateState::STOPPED;
     generate_status_.error_code = err_code;
     generate_status_.error_info = err_msg;
@@ -443,6 +472,11 @@ bool GenerateStream::stopped() {
     return generate_status_.status == GenerateState::STOPPED;
 }
 
+bool GenerateStream::waiting() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return generate_status_.status == GenerateState::WAITING;
+}
+
 bool GenerateStream::paused() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.status == GenerateState::PAUSED;
@@ -453,9 +487,35 @@ std::string GenerateStream::stopReason() {
     return generate_status_.error_info;
 }
 
+bool GenerateStream::finishedWithoutLock() {
+    return generate_status_.status == GenerateState::FINISHED;
+}
+
+bool GenerateStream::running() {
+    return generate_status_.status == GenerateState::RUNNING;
+}
+
+void GenerateStream::cancelIfNotRunning() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (generate_status_.status == GenerateState::WAITING || generate_status_.status == GenerateState::REMOTE_RUNNING) {
+        FT_LOG_WARNING("stop stream: %d %s", streamId(), "cancel stream in waiting or remote_running");
+        generate_status_.status = GenerateState::STOPPED;
+        generate_status_.error_code = absl::StatusCode::kInternal;
+        generate_status_.error_info = "cancel stream in waiting";
+    }
+}
+
 bool GenerateStream::finished() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.status == GenerateState::FINISHED;
+}
+
+bool GenerateStream::needRemoteGenerate() const {
+    return need_remote_generate_;
+}
+
+void GenerateStream::setRemoteGenerate() {
+    generate_status_.status = GenerateState::REMOTE_RUNNING;
 }
 
 size_t GenerateStream::iterCount() const {
@@ -567,20 +627,23 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::update(const ft::BufferPtr&    new_tokens,
-                            int               num_new_tokens,
+void GenerateStream::update(const ft::BufferPtr& new_tokens,
+                            int                  num_new_tokens,
                             const ft::BufferPtr& hidden_states,
                             const ft::BufferPtr& logits,
                             const ft::BufferPtr& cum_log_probs,
                             const ft::BufferPtr& all_probs,
-                            const ft::BufferPtr& loss) {
+                            const ft::BufferPtr& loss,
+                            bool                 update_queue) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
         return;
     }
+
     if (seq_length_ == generate_input_->inputLength()) {
-        first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();;
+        first_token_latency_us_ = first_token_time_us_ - begin_time_us_;
     }
     size_t max_token_nums = max_token_num();
     if (seq_length_ + num_new_tokens > max_token_nums) {
@@ -609,7 +672,8 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
-    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);
+    // TODO(xinfei.sxf) fix this
+    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss, update_queue);
 }
 
 
@@ -656,7 +720,7 @@ void GenerateStream::reportMetric() {
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = tileNum();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-            collector.first_token_latency_us = first_token_time_us_;
+            collector.first_token_latency_us = first_token_latency_us_;
             collector.wait_latency_us        = wait_time_us_;
             collector.pause_latency_us       = pause_time_us_;
             collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
@@ -696,6 +760,12 @@ void GenerateStream::resetCommonLen() {
     }
 }
 
+int GenerateStream::reuseBlockSize() const {    
+    int reuse_length = reuseLength();
+    int seq_size_per_block = seqSizePerBlock();
+    return reuse_length / seq_size_per_block;
+}
+
 void GenerateStream::setSeqLength(int seq_length) {
     if (seq_length > seq_length_) {
         start_check_seq_length_ = seq_length_ + 1;
@@ -727,6 +797,14 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
         loss_ = nullptr;
     }
     stream_cache_resource_.setStream(this);
+}
+
+GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
+    return {begin_time_us_, first_token_time_us_, first_token_latency_us_};
+}
+
+bool GenerateStream::queryPdSep() const {
+    return generate_input_->generate_config->pd_separation;
 }
 
 }  // namespace rtp_llm

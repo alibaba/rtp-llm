@@ -9,7 +9,7 @@ from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.structure.request_extractor import request_id_field_name
-from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_master_info
+from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_master_info, g_worker_info
 
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from maga_transformer.test.utils.port_util import get_consecutive_free_ports
@@ -30,8 +30,10 @@ class InferenceWorkerTest(TestCase):
         self.inference_worker = self.create_inference_worker()
 
     def create_inference_worker(self):
-        port_list = get_consecutive_free_ports(3)
+        port_list = get_consecutive_free_ports(1)
+        os.environ['START_PORT'] = str(port_list[0])
         update_master_info('0.0.0.0', int(port_list[0]))
+        g_worker_info.reload()
         self.fake_model_loader = FakeModelLoader(model_type='llama',
                                                  tokenizer_path=self.tokenizer_path,
                                                  ckpt_path=self.ckpt_path,

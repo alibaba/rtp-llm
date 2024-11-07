@@ -208,6 +208,11 @@ void SpeculativeEngine::loop() {
 
 absl::Status SpeculativeEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
+
+}
+
+void SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {

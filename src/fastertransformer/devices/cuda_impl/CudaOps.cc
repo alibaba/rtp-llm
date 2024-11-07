@@ -228,6 +228,7 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
 
 inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
+        case DataType::TYPE_BOOL: return ncclInt8;
         case DataType::TYPE_INT8: return ncclInt8;
         case DataType::TYPE_INT32: return ncclInt32;
         case DataType::TYPE_INT64: return ncclInt64;

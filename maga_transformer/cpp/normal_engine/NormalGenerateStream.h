@@ -27,12 +27,15 @@ public:
 
     absl::StatusOr<GenerateOutputs> nextOutput() override;
 
+    bool hasOutput() override;
+
     void updateOutput(const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss) override;
+                      const ft::BufferPtr& loss,
+                      bool                 update_queue = true) override;
 
 private:
     void            updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs);

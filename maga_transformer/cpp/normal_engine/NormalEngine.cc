@@ -53,7 +53,8 @@ NormalEngine::~NormalEngine() {
 }
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
+    std::shared_ptr<GenerateStream> stream =
+            std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
     if (mode == preRunMode::warm_up) {
         stream->setPerfTest(true);
     } else if (mode == preRunMode::build_system_prompt) {
@@ -94,7 +95,7 @@ void NormalEngine::initLoadBalance() {
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     auto stream = enqueue(fake_input);
     while(!stream->finished() && !stream->stopped()) {
-        FT_LOG_INFO("wait load balance int run over for 1s");
+        FT_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
     FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)", step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
@@ -167,6 +168,15 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
+std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, params_, resource_context_, metrics_reporter_);
+    return stream;
+}
+
+void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    (void)scheduler_->enqueue(stream);
+}
+
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, params_, resource_context_, metrics_reporter_);
     (void)scheduler_->enqueue(stream);
@@ -174,7 +184,6 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
 }
 
 absl::Status NormalEngine::step() {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
         if (scheduler_->empty() || step_recorder_.empty()) {
@@ -186,6 +195,7 @@ absl::Status NormalEngine::step() {
             return absl::OkStatus();
         }
     }
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     auto status = executor_->process(streams);
     if (device_->getDeviceProperties().tp_rank == 0) {
@@ -199,6 +209,10 @@ absl::Status NormalEngine::step() {
         step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
     }
     return status;
+}
+
+const ft::GptInitParameter NormalEngine::gptInitParameter() const {
+    return params_;
 }
 
 }  // namespace rtp_llm

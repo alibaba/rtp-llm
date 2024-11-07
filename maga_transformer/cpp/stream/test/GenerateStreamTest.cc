@@ -62,4 +62,29 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testConstructCacheKey) {
+    CacheConfig cache_config(1, 4, 1, 1, 1, ft::TYPE_INT8);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
+
+    std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+    std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+    size_t num = 1000;
+    vector<int> vec;
+    for (size_t i = 0; i < num; i++) {
+        vec.push_back(1000 + i);
+    }
+    std::vector<size_t>             shape = {num};
+    generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
+    generate_input->generate_config = generate_config;
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ft::GptInitParameter params;
+    params.max_seq_len_ = 2048;
+    params.use_cache_store_ = true;
+
+    for (uint32_t i = 0; i < 5; i++) {
+        NormalGenerateStream stream(generate_input, params, resource_context, nullptr);
+    }
+}
+
 }  // namespace rtp_llm

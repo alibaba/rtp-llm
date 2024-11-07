@@ -24,6 +24,12 @@ public:
         return ptr;
     };
 
+    void* mallocSync(size_t size) {
+        void* ptr = nullptr;
+        ROCM_CHECK(Alloc(&ptr, size));
+        return ptr;
+    };
+
     void free(void** ptr) {
         ROCM_CHECK(Free(*ptr));
         *ptr = nullptr;

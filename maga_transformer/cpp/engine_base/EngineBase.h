@@ -19,7 +19,7 @@ enum preRunMode {
 class EngineBase {
 public:
     EngineBase(const EngineInitParams& params);
-    virtual ~EngineBase() {}
+    virtual ~EngineBase();
 
     static void initDevices(const EngineInitParams& params);
     ft::DeviceBase* getDevice() {
@@ -34,6 +34,10 @@ public:
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
+    virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
+
+    virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
+
     virtual absl::Status stop() = 0;
 
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) = 0;
@@ -42,8 +46,13 @@ public:
         return LoadBalanceInfo();
     }
 
+    virtual const ResourceContext& resourceContext() const {
+        return resource_context_;
+    }
+
 protected:
     ft::DeviceBase* device_;
+    ResourceContext                    resource_context_;
     std::shared_ptr<lora::LoraManager> lora_manager_;
 };
 

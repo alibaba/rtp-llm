@@ -15,7 +15,6 @@ namespace fastertransformer {
 BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allocator)
     : device_allocator_(device_allocator)
     , host_allocator_(host_allocator)
-    , device_max_allocated_bytes_(0)
     , trace_memory_(getenv("RTP_LLM_TRACE_MEMORY"))
     , trace_malloc_stack_(getenv("RTP_LLM_TRACE_MALLOC_STACK"))
 {
@@ -45,7 +44,8 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
     const auto shape = params.dims;
     const auto alloc_bytes = accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>())
                            * getTypeSize(params.type);
-    const auto data = allocator->malloc(alloc_bytes);
+    const auto data = hints.allocate_type == BufferAllocateType::ASYNC ?
+                        allocator->malloc(alloc_bytes) : allocator->mallocSync(alloc_bytes);
     const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
     const auto buffer = new Buffer(allocator->memoryType(), params.type, shape, data, deleter);
     return BufferPtr(buffer);
@@ -68,7 +68,7 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
         allocation_records_[buffer->data()] = record;
     }
     if (trace_memory_) {
-        FT_LOG_DEBUG("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
+        FT_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
                      buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
         auto status = queryStatus();
         const auto device_consumed_bytes = status.device_allocated_bytes + status.device_fragmented_bytes;

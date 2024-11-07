@@ -37,6 +37,12 @@ def embedding_arpc_deps():
         actual = "//maga_transformer/cpp/embedding_engine:embedding_engine_arpc_server_impl"
     )
 
+def subscribe_deps():
+    native.alias(
+        name = "subscribe_deps",
+        actual = "//maga_transformer/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
+    )
+
 def whl_deps():
     return select({
         "//:using_cuda12": ["torch==2.1.2+cu121"],

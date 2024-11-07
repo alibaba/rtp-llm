@@ -14,6 +14,7 @@ build --copt -Wno-attributes # pybind11
 build --copt -Wno-stringop-truncation # grpc
 build --copt -Wno-stringop-overflow # grpc
 build --copt -Wno-maybe-uninitialized # protobuf
+build --copt -Wno-format-overflow # cm2
 build --cxxopt -Wno-class-memaccess # grpc
 build --copt -Wno-deprecated-declarations
 build --experimental_cc_implementation_deps
@@ -44,15 +45,14 @@ build:cuda --host_action_env TF_NEED_CUDA="1"
 # 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100
 build:cuda --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
 build:cuda --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
-build:cuda --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:$LD_LIBRARY_PATH
-build:cuda --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:$LD_LIBRARY_PATH
+build:cuda --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:$LD_LIBRARY_PATH"
+build:cuda --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:$LD_LIBRARY_PATH"
 build:cuda --linkopt="-L/usr/local/cuda/lib64/stubs/"
 build:cuda --action_env NCCL_INSTALL_PATH="/usr/local/cuda/"
 build:cuda --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
 build:cuda --action_env TF_NCCL_VERSION="2"
 build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 build:cuda --action_env TF_CUDNN_VERSION="8"
-
 
 # 8.9 = L, 9.0 = H800
 build:cuda12 --config=cuda

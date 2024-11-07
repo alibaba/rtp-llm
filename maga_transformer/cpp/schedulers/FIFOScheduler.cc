@@ -15,6 +15,8 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     max_context_batch_size_(params.max_context_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     enable_partial_fallback_(params.enable_partial_fallback_),
+    // not support enable_whole_fallback_ when use pd_speration
+    enable_whole_fallback_(params.use_cache_store_ == false),
     enable_fast_gen_(params.enable_fast_gen_),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {}
@@ -36,6 +38,19 @@ absl::Status FIFOScheduler::stop() {
     }
     cond_.notify_all();
     return absl::OkStatus();
+}
+
+void FIFOScheduler::evaluateRunningRemote() {
+    for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+        if ((*it)->needRemoteGenerate()) {
+            (*it)->setRemoteGenerate();
+            remote_running_streams_.emplace_back(*it);
+            FT_LOG_DEBUG("evict remote running stream [%ld]", (*it)->streamId());
+            it = running_streams_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
@@ -70,8 +85,11 @@ int FIFOScheduler::runningNextBlockNum(size_t reserve_step) const {
 }
 
 // TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
-void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
+tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
     // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
+    int fallback_streams = 0;
+    int error_streams = 0;
+
     if (enable_partial_fallback_) {
         for (auto& stream : waiting_streams_) {
             int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
@@ -83,23 +101,27 @@ void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
                     "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                     stream->streamId(), stream->inputLength(), stream->seqLength(), stream->maxBlockSize(), need_block_num);
                 stream->tryReleaseKVBlock(need_block_num);
+                fallback_streams++;
             }
         }
     }
 
-    while (!running_streams_.empty()) {
-        int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
-        if (need_block_num <= 0) {
-            break;
+    if (enable_whole_fallback_) {
+        while (!running_streams_.empty()) {
+            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
+            if (need_block_num <= 0) {
+                break;
+            }
+            auto& last_stream = *(running_streams_.rbegin());
+            int need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
+            FT_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
+                last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength(), last_stream->maxBlockSize(), need_release_blocks);
+            last_stream->tryReleaseKVBlock(need_release_blocks);
+            last_stream->setPaused();
+            waiting_streams_.emplace_front(last_stream);
+            running_streams_.pop_back();
+            fallback_streams++;
         }
-        auto& last_stream = *(running_streams_.rbegin());
-        int need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
-        FT_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
-            last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength(), last_stream->maxBlockSize(), need_release_blocks);
-        last_stream->tryReleaseKVBlock(need_release_blocks);
-        last_stream->setPaused();
-        waiting_streams_.emplace_front(last_stream);
-        running_streams_.pop_back();
     }
 
     if (enable_fast_gen_) {
@@ -114,6 +136,7 @@ void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             (*it)->releaseResource();
             FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
+            error_streams++;
         } else {
             if (enable_fast_gen_) {
                 token_capacity_ -= result.value();
@@ -122,6 +145,7 @@ void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             it++;
         }
     }
+    return {fallback_streams, error_streams};
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
@@ -162,6 +186,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             if ((*it)->setRunning()) {
                 new_streams.emplace_back(*it);
                 it = waiting_streams_.erase(it);
+            } else {
+                (*it)->releaseResource();
+                it++;
             }
         } else if (running_streams_.empty() && new_streams.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
@@ -181,18 +208,18 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
     unique_lock<mutex> lock(lock_);
     cond_.wait(lock, [this]{
-        return stop_ || !waiting_streams_.empty() || !running_streams_.empty();
+        return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
     });
+    evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
+    evictDoneStreams(remote_running_streams_);
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
-    auto running_stream_size = running_streams_.size();
-    evaluateRunningNext(reserve_step);
-    auto fallback_stream_size = running_stream_size - running_streams_.size();
+    auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);
     auto new_stream = scheduleNew(reserve_step);
     running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
-    reportMetrics(fallback_stream_size);
+    reportMetrics(fallback_streams);
     return running_streams_;
 }
 

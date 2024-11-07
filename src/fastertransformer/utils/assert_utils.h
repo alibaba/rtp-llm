@@ -32,13 +32,13 @@ namespace fastertransformer {
     throwRuntimeError(file, line, info);
 }
 
-#define FT_CHECK_WITH_INFO(val, info, ...)                              \
-    do {                                                                \
-        bool is_valid_val = (val);                                      \
-	if (!is_valid_val) {						\
-  	    fastertransformer::myAssert(					\
-                __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
-	}								\
+#define FT_CHECK_WITH_INFO(val, info, ...)                                                  \
+    do {                                                                                    \
+        bool is_valid_val = (val);                                                          \
+        if (!is_valid_val) {						                                        \
+            fastertransformer::myAssert(					                                \
+                    __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__));    \
+        }								                                                    \
     } while (0)
 
 #define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")

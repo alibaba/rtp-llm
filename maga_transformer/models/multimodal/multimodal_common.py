@@ -1,6 +1,7 @@
 from typing import List, Tuple, Union
 
 import torch
+from threading import Lock
 try:
     from decord import VideoReader, cpu
 except ModuleNotFoundError:

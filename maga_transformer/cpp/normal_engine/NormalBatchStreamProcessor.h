@@ -20,7 +20,8 @@ public:
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ft::GptInitParameter& params):
+    NormalBatchStreamProcessor(const ft::GptInitParameter& params, bool warm_up,
+                                size_t block_size, size_t scale_block_size):
         num_layers_(params.num_layers_),
         vocab_size_(params.vocab_size_),
         use_int8_kv_cache_(params.kv_cache_data_type_ == ft::DataType::TYPE_INT8),
@@ -28,6 +29,10 @@ public:
         is_multimodal_(params.is_multimodal_),
         mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),
         position_id_len_factor_(params.position_id_len_factor_),
+        pd_separation_(params.pd_separation_),
+        warm_up_(warm_up),
+        block_size_(block_size),
+        scale_block_size_(scale_block_size),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     virtual absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const MergedOutput& merge_outputs) const;
@@ -51,6 +56,10 @@ protected:
     bool             is_multimodal_;
     PositionIdsStyle mm_position_ids_style_;
     size_t           position_id_len_factor_;
+    bool             pd_separation_;
+    bool             warm_up_;
+    size_t           block_size_;
+    size_t           scale_block_size_;
     ft::DeviceBase*  device_;
 };
 

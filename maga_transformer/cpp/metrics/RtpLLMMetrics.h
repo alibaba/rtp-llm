@@ -14,6 +14,38 @@ class MutableMetric;
 
 namespace rtp_llm {
 
+class RPCMetricsCollector final {
+public:
+    bool    qps                         = false;
+    bool    cancel_qps                  = false;
+    bool    error_qps                   = false;
+    int     retry_times                 = 0;
+    int64_t onflight_request            = 0;
+    int64_t load_latency_us             = 0;
+    int64_t wait_load_latency_us        = 0;
+    int64_t remote_compute_latency_us   = 0;
+    int64_t total_latency_us            = 0;
+};
+
+class RPCMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RPCMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* qps_metric                         = nullptr;
+    kmonitor::MutableMetric* cancel_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* error_qps_metric                   = nullptr;
+    kmonitor::MutableMetric* onflight_request_metric            = nullptr;
+    kmonitor::MutableMetric* load_latency_us_metric             = nullptr;
+    kmonitor::MutableMetric* wait_load_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* remote_compute_latency_us_metric   = nullptr;
+    kmonitor::MutableMetric* total_latency_us_metric            = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMStreamMetricsCollector final {
 public:
     bool qps        = false;
@@ -216,10 +248,12 @@ private:
 
 class RtpLLMExecutorMetricsCollector final {
 public:
-    int64_t context_batch_size  = 0;
-    int64_t generate_batch_size = 0;
-    int64_t execute_token_size  = 0;
-    int64_t max_seq_len         = 0;
+    int64_t context_batch_size                      = 0;
+    int64_t generate_batch_size                     = 0;
+    int64_t context_batch_size_when_has_context     = 0;
+    int64_t generate_batch_size_when_has_context    = 0;
+    int64_t execute_token_size                      = 0;
+    int64_t max_seq_len                             = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -228,10 +262,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMExecutorMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_batch_size_metric  = nullptr;
-    kmonitor::MutableMetric* generate_batch_size_metric = nullptr;
-    kmonitor::MutableMetric* execute_token_size_metric  = nullptr;
-    kmonitor::MutableMetric* max_seq_len                = nullptr;
+    kmonitor::MutableMetric* context_batch_size_metric                      = nullptr;
+    kmonitor::MutableMetric* generate_batch_size_metric                     = nullptr;
+    kmonitor::MutableMetric* context_batch_size_when_has_context_metric     = nullptr;
+    kmonitor::MutableMetric* generate_batch_size_when_has_context_metric    = nullptr;
+    kmonitor::MutableMetric* execute_token_size_metric                      = nullptr;
+    kmonitor::MutableMetric* max_seq_len                                    = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -240,6 +276,8 @@ private:
 class RtpLLMCacheMetricsCollector final {
 public:
     int64_t kv_cache_item_num = 0;
+    int64_t kv_cache_free_blocks = 0;
+    int64_t kv_cache_available_blocks = 0;
     int64_t kv_cache_left_seq = 0;
     float kv_cache_used_ratio = 0;
 };
@@ -251,6 +289,8 @@ public:
 
 public:
     kmonitor::MutableMetric* kv_cache_item_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_free_blocks_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_available_blocks_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_left_seq_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_used_ratio_metric = nullptr;
 

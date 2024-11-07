@@ -82,6 +82,12 @@ class InferenceServer(object):
                             self._openai_endpoint.chat_renderer)
                     self._lora_manager = LoraManager(self._inference_worker.model)
 
+    def stop(self):
+        self._inference_worker.stop()
+
+    def ready(self):
+        return self._inference_worker.ready()
+
     @property
     def is_embedding(self):
         return self._embedding_endpoint is not None

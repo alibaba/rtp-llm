@@ -6,6 +6,10 @@ void* Allocator<AllocatorType::CPU>::malloc(size_t size) {
     return std::malloc(size);
 }
 
+void* Allocator<AllocatorType::CPU>::mallocSync(size_t size) {
+    return malloc(size);
+}
+
 void  Allocator<AllocatorType::CPU>::free(void** ptr) {
     std::free(*ptr);
     *ptr = nullptr;

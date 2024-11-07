@@ -43,7 +43,8 @@ public:
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss) override {
+                      const ft::BufferPtr& loss,
+                      bool                 update_queue = false) override {
         device_->copy({(*output_buffer_->tokens)[0], (*new_tokens)[0]});
 
         // TODO(xyz): optimize deepclone

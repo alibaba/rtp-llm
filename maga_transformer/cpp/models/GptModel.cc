@@ -79,6 +79,12 @@ void GptModel::prepareAttentionInputs(
         ft::DataType dtype,
         AttentionCommonInputs& attention_inputs)
 {
+    attention_inputs.warmup = inputs.warmup;
+    if (!inputs.warmup && inputs.pd_separation) {
+        FT_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_offset, "failed to get information for pd seperation store cache");
+        CacheStoreInputs cache_store_inputs({inputs.input_lengths, inputs.prefix_lengths, inputs.kv_cache_offset});
+        attention_inputs.cache_store_inputs = cache_store_inputs;
+    }
     if (inputs.kv_cache_offset) {
         checkKvBlocksShape(inputs.kv_cache_offset);
         KvCacheInfo kv_cache;
@@ -157,6 +163,13 @@ void GptModel::prepareAttentionInputs(
             (bool)weights_.linear_bias_slopes,
             false // sparse head not support now
         });
+
+    attention_inputs.cache_keys = inputs.cache_keys;
+    attention_inputs.query_id = inputs.query_id;
+    attention_inputs.query_pd_separation = inputs.query_pd_separation;
+    attention_inputs.block_size = inputs.block_size;
+    attention_inputs.scale_block_size = inputs.scale_block_size;
+    attention_inputs.pd_separation = inputs.pd_separation;
 
     if (context_batch_size && prep_output.need_mask) {
         attention_inputs.attention_mask = device_->attentionMask({
@@ -276,7 +289,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto kv_cache_offset = inputs.kv_cache_offset;
     AttentionCommonInputs attention_common_inputs({
         *input_lengths,
-        *sequence_lengths
+        *sequence_lengths,
     });
 
     prepareAttentionInputs(inputs, dtype, attention_common_inputs);
@@ -286,6 +299,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     printBufferData(*hidden, "input_hidden");
     // layers
     for (int i = 0; i < layer_num; ++i) {
+        attention_common_inputs.layer_id = i;
         const auto& layer = weights_.layers[i];
 
         // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead

@@ -157,6 +157,7 @@ int StreamCacheResource::maxBlockSize() const {
 }
 
 const BatchKVCacheBlockAddr& StreamCacheResource::kvCache() const {
+    batch_block_addr_.check();
     return batch_block_addr_;
 }
 

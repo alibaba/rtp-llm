@@ -103,6 +103,7 @@ public:
     int                                              fallback_tokens = 0;
     int                                              fallback_times  = 0;
     int                                              step_output_len = 0;
+    bool                                             pd_sep          = false;
     std::optional<ft::ConstBufferPtr>                cum_log_probs;
 };
 
@@ -137,6 +138,7 @@ enum class GenerateState {
     PAUSED,
     STOPPED,
     FINISHED,
+    REMOTE_RUNNING
 };
 
 struct GenerateStatus {

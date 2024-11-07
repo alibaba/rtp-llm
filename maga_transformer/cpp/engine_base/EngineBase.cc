@@ -14,6 +14,12 @@ EngineBase::EngineBase(const EngineInitParams& params) {
     lora_manager_ = std::make_shared<lora::LoraManager>();
 }
 
+EngineBase::~EngineBase() {}
+
+std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    throw std::runtime_error("not implemeted");
+}
+
 void EngineBase::initDevices(const EngineInitParams& params) {
     fastertransformer::Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
     fastertransformer::Logger::getEngineLogger().flush();

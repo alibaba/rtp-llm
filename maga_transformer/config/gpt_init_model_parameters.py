@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
-from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
+from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info, g_worker_info
 from maga_transformer.ops import GptInitParameter
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
@@ -158,8 +158,15 @@ class GptInitModelParameters:
         self.need_ffn_act_scale = False
         self.nccl_ip = g_master_info.ip
         self.nccl_port = g_master_info.gpt_nccl_port
-        self.model_rpc_port = g_master_info.model_rpc_port if g_parallel_info.tp_rank == 0 else -1
+        self.model_rpc_port = g_worker_info.rpc_server_port
         self.http_port = g_master_info.http_port if g_parallel_info.tp_rank == 0 else -1
+        self.cache_store_listen_port = g_worker_info.cache_store_listen_port
+        self.cache_store_connect_port = g_worker_info.cache_store_connect_port
+        self.cache_store_rdma_listen_port = g_worker_info.cache_store_rdma_listen_port
+        self.cache_store_rdma_connect_port = g_worker_info.cache_store_rdma_connect_port
+        self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
+        self.worker_port_offset = g_worker_info.need_port_num()
+        
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
         self.add_special_tokens = True
@@ -311,7 +318,7 @@ class GptInitModelParameters:
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
-        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
+        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')        
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
         logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
         self.warm_up = bool(int(os.environ.get('WARM_UP', 0)))
@@ -319,9 +326,26 @@ class GptInitModelParameters:
         self.warm_up_with_loss = bool(int(os.environ.get('WARM_UP_WITH_LOSS', 0)))
         logging.info(f'warm_up_with_loss: {self.warm_up_with_loss}')
 
-        # TODO(xinfei.sxf) fix name
         self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
         logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
+
+        self.pd_separation = bool(int(os.environ.get('PD_SEPARATION', 0)))
+        logging.info(f'pd_separation: {self.pd_separation}')
+        if self.pd_separation:
+            self.prefill_retry_times = int(os.environ.get('PREFILL_RETRY_TIMES', 0))
+            logging.info(f'prefill_retry_times: {self.prefill_retry_times}')
+            self.prefill_retry_timeout_ms = int(os.environ.get('PREFILL_RETRY_TIMEOUT_MS', 0))
+            logging.info(f'prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}')
+            self.pd_sep_enable_fallback = bool(int(os.environ.get('PD_SEP_ENABLE_FALLBACK', 0)))
+            logging.info(f'pd_sep_enable_fallback: {self.pd_sep_enable_fallback}')
+
+        self.use_cache_store = bool(int(os.environ.get('USE_CACHE_STORE', 0)))
+        logging.info(f'use_cache_store: {self.use_cache_store}')
+        if self.use_cache_store:
+            self.cache_store_rdma_mode = bool(int(os.environ.get('CACHE_STORE_RDMA_MODE', 1)))
+            logging.info(f'cache_store_rdma_mode: {self.cache_store_rdma_mode}')
+            self.load_cache_timeout_ms = int(os.environ.get('LOAD_CACHE_TIMEOUT_MS', 0))
+            logging.info(f'load_cache_timeout_ms: {self.load_cache_timeout_ms}')
 
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')

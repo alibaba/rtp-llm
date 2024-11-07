@@ -163,6 +163,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
+        "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
     ],
     visibility = ["//visibility:public"],
 )
@@ -389,8 +390,8 @@ cc_library(
 
 cc_library(
     name = "model_rpc_server",
-    srcs = ["model_rpc/ModelRpcServer.cc", "model_rpc/QueryConverter.cc"],
-    hdrs = ["model_rpc/ModelRpcServer.h", "model_rpc/QueryConverter.h"],
+    srcs =  glob(["model_rpc/*.cc"]),
+    hdrs =  glob(["model_rpc/*.h"]),
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "//maga_transformer/cpp:dataclass",
@@ -400,6 +401,8 @@ cc_library(
         "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp:multimodal_processor",
+        "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
+        "//maga_transformer/cpp/disaggregate/load_balancer:load_balancer",
     ],
     visibility = ["//visibility:public"]
 )

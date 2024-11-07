@@ -42,6 +42,7 @@ public:
 
 public:
     void* malloc(size_t size) override;
+    void* mallocSync(size_t size) override;
     void free(void** ptr) override;
 
 protected:
@@ -49,7 +50,9 @@ protected:
     virtual ReallocType isReMalloc(void* address, size_t size) const;
 
     virtual void* doMalloc(size_t size) = 0;
+    virtual void* doMallocSync(size_t size) = 0;
     virtual void doFree(void* ptr) = 0;
+
     void destroy();
 
 private:
@@ -64,6 +67,7 @@ public:
     ~Allocator();
 
     void* doMalloc(size_t size) override;
+    void* doMallocSync(size_t size) override;
     void doFree(void* ptr) override;
 };
 
@@ -78,6 +82,7 @@ public:
     }
 
     void* doMalloc(size_t size) override;
+    void* doMallocSync(size_t size) override;
     void doFree(void* ptr) override;
 };
 

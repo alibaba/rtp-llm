@@ -26,9 +26,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     sampler_.reset(new Sampler(sampler_params));
 
     model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
+    // when warmup, cache manager maybe nullptr
+    auto block_size = cache_manager ? cache_manager->cacheConfig().kv_block_stride: 0;
+    auto scale_block_size = cache_manager ? cache_manager->cacheConfig().kv_scale_block_stride: 0;
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
+        params.gpt_init_parameter, warm_up_, block_size, scale_block_size));
 }
-
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
@@ -62,8 +65,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {
     if (metrics_reporter_) {
         RtpLLMExecutorMetricsCollector executor_collector;
-        executor_collector.context_batch_size  = stream_groups.contextStreams().size();
+        executor_collector.context_batch_size  = stream_groups.totalContextBatchSize();
         executor_collector.generate_batch_size = stream_groups.totalDecodeBatchSize();
+        if (executor_collector.context_batch_size != 0) {
+            executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
+            executor_collector.generate_batch_size_when_has_context = executor_collector.generate_batch_size;
+        }
         executor_collector.execute_token_size  = stream_groups.modelExecuteTokenSize();
         executor_collector.max_seq_len         = stream_groups.maxSeqLen();
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);

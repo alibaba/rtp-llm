@@ -3,8 +3,11 @@
 #include <cstddef>
 #include <memory>
 #include <shared_mutex>
+// TODO: remove this macro, split in the file level
+#if USING_CUDA
 #include <cuda.h>
 #include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm {
 
@@ -49,9 +52,11 @@ private:
     void setRdmaMode(bool rdma_mode);
 
     bool                            rdma_mode_{false};
-    bool                            memcpyImpl(void* dst, const void* src, size_t count, enum cudaMemcpyKind kind);
     std::unique_ptr<MemoryUtilBase> instance_;
-    cudaStream_t                    stream_;
+#if USING_CUDA
+    bool         memcpyImpl(void* dst, const void* src, size_t count, enum cudaMemcpyKind kind);
+    cudaStream_t stream_;
+#endif
 };
 
 }  // namespace rtp_llm

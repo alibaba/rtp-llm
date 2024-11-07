@@ -41,7 +41,8 @@ public:
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss) override {
+                      const ft::BufferPtr& loss,
+                      bool                 update_queue = true) override {
         // TODO(xyz): optimize deepclone
         if (all_probs) {
             // lazy allocate buffer

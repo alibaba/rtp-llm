@@ -106,7 +106,6 @@ __launch_bounds__(TPB) __global__ void moeTopK(const float* inputs_after_softmax
     cub_kvp     thread_kvp;
     cub::ArgMax arg_max;
 
-    const int num_rows  = gridDim.x;
     const int block_row = blockIdx.x;
 
     const bool row_is_active      = finished ? !finished[block_row] : true;

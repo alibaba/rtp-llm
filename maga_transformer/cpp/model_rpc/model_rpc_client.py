@@ -9,7 +9,7 @@ import grpc
 import torch
 
 from maga_transformer.utils.util import AtomicCounter
-from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
+from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
@@ -18,6 +18,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputsPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
 from maga_transformer.distribute.worker_info import g_master_info
+from maga_transformer.distribute.worker_info import g_worker_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 request_counter = AtomicCounter()
 
@@ -115,10 +116,12 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     output_len=output_pb.aux_info.output_len,
                                     step_output_len=output_pb.aux_info.step_output_len,
                                     fallback_tokens=output_pb.aux_info.fallback_tokens,
-                                    fallback_times=output_pb.aux_info.fallback_times
+                                    fallback_times=output_pb.aux_info.fallback_times,
+                                    pd_sep=output_pb.aux_info.pd_sep,
                                     )
-        if output_pb.aux_info.HasField('cum_log_probs'):
-            output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
+        # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
+        # if output_pb.aux_info.HasField('cum_log_probs'):
+        #     output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
         output_py.output_ids = trans_tensor(output_pb.output_ids)
         output_py.input_ids = input_py.token_ids.reshape(1, -1)
         if output_pb.HasField('hidden_states'):
@@ -141,7 +144,8 @@ class ModelRpcClient(object):
     def __init__(self, address: Optional[str] = None):
         # 创建到服务器的连接
         if not address:
-            address = f'localhost:{g_master_info.model_rpc_port}'
+            address = f'localhost:{g_worker_info.rpc_server_port}'
+        logging.info("client connect to rpc address: " + address)
         self._address = address
 
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
@@ -149,7 +153,7 @@ class ModelRpcClient(object):
         response_iterator = None
         try:
             async with grpc.aio.insecure_channel(self._address) as channel:
-                stub = ModelRpcServiceStub(channel)
+                stub = RpcServiceStub(channel)
                 response_iterator = stub.generate_stream(input_pb)
                 # 调用服务器方法并接收流式响应
                 count = 0

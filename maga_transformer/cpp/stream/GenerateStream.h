@@ -16,12 +16,14 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
+
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ft::GptInitParameter& params,
                    const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter);
     virtual ~GenerateStream() {
         reportMetric();
+        releaseResource();
     }
 
 public:
@@ -29,21 +31,25 @@ public:
     void                                cancel();
 
     virtual absl::StatusOr<GenerateOutputs>     nextOutput() = 0;
+    virtual bool hasOutput() {return false;}
+    
     virtual void updateOutput(
                       const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
                       const ft::BufferPtr& cum_log_probs,
                       const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss) = 0;
+                      const ft::BufferPtr& loss,
+                      bool update_queue = true) = 0;
 
-    void update(const ft::BufferPtr&    new_tokens,
-                int   num_new_tokens,
+    void update(const ft::BufferPtr& new_tokens,
+                int                  num_new_tokens,
                 const ft::BufferPtr& hidden_states,
                 const ft::BufferPtr& logits,
                 const ft::BufferPtr& cum_log_probs,
                 const ft::BufferPtr& all_probs,
-                const ft::BufferPtr& loss);
+                const ft::BufferPtr& loss,
+                bool                 update_queue = true);
 
     void update(const GptModelOutputs& gpt_model_outputs,
                 SamplerOutput&   sampler_output);
@@ -52,6 +58,7 @@ public:
     virtual size_t scoreLen() const {
         return 1;
     }
+    
 
     // Only used in C++ world.
     virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
@@ -59,7 +66,13 @@ public:
     virtual int tryReleaseKVBlock(int nums);
     virtual void releaseResource();
     int nextNeedBlockNums(size_t reserve_step) const;
+    void setNeedReleaseResource(bool need_release_resource);
     void incrFallbackBlock(int fallback_blocks);
+
+    void constructCacheKey();
+    const std::vector<int32_t>& cacheKeys() const;
+    int reuseBlockSize() const;
+    const std::string& cacheStorePeer() const;
 
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -95,6 +108,7 @@ public:
     void setReuseLength(int reuse_length);
     int fallbackPrefixLength() const;
     void setFallbackPrefixLength(int fallback_prefix_length);
+    void incLastOutputPos();
 
     absl::StatusOr<int> acquireCapacity(int token_capacity);
     int currentChunkLen() const;
@@ -108,8 +122,8 @@ public:
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
     std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int currentExecuteTokenSize();
-    std::vector<int> contextTokens(int batch_idx) const;
-    std::vector<int> currentExecuteTokens(int batch_idx) const;
+    std::vector<int> contextTokens(int batch_idx = 0) const;
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
 
@@ -130,7 +144,13 @@ public:
     bool paused();
     std::string stopReason();
     bool finished();
+    bool running();
+    bool waiting();
+    bool finishedWithoutLock();
+    void cancelIfNotRunning();
     void setFinishedWithoutLock();
+    bool needRemoteGenerate() const;
+    void setRemoteGenerate();
     size_t iterCount() const;
 
     const ResourceContext& resourceContext() const;
@@ -161,11 +181,6 @@ public:
     }
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true);
-
-    void setNeedReleaseResource(bool need_release_resource) {
-        need_release_resource_ = need_release_resource;
-        stream_cache_resource_.setNeedReleaseResource(need_release_resource);
-    }
 
     void setReturnAllProbs(bool return_all_probs) {
         return_all_probs_ = return_all_probs;
@@ -227,6 +242,15 @@ public:
 
     std::vector<int> getLatestTokens(size_t token_num);
 
+public:
+    struct TimeInfo {
+        int64_t begin_time_us;
+        int64_t first_token_time_us;
+        int64_t first_token_latency_us;
+    };
+    TimeInfo getTimeInfo();
+    bool queryPdSep() const;
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
@@ -243,6 +267,7 @@ protected:
     int64_t                             pause_time_us_ = 0;
     int64_t                             wait_time_us_ = 0;
     int64_t                             first_token_time_us_ = 0;
+    int64_t                             first_token_latency_us_ = 0;
     StreamCacheResource                 stream_cache_resource_;
     SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_      = true;
@@ -268,7 +293,11 @@ protected:
     int                                 sp_edit_search_index_   = 0;
     bool                                sp_edit_first_time_     = true;
 
-    kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
+    bool                                need_remote_generate_   = false;
+    bool                                use_cache_store_        = false;
+    std::vector<int32_t>                cache_keys_;
+
+    kmonitor::MetricsReporterPtr        metrics_reporter_;
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
     ft::BufferPtr                       loss_;

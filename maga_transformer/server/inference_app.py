@@ -41,6 +41,9 @@ active_requests = AtomicCounter()
 server_shutdown = False
 
 class GracefulShutdownServer(Server):
+    def set_server(self, inference_server):
+        self.inference_server = inference_server
+
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
         global server_shutdown
@@ -49,6 +52,7 @@ class GracefulShutdownServer(Server):
         while active_requests.get() > 0:
             logging.info(f"wait {active_requests.get()} requests finish for 1s")
             await asyncio.sleep(1)
+        self.inference_server.stop()
         await super().shutdown(sockets)
 
 class InferenceApp(object):
@@ -79,8 +83,13 @@ class InferenceApp(object):
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
 
-        server = GracefulShutdownServer(config)
-        server.run()
+        try:
+            server = GracefulShutdownServer(config)
+            server.set_server(self.inference_server)
+            server.run()
+        except BaseException as e:
+            self.inference_server.stop()
+            raise e
 
     def create_app(self):
         middleware = [
@@ -96,10 +105,19 @@ class InferenceApp(object):
 
         def check_shutdown():
             global server_shutdown
-            if server_shutdown:
+            detail=""
+            ready = True
+            if server_shutdown :
+                detail = "this server has been shutdown"
+                ready = False
+            elif self.inference_server.ready() == False:
+                detail = "inference server is not ready"
+                ready = False
+
+            if not ready:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="this server has been shutdown"
+                    detail=detail
                 )
 
         @app.on_event("startup")

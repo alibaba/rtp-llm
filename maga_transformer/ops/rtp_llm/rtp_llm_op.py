@@ -33,5 +33,8 @@ class RtpLLMOp():
     def stop(self):
         self.ft_op.stop() # type: ignore
 
+    def ready(self):
+        return self.ft_op.ready()
+
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return self.ft_op.get_load_balance_info() # type: ignore

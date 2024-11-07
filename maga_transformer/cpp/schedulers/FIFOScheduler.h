@@ -1,6 +1,7 @@
 #pragma once
 
 #include <queue>
+#include <tuple>
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
@@ -31,8 +32,10 @@ public:
 
 private:
     void evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;
-    bool evaluateNewStream(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream, size_t reserve_step);
-    void evaluateRunningNext(size_t reserve_step);
+    bool evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
+                            const GenerateStreamPtr& new_stream, size_t reserve_step);
+    std::tuple<int, int> evaluateRunningNext(size_t reserve_step);
+    void evaluateRunningRemote();
     int  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
@@ -40,11 +43,13 @@ private:
 private:
     std::list<GenerateStreamPtr>        waiting_streams_;
     std::list<GenerateStreamPtr>        running_streams_;
+    std::list<GenerateStreamPtr>        remote_running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
     size_t                              max_seq_len_        = 0;
     size_t                              max_context_batch_size_ = 1;
     int                                 reserve_block_num_  = 0;
     bool                                enable_partial_fallback_ = false;
+    bool                                enable_whole_fallback_ = true;
     bool                                enable_fast_gen_    = false;
     int                                 fast_gen_max_context_len_    = 0;
     int                                 token_capacity_     = 0;

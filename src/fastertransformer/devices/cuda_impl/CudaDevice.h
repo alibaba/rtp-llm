@@ -58,6 +58,7 @@ private:
     void checkUseGroupGemm();
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
+    void initCacheStore(const DeviceInitParams& device_params);
 
 public:
     cudaStream_t getStream() {return stream_;}
@@ -105,6 +106,9 @@ protected:
                            const CudaGemmArguments arguments,
                            BufferPtr               output);
     void selectCuFMHARunner(const DevicePrepParams& params);
+
+    // for pd seperation
+    void writeCacheStore(DeviceBase* device, const AttentionModuleParams& params, rtp_llm::NormalCacheStore* cache_store, cudaStream_t stream);
 
 protected:
     cudaStream_t stream_;

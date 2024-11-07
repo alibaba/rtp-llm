@@ -14,7 +14,7 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params)
     while (true) {
         void* reserved_ptr = nullptr;
         try {
-            reserved_ptr = real_allocator_->malloc(real_reserve_size);
+            reserved_ptr = real_allocator_->mallocSync(real_reserve_size);
         } catch (std::exception& e) {
             FT_LOG_WARNING("TrackerAllocator reserve %lu bytes of memory [%d] exception: %s",
                            real_reserve_size, real_allocator_->memoryType(), e.what());
@@ -76,6 +76,23 @@ void* TrackerAllocator::malloc(size_t size) {
                        tracker_status.fragmented_size  / 1024 / 1024,
                        (tracker_status.available_size + tracker_status.allocated_size) / 1024 / 1024);
         ptr = real_allocator_->malloc(size);
+    }
+    return ptr;
+}
+
+void* TrackerAllocator::mallocSync(size_t size) {
+    if (size == 0) {
+        return nullptr;
+    }
+    void* ptr = nullptr;
+    if (memory_tracker_) {
+        ptr = memory_tracker_->allocate(size);
+    }
+    if (!ptr) {
+        FT_LOG_WARNING("TrackerAllocator failed to allocate %ld bytes of memory [%d]. "
+                       "Use real allocator directly as fallback.",
+                       size, real_allocator_->memoryType());
+        ptr = real_allocator_->mallocSync(size);
     }
     return ptr;
 }

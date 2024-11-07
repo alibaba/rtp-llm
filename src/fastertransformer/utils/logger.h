@@ -29,6 +29,7 @@
 #include "alog/Appender.h"
 #include "alog/Logger.h"
 #include "autil/EnvUtil.h"
+#include "autil/TimeUtility.h"
 
 #include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/string_utils.h"
@@ -153,6 +154,16 @@ private:
             break;                                                                                                     \
         }                                                                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
+    } while (0)
+
+#define FT_INTERVAL_LOG(logInterval, level, format, args...)                                                           \
+    do {                                                                                                               \
+        static int64_t logTimestamp;                                                                                   \
+        int64_t now = autil::TimeUtility::currentTimeInSeconds();                                                      \
+        if (now - logTimestamp > logInterval) {                                                                        \
+            FT_LOG(alog::LOG_LEVEL_##level, format, ##args);                                                                             \
+            logTimestamp = now;                                                                                        \
+        }                                                                                                              \
     } while (0)
 
 #define FT_LOG_TRACE(...) FT_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)

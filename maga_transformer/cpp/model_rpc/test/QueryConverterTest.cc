@@ -4,7 +4,7 @@
 
 #define private public
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
+#include "maga_transformer/cpp/model_rpc/LocalRpcServer.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"

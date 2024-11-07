@@ -50,6 +50,8 @@ public:
     std::vector<std::vector<int>> stop_words_list;
     std::vector<int>    sp_advice_prompt_token_ids;
 
+    bool pd_separation  = false;
+
     bool top1() {
         return top_k == 1;
     }
@@ -67,7 +69,9 @@ public:
                      << ", top_k:" << top_k
                      << ", top_p:" << top_p
                      << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", stop_words_list:" << vectorsToString(stop_words_list) << "}";
+                     << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", pd_separation: " << pd_separation
+                     << "}";
         return debug_string.str();
     }
 

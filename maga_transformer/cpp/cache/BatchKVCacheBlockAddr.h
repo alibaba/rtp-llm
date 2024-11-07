@@ -20,6 +20,7 @@ public:
     int                         maxBlockSize() const;
     const std::vector<int>&     blocks(int batch_id) const;
     void                        clear();
+    void                        check() const;
 
     std::string                 debugString() const;
 

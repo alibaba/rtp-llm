@@ -2,6 +2,7 @@
 
 #include <shared_mutex>
 #include <unordered_map>
+#include <memory>
 
 namespace rtp_llm {
 

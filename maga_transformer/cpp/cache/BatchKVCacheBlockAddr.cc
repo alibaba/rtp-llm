@@ -63,13 +63,22 @@ void BatchKVCacheBlockAddr::clear() {
     batch_offset.clear();
 }
 
+void BatchKVCacheBlockAddr::check() const {
+    FT_CHECK(!batch_offset.empty());
+    size_t block_size = batch_offset[0].size();
+    for (const auto& blocks : batch_offset) {
+        FT_CHECK(blocks.size() == block_size);
+    }
+}
+
 std::string BatchKVCacheBlockAddr::debugString() const {
     std::stringstream debug_string, batch_offset_string;
     for (size_t i = 0; i < batch_offset.size(); i++) {
-        batch_offset_string << "batch: " << i << " , block_id: ";
+        batch_offset_string << "batch:[" << i << "] , block:[";
         for (auto &v: batch_offset[i]) {
             batch_offset_string << v << ", ";
         }
+        batch_offset_string << "], ";
     }
 
     debug_string << "BatchKVCacheBlockAddr {" << batch_offset_string.str()

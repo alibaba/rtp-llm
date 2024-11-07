@@ -45,6 +45,13 @@ public:
         std::vector<float> loss;
     };
 
+    struct BlockAddrInfo {
+        void* k_addr = nullptr;
+        void* v_addr = nullptr;
+        void* k_scale_addr = nullptr;
+        void* v_scale_addr = nullptr;
+    };
+
 public:
     CacheManager(const CacheConfig& config, ft::DeviceBase* device,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
@@ -72,22 +79,27 @@ public:
     void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids, const std::vector<float>& loss = {});
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
-    // TODO(xinfei.sxf) fix this two index?
-    void setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
+    void setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
+    void setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
+    std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index, int layer_id);
     std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index);
     void blockCopy(int src_block_index, int dest_block_index);
 
+    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
     void reportMetricsLoop();
 
     void beamSearchKvUpdate(ft::BufferPtr src_block_offset,
                             ft::BufferPtr  target_block_offset);
 
 private:
+    uint32_t                                totalBlocks() const;
     void                                    initFreeBlock();
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndTpSync();
     void                                    initKvCache();
     MatchInfo                               matchImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds);
+    void                                    regUserMr();
+    void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
     MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids, const std::vector<std::vector<int>>& mm_bounds = {}, bool need_loss = false);
@@ -99,7 +111,7 @@ private:
                          const std::vector<float>& loss,
                          bool                      is_resident);
 
-    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& tgt_index);
+    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& target_index);
     SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
     void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
@@ -116,13 +128,15 @@ private:
     BlockCache      block_cache_;
     KVCacheBuffer   kv_cache_;
     ft::DeviceBase* device_;
+
+    ft::BufferPtr   cache_aligned_buffer_;
+    void*           cache_base_ptr_;
+
     bool            stop_ = false;
     std::thread     metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
-    // tmp
-    ft::BufferPtr cache_aligned_buffer_;
-    void*         cache_base_ptr_;
+    std::mutex mutex_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

@@ -61,6 +61,13 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.master_ip   = params.nccl_ip_;
     device_params.master_port = params.nccl_port_;
     device_params.tokens_per_block = params.seq_size_per_block_;
+    // rdma params
+    device_params.use_cache_store = params.use_cache_store_;
+    device_params.cache_store_rdma_mode = params.cache_store_rdma_mode_;
+    device_params.cache_store_rdma_listen_port = params.cache_store_rdma_listen_port_;
+    device_params.cache_store_rdma_connect_port = params.cache_store_rdma_connect_port_;
+    device_params.cache_store_listen_port = params.cache_store_listen_port_;
+    device_params.cache_store_connect_port = params.cache_store_connect_port_;
     int max_batch_size =
         params.max_context_batch_size_ + params.max_generate_batch_size_;
     device_params.max_batch_size =
@@ -90,6 +97,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
         auto device = it->second(device_params);
         getCurrentDevices().push_back(device);
     }
+    FT_LOG_INFO("init devices done");
 }
 
 unordered_map<DeviceType, DeviceCreatorType>& DeviceFactory::getRegistrationMap() {

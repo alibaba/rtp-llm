@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import os
 import socket
@@ -73,15 +72,25 @@ class ParallelInfo(object):
 g_parallel_info = ParallelInfo.from_env()
 
 class WorkerInfo(object):
-    def __init__(self, ip: str, server_port: int, gang_hb_port: int, name: str, info: Any):
+    def __init__(self, ip: str, server_port: int, gang_hb_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, name: str, info: Any):
         self.ip = ip
         self.server_port = server_port
         self.gang_hb_port = gang_hb_port
+        self.rpc_server_port= rpc_server_port
+        self.remote_rpc_server_port = remote_rpc_server_port
+        self.cache_store_listen_port = cache_store_listen_port
+        self.cache_store_connect_port = cache_store_connect_port
+        self.cache_store_rdma_listen_port = cache_store_rdma_listen_port
+        self.cache_store_rdma_connect_port = cache_store_rdma_connect_port
         self.name = name
         self.info = info
 
     def equals(self, other: 'WorkerInfo') -> bool:
         return self.ip == other.ip and self.server_port == other.server_port
+    
+    @staticmethod
+    def need_port_num():
+        return 5
 
     @staticmethod
     def from_env():
@@ -89,6 +98,12 @@ class WorkerInfo(object):
             ip=socket.gethostbyname(socket.gethostname()),
             server_port=WorkerInfo.server_port_offset(g_parallel_info.local_rank),
             gang_hb_port=WorkerInfo.gang_hb_port_offset(g_parallel_info.local_rank),
+            rpc_server_port=WorkerInfo.rpc_server_port_offset(g_parallel_info.local_rank),
+            remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
+            cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(g_parallel_info.local_rank),
+            cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
+            cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank),
+            cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
             name='', info=None)
         return info
 
@@ -102,15 +117,23 @@ class WorkerInfo(object):
             base_port = server_port
         else:
             base_port = WorkerInfo.self_server_port()
-        return base_port + local_rank * 4
+        return base_port + local_rank * WorkerInfo.need_port_num()
+    
+    @staticmethod
+    def rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 1
+
+    @staticmethod
+    def cache_store_listen_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 2
 
     @staticmethod
     def gang_hb_port_offset(local_rank: int, server_port: int = -1) -> int:
-        if server_port != -1:
-            base_port = server_port
-        else:
-            base_port = WorkerInfo.self_server_port()
-        return base_port + local_rank * 4 + 3
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 3
+
+    @staticmethod
+    def cache_store_rdma_listen_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 4
 
     # used for ut
     def reload(self):
@@ -118,11 +141,19 @@ class WorkerInfo(object):
         self.ip = new_info.ip
         self.server_port = new_info.server_port
         self.gang_hb_port = new_info.gang_hb_port
+        self.remote_rpc_server_port = new_info.remote_rpc_server_port
+        self.cache_store_listen_port = new_info.cache_store_listen_port
+        self.cache_store_connect_port = new_info.cache_store_connect_port
+        self.rpc_server_port = new_info.rpc_server_port
         self.name = new_info.name
         self.info = new_info.info
 
     def __str__(self):
-        return f"WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} name={self.name} info={self.info} ]"
+        return f"""
+        WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} rpc_port={self.rpc_server_port} \n
+        cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port} 
+        name={self.name} info={self.info} ]
+        """
 
 g_worker_info = WorkerInfo.from_env()
 
@@ -131,28 +162,29 @@ class MasterInfo:
     ip: str
     th_nccl_port: int
     gpt_nccl_port: int
-    dynamic_decoder_nccl_port: int
     nccl_op_port: int
     sp_gpt_nccl_port: int
     http_port: int
-    model_rpc_port: int
+
+    @staticmethod
+    def need_port_count() -> int:
+        return 5
 
 g_master_info = MasterInfo(
     ip='',
     th_nccl_port=0,
     gpt_nccl_port = 0,
-    dynamic_decoder_nccl_port=0,
     nccl_op_port=0,
     sp_gpt_nccl_port=0,
-    http_port=0,
-    model_rpc_port=0)
+    http_port=0)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
-    g_master_info.http_port = base_port + 2
-    g_master_info.model_rpc_port = base_port + 1
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.gpt_nccl_port = base_port - 2
-    g_master_info.dynamic_decoder_nccl_port = base_port - 3
-    g_master_info.nccl_op_port = base_port - 4
-    g_master_info.sp_gpt_nccl_port = base_port - 5
+    g_master_info.nccl_op_port = base_port - 3
+    g_master_info.sp_gpt_nccl_port = base_port - 4
+    g_master_info.http_port = base_port - 5
+
+def total_need_port_num() -> int:
+    return MasterInfo.need_port_count() + WorkerInfo.need_port_num() * g_parallel_info.tp_size

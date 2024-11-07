@@ -79,6 +79,7 @@ class AuxInfo(PyBaseModel):
     step_output_len: int = 0
     fallback_tokens: int = 0
     fallback_times: int = 0
+    pd_sep: bool = False
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
 

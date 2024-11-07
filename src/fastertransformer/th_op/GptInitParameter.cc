@@ -289,6 +289,19 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(http_port, http_port_)                                 \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
+    DEF_PROPERTY(cache_store_listen_port, cache_store_listen_port_)     \
+    DEF_PROPERTY(cache_store_connect_port, cache_store_connect_port_)   \
+    DEF_PROPERTY(cache_store_rdma_connect_port, cache_store_rdma_connect_port_)   \
+    DEF_PROPERTY(cache_store_rdma_listen_port, cache_store_rdma_listen_port_)     \
+    DEF_PROPERTY(worker_port_offset, worker_port_offset_)     \
+    DEF_PROPERTY(remote_rpc_server_port, remote_rpc_server_port_)       \
+    DEF_PROPERTY(pd_separation, pd_separation_)                         \
+    DEF_PROPERTY(use_cache_store, use_cache_store_)                     \
+    DEF_PROPERTY(cache_store_rdma_mode, cache_store_rdma_mode_)         \
+    DEF_PROPERTY(prefill_retry_times, prefill_retry_times_)             \
+    DEF_PROPERTY(prefill_retry_timeout_ms, prefill_retry_timeout_ms_)   \
+    DEF_PROPERTY(pd_sep_enable_fallback, pd_sep_enable_fallback_)       \
+    DEF_PROPERTY(load_cache_timeout_ms, load_cache_timeout_ms_)         \
     DEF_PROPERTY(use_kvcache, use_kvcache_)                             \
     DEF_PROPERTY(use_expert_attention, use_expert_attention_)           \
     DEF_PROPERTY(local_rank, local_rank_)                               \

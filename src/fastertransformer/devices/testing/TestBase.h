@@ -19,7 +19,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
-#include "maga_transformer/cpp/utils/KvCacheUtils.h"
+#include "maga_transformer/cpp/utils/KVCacheUtils.h"
 #include "autil/EnvUtil.h"
 
 
@@ -286,9 +286,8 @@ protected:
                     auto kblock_buffer = ft::torchTensor2Buffer(kblock);
                     auto vblock_buffer = ft::torchTensor2Buffer(vblock);
                     cache_manager_->setKVBlockValue(k_indexs[k],
-                                                    k_indexs[k],
-                                                    kblock_buffer,
-                                                    vblock_buffer);
+                                                    *kblock_buffer,
+                                                    *vblock_buffer);
                 }
             }
 

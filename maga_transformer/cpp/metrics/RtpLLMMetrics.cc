@@ -7,6 +7,7 @@
 using namespace fastertransformer;
 namespace rtp_llm {
 
+AUTIL_LOG_SETUP(rtp_llm, RPCMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -28,6 +29,31 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
     if (collector->name) {                                                                                             \
         REPORT_MUTABLE_METRIC(name##_metric, collector->name);                                                         \
     }
+
+
+bool RPCMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_rpc_qps");
+    REGISTER_QPS_MUTABLE_METRIC(error_qps_metric, "rtp_llm_rpc_error_qps");
+    REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_rpc_cancel_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(onflight_request_metric, "rtp_llm_rpc_onflight_request");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_latency_us_metric, "rtp_llm_rpc_load_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(wait_load_latency_us_metric, "rtp_llm_rpc_wait_load_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_compute_latency_us_metric, "rtp_llm_rpc_remote_compute_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_rpc_total_latency_us");
+    
+    return true;
+}
+
+void RPCMetrics::report(const kmonitor::MetricsTags* tags, RPCMetricsCollector* collector) {
+    REPORT_QPS(qps);
+    REPORT_QPS(cancel_qps);
+    REPORT_QPS(error_qps);
+    REPORT_GAUGE(onflight_request);
+    REPORT_GAUGE(load_latency_us);
+    REPORT_GAUGE(wait_load_latency_us);
+    REPORT_GAUGE(remote_compute_latency_us);
+    REPORT_GAUGE(total_latency_us);
+}
 
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_framework_qps");
@@ -132,6 +158,8 @@ void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngine
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(context_batch_size_metric, "rtp_llm_context_batch_size");
     REGISTER_GAUGE_MUTABLE_METRIC(generate_batch_size_metric, "rtp_llm_generate_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(context_batch_size_when_has_context_metric, "rtp_llm_context_batch_size_when_has_context");
+    REGISTER_GAUGE_MUTABLE_METRIC(generate_batch_size_when_has_context_metric, "rtp_llm_generate_batch_size_when_has_context");
     REGISTER_GAUGE_MUTABLE_METRIC(execute_token_size_metric, "rtp_llm_execute_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(max_seq_len, "rtp_llm_max_seq_len");
     return true;
@@ -140,6 +168,10 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExecutorMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(context_batch_size_metric, collector->context_batch_size);
     REPORT_MUTABLE_METRIC(generate_batch_size_metric, collector->generate_batch_size);
+    if (collector->context_batch_size != 0) {
+        REPORT_MUTABLE_METRIC(context_batch_size_when_has_context_metric, collector->context_batch_size_when_has_context);
+        REPORT_MUTABLE_METRIC(generate_batch_size_when_has_context_metric, collector->generate_batch_size_when_has_context);
+    }
     REPORT_MUTABLE_METRIC(execute_token_size_metric, collector->execute_token_size);
     REPORT_MUTABLE_METRIC(max_seq_len, collector->max_seq_len);
 }
@@ -182,6 +214,8 @@ void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMToken
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_item_num_metric, "rtp_llm_kv_cache_item_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_free_blocks_metric, "rtp_llm_kv_cache_free_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_available_blocks_metric, "rtp_llm_kv_cache_available_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_left_seq_metric, "rtp_llm_kv_cache_left_seq");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     return true;
@@ -189,6 +223,8 @@ bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kv_cache_item_num_metric, collector->kv_cache_item_num);
+    REPORT_MUTABLE_METRIC(kv_cache_free_blocks_metric, collector->kv_cache_free_blocks);
+    REPORT_MUTABLE_METRIC(kv_cache_available_blocks_metric, collector->kv_cache_available_blocks);
     REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
     REPORT_MUTABLE_METRIC(kv_cache_used_ratio_metric, collector->kv_cache_used_ratio);
 }
@@ -241,7 +277,7 @@ bool initKmonitorFactory() {
     }
     metricsConfig.set_sink_address(sink_address.c_str());
     metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
-    metricsConfig.set_enable_prometheus_sink(param.kmonitorEnablePrometheusSink);
+    //metricsConfig.set_enable_prometheus_sink(param.kmonitorEnablePrometheusSink);
     metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
     metricsConfig.set_inited(true);
     metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);

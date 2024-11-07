@@ -2,7 +2,7 @@
 #include <memory>
 #include <unordered_map>
 
-#include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
+#include "maga_transformer/cpp/model_rpc/RpcServer.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
@@ -13,12 +13,12 @@ using grpc::testing::MockClientReader;
 using namespace std;
 namespace rtp_llm {
 
-class ModelRpcServiceTest: public DeviceTestBase {
+class RpcServiceTest: public DeviceTestBase {
 protected:
 
 };
 
-TEST_F(ModelRpcServiceTest, testSimple) {
+TEST_F(RpcServiceTest, testSimple) {
     GenerateInputPB input;
     // 设置测试数据
 
@@ -35,7 +35,7 @@ TEST_F(ModelRpcServiceTest, testSimple) {
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights;
     std::unordered_map<std::string, ft::ConstBufferPtr>              weights;
 
-    ModelRpcServiceImpl service(maga_init_params, layer_weights, weights);
+    RpcServiceImpl service(maga_init_params, layer_weights, weights);
     // auto stream = service.generate_stream(&context, input);
 
     // 读取并验证流数据

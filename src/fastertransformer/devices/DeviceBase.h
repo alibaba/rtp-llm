@@ -4,6 +4,7 @@
 #include "src/fastertransformer/devices/DeviceData.h"
 #include "src/fastertransformer/devices/BufferManager.h"
 #include "src/fastertransformer/devices/OpData.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace fastertransformer {
 
@@ -12,6 +13,8 @@ public:
     DeviceBase(const DeviceInitParams& params);
 
     virtual void init();
+    std::shared_ptr<rtp_llm::NormalCacheStore> cacheStore();
+
     // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments
     // needs to be reset again in a new thread(such as cudaSetDevice,
     // otherwise it will be executed in default cudaDevice 0) so we provide a preRun() to do this.
@@ -65,6 +68,7 @@ private:
 protected:
     int device_id_;
     DeviceInitParams init_params_;
+    std::shared_ptr<rtp_llm::NormalCacheStore> cache_store_;
 
 private:
     std::unique_ptr<BufferManager> buffer_manager_;

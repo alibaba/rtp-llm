@@ -17,6 +17,9 @@
 #include "nccl_utils.h"
 #include "nccl_utils_torch.h"
 #include <chrono>
+#include <string>
+
+using namespace std;
 
 namespace fastertransformer {
 
@@ -36,12 +39,14 @@ ncclDataType_t getNcclDataType() {
 #endif
     else if (std::is_same<T, int>::value) {
         nccl_data_type = ncclInt;
+    } else if (std::is_same<T, int64_t>::value) {
+        nccl_data_type = ncclInt64;
     } else if (std::is_same<T, char>::value) {
         nccl_data_type = ncclChar;
     } else if (std::is_same<T, bool>::value) {
         nccl_data_type = ncclInt8;
     } else {
-        printf("[ERROR] NCCL only support float, half, bfloat16, int, char, and bool. \n");
+        printf("[ERROR] NCCL only support float, half, bfloat16, int, int64, char, and bool. \n");
         exit(-1);
     }
     return nccl_data_type;

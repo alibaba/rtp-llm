@@ -31,6 +31,7 @@ public:
     virtual MemoryType    memoryType() const = 0;
 
     virtual void* malloc(size_t size)              = 0;
+    virtual void* mallocSync(size_t size)          = 0;
     virtual void  free(void** ptr)                 = 0;
     virtual void* reMalloc(void* ptr, size_t size) = 0;
 };

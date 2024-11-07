@@ -15,6 +15,7 @@ public:
     }
 
     void* malloc(size_t size);
+    void* mallocSync(size_t size);
     void  free(void** ptr);
     void* reMalloc(void* ptr, size_t size);
 };

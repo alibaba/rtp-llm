@@ -19,6 +19,7 @@ struct CacheConfig {
     size_t       kv_scale_block_size;
     size_t       kv_block_stride;
     size_t       kv_scale_block_stride;
+    size_t       total_size;
     size_t       reserve_runtime_mem_mb;
     
     CacheConfig() {}
@@ -46,16 +47,30 @@ struct CacheConfig {
         kv_block_size = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 
+        // kv_block_stride is the size of a single block in a single layer
         kv_block_stride = kv_block_size / layer_num;
         kv_scale_block_stride = kv_scale_block_size / layer_num;
+
+        refresh();
+    }
+
+    void refresh() {
+        total_size = block_size * block_nums;
     }
 
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "CacheConfig { "
-                     << "layer_num: " << layer_num << ", block_nums: " << block_nums << ", block_size: " << block_size
-                     << ", local_head_num_kv: " << local_head_num_kv << ", size_per_head: " << size_per_head
-                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << int(dtype)
+                     << "layer_num: " << layer_num 
+                     << ", block_nums: " << block_nums
+                     << ", block_size: " << block_size
+                     << ", local_head_num_kv: " << local_head_num_kv
+                     << ", size_per_head: " << size_per_head
+                     << ", seq_size_per_block: " << seq_size_per_block
+                     << ", dtype: " << int(dtype)
+                     << ", kv_block_stride: " << kv_block_stride
+                     << ", kv_scale_block_stride: " << kv_scale_block_stride
+                     << ", total_size: " << total_size
                      << ", reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "}";
         return debug_string.str();
     }

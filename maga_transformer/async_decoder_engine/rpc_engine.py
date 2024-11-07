@@ -37,6 +37,10 @@ class RPCEngine(BaseEngine):
         self.rtp_llm_op_.stop()
 
     @override
+    def ready(self) -> bool:
+        return self.rtp_llm_op_.ready()
+
+    @override
     def decode(self,
                input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         return self.model_rpc_client.enqueue(input)

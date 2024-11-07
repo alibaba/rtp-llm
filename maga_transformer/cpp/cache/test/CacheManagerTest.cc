@@ -497,7 +497,7 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
     vector<int8_t> v_vec(cache_config.kv_block_size, 1);
     auto           k_buffer = ft::vector2Buffer(k_vec);
     auto           v_buffer = ft::vector2Buffer(v_vec);
-    cache_manager.setKVBlockValue(1, 1, k_buffer, v_buffer);
+    cache_manager.setKVBlockValue(1, *k_buffer, *v_buffer);
 
     auto testFunc = [&](int block_index, int block_value) {
         auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index);
@@ -508,6 +508,18 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
         for (size_t i = 0; i < host_kbuffer->size(); i++) {
             ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
             ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+        }
+
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
+            auto host_kbuffer = device_->clone({*kbuffer, AllocationType::HOST});
+            auto host_vbuffer = device_->clone({*vbuffer, AllocationType::HOST});
+            ASSERT_EQ(cache_config.kv_block_stride, host_kbuffer->size());
+            ASSERT_EQ(cache_config.kv_block_stride, host_vbuffer->size());
+            for (size_t i = 0; i < host_kbuffer->size(); i++) {
+                ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
+                ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+            }
         }
     };
     testFunc(1, 1);

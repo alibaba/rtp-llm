@@ -13,8 +13,14 @@ class ExceptionType(IntEnum):
     ERROR_GENERATE_CONFIG_FORMAT = 516
     UPDATE_ERROR = 601
     MALLOC_ERROR = 602
-    TIMEOUT_ERROR = 603
-    
+    GENERATE_TIMEOUT_ERROR = 603
+    GET_HOST_ERROR = 604
+    GET_CONNECTION_ERROR = 605
+    CONNECT_ERROR = 606
+    CONNECTION_RESET_BY_PEER_ERROR = 607
+    REMOTE_ALLOCATE_RESOURCE_ERROR = 608
+    REMOTE_LOAD_KV_CACHE_ERROR = 609
+    REMOTE_GENERATE_ERROR = 610
 
 class FtRuntimeException(Exception):
     def __init__(self, expcetion_type: ExceptionType, message: str):

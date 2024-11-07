@@ -97,6 +97,10 @@ class InferenceWorker():
             logging.info("stoping InferenceWorker")
             self.model.stop()
 
+    def ready(self) -> bool:
+        if isinstance(self.model, AsyncModel):
+            return self.model.ready()
+
     def _format_response(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished

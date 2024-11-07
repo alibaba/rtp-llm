@@ -6,6 +6,8 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/common/fatal_util.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
@@ -36,7 +38,33 @@ CacheManager::CacheManager(const CacheConfig&                 config,
     }
 }
 
+void CacheManager::regUserMr() {
+    if (device_->cacheStore()) {
+        FT_LOG_INFO("start to register user mr");
+        auto memory_util = device_->cacheStore()->getMemoryUtil();
+        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true)) {
+            RAISE_FATAL_ERROR("register user mr failed");
+        }
+        FT_LOG_INFO("cache base address = %p, len = %lu, end address = %p",
+            cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
+        FT_LOG_INFO("register user mr success");
+    }
+}
+
+void CacheManager::deregUserMr() {
+    if (device_->cacheStore()) {
+        FT_LOG_INFO("start to deregUserMr user mr");
+        auto memory_util = device_->cacheStore()->getMemoryUtil();
+        if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
+            RAISE_FATAL_ERROR("deregUserMr user mr failed");
+        }
+        FT_LOG_INFO("deregUserMr user mr success");
+    }
+}
+
 CacheManager::~CacheManager() {
+    deregUserMr();
+
     stop_ = true;
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
@@ -44,14 +72,24 @@ CacheManager::~CacheManager() {
     cache_aligned_buffer_.reset();
 }
 
+uint32_t CacheManager::totalBlocks() const {
+    // block 0 is reserved
+    return config_.block_nums - 1;
+}
+
 void CacheManager::reportMetricsLoop() {
     while (!stop_) {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
-            collector.kv_cache_item_num   = block_cache_.size();
-            auto available_blocks         = availableBlockNums();
-            collector.kv_cache_left_seq   = available_blocks * seq_size_per_block_;
-            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - available_blocks) / config_.block_nums;
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                collector.kv_cache_item_num = block_cache_.size();
+                auto available_blocks = availableBlockNums();
+                collector.kv_cache_left_seq = available_blocks * seq_size_per_block_;
+                collector.kv_cache_available_blocks = available_blocks;
+                collector.kv_cache_free_blocks = freeBlockNums();
+                collector.kv_cache_used_ratio = 100.0 * (totalBlocks() - available_blocks) / totalBlocks();
+            }
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
         }
@@ -64,7 +102,7 @@ void CacheManager::initFreeBlock() {
     for (int i = 1; i < int(config_.block_nums); ++i) {
         free_blocks_index_.insert(i);
     }
-    available_blocks_ = config_.block_nums - 1;
+    available_blocks_ = totalBlocks();
 
     block_ref_counter_ = BlockRefCounter(config_.block_nums);
 }
@@ -81,8 +119,10 @@ void CacheManager::allocateAndTpSync() {
         device_->syncAndCheck();
         config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + properties.tp_size);
     }
+    config_.refresh();
     cache_aligned_buffer_ =
-        device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.block_size * config_.block_nums}});
+        device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.total_size}});
+    
     cache_base_ptr_ = cache_aligned_buffer_->data();
 }
 
@@ -142,6 +182,8 @@ void CacheManager::initKvCache() {
     }
 #endif
 
+
+    regUserMr();
 }
 
 const CacheConfig& CacheManager::cacheConfig() const {
@@ -165,8 +207,7 @@ size_t CacheManager::availableBlockNums() const {
 }
 
 KVCacheInfo CacheManager::getKVCacheInfo() const {
-    // block 0 is reserved, so total block num need - 1
-    return {availableBlockNums() * seq_size_per_block_, (config_.block_nums - 1) * seq_size_per_block_};
+    return {availableBlockNums() * seq_size_per_block_, totalBlocks() * seq_size_per_block_};
 }
 
 size_t CacheManager::cacheItemNum() const {
@@ -246,6 +287,7 @@ CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>
 }
 
 std::tuple<bool, KVCacheBlockAddr> CacheManager::malloc(int nums) {
+    std::lock_guard<std::mutex> guard(mutex_);
     auto [success, block_indices] = mallocIndex(nums);
     return {success, {block_indices}};
 }
@@ -286,6 +328,7 @@ void CacheManager::free(const std::vector<KVCacheBlockAddr>& resource) {
 }
 
 void CacheManager::free(const std::vector<int>& block_indices) {
+    std::lock_guard<std::mutex> guard(mutex_);
     decrQueryRefCounter(block_indices);
     freeImpl(block_indices);
 }
@@ -304,7 +347,7 @@ void CacheManager::maybeFreeBlockFromCache(int nums) {
     while (int(freeBlockNums()) < nums && !block_cache_.empty()) {
         std::vector<int> indices = block_cache_.pop();
         if (indices.empty()) {
-            // Avoid infinite loop
+            // avoid infinite loop
             break;
         }
         freeImpl(indices);
@@ -314,6 +357,7 @@ void CacheManager::maybeFreeBlockFromCache(int nums) {
 void CacheManager::freeWithCache(const std::vector<int>&   block_indices,
                                  const std::vector<int>&   token_ids,
                                  const std::vector<float>& loss) {
+    std::lock_guard<std::mutex> guard(mutex_);
     decrQueryRefCounter(block_indices);
     insertIntoCache(block_indices, token_ids, loss, false);
 }
@@ -346,105 +390,125 @@ void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
     block_ref_counter_.incrementRefCounter(indices);
 }
 
-void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
+void CacheManager::setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer) {
     auto layer_stride = config_.block_nums * config_.kv_block_stride;
-    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+    auto copyFunc = [&](ft::Buffer& src_buffer, ft::BufferPtr& dst_blocks){
+        auto dst_data = (char*)dst_blocks->data() + layer_id * layer_stride + block_index * config_.kv_block_stride;
+        auto dst_buffer = Buffer(
+            dst_blocks->where(), src_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, dst_data);
+        device_->copy({dst_buffer, src_buffer});
+    };
 
-        auto copyFunc = [&](ft::BufferPtr& src_value, ft::BufferPtr& dst_blocks) {
-            auto dst_data   = (char*)(dst_blocks->data()) + layer_num * layer_stride + kindex * config_.kv_block_stride;
-            auto src_data   = (char*)(src_value->data()) + layer_num * config_.kv_block_stride;
-            auto dst_buffer = Buffer(dst_blocks->where(),
-                                     src_value->type(),
-                                     {config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                     dst_data);
-            auto src_buffer = Buffer(src_value->where(),
-                                     src_value->type(),
-                                     {config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                     src_data);
-            device_->copy({dst_buffer, src_buffer});
-        };
+    copyFunc(k_buffer, kv_cache_.k_blocks);
+    copyFunc(v_buffer, kv_cache_.v_blocks);
+}
 
-        copyFunc(k_value, kv_cache_.k_blocks);
-        copyFunc(v_value, kv_cache_.v_blocks);
+void CacheManager::setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer) {
+    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        auto layer_k_data = (char*)(k_buffer.data()) + layer_id * config_.kv_block_stride;
+        auto layer_k_buffer = Buffer(
+                k_buffer.where(), k_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, layer_k_data);
+        auto layer_v_data = (char*)(v_buffer.data()) + layer_id * config_.kv_block_stride;
+        auto layer_v_buffer = Buffer(
+                v_buffer.where(), v_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, layer_v_data);
+        setKVBlockValue(block_index, layer_id, layer_k_buffer, layer_v_buffer);
     }
+}
+
+std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block_index, int layer_id) {
+    auto layer_stride = config_.block_nums * config_.kv_block_stride;
+    auto kdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+    auto vdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+
+    auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
+        auto src_data = (char*)(src_blocks->data()) + layer_id * layer_stride + block_index * config_.kv_block_stride;
+        auto src_buffer = Buffer(
+            src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
+        device_->copy({*dst_buffer, src_buffer});
+    };
+    copyFunc(kv_cache_.k_blocks, kdst_buffer);
+    copyFunc(kv_cache_.v_blocks, vdst_buffer);
+
+    return {kdst_buffer, vdst_buffer};
 }
 
 std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block_index) {
     auto layer_stride = config_.block_nums * config_.kv_block_stride;
-    auto kdst_buffer =
-        device_->allocateBuffer({config_.dtype,
-                                 {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                 ft::AllocationType::DEVICE});
-    auto vdst_buffer =
-        device_->allocateBuffer({config_.dtype,
-                                 {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                 ft::AllocationType::DEVICE});
-    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+    auto kdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+    auto vdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
 
-        auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer) {
-            auto src_data =
-                (char*)(src_blocks->data()) + layer_num * layer_stride + block_index * config_.kv_block_stride;
-            auto src_buffer = Buffer(src_blocks->where(),
-                                     config_.dtype,
-                                     {config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                     src_data);
-            device_->copy({dst_buffer->view(layer_num, 1)[0], src_buffer});
+    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
+            auto src_data = (char*)(src_blocks->data()) + layer_id * layer_stride + block_index * config_.kv_block_stride;
+            auto src_buffer = Buffer(
+                src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
+            device_->copy({dst_buffer->view(layer_id, 1)[0], src_buffer});
         };
-
         copyFunc(kv_cache_.k_blocks, kdst_buffer);
         copyFunc(kv_cache_.v_blocks, vdst_buffer);
     }
+
     return {kdst_buffer, vdst_buffer};
 }
 
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
     auto layer_stride = config_.block_nums * config_.kv_block_stride;
-    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
-        auto copyFunc = [&](ft::BufferPtr& buffer_blocks) {
-            auto dst_data =
-                (char*)(buffer_blocks->data()) + layer_num * layer_stride + dest_block_index * config_.kv_block_stride;
-            auto src_data =
-                (char*)(buffer_blocks->data()) + layer_num * layer_stride + src_block_index * config_.kv_block_stride;
-            auto dst_buffer = Buffer(buffer_blocks->where(),
-                                     config_.dtype,
-                                     {config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                     dst_data);
-            auto src_buffer = Buffer(buffer_blocks->where(),
-                                     config_.dtype,
-                                     {config_.kv_block_stride / ft::getTypeSize(config_.dtype)},
-                                     src_data);
+    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        auto copyFunc = [&](ft::BufferPtr& buffer_blocks){
+            auto dst_data = (char*)(buffer_blocks->data()) + layer_id * layer_stride + dest_block_index * config_.kv_block_stride;
+            auto src_data = (char*)(buffer_blocks->data()) + layer_id * layer_stride + src_block_index * config_.kv_block_stride;
+            auto dst_buffer = Buffer(
+                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, dst_data);
+            auto src_buffer = Buffer(
+                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, src_data);
             device_->copy({dst_buffer, src_buffer});
         };
-
-        // copy value
         copyFunc(kv_cache_.k_blocks);
         copyFunc(kv_cache_.v_blocks);
     }
 }
 
+CacheManager::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {
+    BlockAddrInfo addr_info;
+    size_t total_blocks_num = (size_t)(layer_id * config_.block_nums + block_index);
+    auto offset = total_blocks_num * (size_t)config_.kv_block_stride;
+    auto scale_offset = total_blocks_num * (size_t)config_.kv_scale_block_stride;
+    addr_info.k_addr = (int8_t*)kv_cache_.k_blocks->data() + offset;
+    addr_info.v_addr = (int8_t*)kv_cache_.v_blocks->data() + offset;
+    if (kv_cache_.k_scale) {
+        addr_info.k_scale_addr = (int8_t*)kv_cache_.k_scale->data() + scale_offset;
+        addr_info.v_scale_addr = (int8_t*)kv_cache_.v_scale->data() + scale_offset;
+    }
+    return addr_info;
+}
+
 void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
                                           const std::vector<int>& src_index,
-                                          const std::vector<int>& tgt_index) {
-    if (src_index.size() != tgt_index.size()) {
-        RAISE_FATAL_ERROR(std::string("src and tgt length should equal"));
+                                          const std::vector<int>& target_index) {
+    if (src_index.size() != target_index.size()) {
+        RAISE_FATAL_ERROR("src index and target index length should equal");
     }
     std::vector<SeqPosition> src_seq_positions;
-    std::vector<SeqPosition> tgt_seq_positions;
+    std::vector<SeqPosition> target_seq_positions;
 
     for (size_t i = 0; i < src_index.size(); ++i) {
         src_seq_positions.push_back(getSeqPosition(block_indice_list, src_index[i]));
-        tgt_seq_positions.push_back(getSeqPosition(block_indice_list, tgt_index[i]));
+        target_seq_positions.push_back(getSeqPosition(block_indice_list, target_index[i]));
     }
 
     for (size_t i = 0; i < src_seq_positions.size(); ++i) {
-        copyKvCacheFromSeqPosition(src_seq_positions[i], tgt_seq_positions[i]);
+        copyKvCacheFromSeqPosition(src_seq_positions[i], target_seq_positions[i]);
     }
 }
 
 CacheManager::SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
     int block_idx = idx / seq_size_per_block_;
     if (block_idx >= static_cast<int>(block_indice_list.size())) {
-        RAISE_FATAL_ERROR(std::string("block idx should not >= len(block_indice_list)"));
+        RAISE_FATAL_ERROR("block idx should not >= len(block_indice_list)");
     }
     return SeqPosition{block_indice_list[block_idx], idx % seq_size_per_block_};
 }

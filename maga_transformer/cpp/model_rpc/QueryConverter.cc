@@ -14,6 +14,7 @@ namespace rtp_llm {
 
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
+    // TODO(xinfei.sxf) 这里面有些选项是没有值的，这样会得到0
     generate_config->max_new_tokens                 = config_proto->max_new_tokens();
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
@@ -128,6 +129,7 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_prefix_len(response.aux_info.prefix_len);
         aux_info->set_output_len(response.aux_info.output_len);
         aux_info->set_step_output_len(response.aux_info.step_output_len);
+        aux_info->set_pd_sep(response.aux_info.pd_sep);
         if (response.aux_info.cum_log_probs.has_value()) {
             transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }

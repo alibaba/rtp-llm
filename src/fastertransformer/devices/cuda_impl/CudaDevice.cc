@@ -15,8 +15,10 @@
 #include <unistd.h>
 
 using namespace std;
+using namespace rtp_llm;
 using namespace tensorrt_llm;
 using namespace tensorrt_llm::kernels;
+using namespace rtp_llm;
 
 namespace fastertransformer {
 
@@ -29,6 +31,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));
     check_cuda_error(cudaGetDeviceProperties(&device_prop_, device_id_));
+
+    initCacheStore(params);
 
     weight_only_matmul_plugin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>();
 
@@ -138,14 +142,14 @@ CudaDevice::~CudaDevice() {
         origin_torch_cuda_allocator_ = nullptr;
     }
     curandstate_buf_.reset();
-    cublas_mm_wrapper_.reset();
-    check_cuda_error(cudaStreamDestroy(stream_));
+    cublas_mm_wrapper_.reset();    
     check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
     if (nccl_param_.nccl_comm_) {
         ncclCommDestroy(nccl_param_.nccl_comm_);
     }
+    cache_store_.reset();
 }
 
 void CudaDevice::init() {
@@ -154,6 +158,25 @@ void CudaDevice::init() {
     FT_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer(
         {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+}
+
+void CudaDevice::initCacheStore(const DeviceInitParams& device_params) {
+    FT_LOG_INFO("device_params.use_cache_store = %d, device_params.pd_separation = %d",
+        device_params.use_cache_store, device_params.pd_separation);
+    if (!device_params.use_cache_store) {
+        return;
+    }
+    CacheStoreInitParams params;
+    params.listen_port = device_params.cache_store_listen_port;
+    params.connect_port = device_params.cache_store_connect_port;
+    params.rdma_listen_port = device_params.cache_store_rdma_listen_port;
+    params.rdma_connect_port = device_params.cache_store_rdma_connect_port;
+    params.rdma_mode = device_params.cache_store_rdma_mode;
+    FT_LOG_INFO("cache store listen port is [%ld], connect port is [%d], rdma_mode is [%d]",
+        params.listen_port, params.connect_port, params.rdma_mode);
+    cache_store_ = NormalCacheStore::createNormalCacheStore(params);
+    FT_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
+    FT_LOG_INFO("cache store init success");
 }
 
 void CudaDevice::syncAndCheck() {

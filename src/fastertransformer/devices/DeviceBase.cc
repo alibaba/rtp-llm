@@ -28,6 +28,10 @@ void DeviceBase::setTraceMemory(bool trace_memory) {
     buffer_manager_->setTraceMemory(trace_memory);
 }
 
+std::shared_ptr<rtp_llm::NormalCacheStore> DeviceBase::cacheStore() {
+    return cache_store_;
+}
+
 DeviceStatus DeviceBase::getDeviceStatus() {
     return DeviceStatus();
 }

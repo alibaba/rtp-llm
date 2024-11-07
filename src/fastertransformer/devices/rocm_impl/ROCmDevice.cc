@@ -136,7 +136,7 @@ ROCmDevice::~ROCmDevice() {
 
 void ROCmDevice::init() {
     DeviceBase::init();
-    FT_LOG_INFO("max batch size: %d\n", init_params_.max_batch_size);
+    FT_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer(
         {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }

@@ -23,6 +23,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     auto           context_streams = stream_groups.contextStreams();
     auto           decode_streams  = stream_groups.decodeStreams();
+    FT_LOG_DEBUG("context_streams size = %d, decode_streams size = %d", context_streams.size(), decode_streams.size());
     GptModelInputs model_input;
     size_t         current_tokens_size      = stream_groups.modelExecuteTokenSize();
     size_t         total_batch_size         = stream_groups.totalModelBatchSize();
@@ -39,8 +40,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (max_block_size) {
         model_input.kv_cache_offset = device_->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
+        model_input.cache_keys = device_->allocateBuffer(
+            {ft::DataType::TYPE_INT32, {total_context_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
     }
-    // memset(model_input.kv_cache_offset->data(), 0, model_input.kv_cache_offset->sizeBytes());
+    model_input.query_id = device_->allocateBuffer(
+            {ft::DataType::TYPE_INT64, {total_context_batch_size}, ft::AllocationType::HOST}, {});
+    model_input.query_pd_separation = device_->allocateBuffer(
+            {ft::DataType::TYPE_BOOL, {total_context_batch_size}, ft::AllocationType::HOST}, {});
     model_input.input_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.lora_ids =
@@ -63,6 +69,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.mm_features_locs =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {multimodal_features_len}, ft::AllocationType::HOST}, {});
     }
+    model_input.block_size = block_size_;
+    model_input.scale_block_size = scale_block_size_;
+    model_input.pd_separation = pd_separation_;
+    model_input.warmup = warm_up_;
 
     int*      merged_tokens    = (int*)model_input.combo_tokens->data();
     int*      input_lengths    = (int*)model_input.input_lengths->data();
@@ -175,7 +185,12 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 std::memcpy((*model_input.kv_cache_offset)[batch_idx].data(),
                             kv_cache.batch_offset[i].data(),
                             kv_cache.batch_offset[i].size() * sizeof(int));
+                std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
+                        stream->cacheKeys().data(),
+                        stream->cacheKeys().size() * sizeof(int32_t));
             }
+            *(model_input.query_id->dataWithOffset<int64_t>(batch_idx - total_decode_batch_size)) = stream->streamId();
+            *(model_input.query_pd_separation->dataWithOffset<bool>(batch_idx - total_decode_batch_size)) = stream->queryPdSep();
             batch_idx += 1;
             token_idx += input_tokens.size();
         }

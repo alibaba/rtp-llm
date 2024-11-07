@@ -67,6 +67,16 @@ void* PurePointerCudaAllocator::malloc(size_t size) {
     return ptr;
 }
 
+void* PurePointerCudaAllocator::mallocSync(size_t size) {
+    if (size == 0) {
+        return nullptr;
+    }
+    void* ptr = doMallocSync(size);
+    std::lock_guard<std::mutex> lock(lock_);
+    pointer_mapping_->insert({ptr, size});
+    return ptr;
+}
+
 void PurePointerCudaAllocator::free(void** ptr) {
     void* address = *ptr;
     if (address) {
@@ -120,6 +130,12 @@ void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     return ptr;
 }
 
+void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
+    void* ptr      = nullptr;
+    check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    return ptr;
+}
+
 void Allocator<AllocatorType::CUDA>::doFree(void* address) {
     check_cuda_error(cudaFreeAsync(address, stream_));
     // cudaStreamSynchronize(stream_);
@@ -136,6 +152,10 @@ void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size) {
     void* ptr = nullptr;
     check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
+}
+
+void* Allocator<AllocatorType::CUDA_HOST>::doMallocSync(size_t size) {
+    return doMalloc(size);
 }
 
 void Allocator<AllocatorType::CUDA_HOST>::doFree(void* address) {

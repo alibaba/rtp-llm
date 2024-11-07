@@ -21,6 +21,7 @@ public:
     MemoryType memoryType() const override;
 
     void* malloc(size_t size) override;
+    void* mallocSync(size_t size) override;
     void  free(void** ptr) override;
     void* reMalloc(void* ptr, size_t size) override;
 

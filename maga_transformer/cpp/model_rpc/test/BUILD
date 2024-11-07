@@ -28,7 +28,7 @@ test_deps = [
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [
-#         "ModelRpcServerTest.cc",
+#         "RpcServerTest.cc",
 #     ],
 #     copts = test_copts,
 #     deps = [
@@ -49,15 +49,15 @@ cc_test(
     copts = test_copts,
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
         "//maga_transformer/cpp:model_rpc_server",
         "//:gpt_init_params",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//src/fastertransformer/devices/testing:device_test_utils"
+        "//src/fastertransformer/devices/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main"
     ] + torch_deps(),
     env = {
         "TEST_USING_DEVICE": "CUDA",
