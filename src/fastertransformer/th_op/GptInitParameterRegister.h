@@ -1,6 +1,8 @@
 #pragma once
 
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include <torch/custom_class.h>
+#include <torch/script.h>
+#include <torch/extension.h>
 
 namespace fastertransformer {
 

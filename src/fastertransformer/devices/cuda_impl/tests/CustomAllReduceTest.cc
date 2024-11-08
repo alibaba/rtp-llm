@@ -1,6 +1,6 @@
 #include <cstddef>
 #include <torch/torch.h>
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 #define private public

@@ -1,5 +1,5 @@
 #include "rocmMoeWrapper.h"
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 #include "ck/ck.hpp"
 #include "ck/tensor_operation/gpu/device/tensor_layout.hpp"
@@ -24,7 +24,7 @@ static void throwCKError(const char* const file, int const line, std::string con
     abort();
     throw std::exception();
 }
-#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
+#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
 
 void* add_offset(void* ptr, std::size_t offset, std::size_t element_size) {
     char* char_ptr = static_cast<char*>(ptr);

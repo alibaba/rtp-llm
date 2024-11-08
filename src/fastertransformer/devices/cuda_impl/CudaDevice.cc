@@ -7,7 +7,7 @@
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/core/torch_utils/torch_cuda_allocator.h"
 #include <cuda_runtime.h>

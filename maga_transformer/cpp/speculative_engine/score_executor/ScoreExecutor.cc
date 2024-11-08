@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreExecutor.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreOutput.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreStream.h"
 

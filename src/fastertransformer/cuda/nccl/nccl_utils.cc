@@ -309,7 +309,7 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     int rank       = std::stoi(std::string(getenv("WORLD_RANK")));
     int world_size = std::stoi(std::string(getenv("WORLD_SIZE")));
     FT_CHECK_WITH_INFO(tensor_para_size * pipeline_para_size == world_size,
-                       fmtstr("tensor_para_size (%d) * pipeline_para_size (%d) should equal to the world size (%d).",
+                       rtp_llm::fmtstr("tensor_para_size (%d) * pipeline_para_size (%d) should equal to the world size (%d).",
                               tensor_para_size,
                               pipeline_para_size,
                               world_size));

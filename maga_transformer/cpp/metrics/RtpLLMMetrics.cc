@@ -1,10 +1,9 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "autil/EnvUtil.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "maga_transformer/cpp/metrics/KmonParam.h"
 
-using namespace fastertransformer;
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RPCMetrics);

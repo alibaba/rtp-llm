@@ -1,9 +1,9 @@
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/models/W.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include <memory>
 #if defined(__aarch64__)
 #include "src/fastertransformer/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
@@ -207,11 +207,11 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
 std::unique_ptr<TensorMaps>
 WeightsConverter::convertLayerWeights(py::object py_layer_weights) {
     TensorMaps tensor_layer_weights;
-    auto layers_weights_vec = ft::convertPyObjectToVec(py_layer_weights);
+    auto layers_weights_vec = convertPyObjectToVec(py_layer_weights);
     for (auto& layer_weights : layers_weights_vec) {
         TensorMap weights;
         for (auto& it : convertPyObjectToDict(layer_weights)) {
-            weights.emplace(it.first, ft::convertPyObjectToTensor(it.second));
+            weights.emplace(it.first, convertPyObjectToTensor(it.second));
         }
         tensor_layer_weights.emplace_back(std::move(weights));
     }
@@ -221,9 +221,9 @@ WeightsConverter::convertLayerWeights(py::object py_layer_weights) {
 std::unique_ptr<TensorMap>
 WeightsConverter::convertGlobalWeight(py::object py_global_weight) {
     TensorMap global_weights;
-    auto global_weights_dict = ft::convertPyObjectToDict(py_global_weight);
+    auto global_weights_dict = convertPyObjectToDict(py_global_weight);
     for (auto& it : global_weights_dict) {
-        global_weights.emplace(it.first, ft::convertPyObjectToTensor(it.second));
+        global_weights.emplace(it.first, convertPyObjectToTensor(it.second));
     }
     return std::make_unique<TensorMap>(std::move(global_weights));
 }

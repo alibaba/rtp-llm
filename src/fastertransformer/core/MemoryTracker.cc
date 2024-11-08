@@ -1,4 +1,4 @@
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/core/MemoryTracker.h"
 
 using namespace std;

@@ -14,9 +14,44 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/utils/logger.h"
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
 
-namespace fastertransformer {
+#include "maga_transformer/cpp/utils/Logger.h"
+
+namespace rtp_llm {
+
+bool initLogger() {
+    std::string log_conf_file = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
+    if ("" == log_conf_file) {
+        std::string alog_conf_full_path = std::filesystem::current_path().string() + "/maga_transformer/config/alog.conf";
+        bool exist = std::filesystem::exists(alog_conf_full_path);
+        if (!exist) {
+            AUTIL_ROOT_LOG_CONFIG();
+            AUTIL_ROOT_LOG_SETLEVEL(INFO);
+            return true;
+        }
+        log_conf_file = alog_conf_full_path;
+    }
+
+    bool exist = std::filesystem::exists(log_conf_file);
+
+    if (exist) {
+        try {
+            alog::Configurator::configureLogger(log_conf_file.c_str());
+        } catch (std::exception& e) {
+            std::cerr << "Failed to configure logger. Logger config file [" << log_conf_file << "], errorMsg ["
+                      << e.what() << "]." << std::endl;
+            return false;
+        }
+    } else {
+        std::cerr << "log config file [" << log_conf_file << "] doesn't exist. errorCode: [" << std::endl;
+        return false;
+    }
+
+    return true;
+}
 
 Logger::Logger(const std::string& submodule_name) {
     int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
@@ -27,6 +62,11 @@ Logger::Logger(const std::string& submodule_name) {
     }
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
+    }
+    std::string log_level = autil::EnvUtil::getEnv("LOG_LEVEL", "");
+    if (log_level != "") {
+        uint32_t log_level = getLevelfromstr("LOG_LEVEL");
+        logger_->setLevel(log_level);
     }
     base_log_level_ = logger_->getLevel();
 }
@@ -64,4 +104,4 @@ uint32_t Logger::getLevelfromstr(const char* s) {
     return base_log_level_;
 }
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm

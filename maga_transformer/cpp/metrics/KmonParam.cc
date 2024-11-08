@@ -2,7 +2,7 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/StringUtil.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
 using namespace autil;

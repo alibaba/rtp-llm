@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-    "//src/fastertransformer/utils:utils",
+    "//maga_transformer/cpp:utils",
     "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:schedulers",
     "//:gpt_init_params",

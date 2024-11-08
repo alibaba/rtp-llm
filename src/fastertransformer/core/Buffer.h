@@ -1,13 +1,14 @@
 #pragma once
 
 #include "Types.h"
-#include "src/fastertransformer/utils/assert_utils.h"
 
 #include <memory>
 #include <vector>
 #include <string>
 #include <functional>
+#include <sstream>
 
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 namespace fastertransformer {
 
 class QBuffer;

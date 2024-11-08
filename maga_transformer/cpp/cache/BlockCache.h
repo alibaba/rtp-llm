@@ -8,7 +8,7 @@
 #include <unordered_map>
 
 #include "maga_transformer/cpp/utils/LRUCache.h"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 

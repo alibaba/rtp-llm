@@ -40,7 +40,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":types",
-        "//src/fastertransformer/utils:logger",
+        "//maga_transformer/cpp:utils",
         "@havenask//aios/autil:stack_tracer",
     ],
     include_prefix = "src",
@@ -75,7 +75,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
-        "//src/fastertransformer/utils:assert_utils",
+        "//maga_transformer/cpp:utils",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -90,7 +90,7 @@ cc_library(
     ],
     deps = [
         ":types_hdr",
-        "//src/fastertransformer/utils:assert_utils",
+        "//maga_transformer/cpp:utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -104,7 +104,7 @@ cc_library(
     ],
     deps = [
         ":buffer_hdr",
-        "//src/fastertransformer/utils:logger"
+        "//maga_transformer/cpp:utils"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -117,7 +117,7 @@ cc_library(
     ],
     deps = [
         ":buffer",
-        "//src/fastertransformer/utils:logger"
+        "//maga_transformer/cpp:utils"
     ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],

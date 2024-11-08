@@ -13,6 +13,6 @@ cc_library(
     deps = [
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
         "@havenask//aios/autil:time",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
     ],
 )

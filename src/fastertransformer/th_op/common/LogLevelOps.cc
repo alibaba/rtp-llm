@@ -1,7 +1,5 @@
 #include "src/fastertransformer/th_op/common/LogLevelOps.h"
 
-using namespace fastertransformer;
-
 namespace torch_ext {
 
 bool setLogLevel(const std::string& log_level_str) {
@@ -16,7 +14,7 @@ bool setLogLevel(const std::string& log_level_str) {
         FT_LOG_WARNING("set log level failed, unknown log level: %s", log_level_str.c_str());
         return false;
     }
-    auto& logger = Logger::getEngineLogger();
+    auto& logger = rtp_llm::Logger::getEngineLogger();
     logger.setBaseLevel(log_level);
     return true;
 }

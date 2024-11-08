@@ -29,7 +29,7 @@
 #include <rccl/rccl.h>
 #endif
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include <stdio.h>
 #include <string>
@@ -67,7 +67,7 @@ struct NcclParam {
     NcclParam(NcclParam const& param):
         rank_(param.rank_), world_size_(param.world_size_), nccl_uid_(param.nccl_uid_), nccl_comm_(param.nccl_comm_){};
     std::string toString() {
-        return fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
+        return rtp_llm::fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
     }
 };
 

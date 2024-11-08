@@ -16,17 +16,17 @@
 
 #pragma once
 
-#include "src/fastertransformer/utils/string_utils.h"
-
 #include <array>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
 
-#define NEW_FT_EXCEPTION(...)                                                                                        \
-    fastertransformer::FTException(__FILE__, __LINE__, fastertransformer::fmtstr(__VA_ARGS__))
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
-namespace fastertransformer
+#define FT_EXCEPTION(...)                                                                                        \
+    rtp_llm::FTException(__FILE__, __LINE__, rtp_llm::fmtstr(__VA_ARGS__))
+
+namespace rtp_llm
 {
 
 class FTException : public std::runtime_error
@@ -47,4 +47,4 @@ private:
     int mNbFrames;
 };
 
-} // namespace fastertransformer
+} // namespace rtp_llm

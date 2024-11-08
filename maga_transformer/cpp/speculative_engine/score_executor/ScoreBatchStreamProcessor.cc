@@ -1,11 +1,11 @@
 #include <random>
 
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreBatchStreamProcessor.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/utils/assert_utils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
 using namespace fastertransformer;

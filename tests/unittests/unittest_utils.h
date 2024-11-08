@@ -28,7 +28,7 @@
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 #define PRINT_LIMIT 16
 #define EPSILON (1e-20)
@@ -42,7 +42,7 @@ private:
 public:
     explicit TestFailureError() = default;
     explicit TestFailureError(std::string name, std::string msg = "") {
-        msg_ = ft::fmtstr("TEST FAIL [%s] %s", name.c_str(), msg.c_str());
+        msg_ = rtp_llm::fmtstr("TEST FAIL [%s] %s", name.c_str(), msg.c_str());
     }
     const char* what () const throw () {
         return msg_.c_str();

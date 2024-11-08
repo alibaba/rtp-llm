@@ -1,7 +1,7 @@
 #pragma once
 #include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "torch/extension.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include <unordered_map>
 #include <vector>
 

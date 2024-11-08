@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include "aios/network/arpc/arpc/metric/KMonitorANetServerMetricReporter.h"
 #include "autil/LockFreeThreadPool.h"

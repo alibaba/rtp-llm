@@ -2,7 +2,7 @@
 #include <cstdint>
 
 #include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
@@ -11,7 +11,7 @@
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
 namespace rtp_llm {

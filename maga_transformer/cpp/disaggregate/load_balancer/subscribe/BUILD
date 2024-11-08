@@ -18,7 +18,7 @@ cc_library(
     ],
     deps = [
         "@havenask//aios/autil:json",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
     ],
     visibility = ["//visibility:public"]
 )

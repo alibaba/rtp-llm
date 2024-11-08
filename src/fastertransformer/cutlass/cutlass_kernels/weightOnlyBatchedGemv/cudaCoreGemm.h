@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_type_conversion.h"

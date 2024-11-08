@@ -21,8 +21,8 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initDevices(const EngineInitParams& params) {
-    fastertransformer::Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
-    fastertransformer::Logger::getEngineLogger().flush();
+    Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
+    Logger::getEngineLogger().flush();
     ft::DeviceFactory::initDevices(params.gpt_init_parameter);
 }
 

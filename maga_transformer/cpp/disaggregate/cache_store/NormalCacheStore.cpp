@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include "autil/LockFreeThreadPool.h"
 

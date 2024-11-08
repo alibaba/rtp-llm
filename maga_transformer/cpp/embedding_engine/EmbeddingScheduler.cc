@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include <mutex>
 
 using namespace std;

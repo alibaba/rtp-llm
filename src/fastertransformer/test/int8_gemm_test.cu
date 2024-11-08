@@ -26,7 +26,7 @@
 
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #ifdef ENABLE_BF16
 #include <cuda_bf16.h>
 #endif

@@ -51,7 +51,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
 void RemoteRpcServer::initCacheStore() {
     cache_store_ = engine_->getDevice()->cacheStore();
     if (maga_init_params_.gpt_init_parameter.use_cache_store_ && !cache_store_) {
-        RAISE_FATAL_ERROR("cache store is nullptr");
+        FT_FAIL("cache store is nullptr");
     }
 }
 

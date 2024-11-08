@@ -1,8 +1,8 @@
 
 #pragma once
 
-#include "src/fastertransformer/utils/assert_utils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/core/Types.h"
 
 #if USING_CUDA

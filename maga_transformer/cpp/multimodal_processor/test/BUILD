@@ -45,7 +45,6 @@ cc_test(
         "//maga_transformer/cpp:multimodal_processor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/utils:py_utils",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",

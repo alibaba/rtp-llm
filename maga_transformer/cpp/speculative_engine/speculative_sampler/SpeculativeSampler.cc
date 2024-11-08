@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/SpeculativeSampler.h"
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/RejectionSampler.h"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 namespace ft = fastertransformer;
 

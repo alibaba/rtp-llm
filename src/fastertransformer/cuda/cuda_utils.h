@@ -16,8 +16,8 @@
 
 #pragma once
 
-#include "src/fastertransformer/utils/assert_utils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/core/Types.h"
 
 #include <cstddef>
@@ -188,7 +188,7 @@ void check(T result, char const* const func, const char* const file, int const l
 #define check_cuda_error_2(val, file, line) fastertransformer::check((val), #val, file, line)
 
 inline void syncAndCheck(const char* const file, int const line) {
-    if (Logger::getEngineLogger().isDebugMode()) {
+    if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         cudaDeviceSynchronize();
         cudaError_t result = cudaGetLastError();
         if (result) {
@@ -198,7 +198,7 @@ inline void syncAndCheck(const char* const file, int const line) {
             fflush(stdout);
             throw std::runtime_error(msg);
         }
-        FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
+        FT_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
     }
 }
 
@@ -787,7 +787,7 @@ static inline bool should_print() {
         return false;
     }
 
-    return Logger::getEngineLogger().isTraceMode();
+    return rtp_llm::Logger::getEngineLogger().isTraceMode();
 }
 
 template<typename T>

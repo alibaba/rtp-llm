@@ -7,9 +7,9 @@
 #include <torch/python.h>
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
@@ -78,19 +78,19 @@ private:
             try {
                 py::gil_scoped_acquire acquire;
                 auto res = mm_process_engine_.attr("submit")(urls, types, mm_preprocess_configs);
-                auto mm_embedding_vec = ft::convertPyObjectToVec(res.attr("embeddings"));
+                auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MMEmbeddingRes mm_embedding_res;
                 std::vector<torch::Tensor> mm_features;
                 for (auto& emb: mm_embedding_vec) {
-                    mm_features.emplace_back(ft::convertPyObjectToTensor(emb));
+                    mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
                 mm_embedding_res.mm_features = mm_features;
                 auto position_id_vec = res.attr("position_ids");
                 std::vector<ft::BufferPtr> position_ids;
                 if (!position_id_vec.is_none()) {
-                    for (auto& position_id: ft::convertPyObjectToVec(position_id_vec)) {
-                        auto pos = ft::torchTensor2Buffer(ft::convertPyObjectToTensor(position_id));
+                    for (auto& position_id: convertPyObjectToVec(position_id_vec)) {
+                        auto pos = ft::torchTensor2Buffer(convertPyObjectToTensor(position_id));
                         position_ids.emplace_back(pos);
                     }
                     mm_embedding_res.mm_position_ids = position_ids;

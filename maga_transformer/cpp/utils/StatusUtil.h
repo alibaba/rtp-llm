@@ -1,7 +1,6 @@
 #pragma once
 
-#include "maga_transformer/cpp/common/fatal_util.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 #define RETURN_IF_STATUS_OR_ERROR(status_or)                                                                           \
     do {                                                                                                               \
@@ -21,14 +20,14 @@
     do {                                                                                                               \
         ::absl::Status _status = (status);                                                                             \
         if (ABSL_PREDICT_FALSE(!_status.ok()))                                                                         \
-            RAISE_FATAL_ERROR(_status.ToString());                                                                     \
+            FT_FAIL(_status.ToString());                                                                     \
     } while (0)
 
 #define THROW_IF_STATUSOR_ERROR(status_or)                                                                             \
     do {                                                                                                               \
         ::absl::Status _status = (status_or.status());                                                                 \
         if (ABSL_PREDICT_FALSE(!_status.ok()))                                                                         \
-            RAISE_FATAL_ERROR(_status.ToString());                                                                     \
+            FT_FAIL(_status.ToString());                                                                     \
     } while (0)
 
 #define CHECK_AND_RETURN_REF(result_var, call) \

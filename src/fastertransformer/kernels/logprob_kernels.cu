@@ -28,7 +28,7 @@
 
 #include "src/fastertransformer/kernels/logprob_kernels.h"
 #include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace fastertransformer {
 

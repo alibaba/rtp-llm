@@ -1,7 +1,7 @@
 #pragma once
 #include <torch/custom_class.h>
 #include <torch/script.h>
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace torch_ext {
 

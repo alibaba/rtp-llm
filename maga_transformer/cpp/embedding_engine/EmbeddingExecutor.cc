@@ -1,6 +1,6 @@
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/Types.h"

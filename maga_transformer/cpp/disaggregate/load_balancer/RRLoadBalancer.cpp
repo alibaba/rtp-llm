@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

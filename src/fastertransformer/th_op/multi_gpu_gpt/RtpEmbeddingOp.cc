@@ -2,7 +2,7 @@
 #include <pybind11/pytypes.h>
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;

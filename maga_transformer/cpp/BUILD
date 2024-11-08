@@ -13,13 +13,6 @@ embedding_arpc_deps()
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
 
 cc_library(
-    name = "common",
-    hdrs = glob([
-        "common/*.h",
-    ]),
-)
-
-cc_library(
     name = "utils",
     hdrs = glob([
         "utils/*.h",
@@ -28,14 +21,15 @@ cc_library(
         "utils/*.cc",
     ]),
     deps = torch_deps() + [
-        "//:gpt_init_params_hdr",
-        "//src/fastertransformer/utils:py_utils",
         "@havenask//aios/alog:alog",
+        "@havenask//aios/autil:env_util",
         "@com_google_absl//absl/debugging:stacktrace",
         "@com_google_absl//absl/debugging:symbolize",
     ],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
+
 
 cc_library(
     name = "dataclass",
@@ -47,7 +41,6 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":utils",
-        ":common",
         ":metrics",
         ":system_prompt",
         ":position_ids_generator",
@@ -56,7 +49,6 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
         "@havenask//aios/autil:json",
-        "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
@@ -98,7 +90,6 @@ cc_library(
         ":dataclass",
         ":stream",
         ":utils",
-        ":common",
         ":cache",
     ],
     visibility = ["//visibility:public"],
@@ -113,7 +104,6 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":utils",
-        ":common",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -130,14 +120,12 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":utils",
-        ":common",
         ":cache",
         ":dataclass",
         ":engine_base",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
@@ -156,7 +144,6 @@ cc_library(
     deps = torch_deps() + [
         ":utils",
         ":metrics",
-        ":common",
         ":dataclass",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
@@ -224,7 +211,6 @@ cc_library(
         ":dataclass",
         ":metrics",
         ":utils",
-        ":common",
         ":cache",
         ":components",
         "@com_google_absl//absl/status",
@@ -244,7 +230,7 @@ cc_library(
     deps = torch_deps() + [
         ":dataclass",
         ":models",
-        ":common",
+        ":utils",
         ":lora",
         ":system_prompt",
         "@com_google_absl//absl/status",
@@ -267,7 +253,7 @@ cc_library(
         ":models",
         ":schedulers",
         ":engine_base",
-        ":common",
+        ":utils",
         ":system_prompt",
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
@@ -308,7 +294,7 @@ cc_library(
         ":schedulers",
         ":engine_base",
         ":normal_engine",
-        ":common",
+        ":utils",
         ":system_prompt",
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
@@ -347,8 +333,8 @@ cc_library(
         "multimodal_processor/*.cc",
     ]),
     deps = [
+        ":utils",
         "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/utils:py_utils",
     ],
     visibility = ["//visibility:public"]
 )

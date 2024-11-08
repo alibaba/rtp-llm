@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStreamOutput.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <cstddef>
 
 namespace ft = fastertransformer;

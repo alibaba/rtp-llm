@@ -35,7 +35,7 @@
 #endif // #ifndef _WIN32
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"

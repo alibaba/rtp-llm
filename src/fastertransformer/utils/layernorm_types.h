@@ -1,6 +1,6 @@
 #pragma once
 
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <string>
 
 namespace fastertransformer {

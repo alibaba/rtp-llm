@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/stream/StreamGroups.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"

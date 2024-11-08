@@ -1,6 +1,6 @@
-#include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/exception.h"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/Exception.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 #pragma once
 #define TLLM_LOG_TRACE FT_LOG_TRACE
@@ -17,7 +17,7 @@
 #define TLLM_THROW(...)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
-        throw NEW_FT_EXCEPTION(__VA_ARGS__);                                                                         \
+        throw FT_EXCEPTION(__VA_ARGS__);                                                                         \
     } while (0)
 
 namespace nvinfer1

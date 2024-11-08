@@ -67,7 +67,7 @@ cc_library(
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//maga_transformer/cpp/disaggregate/cache_store/metrics:metrics",
-        "//src/fastertransformer/utils:logger",
+        "//maga_transformer/cpp:utils",
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",

@@ -1,8 +1,8 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingEngine.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
 namespace rtp_llm {

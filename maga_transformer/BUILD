@@ -193,6 +193,12 @@ py_library(
     }),
 )
 
+filegroup(
+    name = "alog_config",
+    srcs = ["config/alog.conf"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "config",
     srcs = glob([
@@ -201,7 +207,8 @@ py_library(
     ]),
     deps = [
         "//maga_transformer/distribute:distribute"
-    ]
+    ],
+    data = [":alog_config"]
 )
 
 py_library(

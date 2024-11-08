@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #if USING_CUDA
 #include <curand_kernel.h>
 #endif

@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/SubscribeServiceManager.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/subscribe/SubscribeServiceCreator.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

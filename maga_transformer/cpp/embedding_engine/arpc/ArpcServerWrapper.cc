@@ -1,8 +1,6 @@
 #include "maga_transformer/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
-#include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/assert_utils.h"
-
-using namespace fastertransformer;
+#include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 

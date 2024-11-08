@@ -5,13 +5,12 @@
 #include <unistd.h>
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "maga_transformer/cpp/common/fatal_util.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "maga_transformer/cpp/utils/StringUtil.h"
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
 #endif
@@ -43,7 +42,7 @@ void CacheManager::regUserMr() {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = device_->cacheStore()->getMemoryUtil();
         if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true)) {
-            RAISE_FATAL_ERROR("register user mr failed");
+            FT_FAIL("register user mr failed");
         }
         FT_LOG_INFO("cache base address = %p, len = %lu, end address = %p",
             cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
@@ -56,7 +55,7 @@ void CacheManager::deregUserMr() {
         FT_LOG_INFO("start to deregUserMr user mr");
         auto memory_util = device_->cacheStore()->getMemoryUtil();
         if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
-            RAISE_FATAL_ERROR("deregUserMr user mr failed");
+            FT_FAIL("deregUserMr user mr failed");
         }
         FT_LOG_INFO("deregUserMr user mr success");
     }
@@ -490,7 +489,7 @@ void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_l
                                           const std::vector<int>& src_index,
                                           const std::vector<int>& target_index) {
     if (src_index.size() != target_index.size()) {
-        RAISE_FATAL_ERROR("src index and target index length should equal");
+        FT_FAIL("src index and target index length should equal");
     }
     std::vector<SeqPosition> src_seq_positions;
     std::vector<SeqPosition> target_seq_positions;
@@ -508,7 +507,7 @@ void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_l
 CacheManager::SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
     int block_idx = idx / seq_size_per_block_;
     if (block_idx >= static_cast<int>(block_indice_list.size())) {
-        RAISE_FATAL_ERROR("block idx should not >= len(block_indice_list)");
+        FT_FAIL("block idx should not >= len(block_indice_list)");
     }
     return SeqPosition{block_indice_list[block_idx], idx % seq_size_per_block_};
 }

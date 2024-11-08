@@ -419,7 +419,7 @@ void invokeBatchTopKSampling(void*          workspace,
         CASE_K(33, 64, 256, 256, 8, LOG_PROB);                                                                         \
         CASE_K(65, 1024, 256, 256, 8, LOG_PROB);                                                                       \
         default:                                                                                                       \
-            throw std::domain_error(fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));               \
+            throw std::domain_error(rtp_llm::fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));               \
     }
     if (output_all_probs) {
         SWITCH_MAX_K(true);

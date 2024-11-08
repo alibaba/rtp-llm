@@ -8,7 +8,7 @@ cc_binary(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -25,7 +25,7 @@ cc_binary(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -42,7 +42,7 @@ cc_binary(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -59,7 +59,7 @@ cc_binary(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
         "//:th_utils",
         "@local_config_cuda//cuda:cuda_headers",

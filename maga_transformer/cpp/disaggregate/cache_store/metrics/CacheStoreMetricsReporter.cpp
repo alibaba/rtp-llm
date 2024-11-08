@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsReporter.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/KMonitor.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

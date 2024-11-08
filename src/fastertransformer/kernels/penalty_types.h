@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <cassert>
 
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 namespace fastertransformer {
 

@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImpl.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include "autil/TimeUtility.h"
 #include <unistd.h>

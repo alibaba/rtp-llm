@@ -7,7 +7,7 @@
 #include <sstream>
 
 #include "maga_transformer/cpp/utils/SignalUtils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -63,9 +63,9 @@ void printStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
 }
 
 void flushLog() {
-    fastertransformer::Logger::getEngineLogger().flush();
-    fastertransformer::Logger::getStackTraceLogger().flush();
-    fastertransformer::Logger::getAccessLogger().flush();
+    Logger::getEngineLogger().flush();
+    Logger::getStackTraceLogger().flush();
+    Logger::getAccessLogger().flush();
 }
 
 void getSighandler(int signum, siginfo_t* siginfo, void* ucontext) {

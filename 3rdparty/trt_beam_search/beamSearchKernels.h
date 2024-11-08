@@ -18,7 +18,7 @@
 #include <cstdint>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 namespace tensorrt_llm
 {

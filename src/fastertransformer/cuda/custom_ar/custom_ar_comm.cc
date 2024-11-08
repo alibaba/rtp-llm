@@ -20,7 +20,7 @@
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include <climits>
 #include <cstdint>
 #include <sys/types.h>

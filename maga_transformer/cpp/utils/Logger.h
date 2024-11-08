@@ -31,10 +31,12 @@
 #include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 
-#include "src/fastertransformer/utils/exception.h"
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/Exception.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
-namespace fastertransformer {
+namespace rtp_llm {
+
+bool initLogger();
 
 class Logger {
 public:
@@ -73,7 +75,7 @@ public:
         } else {
             fmt = getPrefix(file, line, func) + format;
         }
-        std::string logstr = fmtstr(fmt, args...);
+        std::string logstr = rtp_llm::fmtstr(fmt, args...);
         logger_->log(level, "%s", logstr.c_str());
         tryFlush(level);
     }
@@ -111,6 +113,7 @@ public:
     }
 
 private:
+
     void tryFlush(int32_t level) {
         if (base_log_level_ >= alog::LOG_LEVEL_DEBUG || level <= alog::LOG_LEVEL_ERROR) {
             flush();
@@ -147,14 +150,7 @@ private:
     int32_t rank_ = 0;
 };
 
-#define FT_LOG(level, ...)                                                                                             \
-    do {                                                                                                               \
-        auto& logger = fastertransformer::Logger::getEngineLogger();                                                   \
-        if (!logger.isLevelEnabled(level)) {                                                                           \
-            break;                                                                                                     \
-        }                                                                                                              \
-        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
-    } while (0)
+} // namespace rtp_llm
 
 #define FT_INTERVAL_LOG(logInterval, level, format, args...)                                                           \
     do {                                                                                                               \
@@ -166,16 +162,25 @@ private:
         }                                                                                                              \
     } while (0)
 
+#define FT_LOG(level, ...)                                                                                             \
+    do {                                                                                                               \
+        auto& logger = rtp_llm::Logger::getEngineLogger();                                                   \
+        if (!logger.isLevelEnabled(level)) {                                                                           \
+            break;                                                                                                     \
+        }                                                                                                              \
+        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
+    } while (0)
+
 #define FT_LOG_TRACE(...) FT_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
 #define FT_LOG_DEBUG(...) FT_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
 #define FT_LOG_INFO(...) FT_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
 #define FT_LOG_WARNING(...) FT_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define FT_LOG_ERROR(...) FT_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
+#define FT_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
 
 #define FT_ACCESS_LOG(level, ...)                                                                                      \
     do {                                                                                                               \
-        auto& logger = fastertransformer::Logger::getAccessLogger();                                                   \
+        auto& logger = rtp_llm::Logger::getAccessLogger();                                                   \
         if (!logger.isLevelEnabled(level)) {                                                                           \
             break;                                                                                                     \
         }                                                                                                              \
@@ -187,11 +192,11 @@ private:
 #define FT_ACCESS_LOG_INFO(...) FT_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
 #define FT_ACCESS_LOG_WARNING(...) FT_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define FT_ACCESS_LOG_ERROR(...) FT_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_ACCESS_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
+#define FT_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
 
 #define FT_STACKTRACE_LOG(level, ...)                                                                                  \
     do {                                                                                                               \
-        auto& logger = fastertransformer::Logger::getStackTraceLogger();                                               \
+        auto& logger = rtp_llm::Logger::getStackTraceLogger();                                               \
         if (!logger.isLevelEnabled(level)) {                                                                           \
             break;                                                                                                     \
         }                                                                                                              \
@@ -203,5 +208,4 @@ private:
 #define FT_STACKTRACE_LOG_INFO(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
 #define FT_STACKTRACE_LOG_WARNING(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define FT_STACKTRACE_LOG_ERROR(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getStackTraceLogger().log(ex, ##__VA_ARGS__)
-}  // namespace fastertransformer
+#define FT_STACKTRACE_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getStackTraceLogger().log(ex, ##__VA_ARGS__)

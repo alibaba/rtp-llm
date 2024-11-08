@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeScheduler.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 
 namespace rtp_llm {
 

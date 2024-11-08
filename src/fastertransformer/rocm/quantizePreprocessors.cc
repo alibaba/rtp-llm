@@ -1,4 +1,4 @@
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 #include "src/fastertransformer/rocm/hip_utils.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
 
@@ -166,10 +166,10 @@ void permute_B_rows_for_mixed_gemm(int8_t* permuted_quantized_tensor, const int8
         arch_version >= 75, "Unsupported Arch. Pre-volta not supported. Column interleave not needed on Volta.");
 
     FT_CHECK_WITH_INFO(num_rows % B_ROWS_PER_MMA == 0,
-        fmtstr("Invalid shape for quantized tensor. Number of rows of quantized matrix must be a multiple of %d",
+        rtp_llm::fmtstr("Invalid shape for quantized tensor. Number of rows of quantized matrix must be a multiple of %d",
             B_ROWS_PER_MMA));
     FT_CHECK_WITH_INFO(num_cols % MMA_SHAPE_N == 0,
-        fmtstr("Invalid shape for quantized tensor. On turing/Ampere, the number of cols must be a multiple of %d.",
+        rtp_llm::fmtstr("Invalid shape for quantized tensor. On turing/Ampere, the number of cols must be a multiple of %d.",
             MMA_SHAPE_N));
 
     // The code is written as below so it works for both int8 and packed int4.
@@ -234,7 +234,7 @@ void subbyte_transpose_impl(
     // of 64 for weight-only quantization. As a result, this seemed like a reasonable tradeoff because it
     // allows GCC to emit vector instructions.
     FT_CHECK_WITH_INFO(!(col_bytes_trans % VECTOR_WIDTH) && !(col_bytes % VECTOR_WIDTH),
-        fmtstr("Number of bytes for rows and cols must be a multiple of %d. However, num_rows_bytes = %ld and "
+        rtp_llm::fmtstr("Number of bytes for rows and cols must be a multiple of %d. However, num_rows_bytes = %ld and "
                "num_col_bytes = %ld.",
             VECTOR_WIDTH, col_bytes_trans, col_bytes));
 
@@ -474,13 +474,13 @@ void interleave_column_major_tensor(int8_t* interleaved_quantized_tensor, const 
     const int rows_per_tile = details.rows_per_column_tile;
 
     FT_CHECK_WITH_INFO(!(num_rows % elts_in_int32),
-        fmtstr("The number of rows must be a multiple of %d but the number of rows is %ld.", elts_in_int32, num_rows));
+        rtp_llm::fmtstr("The number of rows must be a multiple of %d but the number of rows is %ld.", elts_in_int32, num_rows));
 
     const uint32_t* input_byte_ptr = reinterpret_cast<const uint32_t*>(quantized_tensor);
     uint32_t* output_byte_ptr = reinterpret_cast<uint32_t*>(interleaved_quantized_tensor);
 
     FT_CHECK_WITH_INFO(!(num_rows % rows_per_tile),
-        fmtstr("The number of rows must be a multiple of %d but the number of rows is %ld.", rows_per_tile, num_rows));
+        rtp_llm::fmtstr("The number of rows must be a multiple of %d but the number of rows is %ld.", rows_per_tile, num_rows));
 
     const int num_vec_rows = num_rows / elts_in_int32;
     const int vec_rows_per_tile = rows_per_tile / elts_in_int32;

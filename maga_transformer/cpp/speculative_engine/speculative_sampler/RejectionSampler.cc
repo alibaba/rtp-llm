@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/RejectionSampler.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include <ATen/ops/zeros_like.h>
 #include <c10/core/Device.h>
 #include <c10/core/DeviceType.h>

@@ -4,7 +4,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/numbers.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include "rocm/include/hipblaslt/hipblaslt-ext.hpp"
 #include "hip_utils.h"

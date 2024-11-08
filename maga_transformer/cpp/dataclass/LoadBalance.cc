@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

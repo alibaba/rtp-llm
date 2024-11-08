@@ -1,6 +1,5 @@
 #pragma once
 
-#include "maga_transformer/cpp/common/torch_bind.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
@@ -78,7 +77,7 @@ struct GptModelInputs {
 
 public:
     std::string debugString() const {
-        if (!ft::Logger::getEngineLogger().isDebugMode()) {
+        if (!Logger::getEngineLogger().isDebugMode()) {
             return "";
         }
         std::stringstream debug_string;

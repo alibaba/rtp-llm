@@ -30,7 +30,7 @@
 #endif
 
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace fastertransformer {
 

@@ -9,8 +9,6 @@
 
 namespace rtp_llm {
 
-void getStackTraceSighandler(int signum, siginfo_t* siginfo, void* ucontext);
-
 bool installSighandler();
 
 };  // namespace rtp_llm

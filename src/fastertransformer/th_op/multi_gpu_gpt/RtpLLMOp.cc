@@ -5,16 +5,15 @@
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
-#include "maga_transformer/cpp/common/torch_bind.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "maga_transformer/cpp/common/fatal_util.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h"
 
 using namespace std;

@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStreamOutput.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include <memory>
 #define private public
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/RejectionSampler.h"

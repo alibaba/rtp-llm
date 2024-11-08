@@ -8,7 +8,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/cache/KVCacheBlockAddr.h"
-#include "maga_transformer/cpp/common/ErrorCode.h"
+#include "maga_transformer/cpp/utils/ErrorCode.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"

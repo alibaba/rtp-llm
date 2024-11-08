@@ -1,5 +1,5 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 
 namespace ft = fastertransformer;

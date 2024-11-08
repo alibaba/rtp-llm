@@ -17,7 +17,7 @@
 #pragma once
 
 #include <cstdint>
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 namespace fastertransformer
 {

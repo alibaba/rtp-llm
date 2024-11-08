@@ -54,7 +54,7 @@ void invokeTopkSoftMax(T const* logits, void* workspace, BeamHypotheses& bh, cud
 #endif             // FAST_BUILD
     default:
         throw std::runtime_error(
-            fastertransformer::fmtstr("%s:%d Maximum beam width supported for beam search (%d) is larger than beam_width now use (%d)",
+            rtp_llm::fmtstr("%s:%d Maximum beam width supported for beam search (%d) is larger than beam_width now use (%d)",
                 __FILE__, __LINE__, nMaxBeamWidth, bh.nBeamWidth));
     }
 }

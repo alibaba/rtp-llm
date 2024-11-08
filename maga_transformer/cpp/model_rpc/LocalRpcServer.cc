@@ -1,6 +1,6 @@
 #include <memory>
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/common/fatal_util.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
 #include "maga_transformer/cpp/model_rpc/LocalRpcServer.h"

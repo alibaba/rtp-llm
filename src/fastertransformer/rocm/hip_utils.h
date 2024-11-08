@@ -1,9 +1,9 @@
 #pragma once
 
 
-#include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/assert_utils.h"
-#include "src/fastertransformer/utils/string_utils.h"
+#include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 #include <hip/hip_runtime.h>
 #include "cuda_shims.h"
@@ -26,10 +26,10 @@ namespace fastertransformer {
 do {                                                                \
     bool is_valid_val = (val);                                      \
     if (!is_valid_val) {						                    \
-        rocm::throwRocmError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__)); \
+        rocm::throwRocmError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__)); \
     }								                                \
 } while (0)
-#define ROCM_FAIL(info, ...) rocm::throwRocmError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
+#define ROCM_FAIL(info, ...) rocm::throwRocmError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
 
 #define MAX_CONFIG_NUM 20
 #define COL32_ 32
@@ -159,7 +159,7 @@ static void throwRocmError(const char* const file, int const line, std::string c
     if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
         abort();
     }
-    throw NEW_FT_EXCEPTION(error_msg);
+    throw FT_EXCEPTION(error_msg);
 }
 
 template<typename T>
@@ -180,7 +180,7 @@ inline void sync_and_check(const char* const file, int const line) {
             fflush(stdout);
             throw std::runtime_error(msg);
         }
-        FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
+        FT_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
     }
 }
 

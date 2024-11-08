@@ -1,5 +1,5 @@
 #pragma once
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/core/Types.h"
 #include <unordered_map>
 #include <vector>

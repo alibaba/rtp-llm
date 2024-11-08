@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include <atomic>
 #include <cuda.h>

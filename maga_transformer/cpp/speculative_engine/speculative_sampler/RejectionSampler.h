@@ -1,7 +1,7 @@
 #pragma once
 
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/SpeculativeSampler.h"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

@@ -4,7 +4,7 @@
 #include "absl/status/statusor.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "maga_transformer/cpp/models/GptModel.h"
-#include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include <memory>
 

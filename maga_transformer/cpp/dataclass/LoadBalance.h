@@ -5,7 +5,7 @@
 #include <queue>
 #include <vector>
 #include "autil/EnvUtil.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 
 namespace rtp_llm {
 

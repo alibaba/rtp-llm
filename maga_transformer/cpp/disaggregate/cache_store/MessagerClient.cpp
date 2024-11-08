@@ -2,7 +2,7 @@
 
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"

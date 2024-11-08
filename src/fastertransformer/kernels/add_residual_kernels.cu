@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"

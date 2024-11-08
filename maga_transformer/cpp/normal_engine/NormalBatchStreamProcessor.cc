@@ -8,7 +8,7 @@
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/utils/assert_utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"

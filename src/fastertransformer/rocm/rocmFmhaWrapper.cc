@@ -4,7 +4,7 @@
 #include "mask.hpp"
 #include "utils.hpp"
 #include "bias.hpp"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace fastertransformer {
 
@@ -16,7 +16,7 @@ static void throwCKError(const char* const file, int const line, std::string con
     abort();
     throw std::exception();
 }
-#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, fmtstr(info, ##__VA_ARGS__))
+#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
 uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                 void*  k,
                                 void*  v,

@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/utils/exception.h"
 
 #include <cstdlib>
 #include <cxxabi.h>
@@ -22,7 +21,9 @@
 #include <execinfo.h>
 #include <sstream>
 
-namespace fastertransformer
+#include "maga_transformer/cpp/utils/Exception.h"
+
+namespace rtp_llm
 {
 
 namespace
@@ -35,7 +36,7 @@ FTException::FTException(char const* file, std::size_t line, const std::string& 
     mNbFrames = backtrace(mCallstack.data(), MAX_FRAMES);
     auto const trace = getTrace();
     std::runtime_error::operator=(
-        std::runtime_error{fastertransformer::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
+        std::runtime_error{rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
 }
 
 FTException::~FTException() noexcept = default;
@@ -47,11 +48,11 @@ std::string FTException::getTrace() const {
         Dl_info info;
         if (dladdr(mCallstack[i], &info) && info.dli_sname) {
             auto const clearName = demangle(info.dli_sname);
-            buf << fastertransformer::fmtstr("%-3d %*p %s + %zd", i, VOID_PTR_SZ, mCallstack[i], clearName.c_str(),
+            buf << rtp_llm::fmtstr("%-3d %*p %s + %zd", i, VOID_PTR_SZ, mCallstack[i], clearName.c_str(),
                 static_cast<char*>(mCallstack[i]) - static_cast<char*>(info.dli_saddr));
         }
         else {
-            buf << fastertransformer::fmtstr("%-3d %*p %s", i, VOID_PTR_SZ, mCallstack[i], trace[i]);
+            buf << rtp_llm::fmtstr("%-3d %*p %s", i, VOID_PTR_SZ, mCallstack[i], trace[i]);
         }
         if (i < mNbFrames - 1) {
             buf << std::endl;
@@ -75,5 +76,6 @@ std::string FTException::demangle(char const* name) {
     }
     return clearName;
 }
+
 
 } 

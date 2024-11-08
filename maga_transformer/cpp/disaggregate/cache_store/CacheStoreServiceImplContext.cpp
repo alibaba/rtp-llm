@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
 #include <atomic>
 
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 

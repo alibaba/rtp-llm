@@ -58,7 +58,7 @@ cc_test(
     deps = test_deps + [
         ":test_utils",
         "//src/fastertransformer/devices/torch_impl:torch_reference_impl",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
     ],
     env = device_test_envs(),
     exec_properties = {'gpu':'A10'},

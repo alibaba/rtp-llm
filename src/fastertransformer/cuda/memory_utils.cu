@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include <curand_kernel.h>
 #include <sys/stat.h>

@@ -248,7 +248,7 @@ void printBuffer6d(const std::string&  hint,
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print) {
     if (!force_print) {
-        if (!Logger::getEngineLogger().isTraceMode()) {
+        if (!rtp_llm::Logger::getEngineLogger().isTraceMode()) {
             return;
         }
 

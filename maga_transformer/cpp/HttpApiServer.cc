@@ -4,7 +4,7 @@
 #include "autil/legacy/json.h"
 #include "autil/legacy/jsonizable.h"
 #include "autil/EnvUtil.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 

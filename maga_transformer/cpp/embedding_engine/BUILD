@@ -14,7 +14,7 @@ cc_library(
         "//maga_transformer/cpp:models",
         "//maga_transformer/cpp:schedulers",
         "//maga_transformer/cpp:engine_base",
-        "//maga_transformer/cpp:common",
+        "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp:system_prompt",
         "//maga_transformer/cpp:system_prompt_constructor",
@@ -53,7 +53,8 @@ cc_library(
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:models",
         "//:th_op_hdrs",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"]

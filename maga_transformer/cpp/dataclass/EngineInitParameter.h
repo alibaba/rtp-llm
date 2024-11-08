@@ -3,7 +3,6 @@
 #include <pybind11/pytypes.h>
 #include <tuple>
 
-#include "maga_transformer/cpp/common/torch_bind.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/Weights.h"
