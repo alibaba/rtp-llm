@@ -170,7 +170,7 @@ void check(T result, char const* const func, const char* const file, int const l
     }
 }
 inline void sync_and_check(const char* const file, int const line) {
-    if (Logger::getEngineLogger().isDebugMode()) {
+    if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         ROCM_CHECK(hipDeviceSynchronize());
         hipError_t result = hipGetLastError();
         if (result) {

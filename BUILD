@@ -65,7 +65,6 @@ cc_library(
     deps = [
         ":gpt_init_params_hdr",
         "//src/fastertransformer/utils",
-        "//maga_transformer/cpp/utils"
     ],
     copts = copts(),
     alwayslink = True,
