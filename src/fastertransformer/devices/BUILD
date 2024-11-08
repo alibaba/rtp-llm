@@ -13,7 +13,6 @@ cc_library(
         "//src/fastertransformer/core:memory_tracker",
         "//src/fastertransformer/core:buffer_torch",
         "//src/fastertransformer/core:buffer",
-        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/utils",
         "//:gpt_init_params_hdr",
         "//src/fastertransformer/models:weights_define",

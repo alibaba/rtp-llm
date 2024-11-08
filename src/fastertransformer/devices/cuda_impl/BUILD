@@ -25,7 +25,7 @@ cc_library(
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/core:torch_cuda_allocator",
         "//src/fastertransformer/kernels:kernels",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",

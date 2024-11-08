@@ -162,7 +162,6 @@ cc_library(
     deps = [
         "//:gpt_init_params_hdr",
         ":cuda_utils",
-        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/utils",
         "//src/fastertransformer/core:allocator",
         "@local_config_cuda//cuda:cuda_headers",
@@ -186,7 +185,7 @@ cc_library(
     ],
     deps = [
         ":cuda_utils_base",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -202,7 +201,7 @@ cc_library(
     ],
     deps = [
         ":cuda_utils",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -222,7 +221,7 @@ cc_library(
         "trt_utils.h"
     ],
     deps = [
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
@@ -236,7 +235,7 @@ cc_library(
     name = "cuda_utils",
     deps = [
         ":cuda_utils_cu",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -264,7 +263,7 @@ cc_library(
         ":custom_ar",
         ":memory_utils",
         "//src/fastertransformer/kernels:kernels",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//3rdparty/trt_beam_search:trt_beam_search_impl",

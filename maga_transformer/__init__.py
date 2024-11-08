@@ -17,7 +17,7 @@ if os.environ.get('FT_SERVER_TEST') is None:
 
     if os.environ.get('NCCL_DEBUG_FILE') is None:
         os.environ['NCCL_DEBUG_FILE'] = os.path.join(LOG_PATH, 'nccl.log')
-
+        print(f"successfully set NCCL_DEBUG_FILE path to {os.environ['NCCL_DEBUG_FILE']}")
     try:
         logging.config.dictConfig(LOGGING_CONFIG)
         file_logger_init_success = True

@@ -40,7 +40,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":types",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "@havenask//aios/autil:stack_tracer",
     ],
     include_prefix = "src",
@@ -75,7 +75,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -90,7 +90,7 @@ cc_library(
     ],
     deps = [
         ":types_hdr",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

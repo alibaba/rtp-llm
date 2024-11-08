@@ -23,7 +23,7 @@ cc_library(
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/core:types",
         "@composable_kernel//:ck_fmha_example",
@@ -59,7 +59,7 @@ cc_library(
 
     deps=[
         ":rocm_utils",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "//src/fastertransformer/core:allocator",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocm",

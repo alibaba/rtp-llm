@@ -12,7 +12,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/cutlass/cutlass_extensions:cutlass_extensions",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/kernels:kernels",

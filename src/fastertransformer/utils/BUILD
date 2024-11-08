@@ -10,7 +10,7 @@ cc_library(
         "*.h",
     ]),
     deps = torch_deps() + [
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

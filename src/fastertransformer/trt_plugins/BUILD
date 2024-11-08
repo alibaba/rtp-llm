@@ -23,7 +23,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",
-        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/utils",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cutlass:cutlass_headers",
