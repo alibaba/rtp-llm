@@ -33,9 +33,11 @@ test_deps = [
 cc_test(
     name = "api_server_unittest",
     srcs = [
+        "mock/MockEngineBase.h",
         "mock/MockHttpResponseWriter.h",
         "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
+        "WorkerStatusServiceTest.cc",
     ],
     deps = test_deps + [
         "//maga_transformer/cpp:http_api_server",

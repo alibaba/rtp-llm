@@ -36,6 +36,8 @@ TEST_F(HttpApiServerTest, testStart) {
     ASSERT_TRUE(server.isStoped());
 }
 
+// -------------------------- Health Service Test --------------------------
+
 TEST_F(HttpApiServerTest, testRegisterHealthServiceFailed_HttpServerIsNull) {
     server_->http_server_ = nullptr;
     EXPECT_FALSE(server_->registerHealthService());
@@ -49,6 +51,23 @@ TEST_F(HttpApiServerTest, testRegisterHealthServiceFailed_RegisterRouteFailed) {
 
 TEST_F(HttpApiServerTest, testRegisterHealthServiceSuccess) {
     EXPECT_TRUE(server_->registerHealthService());
+}
+
+// -------------------------- Worker Status Service Test --------------------------
+
+TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceFailed_HttpServerIsNull) {
+    server_->http_server_ = nullptr;
+    EXPECT_FALSE(server_->registerWorkerStatusService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceFailed_RegisterRouteFailed) {
+    // 将 http server 的 router 置空, 模拟 RegisterRoute 失败
+    server_->http_server_->_router = nullptr;
+    EXPECT_FALSE(server_->registerWorkerStatusService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceSuccess) {
+    EXPECT_TRUE(server_->registerWorkerStatusService());
 }
 
 }  // namespace rtp_llm

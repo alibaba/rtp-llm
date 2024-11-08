@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
 #include "maga_transformer/cpp/api_server/HealthService.h"
+#include "maga_transformer/cpp/api_server/WorkerStatusService.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -29,7 +30,7 @@ bool HttpApiServer::start(const std::string& address) {
         return false;
     }
 
-    is_stoped_.store(false);
+    is_stopped_.store(false);
     FT_LOG_INFO("HttpApiServer start success, listen address is %s.", address.c_str());
     return true;
 }
@@ -44,6 +45,13 @@ bool HttpApiServer::registerServices() {
     // POST: /health /GraphService/cm2_status /SearchService/cm2_status /health_check
     if (!registerHealthService()) {
         FT_LOG_WARNING("HttpApiServer register health service failed.");
+        return false;
+    }
+
+    // add uri:
+    // GET: /worker_status
+    if (!registerWorkerStatusService()) {
+        FT_LOG_WARNING("HttpApiServer register worker status service failed.");
         return false;
     }
 
@@ -81,8 +89,23 @@ bool HttpApiServer::registerHealthService() {
            && http_server_->RegisterRoute("GET", "/", json_resp_callback);
 }
 
+bool HttpApiServer::registerWorkerStatusService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register worker status service failed, http server is null");
+        return false;
+    }
+
+    worker_status_service_.reset(new WorkerStatusService(engine_, controller_));
+    auto callback = [worker_status_service =
+                         worker_status_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                 const http_server::HttpRequest&                  request) -> void {
+        worker_status_service->workerStatus(writer, request);
+    };
+    return http_server_->RegisterRoute("GET", "/worker_status", callback);
+}
+
 void HttpApiServer::stop() {
-    is_stoped_.store(true);
+    is_stopped_.store(true);
 
     // stop http server
     // TODO: maybe wait all request finished
@@ -94,7 +117,7 @@ void HttpApiServer::stop() {
 
 bool HttpApiServer::isStoped() const {
     // TODO:
-    return is_stoped_.load();
+    return is_stopped_.load();
 }
 
 }  // namespace rtp_llm
