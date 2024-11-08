@@ -24,8 +24,6 @@ cc_library(
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
         "//maga_transformer/cpp:utils",
-        "//maga_transformer/cpp:utils",
-        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/core:types",
         "@composable_kernel//:ck_fmha_example",

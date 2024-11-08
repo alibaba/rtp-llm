@@ -42,7 +42,7 @@ cc_library(
         "src/fastertransformer/th_op/GptInitParameter.h"
     ],
     deps = [
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
 	    "//src/fastertransformer/core:types"
     ] + torch_deps(),
     visibility = ["//visibility:public"],
@@ -64,7 +64,8 @@ cc_library(
     ],
     deps = [
         ":gpt_init_params_hdr",
-        "//src/fastertransformer/utils:py_utils",
+        "//src/fastertransformer/utils",
+        "//maga_transformer/cpp/utils"
     ],
     copts = copts(),
     alwayslink = True,
@@ -132,7 +133,7 @@ cc_library(
     deps = [
         ":gpt_init_params_hdr",
     	":th_op_hdrs",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/devices:device_py_export",
         "//maga_transformer/cpp:http_api_server",
         "//maga_transformer/cpp:model_rpc_server",
@@ -156,7 +157,7 @@ cc_library(
     deps = [
         ":gpt_init_params_hdr",
     	":th_op_hdrs",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
@@ -200,7 +201,7 @@ cc_library(
     deps = [
         "//src/fastertransformer/cuda:allocator_torch",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:utils",
         "//src/fastertransformer/kernels:kernels",
     ],
     copts = copts(),
