@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
+#include "maga_transformer/cpp/api_server/HealthService.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
@@ -68,6 +69,33 @@ TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceFailed_RegisterRouteFai
 
 TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceSuccess) {
     EXPECT_TRUE(server_->registerWorkerStatusService());
+}
+
+TEST_F(HttpApiServerTest, testStop) {
+    EXPECT_FALSE(server_->isStoped());
+    EXPECT_TRUE(server_->registerHealthService());
+    EXPECT_TRUE(server_->health_service_ != nullptr);
+    EXPECT_FALSE(server_->health_service_->is_stopped_);
+
+    server_->stop();
+    EXPECT_TRUE(server_->health_service_->is_stopped_);
+}
+
+// -------------------------- Model Status Service Test --------------------------
+
+TEST_F(HttpApiServerTest, testRegisterModelStatusServiceFailed_HttpServerIsNull) {
+    server_->http_server_ = nullptr;
+    EXPECT_FALSE(server_->registerModelStatusService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterModelStatusServiceFailed_RegisterRouteFailed) {
+    // 将 http server 的 router 置空, 模拟 RegisterRoute 失败
+    server_->http_server_->_router = nullptr;
+    EXPECT_FALSE(server_->registerModelStatusService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterModelStatusServiceSuccess) {
+    EXPECT_TRUE(server_->registerModelStatusService());
 }
 
 }  // namespace rtp_llm

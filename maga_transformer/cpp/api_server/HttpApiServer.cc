@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
 #include "maga_transformer/cpp/api_server/HealthService.h"
 #include "maga_transformer/cpp/api_server/WorkerStatusService.h"
+#include "maga_transformer/cpp/api_server/ModelStatusService.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -55,6 +56,12 @@ bool HttpApiServer::registerServices() {
         return false;
     }
 
+    // GET: /v1/models
+    if (!registerModelStatusService()) {
+        FT_LOG_WARNING("HttpApiServer register model status service failed.");
+        return false;
+    }
+
     FT_LOG_INFO("HttpApiServer register services success.");
     return true;
 }
@@ -104,8 +111,27 @@ bool HttpApiServer::registerWorkerStatusService() {
     return http_server_->RegisterRoute("GET", "/worker_status", callback);
 }
 
+bool HttpApiServer::registerModelStatusService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register model status service failed, http server is null");
+        return false;
+    }
+
+    model_status_service_.reset(new ModelStatusService());
+    auto callback = [model_status_service =
+                         model_status_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                const http_server::HttpRequest&                  request) -> void {
+        model_status_service->modelStatus(writer, request);
+    };
+    return http_server_->RegisterRoute("GET", "/v1/models", callback);
+}
+
 void HttpApiServer::stop() {
     is_stopped_.store(true);
+
+    if (health_service_) {
+        health_service_->stop();
+    }
 
     // stop http server
     // TODO: maybe wait all request finished
