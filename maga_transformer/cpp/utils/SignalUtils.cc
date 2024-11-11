@@ -8,14 +8,11 @@
 
 #include "maga_transformer/cpp/utils/SignalUtils.h"
 #include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/StackTrace.h"
 
 namespace rtp_llm {
 
-static constexpr int kMaxStackDepth = 64;
-
-void printStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
-    void*             addrs[kMaxStackDepth];
-
+void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
     std::stringstream stack_ss;
     time_t            current_time = time(nullptr);
     stack_ss << std::endl << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
@@ -47,19 +44,9 @@ void printStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
                      << "); stack trace: ***" << std::endl;
             break;
     }
-
-    int stack_depth = backtrace(addrs, kMaxStackDepth);
-    for (int i = 2; i < stack_depth; ++i) {
-        char line[2048];
-        char buf[1024];
-        if (absl::Symbolize(addrs[i], buf, sizeof(buf))) {
-            snprintf(line, 2048, "@  %16p  %s\n", addrs[i], buf);
-        } else {
-            snprintf(line, 2048, "@  %16p  (unknown)\n", addrs[i]);
-        }
-        stack_ss << std::string(line);
-    }
     FT_STACKTRACE_LOG_INFO("%s", stack_ss.str().c_str());
+
+    fastertransformer::printStackTrace();
 }
 
 void flushLog() {
@@ -69,7 +56,7 @@ void flushLog() {
 }
 
 void getSighandler(int signum, siginfo_t* siginfo, void* ucontext) {
-    printStackTrace(signum, siginfo, ucontext);
+    printSignalStackTrace(signum, siginfo, ucontext);
     flushLog();
     signal(signum, SIG_DFL);
     kill(getpid(), signum);

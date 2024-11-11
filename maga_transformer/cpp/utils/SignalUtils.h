@@ -4,11 +4,10 @@
 #include <string>
 #include <signal.h>
 
-#include "absl/debugging/symbolize.h"
-#include "absl/debugging/stacktrace.h"
-
 namespace rtp_llm {
 
 bool installSighandler();
+
+void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext);
 
 };  // namespace rtp_llm

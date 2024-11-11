@@ -11,6 +11,8 @@ cc_library(
     ]),
     deps = torch_deps() + [
         "//maga_transformer/cpp:utils",
+        "@com_google_absl//absl/debugging:stacktrace",
+        "@com_google_absl//absl/debugging:symbolize",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

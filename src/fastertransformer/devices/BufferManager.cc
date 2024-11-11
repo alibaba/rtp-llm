@@ -1,5 +1,6 @@
 #include "src/fastertransformer/devices/BufferManager.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
+#include "maga_transformer/cpp/utils/StackTrace.h"
 #include "autil/StackTracer.h"
 
 #include <numeric>
@@ -29,9 +30,17 @@ BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allo
 BufferManager::~BufferManager() {}
 
 BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
-    auto buffer = doAllocate(params, hints);
-    recordAllcation(params, hints, buffer);
-    return buffer;
+    try {
+        auto buffer = doAllocate(params, hints);
+        recordAllcation(params, hints, buffer);
+        return buffer;
+    } catch (std::exception& e) {
+        FT_LOG_ERROR(
+            "allocate buffer failed: %s current allocation records:\n%s \n stack traces: ",
+            e.what(), printAllocationRecords(device_allocator_).c_str());
+        printStackTrace();
+        throw e;
+    }
 }
 
 void BufferManager::recycle(Buffer* buffer, IAllocator* allocator) {
@@ -120,6 +129,7 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
     if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(allocator)) {
         auto tracker_status = tracker_allocator->getTrackerStatus();
         std::ostringstream info;
+        std::set<void*> allocated_ptrs;
         info << "Memory Tracker [" << (int32_t)tracker_allocator->type() << "] Status:\n";
         info << "allocated " << tracker_status.allocated_chunk_count
              << " chunks, size: " << tracker_status.allocated_size << "\n"
@@ -131,6 +141,9 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
         info << "--------------------------------------------------------------------------\n";
         {
             ReadLock lock(mutex_);
+            for (const auto& [ptr, record] : allocation_records_) {
+                allocated_ptrs.insert(ptr);
+            }
             for (const auto chunk: tracker_status.chunks) {
                 info << "| " << chunk.ptr
                      << " | " << setw(12) << chunk.size
@@ -138,6 +151,7 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
                      << " | " << (chunk.used ? "USED" : "FREE");
                 const auto alloc_record = allocation_records_.find(chunk.ptr);
                 if (alloc_record != allocation_records_.end()) {
+                    allocated_ptrs.erase(chunk.ptr);
                     info << " | " << setw(4) << alloc_record->second.trace_id
                          << " | " << setw(16) << alloc_record->second.hints.tag.c_str()
                          << " |\n";
@@ -145,8 +159,24 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
                     info << " |      |                  |\n";
                 }
             }
-        }
-        info << "--------------------------------------------------------------------------\n";
+            info << "--------------------------------------------------------------------------\n";
+            if (allocated_ptrs.size()) {
+                info << "There are also " << allocated_ptrs.size() << " buffers allocated but not tracked, "
+                    << "they are not shown in the list: \n";
+                info << "--------------------------------------------------------------------------\n";
+                for (const auto ptr : allocated_ptrs) {
+                    const auto alloc_record = allocation_records_.find(ptr);
+                    info << "| " << ptr
+                        << " | " << setw(12) << alloc_record->second.bytes
+                        << " (" << std::setw(8) << std::hex << alloc_record->second.bytes << std::dec << ")"
+                        << " |     "
+                        << " | " << setw(4) << alloc_record->second.trace_id
+                        << " | " << setw(16) << alloc_record->second.hints.tag.c_str()
+                        << " |\n";
+                }
+                info << "--------------------------------------------------------------------------\n";
+            }
+         }
         return info.str();
     } else {
         FT_LOG_WARNING("BufferManager::printAllocationRecords is only effective when using TrackerAllocator!");
