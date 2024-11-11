@@ -88,3 +88,6 @@ class SparseEmbeddingRequest(OpenAIEmbeddingRequest):
 
 class ColbertEmbeddingRequest(OpenAIEmbeddingRequest):
     pass
+
+class AllEmbeddingRequest(OpenAIEmbeddingRequest):
+    normalize: bool = True
