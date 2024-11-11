@@ -9,7 +9,8 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     const CacheLoadRequest*                                      request,
     CacheLoadResponse*                                           response,
     const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
-    ::google::protobuf::Closure*                                 done):
+    ::google::protobuf::Closure*                                 done,
+    const std::shared_ptr<RequestBlockBufferStore>&              request_block_buffer_store):
     request_(request),
     request_send_start_time_us_(request->request_send_start_time_us()),
     total_block_count_(request_->blocks_size()),
@@ -18,6 +19,7 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     response_(response),
     collector_(collector),
     done_(done),
+    request_block_buffer_store_(request_block_buffer_store),
     write_cnt_(0) {
     // init set unloaded blocks
     std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);
@@ -62,10 +64,10 @@ void CacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std
             runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
             return;
         }
-        
+
         if (++write_cnt_ == 1) {
             CacheStoreServerLoadMetricsCollector::setFirstBlockCostUs(
-            collector_, autil::TimeUtility::currentTimeInMicroSeconds() - request_send_start_time_us_);
+                collector_, autil::TimeUtility::currentTimeInMicroSeconds() - request_send_start_time_us_);
         }
     }
 
@@ -139,10 +141,20 @@ void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_
     }
 
     stopTimer();
-    FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d",
-                   request_id_.c_str(),
-                   peer_ip_.c_str(),
-                   error_code);
+
+    auto request_block_buffer_store = request_block_buffer_store_.lock();
+    if (request_block_buffer_store) {
+        FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is %s",
+                       request_id_.c_str(),
+                       peer_ip_.c_str(),
+                       error_code,
+                       request_block_buffer_store->debugInfoOnRequest(request_id_).c_str());
+    } else {
+        FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is null",
+                       request_id_.c_str(),
+                       peer_ip_.c_str(),
+                       error_code);
+    }
 
     CacheStoreServerLoadMetricsCollector::markEnd(collector_, false);
 

@@ -55,7 +55,8 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
                                              ::CacheLoadResponse*                                         response,
                                              const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
                                              ::google::protobuf::Closure*                                 done) {
-    auto context = std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done);
+    auto context =
+        std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done, request_block_buffer_store_);
     if (!context) {
         FT_LOG_WARNING("cache store service new context failed");
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);

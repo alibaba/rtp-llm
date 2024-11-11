@@ -30,7 +30,10 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     request_block->addBlock(block2);
 
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
+
     store->setRequestBlockBuffer(request_block);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     auto verify_block1 = store->getBlockBuffer("request-1", "b1");
     ASSERT_TRUE(block1 != nullptr);
@@ -54,12 +57,14 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     store->delRequestBlockBuffer("request-1");
     verify_block1 = store->getBlockBuffer("request-1", "b1");
     ASSERT_TRUE(verify_block1 == nullptr);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     store->delRequestBlockBuffer("request-2");
 }
 
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
     auto block1        = block_buffer_util_->makeBlockBuffer("b1", 1024, '0', true);
@@ -85,6 +90,7 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
 
     // empty block, not trigger callback
     store->setRequestBlockBufferWatchFunc("request-1", std::move(watch_func));
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
     ASSERT_FALSE(callback_flag);
     ASSERT_FALSE(failed_callback_flag);
 
@@ -96,10 +102,12 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
     // del request block
     store->delRequestBlockBuffer("request-1");
     ASSERT_TRUE(failed_callback_flag);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 }
 
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
     auto block1        = block_buffer_util_->makeBlockBuffer("b1", 1024, '0', true);
@@ -128,10 +136,12 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
     store->setRequestBlockBufferWatchFunc("request-1", std::move(watch_func));
     ASSERT_TRUE(callback_flag);
     ASSERT_FALSE(failed_callback_flag);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     // del request block
     store->delRequestBlockBuffer("request-1");
     ASSERT_TRUE(failed_callback_flag);
+    ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 }
 
 }  // namespace rtp_llm

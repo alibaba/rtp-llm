@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsCollector.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/TimerManager.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include <shared_mutex>
 
 namespace rtp_llm {
@@ -12,7 +13,8 @@ public:
     CacheStoreServiceImplContext(const CacheLoadRequest*                                      request,
                                  CacheLoadResponse*                                           response,
                                  const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
-                                 ::google::protobuf::Closure*                                 done);
+                                 ::google::protobuf::Closure*                                 done,
+                                 const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store);
     virtual ~CacheStoreServiceImplContext();
 
 public:
@@ -24,8 +26,8 @@ public:
 
 protected:
     std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
-    void stopTimer();
-    void runSuccess(bool direct_write);
+    void                             stopTimer();
+    void                             runSuccess(bool direct_write);
 
 private:
     bool writeResponseBlock(const std::shared_ptr<BlockBuffer>&     block,
@@ -46,9 +48,11 @@ protected:
     std::atomic_bool             done_run_{false};
     ::google::protobuf::Closure* done_;
 
+    std::weak_ptr<RequestBlockBufferStore> request_block_buffer_store_;
+
     std::weak_ptr<arpc::Timer> timer_;
 
-    std::atomic_int  write_cnt_{0};
+    std::atomic_int write_cnt_{0};
 
     std::shared_mutex                                                 unloaded_blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBufferInfo>> unloaded_blocks_;

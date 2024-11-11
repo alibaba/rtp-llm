@@ -35,7 +35,10 @@ protected:
     bool initCacheStores();
     bool initContext();
     void loadThreadFunction(int id);
-    void verifyContextRunDone(int unloaded_block_cnt, int write_cnt, bool context_done_run, KvCacheStoreServiceErrorCode error_code);
+    void verifyContextRunDone(int                          unloaded_block_cnt,
+                              int                          write_cnt,
+                              bool                         context_done_run,
+                              KvCacheStoreServiceErrorCode error_code);
 
     void SetUp() override {
         memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
@@ -105,11 +108,15 @@ bool CacheStoreServiceImplContextTest::initContext() {
         return false;
     }
 
-    context_ = std::make_shared<CacheStoreServiceImplContext>(request_, response_, nullptr, done_);
+    context_ = std::make_shared<CacheStoreServiceImplContext>(
+        request_, response_, nullptr, done_, cache_store1_->request_block_buffer_store_);
     return context_ != nullptr;
 }
 
-void CacheStoreServiceImplContextTest::verifyContextRunDone(int unloaded_block_cnt, int write_cnt, bool context_done_run, KvCacheStoreServiceErrorCode error_code) {
+void CacheStoreServiceImplContextTest::verifyContextRunDone(int                          unloaded_block_cnt,
+                                                            int                          write_cnt,
+                                                            bool                         context_done_run,
+                                                            KvCacheStoreServiceErrorCode error_code) {
     ASSERT_EQ(context_->unloaded_blocks_.size(), unloaded_block_cnt);
     ASSERT_EQ(context_->write_cnt_.load(), write_cnt);
     ASSERT_EQ(context_->done_run_.load(), context_done_run);

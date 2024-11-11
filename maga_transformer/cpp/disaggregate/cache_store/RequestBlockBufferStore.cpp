@@ -71,6 +71,16 @@ void RequestBlockBufferStore::debugInfo() {
     FT_LOG_INFO("reqeut block buffer debug info: %s", debug.c_str());
 }
 
+std::string RequestBlockBufferStore::debugInfoOnRequest(const std::string& requestid) const {
+    std::ostringstream stream;
+    auto               request_block_buffer = getRequestBlockBuffer(requestid);
+    if (request_block_buffer == nullptr) {
+        stream << "request id: " << requestid << " not found";
+        return stream.str();
+    }
+    return request_block_buffer->debugInfo();
+}
+
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::getBlockBuffer(const std::string& requestid,
                                                                      const std::string& blockid) const {
     auto request_block_buffer = getRequestBlockBuffer(requestid);

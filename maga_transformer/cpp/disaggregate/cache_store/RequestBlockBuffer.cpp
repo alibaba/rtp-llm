@@ -113,4 +113,15 @@ void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared
     }
 }
 
+std::string RequestBlockBuffer::debugInfo() const {
+    std::ostringstream stream;
+    stream << "request id: " << requestid_ << ", blocks count: " << getBlocksCount();
+    if (watch_func_) {
+        stream << ", has watch func";
+    } else {
+        stream << ", no watch func";
+    }
+    return stream.str();
+}
+
 }  // namespace rtp_llm

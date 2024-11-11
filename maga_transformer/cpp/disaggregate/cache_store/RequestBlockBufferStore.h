@@ -28,7 +28,8 @@ public:
 
     void delRequestBlockBuffer(const std::string& requestid);
 
-    void debugInfo();
+    std::string debugInfoOnRequest(const std::string& requestid) const;
+    void        debugInfo();
 
 private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
