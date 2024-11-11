@@ -1,4 +1,8 @@
-#include "src/fastertransformer/th_op/common/LogLevelOps.h"
+#include "maga_transformer/cpp/api_server/LogLevelOps.h"
+
+#include <torch/custom_class.h>
+#include <torch/script.h>
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace torch_ext {
 
@@ -20,8 +24,6 @@ bool setLogLevel(const std::string& log_level_str) {
 }
 
 // maybe faster than torch copy
-static auto log_level_func =
-    torch::RegisterOperators("fastertransformer::set_log_level", &torch_ext::setLogLevel);
+static auto log_level_func = torch::RegisterOperators("fastertransformer::set_log_level", &torch_ext::setLogLevel);
 
-} // namespace torch_ext
-
+}  // namespace torch_ext

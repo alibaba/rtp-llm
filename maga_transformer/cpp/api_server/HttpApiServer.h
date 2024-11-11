@@ -18,6 +18,7 @@ namespace rtp_llm {
 class HealthService;
 class WorkerStatusService;
 class ModelStatusService;
+class SysCmdService;
 
 class HttpApiServer {
 public:
@@ -62,6 +63,7 @@ private:
     bool registerHealthService();
     bool registerWorkerStatusService();
     bool registerModelStatusService();
+    bool registerSysCmdService();
 
 private:
     std::atomic_bool                      is_stopped_{true};
@@ -79,6 +81,7 @@ private:
     std::shared_ptr<HealthService>           health_service_;
     std::shared_ptr<WorkerStatusService>     worker_status_service_;
     std::shared_ptr<ModelStatusService>      model_status_service_;
+    std::shared_ptr<SysCmdService>           sys_cmd_service_;
 };
 
 }  // namespace rtp_llm

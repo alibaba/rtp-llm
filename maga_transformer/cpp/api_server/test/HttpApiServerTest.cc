@@ -37,7 +37,7 @@ TEST_F(HttpApiServerTest, testStart) {
     ASSERT_TRUE(server.isStoped());
 }
 
-// -------------------------- Health Service Test --------------------------
+// -------------------------- HealthService Test --------------------------
 
 TEST_F(HttpApiServerTest, testRegisterHealthServiceFailed_HttpServerIsNull) {
     server_->http_server_ = nullptr;
@@ -54,7 +54,7 @@ TEST_F(HttpApiServerTest, testRegisterHealthServiceSuccess) {
     EXPECT_TRUE(server_->registerHealthService());
 }
 
-// -------------------------- Worker Status Service Test --------------------------
+// -------------------------- WorkerStatusService Test --------------------------
 
 TEST_F(HttpApiServerTest, testRegisterWorkerStatusServiceFailed_HttpServerIsNull) {
     server_->http_server_ = nullptr;
@@ -81,7 +81,7 @@ TEST_F(HttpApiServerTest, testStop) {
     EXPECT_TRUE(server_->health_service_->is_stopped_);
 }
 
-// -------------------------- Model Status Service Test --------------------------
+// -------------------------- ModelStatusService Test --------------------------
 
 TEST_F(HttpApiServerTest, testRegisterModelStatusServiceFailed_HttpServerIsNull) {
     server_->http_server_ = nullptr;
@@ -96,6 +96,23 @@ TEST_F(HttpApiServerTest, testRegisterModelStatusServiceFailed_RegisterRouteFail
 
 TEST_F(HttpApiServerTest, testRegisterModelStatusServiceSuccess) {
     EXPECT_TRUE(server_->registerModelStatusService());
+}
+
+// -------------------------- SysCmdService Test --------------------------
+
+TEST_F(HttpApiServerTest, testRegisterSysCmdServiceFailed_HttpServerIsNull) {
+    server_->http_server_ = nullptr;
+    EXPECT_FALSE(server_->registerSysCmdService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterSysCmdServiceFailed_RegisterRouteFailed) {
+    // 将 http server 的 router 置空, 模拟 RegisterRoute 失败
+    server_->http_server_->_router = nullptr;
+    EXPECT_FALSE(server_->registerSysCmdService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterSysCmdServiceSuccess) {
+    EXPECT_TRUE(server_->registerSysCmdService());
 }
 
 }  // namespace rtp_llm

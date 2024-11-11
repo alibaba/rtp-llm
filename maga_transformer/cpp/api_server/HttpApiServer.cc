@@ -2,6 +2,7 @@
 #include "maga_transformer/cpp/api_server/HealthService.h"
 #include "maga_transformer/cpp/api_server/WorkerStatusService.h"
 #include "maga_transformer/cpp/api_server/ModelStatusService.h"
+#include "maga_transformer/cpp/api_server/SysCmdService.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -62,6 +63,12 @@ bool HttpApiServer::registerServices() {
         return false;
     }
 
+    // POST: /set_log_level
+    if (!registerSysCmdService()) {
+        FT_LOG_WARNING("HttpApiServer register sys cmd service failed.");
+        return false;
+    }
+
     FT_LOG_INFO("HttpApiServer register services success.");
     return true;
 }
@@ -84,16 +91,16 @@ bool HttpApiServer::registerHealthService() {
         health_service->healthCheck2(writer, request);
     };
 
-    return http_server_->RegisterRoute("GET", "/health", raw_resp_callback)
-           && http_server_->RegisterRoute("POST", "/health", raw_resp_callback)
-           && http_server_->RegisterRoute("GET", "/GraphService/cm2_status", raw_resp_callback)
-           && http_server_->RegisterRoute("POST", "/GraphService/cm2_status", raw_resp_callback)
-           && http_server_->RegisterRoute("GET", "/SearchService/cm2_status", raw_resp_callback)
-           && http_server_->RegisterRoute("POST", "/SearchService/cm2_status", raw_resp_callback)
-           && http_server_->RegisterRoute("GET", "/status", raw_resp_callback)
-           && http_server_->RegisterRoute("POST", "/status", raw_resp_callback)
-           && http_server_->RegisterRoute("POST", "/health_check", raw_resp_callback)
-           && http_server_->RegisterRoute("GET", "/", json_resp_callback);
+    return http_server_->RegisterRoute("GET", "/health",                    raw_resp_callback) &&
+           http_server_->RegisterRoute("POST", "/health",                   raw_resp_callback) &&
+           http_server_->RegisterRoute("GET", "/GraphService/cm2_status",   raw_resp_callback) &&
+           http_server_->RegisterRoute("POST", "/GraphService/cm2_status",  raw_resp_callback) &&
+           http_server_->RegisterRoute("GET", "/SearchService/cm2_status",  raw_resp_callback) &&
+           http_server_->RegisterRoute("POST", "/SearchService/cm2_status", raw_resp_callback) &&
+           http_server_->RegisterRoute("GET", "/status",                    raw_resp_callback) &&
+           http_server_->RegisterRoute("POST", "/status",                   raw_resp_callback) &&
+           http_server_->RegisterRoute("POST", "/health_check",             raw_resp_callback) &&
+           http_server_->RegisterRoute("GET", "/",                         json_resp_callback);
 }
 
 bool HttpApiServer::registerWorkerStatusService() {
@@ -124,6 +131,21 @@ bool HttpApiServer::registerModelStatusService() {
         model_status_service->modelStatus(writer, request);
     };
     return http_server_->RegisterRoute("GET", "/v1/models", callback);
+}
+
+bool HttpApiServer::registerSysCmdService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register sys cmd service failed, http server is null");
+        return false;
+    }
+
+    sys_cmd_service_.reset(new SysCmdService());
+    auto set_log_level_callback = [sys_cmd_service =
+                                       sys_cmd_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                         const http_server::HttpRequest& request) -> void {
+        sys_cmd_service->setLogLevel(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/set_log_level", set_log_level_callback);
 }
 
 void HttpApiServer::stop() {

@@ -39,6 +39,7 @@ cc_test(
         "HttpApiServerTest.cc",
         "WorkerStatusServiceTest.cc",
         "ModelStatusServiceTest.cc",
+        "SysCmdServiceTest.cc",
     ],
     deps = test_deps + [
         "//maga_transformer/cpp:http_api_server",

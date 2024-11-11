@@ -77,7 +77,6 @@ filegroup(
     srcs = [
         "src/fastertransformer/th_op/GptInitParameter.cc",
         "src/fastertransformer/th_op/init.cc",
-        "src/fastertransformer/th_op/common/LogLevelOps.cc",
         "src/fastertransformer/th_op/common/InitEngineOps.cc",
         "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
         "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
