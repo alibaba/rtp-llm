@@ -89,7 +89,6 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
     }
 }
 
-
 void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
     auto convert = rtp_llm::WeightsConverter(true);
     auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
@@ -123,6 +122,16 @@ void RtpLLMOp::initRPCServer(
     if (!grpc_status.ok()) {
         FT_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
     }
+
+    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
+    http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_service_->getEngine(),
+                                                  http_server_address,
+                                                  maga_init_params.gpt_init_parameter,
+                                                  token_processor));
+    if (model_rpc_port < 0) {
+        is_server_ready_ = true;
+        return;
+    }
     grpc::ServerBuilder builder;
     builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 200);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -132,11 +141,6 @@ void RtpLLMOp::initRPCServer(
 
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
-    if (http_port > 0) {
-        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
-        http_server_.reset(new rtp_llm::HttpApiServer(
-            model_rpc_service_->getEngine(), http_server_address, maga_init_params.gpt_init_parameter, token_processor));
-    }
     grpc_server_->Wait();
     FT_LOG_INFO("Server exit on %s", server_address.c_str());
 }
@@ -147,7 +151,7 @@ bool RtpLLMOp::ready() {
 
 void RtpLLMOp::startHttpServer(py::object tokenizer, py::object render) {
     if (http_server_ == nullptr) {
-        FT_LOG_INFO("skip startHttpServer in case of tp.");
+        FT_FAIL("normal HTTP Server nullptr error.");
         return;
     }
 

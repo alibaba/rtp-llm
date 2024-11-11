@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
-from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info, g_worker_info
+from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
 from maga_transformer.ops import GptInitParameter
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
@@ -159,13 +159,13 @@ class GptInitModelParameters:
         self.nccl_ip = g_master_info.ip
         self.nccl_port = g_master_info.gpt_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
-        self.http_port = g_master_info.http_port if g_parallel_info.tp_rank == 0 else -1
+        self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
         self.cache_store_connect_port = g_worker_info.cache_store_connect_port
         self.cache_store_rdma_listen_port = g_worker_info.cache_store_rdma_listen_port
         self.cache_store_rdma_connect_port = g_worker_info.cache_store_rdma_connect_port
         self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
-        self.worker_port_offset = g_worker_info.need_port_num()
+        self.worker_port_offset = WORKER_INFO_PORT_NUM
         
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank

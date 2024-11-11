@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
+WORKER_INFO_PORT_NUM = 6
+MASTER_INFO_PORT_NUM = 4
 
 class ParallelInfo(object):
     def __init__(
@@ -72,10 +74,11 @@ class ParallelInfo(object):
 g_parallel_info = ParallelInfo.from_env()
 
 class WorkerInfo(object):
-    def __init__(self, ip: str, server_port: int, gang_hb_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, name: str, info: Any):
+    def __init__(self, ip: str, server_port: int, gang_hb_port: int, http_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, name: str, info: Any):
         self.ip = ip
         self.server_port = server_port
         self.gang_hb_port = gang_hb_port
+        self.http_port = http_port
         self.rpc_server_port= rpc_server_port
         self.remote_rpc_server_port = remote_rpc_server_port
         self.cache_store_listen_port = cache_store_listen_port
@@ -87,10 +90,6 @@ class WorkerInfo(object):
 
     def equals(self, other: 'WorkerInfo') -> bool:
         return self.ip == other.ip and self.server_port == other.server_port
-    
-    @staticmethod
-    def need_port_num():
-        return 5
 
     @staticmethod
     def from_env():
@@ -98,6 +97,7 @@ class WorkerInfo(object):
             ip=socket.gethostbyname(socket.gethostname()),
             server_port=WorkerInfo.server_port_offset(g_parallel_info.local_rank),
             gang_hb_port=WorkerInfo.gang_hb_port_offset(g_parallel_info.local_rank),
+            http_port=WorkerInfo.http_port_offset(g_parallel_info.local_rank),
             rpc_server_port=WorkerInfo.rpc_server_port_offset(g_parallel_info.local_rank),
             remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
             cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(g_parallel_info.local_rank),
@@ -117,7 +117,7 @@ class WorkerInfo(object):
             base_port = server_port
         else:
             base_port = WorkerInfo.self_server_port()
-        return base_port + local_rank * WorkerInfo.need_port_num()
+        return base_port + local_rank * WORKER_INFO_PORT_NUM
     
     @staticmethod
     def rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
@@ -135,12 +135,17 @@ class WorkerInfo(object):
     def cache_store_rdma_listen_port_offset(local_rank: int, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 4
 
+    @staticmethod
+    def http_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 5
+
     # used for ut
     def reload(self):
         new_info = self.from_env()
         self.ip = new_info.ip
         self.server_port = new_info.server_port
         self.gang_hb_port = new_info.gang_hb_port
+        self.http_port = new_info.http_port
         self.remote_rpc_server_port = new_info.remote_rpc_server_port
         self.cache_store_listen_port = new_info.cache_store_listen_port
         self.cache_store_connect_port = new_info.cache_store_connect_port
@@ -150,7 +155,7 @@ class WorkerInfo(object):
 
     def __str__(self):
         return f"""
-        WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} rpc_port={self.rpc_server_port} \n
+        WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} http_port={self.http_port} rpc_port={self.rpc_server_port} \n
         cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port} 
         name={self.name} info={self.info} ]
         """
@@ -164,19 +169,13 @@ class MasterInfo:
     gpt_nccl_port: int
     nccl_op_port: int
     sp_gpt_nccl_port: int
-    http_port: int
-
-    @staticmethod
-    def need_port_count() -> int:
-        return 5
 
 g_master_info = MasterInfo(
     ip='',
     th_nccl_port=0,
     gpt_nccl_port = 0,
     nccl_op_port=0,
-    sp_gpt_nccl_port=0,
-    http_port=0)
+    sp_gpt_nccl_port=0)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
@@ -184,7 +183,6 @@ def update_master_info(ip: str, base_port: int):
     g_master_info.gpt_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4
-    g_master_info.http_port = base_port - 5
 
 def total_need_port_num() -> int:
-    return MasterInfo.need_port_count() + WorkerInfo.need_port_num() * g_parallel_info.tp_size
+    return MASTER_INFO_PORT_NUM + WORKER_INFO_PORT_NUM * g_parallel_info.tp_size
