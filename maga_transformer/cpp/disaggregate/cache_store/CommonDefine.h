@@ -60,6 +60,7 @@ typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreLoadDoneCallbac
 typedef std::function<void(bool)>                      WriteBlockDoneCallback;
 
 const std::string kEnvRdmaMode     = "CACHE_STORE_RDMA_MODE";
+const std::string kEnvRdmaWriteBlockConcat = "CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT";
 const uint32_t    kTcpRdmaPortDiff = 100;
 
 }  // namespace rtp_llm

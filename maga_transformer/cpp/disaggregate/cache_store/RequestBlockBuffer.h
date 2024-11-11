@@ -14,6 +14,8 @@ public:
     BlockBuffer(
         const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
         key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
+    BlockBuffer(const BlockBuffer& rhs):
+        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
 
     std::string           key;
     std::shared_ptr<void> addr;
