@@ -54,8 +54,9 @@ xft_loaded = False
 
 
 try:
-    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo, init_devices
+    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
+    from libth_transformer import get_device, DeviceType, DeviceExporter
 except BaseException as e:
     import traceback
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")

@@ -3,6 +3,7 @@
 #include <cassert>
 
 using namespace std;
+using namespace torch_ext;
 
 namespace fastertransformer {
 
@@ -30,7 +31,7 @@ GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
     for (const auto type : types_to_try) {
         if (getRegistrationMap().find(type) != getRegistrationMap().end()) {
             FT_LOG_INFO("found device type %d, use as default.", static_cast<int>(type));
-            params.device_params.push_back({type, DeviceInitParams{0}});
+            params.device_params.push_back({type, DeviceInitParams{type}});
         } else {
             FT_LOG_INFO("Device type %d is not registered, skip.", static_cast<int>(type));
         }
@@ -94,7 +95,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
             FT_LOG_ERROR("Device type %d is not registered !", static_cast<int>(type));
             abort();
         }
-        auto device = it->second(device_params);
+        auto device = it->second.create(device_params);
         getCurrentDevices().push_back(device);
     }
     FT_LOG_INFO("init devices done");
@@ -133,11 +134,34 @@ DeviceBase* DeviceFactory::getDefaultDevice() {
     return getCurrentDevices()[0];
 }
 
+std::shared_ptr<DeviceExporter> DeviceFactory::getDeviceExporter() {
+    const auto params = getDefaultGlobalDeviceParams();
+    const auto registration = getRegistrationMap()[params.device_params[0].first];
+    const auto exporter = registration.createExporter(params.device_params[0].second);
+    return std::shared_ptr<DeviceExporter>(exporter);
+}
+
 void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
     auto& registrationMap = getRegistrationMap();
     FT_CHECK_WITH_INFO((registrationMap.find(type) == registrationMap.end()),
         "Can not find device: %d", type);
     registrationMap[type] = creator;
+}
+
+void registerDeviceOps(py::module& m) {
+    pybind11::class_<DeviceExporter, std::shared_ptr<DeviceExporter>>(m, "DeviceExporter")
+        .def("get_device_type", &DeviceExporter::getDeviceType)
+        .def("get_device_id", &DeviceExporter::getDeviceId);
+
+    pybind11::enum_<DeviceType>(m, "DeviceType")
+        .value("Cpu", DeviceType::Cpu)
+        .value("Cuda", DeviceType::Cuda)
+        .value("Yitian", DeviceType::Yitian)
+        .value("ArmCpu", DeviceType::ArmCpu)
+        .value("ROCm", DeviceType::ROCm)
+        .value("Ppu", DeviceType::Ppu);
+
+    m.def("get_device", &DeviceFactory::getDeviceExporter);
 }
 
 } // namespace fastertransformer

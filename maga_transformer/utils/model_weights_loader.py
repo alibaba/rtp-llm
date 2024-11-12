@@ -9,12 +9,12 @@ import torch.serialization
 from typing import List, Set, Optional, Tuple, Any
 from typing_extensions import Self
 from itertools import repeat
+from maga_transformer.device import get_current_device
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights
 from maga_transformer.lora.lora_weights import LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, LoraConfig, ModuleDatabase, CkptDatabase, DictDatabase
-from maga_transformer.utils.util import get_mem_info
 
 class WeightLog:
     """
@@ -72,7 +72,8 @@ class ModelWeightsLoader:
         self._database: BaseDatabase = database
         self._merge_lora = False
         self._static_lora_adapter_name = None
-        self.use_expert_attention = weights_info.use_expert_attention
+        self._use_expert_attention = weights_info.use_expert_attention
+        self._exported_device = get_current_device()
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -281,7 +282,7 @@ class ModelWeightsLoader:
         load_weight(W.sq_quant_scales, torch.float32)
         if self._weights_info._quant_algo.isOmniQuant():
             load_weight(W.sq_quant_shifts, torch.float32)
-        elif self._weights_info._quant_algo.isPerTensorQuant():            
+        elif self._weights_info._quant_algo.isPerTensorQuant():
             load_weight(W.static_quant_scales, torch.float32)
         return results
 
@@ -310,7 +311,7 @@ class ModelWeightsLoader:
                     logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
                     raise e
 
-        if self.use_expert_attention:
+        if self._use_expert_attention:
             # for CogVLM2, moe is not supported and gated activation is enabled
             assert not is_moe and is_gated_activation, (
                 "CogVLM2 shouldn't use moe mode and gated activation."
@@ -650,7 +651,7 @@ def estimate_load_parallel_num(config, tp_size):
     model_size = config.eval_model_size()
     cuda_runtime_mem = 2
     weight_compute_mem = 2
-    free_mem = get_mem_info().free / (1024.0 ** 3)
+    free_mem = get_current_device().get_mem_info().free / (1024.0 ** 3)
     model_mem = model_size / tp_size / (1024.0 ** 3)
     parallel_num = int((free_mem - model_mem) / (weight_compute_mem + cuda_runtime_mem))
     parallel_num = min(max(parallel_num, 1), 4) # 以防并发太多影响 io 效率

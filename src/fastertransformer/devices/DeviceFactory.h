@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/DeviceExport.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include <unordered_map>
 #include <vector>
@@ -13,29 +14,45 @@ struct GlobalDeviceParams {
 
 DeviceType getDeviceType(const std::string& device_name);
 
-using DeviceCreatorType = std::function<DeviceBase*(const DeviceInitParams&)>;
+
+class DeviceCreatorType {
+public:
+    std::function<DeviceBase*(const DeviceInitParams&)> create;
+    std::function<torch_ext::DeviceExporter*(const DeviceInitParams&)> createExporter;
+};
 
 class DeviceFactory {
 public:
     static void initDevices(const GptInitParameter& params);
-    static DeviceBase* getDevice(DeviceType type, int device_id = 0);
     static DeviceBase* getDefaultDevice();
     static void registerDevice(DeviceType type, DeviceCreatorType creator);
 
+    // This function exports default device to python world.
+    static std::shared_ptr<torch_ext::DeviceExporter> getDeviceExporter();
+
 private:
+    static DeviceBase* getDevice(DeviceType type, int device_id = 0);
     static GlobalDeviceParams getDefaultGlobalDeviceParams();
     static std::unordered_map<DeviceType, DeviceCreatorType>& getRegistrationMap();
     static std::vector<DeviceBase *>& getCurrentDevices();
 };
 
+void registerDeviceOps(py::module& m);
+
 #define RTP_LLM_REGISTER_DEVICE(type)                                   \
     static DeviceBase* type##_device __attribute__((used)) = nullptr;   \
     static auto type##_device_reg_creator = []() {                      \
-        DeviceFactory::registerDevice(DeviceType::type, [](const DeviceInitParams& params) { \
-            auto device = new type##Device(params);                     \
-            device->init();                                             \
-            return device;                                              \
-        });                                                             \
+        DeviceFactory::registerDevice(DeviceType::type, { \
+            [](const DeviceInitParams& params) { \
+                auto device = new type##Device(params);                     \
+                device->init();                                             \
+                return device;                                              \
+            }, \
+            [](const DeviceInitParams& params) {                         \
+                auto exporter = new torch_ext::DeviceExporterImpl<type##Device>(params);     \
+                return exporter;                                            \
+            } \
+        });                                                          \
         return true;                                                    \
     }();
 

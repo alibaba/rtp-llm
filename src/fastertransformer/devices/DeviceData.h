@@ -16,6 +16,7 @@ enum class DeviceType {
 };
 
 struct DeviceInitParams {
+    DeviceType device_type;
     size_t device_id       = 0;
     size_t max_batch_size  = 256;
 

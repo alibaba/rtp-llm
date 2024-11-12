@@ -4,9 +4,14 @@ using namespace fastertransformer;
 
 namespace torch_ext {
 
-void registerDeviceOps(py::module& m) {
-    m.def("init_devices", &DeviceFactory::initDevices);
+DeviceType DeviceExporter::getDeviceType() {
+    return device_params_.device_type;
+}
+
+int64_t DeviceExporter::getDeviceId() {
+    return device_params_.device_id;
 }
 
 } // namespace torch_ext
 
+using namespace torch_ext;

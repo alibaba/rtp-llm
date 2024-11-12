@@ -9,7 +9,6 @@ import threading
 from enum import Enum
 from typing import Optional, Union, Dict, Any, List, Set
 from maga_transformer import _ft_pickler
-from maga_transformer.device import get_current_device
 from pathlib import Path
 
 class AtomicCounter:
@@ -130,15 +129,6 @@ def copy_gemm_config():
 
 def get_dtype_size(dtype: torch.dtype) -> int:
     return {torch.int8: 1, torch.half: 2, torch.bfloat16: 2, torch.float: 4}[dtype]
-
-def get_mem_info():
-    return get_current_device().get_mem_info()
-
-def to_cuda(tensor: torch.Tensor) -> torch.Tensor:
-    return torch.ops.fastertransformer.async_copy_to_gpu(tensor)
-
-def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
-    return torch.ops.fastertransformer.async_copy_to_cpu(tensor)
 
 def check_with_info(condition: bool, error_msg: str):
     if not condition:

@@ -118,6 +118,7 @@ cc_library(
     	":th_op_hdrs",
         "//maga_transformer/cpp:utils",
         "//src/fastertransformer/devices:device_py_export",
+        "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp:http_api_server",
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
