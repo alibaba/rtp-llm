@@ -4,6 +4,7 @@
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 
 using namespace std;
 

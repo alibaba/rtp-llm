@@ -44,7 +44,7 @@ cc_library(
         ":metrics",
         ":system_prompt",
         ":position_ids_generator",
-        "//:gpt_init_params_hdr",
+        "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
@@ -77,7 +77,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-
 cc_library(
     name = "lora",
     hdrs = glob([
@@ -88,7 +87,6 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":dataclass",
-        ":stream",
         ":utils",
         ":cache",
     ],
@@ -123,7 +121,7 @@ cc_library(
         ":cache",
         ":dataclass",
         ":engine_base",
-        "//:gpt_init_params_hdr",
+        "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base",
@@ -145,7 +143,7 @@ cc_library(
         ":utils",
         ":metrics",
         ":dataclass",
-        "//:gpt_init_params_hdr",
+        "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base",
@@ -228,6 +226,7 @@ cc_library(
         "engine_base/*.cc",
     ]),
     deps = torch_deps() + [
+        ":stream",
         ":dataclass",
         ":models",
         ":utils",

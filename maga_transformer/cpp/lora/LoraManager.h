@@ -1,6 +1,5 @@
 #pragma once
 #include "src/fastertransformer/devices/LoraWeights.h"
-#include "maga_transformer/cpp/stream/StreamGroups.h"
 #include <condition_variable>
 
 namespace ft = fastertransformer;

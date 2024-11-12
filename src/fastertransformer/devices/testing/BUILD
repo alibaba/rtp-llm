@@ -9,7 +9,6 @@ cc_library(
         "@com_google_googletest//:gtest",
         "//maga_transformer/cpp:cache",
         "//maga_transformer/cpp:dataclass",
-        "//maga_transformer/cpp:stream",
         "//:gpt_init_params",
         "//src/fastertransformer/devices:device_utils",
     ],

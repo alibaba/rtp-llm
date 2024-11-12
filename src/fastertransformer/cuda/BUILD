@@ -74,8 +74,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         ":trt_plugins",
-        # TODO(lidongjin) cutlass_interface dependece gpt_init_params_hdr is not good.
-        "//:gpt_init_params_hdr",
     ],
     copts = copts(),
     include_prefix = "src",
@@ -160,7 +158,6 @@ cc_library(
 
     ],
     deps = [
-        "//:gpt_init_params_hdr",
         ":cuda_utils",
         "//src/fastertransformer/utils",
         "//src/fastertransformer/core:allocator",

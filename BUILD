@@ -36,38 +36,22 @@ config_setting(
     values = {"define": "xft_use_icx=true"},
 )
 
-cc_library(
-    name = "gpt_init_params_hdr",
-    hdrs = [
-        "src/fastertransformer/th_op/GptInitParameter.h"
-    ],
-    deps = [
-        "//maga_transformer/cpp:utils",
-	    "//src/fastertransformer/core:types"
-    ] + torch_deps(),
-    visibility = ["//visibility:public"],
-)
 
-# NOTE: This target is defined here but not used here.
-# for libth_transformer.so, GptInitParameter.cc must be compiled together with `th_op/multi_gpu_gpt/*.cc`
-# in a single target, otherwise torch throws an error of
-# `Type c10::intrusive_ptr<GptInitParameter> could not be converted to any of the known types.`
-# This is due to GptInitParameter is referenced before it's registered,
-# which might because the compiled symbols does not load in expected order according to dependency.
 cc_library(
     name = "gpt_init_params",
     srcs = [
         "src/fastertransformer/th_op/GptInitParameter.cc"
     ],
     hdrs = [
+        "src/fastertransformer/th_op/GptInitParameter.h",
         "src/fastertransformer/th_op/GptInitParameterRegister.h",
     ],
     deps = [
-        ":gpt_init_params_hdr",
         "//src/fastertransformer/utils",
+        "//maga_transformer/cpp:utils",
+	    "//src/fastertransformer/core:types"
     ],
     copts = copts(),
-    alwayslink = True,
     visibility = ["//visibility:public"],
 )
 
@@ -131,7 +115,7 @@ cc_library(
         ":th_transformer_lib_files"
     ],
     deps = [
-        ":gpt_init_params_hdr",
+        ":gpt_init_params",
     	":th_op_hdrs",
         "//maga_transformer/cpp:utils",
         "//src/fastertransformer/devices:device_py_export",
@@ -155,7 +139,7 @@ cc_library(
         ":th_transformer_gpu_files"
     ],
     deps = [
-        ":gpt_init_params_hdr",
+        ":gpt_init_params",
     	":th_op_hdrs",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:model_rpc_server",
@@ -175,7 +159,7 @@ cc_binary(
     name = "th_transformer",
     deps = [
         ":th_transformer_lib",
-        ":gpt_init_params_hdr",
+        ":gpt_init_params",
     ] + select({
         "//:using_cuda": [
             ":th_transformer_gpu",

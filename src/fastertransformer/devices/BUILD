@@ -14,7 +14,7 @@ cc_library(
         "//src/fastertransformer/core:buffer_torch",
         "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/utils",
-        "//:gpt_init_params_hdr",
+        "//:gpt_init_params",
         "//src/fastertransformer/models:weights_define",
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
     ],

@@ -18,8 +18,8 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/utils/KVCacheUtils.h"
+#include "maga_transformer/cpp/cache/BatchKVCacheBlockAddr.h"
 #include "autil/EnvUtil.h"
 
 

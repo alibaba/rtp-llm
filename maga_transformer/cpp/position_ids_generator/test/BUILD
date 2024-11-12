@@ -38,12 +38,11 @@ cc_test(
     linkopts = test_linkopts,
     deps = torch_deps() + [
         "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         "//maga_transformer/cpp:position_ids_generator",
+        "//maga_transformer/cpp:models",
+        "//maga_transformer/cpp:stream",
         "//:gpt_init_params",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
