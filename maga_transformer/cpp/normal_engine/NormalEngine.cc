@@ -23,7 +23,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
 {
     FT_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-    if (params_.warm_up_) {
+    if (params_.warm_up_ && (!params_.is_multimodal_)) {
         // warm up
         FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
         warm_up_result = warmUp(params);

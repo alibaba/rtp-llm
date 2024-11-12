@@ -70,6 +70,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(
         FT_LOG_INFO("devices reserved %ld MiB memory, warm up consumed %ld MiB max memory",
                     device_reserved_memory_bytes / 1024 / 1024,
                     warm_up_result->max_used_memory / 1024 / 1024);
+        runtime_required_bytes = warm_up_result->max_used_memory;
     } else {
         runtime_required_bytes = getDefaultRuntimeMemorySize(params);
         FT_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",

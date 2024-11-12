@@ -166,7 +166,7 @@ class GptInitModelParameters:
         self.cache_store_rdma_connect_port = g_worker_info.cache_store_rdma_connect_port
         self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
         self.worker_port_offset = WORKER_INFO_PORT_NUM
-        
+
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
         self.add_special_tokens = True
@@ -318,10 +318,10 @@ class GptInitModelParameters:
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
-        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')        
+        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
         logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
-        self.warm_up = bool(int(os.environ.get('WARM_UP', 0)))
+        self.warm_up = bool(int(os.environ.get('WARM_UP', 1)))
         logging.info(f'warm_up: {self.warm_up}')
         self.warm_up_with_loss = bool(int(os.environ.get('WARM_UP_WITH_LOSS', 0)))
         logging.info(f'warm_up_with_loss: {self.warm_up_with_loss}')
