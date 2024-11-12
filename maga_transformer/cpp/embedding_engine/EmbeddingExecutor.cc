@@ -4,7 +4,7 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/utils/python_utils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"

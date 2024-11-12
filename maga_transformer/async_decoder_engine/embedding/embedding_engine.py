@@ -51,3 +51,7 @@ class EmbeddingCppEngine(BaseEngine):
     @override
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return LoadBalanceInfo()
+    
+    @override
+    def ready(self) -> bool:
+        return True

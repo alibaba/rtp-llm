@@ -3,7 +3,7 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
-#include "src/fastertransformer/utils/python_utils.h"
+#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;
@@ -102,10 +102,10 @@ py::object RtpEmbeddingOp::decode(th::Tensor token_ids,
     py::gil_scoped_acquire acquire;
     if (embedding_output->output.isTensor) {
         FT_CHECK_WITH_INFO(embedding_output->output.t.has_value(), "embedding output has null tensor value");
-        return rtp_llm::ConvertTensorToObject(embedding_output->output.t.value());
+        return rtp_llm::convertTensorToObject(embedding_output->output.t.value());
     } else {
         FT_CHECK_WITH_INFO(embedding_output->output.map.has_value(), "embedding output has null map value");
-        return rtp_llm::ConvertTensorMapVectorToObject(embedding_output->output.map.value());
+        return rtp_llm::convertTensorMapVectorToObject(embedding_output->output.map.value());
     }
 }
 

@@ -17,7 +17,7 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def ready(self) -> None:
+    def ready(self) -> bool:
         raise NotImplementedError()
 
     @abstractmethod
