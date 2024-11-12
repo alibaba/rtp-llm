@@ -1,8 +1,8 @@
 import os
 import json
 import torch
-
-from typing import Any, Dict, List, Type, Optional
+import logging
+from typing import Any, Dict, List, Optional
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
@@ -13,7 +13,7 @@ from maga_transformer.models.downstream_modules.classifier.bert_classifier impor
 from maga_transformer.models.downstream_modules import RobertaRerankerModule
 from maga_transformer.models.bert_weight import BertWeightInfo, RobertaWeightInfo
 from maga_transformer.model_factory_register import register_model
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BertTokenizer
 
 class Bert(BaseModel):
     def __init__(self, config: GptInitModelParameters):
@@ -73,7 +73,11 @@ class Bert(BaseModel):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+        try:
+            return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+        except:
+            logging.warning("failed to load bert tokenizer using AutoTokenizer, try using BertTokenizer instead")
+            return BertTokenizer.from_pretrained(config.tokenizer_path)
 
 class Roberta(Bert):
     @staticmethod
