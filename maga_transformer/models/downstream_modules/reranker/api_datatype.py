@@ -6,6 +6,7 @@ class VoyageRerankerRequest(PyDanticModelBase):
     documents: List[str]
     model: Optional[str] = None
     top_k: Optional[int] = None
+    sorted: bool = True
     truncation: bool = True
     return_documents: bool = True
     normalize: bool = False

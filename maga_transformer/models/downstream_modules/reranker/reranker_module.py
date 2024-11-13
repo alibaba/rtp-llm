@@ -49,7 +49,8 @@ class RerankerRenderer(CustomRenderer):
                 index=i, 
                 document=formated_request.documents[i] if formated_request.return_documents else None, 
                 relevance_score=float(outputs.outputs[i]) if not formated_request.normalize else self.sigmoid(float(outputs.outputs[i]))))
-        rank_items.sort(key=lambda x: x.relevance_score, reverse=True)
+        if formated_request.sorted:
+            rank_items.sort(key=lambda x: x.relevance_score, reverse=True)
         if formated_request.top_k is not None:
             rank_items = rank_items[: min(len(rank_items), formated_request.top_k)]
         return VoyageRerankerResponse(results=rank_items, total_tokens=len(inputs.token_ids)).model_dump(exclude_none=True)
