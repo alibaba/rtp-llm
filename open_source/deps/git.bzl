@@ -123,6 +123,16 @@ def git_deps():
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
     )
 
+    new_git_repository(
+        name = "nacos_sdk_cpp",
+        remote = "https://github.com/nacos-group/nacos-sdk-cpp.git",
+        commit = "2b4104d2524776dff236a228ad2abff4676fb916",
+        patches = [
+            "//patches/nacos_sdk_cpp:nacos-compile.patch",
+        ],
+        build_file = clean_dep("//3rdparty/nacos_sdk_cpp:nacos_sdk_cpp.BUILD")
+    )
+
     http_archive(
         name = "curl",
         build_file = clean_dep("//3rdparty/curl:curl.BUILD"),

@@ -2,6 +2,15 @@
 
 namespace rtp_llm {
 
+void NacosSubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("server_host", server_host, server_host);
+    json.Jsonize("clusters", clusters, clusters);
+}
+
+bool NacosSubscribeServiceConfig::validate() const {
+    return !server_host.empty();
+}
+
 void CM2SubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
     json.Jsonize("zk_host", zk_host, zk_host);
     json.Jsonize("zk_path", zk_path, zk_path);
@@ -42,6 +51,7 @@ bool LocalSubscribeServiceConfig::validate() const {
 void SubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
     json.Jsonize("cm2", cm2_configs, cm2_configs);
     json.Jsonize("local", local_configs, local_configs);
+    json.Jsonize("nacos", nacos_configs, nacos_configs);
 }
 
 bool SubscribeServiceConfig::validate() const {
@@ -51,6 +61,11 @@ bool SubscribeServiceConfig::validate() const {
         }
     }
     for (auto& config : local_configs) {
+        if (!config.validate()) {
+            return false;
+        }
+    }
+    for (auto& config : nacos_configs) {
         if (!config.validate()) {
             return false;
         }

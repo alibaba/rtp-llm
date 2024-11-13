@@ -1,0 +1,26 @@
+diff --git src/utils/DirUtils.cpp src/utils/DirUtils.cpp
+index 64ee3d6..a3d6349 100644
+--- src/utils/DirUtils.cpp
++++ src/utils/DirUtils.cpp
+@@ -5,7 +5,7 @@
+ 
+ #if defined(__CYGWIN__) || defined(MS_WINDOWS)
+ #define PATH_MAX 260
+-#elif defined(linux)
++#elif defined(__linux__)
+ #include <linux/limits.h>
+ #elif defined(FreeBSD)
+ #include <sys/syslimits.h>
+diff --git src/utils/NetUtils.cpp src/utils/NetUtils.cpp
+index 21aee69..5856415 100644
+--- src/utils/NetUtils.cpp
++++ src/utils/NetUtils.cpp
+@@ -4,7 +4,7 @@
+ #include <netdb.h>
+ #include <errno.h>
+ #include <ifaddrs.h>
+-#include <src/log/Logger.h>
++#include "src/log/Logger.h"
+ #include <string.h>
+ #include <unistd.h>
+ 

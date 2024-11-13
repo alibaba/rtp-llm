@@ -6,4 +6,6 @@ std::shared_ptr<SubscribeService> createInstanceFromCm2Config(const CM2Subscribe
 
 std::shared_ptr<SubscribeService> createInstanceFromLocalConfig(const LocalSubscribeServiceConfig& config);
 
+std::shared_ptr<SubscribeService> createInstanceFromNacosConfig(const NacosSubscribeServiceConfig& config);
+
 }

@@ -11,3 +11,15 @@ cc_binary(
     ],
     linkstatic = True,
 )
+
+cc_binary(
+    name = "nacos_subscribe_service_main",
+    srcs = [
+        "NacosSubscribeServiceMain.cpp",
+    ],
+    deps = [
+        ":subscribe_deps",
+        "@nacos_sdk_cpp//:nacos_sdk",
+    ],
+    linkstatic = True,
+)

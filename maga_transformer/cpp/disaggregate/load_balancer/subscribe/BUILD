@@ -7,6 +7,7 @@ cc_library(
         "SubscribeServiceConfig.cpp",        
         "LocalSubscribeService.cpp",
         "SubscribeServiceManager.cpp",
+        "NacosSubscribeService.cpp",
     ],
     hdrs = [
         "TopoNode.h",
@@ -14,9 +15,11 @@ cc_library(
         "SubscribeService.h",
         "LocalSubscribeService.h",
         "SubscribeServiceManager.h",
-        "SubscribeServiceCreator.h"
+        "SubscribeServiceCreator.h",
+        "NacosSubscribeService.h",
     ],
     deps = [
+        "@nacos_sdk_cpp//:nacos_sdk",
         "@havenask//aios/autil:json",
         "//maga_transformer/cpp:utils",
     ],

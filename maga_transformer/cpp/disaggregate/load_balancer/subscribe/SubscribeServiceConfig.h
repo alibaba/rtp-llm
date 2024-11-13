@@ -4,6 +4,16 @@
 
 namespace rtp_llm {
 
+class NacosSubscribeServiceConfig : public autil::legacy::Jsonizable {
+public:
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
+    bool validate() const;
+
+public:
+    std::string server_host;
+    std::vector<std::string> clusters;
+};
+
 class CM2SubscribeServiceConfig: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
@@ -47,6 +57,7 @@ public:
 public:
     std::vector<CM2SubscribeServiceConfig>   cm2_configs;
     std::vector<LocalSubscribeServiceConfig> local_configs;
+    std::vector<NacosSubscribeServiceConfig> nacos_configs;
 };
 
 }  // namespace rtp_llm

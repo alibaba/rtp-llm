@@ -29,6 +29,14 @@ bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
         subscribe_service_vec_.push_back(service);
     }
 
+    for (auto& nacos_config : config.nacos_configs) {
+        auto service = createInstanceFromNacosConfig(nacos_config);
+        if (!service) {
+            return false;
+        }
+        subscribe_service_vec_.push_back(service);
+    }
+
     FT_LOG_INFO(
               "subscribe service manager init success, config is [%s]",
               autil::legacy::ToJsonString(config, true).c_str());
