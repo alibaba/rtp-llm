@@ -135,7 +135,7 @@ build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
-test:cicd --test_output=errors --max_test_output_bytes=102400 --experimental_ui_max_stdouterr_bytes=3145728
+test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
 # asan
 build:asan --copt -fsanitize=address
