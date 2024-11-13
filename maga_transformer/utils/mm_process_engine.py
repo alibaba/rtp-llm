@@ -34,9 +34,9 @@ class MMProcessEngine:
             res = []
             for index in range(len(urls)):
                 if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index], index=index)
+                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index], index=index)
                 else:
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index])
+                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
                 if len(embedding.shape) > 2:
                     res.extend(list(embedding))
                 else:
@@ -46,7 +46,7 @@ class MMProcessEngine:
             res = []
             pos_id = []
             for index in range(len(urls)):
-                embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), configs=configs[index])
+                embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
                 if len(embedding_res[0].shape) > 2:
                     res.extend(list(embedding_res[0]))
                 else:

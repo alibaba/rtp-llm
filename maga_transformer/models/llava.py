@@ -71,11 +71,8 @@ class LlavaTokenizer(object):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
 class Llava(Llama, MultiModalMixin):
-    def init_multimodal(self, config: GptInitModelParameters):
-        if g_parallel_info.tp_rank > 0:
-            return
-        with torch.device(g_parallel_info.device):
-            self.mm_part = LlavaImageEmbedding(config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = LlavaImageEmbedding(config)
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
         if config.mm_related_params.config["unfreeze_mm_vision_tower"] or \
             "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]:

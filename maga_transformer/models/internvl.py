@@ -32,9 +32,8 @@ class InternVLTokenizer:
         return self.tokenizer.decode(token_id, **kwargs)
 
 class InternVL(BaseModel, MultiModalMixin):
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.cuda.device(torch.device(g_parallel_info.device)):
-            self.mm_part = InternVLImageEmbedding(config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = InternVLImageEmbedding(config)
         config.mm_related_params.vit_weights = InternVLVitWeight({"vision_model": self.mm_part.vision_model,
                                                                     "mlp1": self.mm_part.mlp1}, True)
         config.mm_sep_tokens = [[self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]]

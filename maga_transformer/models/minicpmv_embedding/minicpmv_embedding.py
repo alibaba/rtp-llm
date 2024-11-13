@@ -74,7 +74,9 @@ class LlamaTokenizerWrapper(LlamaTokenizer):
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: GptInitModelParameters):
+        self.config = config
+        config = config.mm_related_params.config
         self.transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
@@ -82,7 +84,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         ])
         self.vision_encoder = config['vision_encoder']
         self.drop_vision_last_layer = config['drop_vision_last_layer']
-        self.vpm = self.init_vision_module().half().cuda()
+        self.vpm = self.init_vision_module()
         self.vision_dim = self.vpm.embed_dim
         self.embed_dim = config['llm_hidden_size']
         self.query_num = config['query_num']
@@ -96,6 +98,10 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                                    num_heads=self.embed_dim // 128,
                                    kv_dim=self.vision_dim,
                                    adaptive=True)
+
+    @property
+    def _device(self):
+        return self.vpm.device
 
     def init_vision_module(self):
         model = timm.create_model(self.vision_encoder,
@@ -114,8 +120,8 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return model
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, device, dtype,
-                     **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
+        dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
@@ -124,7 +130,6 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
                 features = self.mm_process(cached_url_res,
-                                        device,
                                         mm_type=mm_type,
                                         **kwargs)
             if isinstance(features, list):
@@ -141,27 +146,27 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             return encode_video(data) 
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
+    def mm_process(self, mm_input, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
             if isinstance(mm_input, list):
-                return self.image_embedding(mm_input, device)
+                return self.image_embedding(mm_input)
             else:
-                return self.image_embedding([mm_input], device)
+                return self.image_embedding([mm_input])
         elif mm_type == MMUrlType.IMAGE:
             if isinstance(mm_input, list):
                 raise Exception("expect single image input, but get a list")
-            return self.image_embedding([mm_input], device)
+            return self.image_embedding([mm_input])
         elif mm_type == MMUrlType.VIDEO:
             if not isinstance(mm_input, list):
                 raise Exception("expect video input, but get a single image")
-            return self.image_embedding(mm_input, device)
+            return self.image_embedding(mm_input)
         else:
             raise Exception("unknown mm url type")
 
     def get_vision_embedding(self, pixel_values):
         res = []
-        dtype = self.vpm.pos_embed.data.dtype
+        dtype = self._data_type
 
         # first slice
         H, W = pixel_values[0].shape[-2:]
@@ -186,8 +191,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return res
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Any],
-                        device: str) -> List[torch.Tensor]:
+    def image_embedding(self, images: List[Any]) -> List[torch.Tensor]:
         new_images_list = []
         for image in images:
             if self.slice_mode:
@@ -210,7 +214,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             for img_batch in new_images_list:
                 img_inps = list(executor.map(self.transform, img_batch))
                 for i in range(len(img_inps)):
-                    img_inps[i] = img_inps[i].to(device)
+                    img_inps[i] = img_inps[i].to(self._device)
                 pixel_values_list.append(img_inps if img_inps else [])
         vision_hidden_states = []
         for pixel_values in pixel_values_list:
@@ -264,10 +268,8 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
                                      # [self.slice_start_id, self.slice_end_id]
                                      ]
 
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.device(g_parallel_info.device):
-            self.mm_part = ImageEmbeddingInterface(
-                config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = ImageEmbeddingInterface(config)
         config.mm_related_params.vit_weights = MiniCPMVVitWeight({
             "vpm":
             self.mm_part.vpm,

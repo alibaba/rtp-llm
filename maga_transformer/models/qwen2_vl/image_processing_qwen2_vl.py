@@ -461,11 +461,3 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
             data = {"pixel_values_videos": pixel_values, "video_grid_thw": vision_grid_thws}
 
         return BatchFeature(data=data, tensor_type=return_tensors)
-
-class Qwen2VLProcessor:
-    def __init__(self, image_processor: Qwen2VLImageProcessor, **kwargs):
-        self.image_processor = image_processor
-    
-    def process_image(self, images: List[Image.Image]):
-        image_inputs = self.image_processor(images=images, videos=None, return_tensors="pt")
-        image_grid_thw = image_inputs["image_grid_thw"]

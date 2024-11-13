@@ -44,6 +44,12 @@ class MultimodalInput:
         self.mm_type = mm_type
         self.config = config
 
+def get_vit_compute_dtype(dtype: str):
+    if dtype == "bf16":
+        return torch.bfloat16
+    else:
+        return torch.half
+
 def get_bytes_io_from_url(url: str):
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:

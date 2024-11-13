@@ -26,7 +26,7 @@ class CogVLM2(Llama, MultiModalMixin):
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
         super().__init__(config)
         
-    def init_multimodal(self, config: GptInitModelParameters):        
+    def _init_multimodal(self, config: GptInitModelParameters):        
         self.mm_part = EVA2CLIPImageEmbedding(config)
         config.mm_related_params.vit_weights = CogVLM2VitWeights(
             {"vit": self.mm_part.vit}

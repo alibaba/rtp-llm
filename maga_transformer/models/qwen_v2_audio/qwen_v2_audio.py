@@ -23,9 +23,8 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
 
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.device(g_parallel_info.device):
-            self.mm_part = Processor(config.ckpt_path, to_torch_dtype(config.data_type))
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = Processor(config)
         config.mm_related_params.vit_weights = BaseVitWeights({"multi_modal_projector": self.mm_part.multi_modal_projector, "audio_tower": self.mm_part.audio_tower}, with_prefix=True)
         config.mm_related_params.vit_weights._ckpt_prefix = ""
 

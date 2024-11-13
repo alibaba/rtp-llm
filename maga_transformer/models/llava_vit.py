@@ -10,30 +10,37 @@ from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class LlavaImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config: Dict[str, Any]):
-        if config.get("vision_config", None) != None:
+    def __init__(self, config: GptInitModelParameters):
+        self.config = config
+        if config.mm_related_params.config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
         else:
-            self.vision_tower = self.build_vision_tower(config).to(g_parallel_info.device).half()
-        self.mm_projector = self.build_vision_projector(config).half()
-        if "unpad" in config.get("mm_patch_merge_type", "flat"):
+            self.vision_tower = self.build_vision_tower(config.mm_related_params.config)
+        self.mm_projector = self.build_vision_projector(config.mm_related_params.config)
+        if "unpad" in self.config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(
-                torch.empty(config["hidden_size"]).half()
+                torch.empty(self.config.mm_related_params.config["hidden_size"])
             )
-        self.config = config
+
+    @property
+    def _device(self):
+        return self.vision_tower.device
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image], device: str):
-        image_aspect_ratio = self.config["image_aspect_ratio"]
-        mm_patch_merge_type = self.config.get("mm_patch_merge_type", "flat")
+    def image_embedding(self, images: List[Image.Image]):
+        config = self.config.mm_related_params.config
+        image_aspect_ratio = config["image_aspect_ratio"]
+        mm_patch_merge_type = config.get("mm_patch_merge_type", "flat")
 
         processed_images = process_images(images, 
                                           image_aspect_ratio, 
                                           self.vision_tower.image_processor, 
-                                          device,
-                                          image_grid_pinpoints = self.config.get("image_grid_pinpoints", []))
+                                          self._device,
+                                          self._data_type,
+                                          image_grid_pinpoints = config.get("image_grid_pinpoints", []))
         
         processed_images = [image.unsqueeze(0) if image.ndim == 3 else image for image in processed_images]
         split_sizes = [processed_image.shape[0] for processed_image in processed_images]
@@ -53,7 +60,7 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
                     height = width = self.vision_tower.num_patches_per_side
                     assert height * width == base_image_feature.shape[0]
                     if image_aspect_ratio == 'anyres':
-                        num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], self.config["image_grid_pinpoints"], self.vision_tower.config.image_size)
+                        num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], config["image_grid_pinpoints"], self.vision_tower.config.image_size)
                         image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
                     else:
                         raise NotImplementedError
@@ -211,13 +218,7 @@ class IdentityMap(torch.nn.Module):
     def config(self):
         return {"mm_projector_type": 'identity'}
 
-def process_batch_images(batch_images, image_aspect_ratio, image_processor, device, **kwargs):
-    batch_new_images = []
-    for images in batch_images:
-        batch_new_images.append(process_images(images, image_aspect_ratio, image_processor, device, **kwargs))
-    return batch_new_images
-
-def process_images(images, image_aspect_ratio, image_processor, device, **kwargs):
+def process_images(images, image_aspect_ratio, image_processor, device, data_type, **kwargs):
     new_images = []
     if image_aspect_ratio == "pad":
         for image in images:
@@ -232,8 +233,8 @@ def process_images(images, image_aspect_ratio, image_processor, device, **kwargs
         return image_processor(images, return_tensors='pt')['pixel_values']
 
     if type(new_images) is list:
-        new_images = [image.to(device, dtype=torch.float16) for image in new_images]
+        new_images = [image.to(device, dtype=data_type) for image in new_images]
     else:
-        new_images = new_images.to(device, dtype=torch.float16)
+        new_images = new_images.to(device, dtype=data_type)
 
     return new_images

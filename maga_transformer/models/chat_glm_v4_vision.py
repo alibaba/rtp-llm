@@ -18,20 +18,19 @@ from maga_transformer.utils.multimodal_util import MMUrlType
 
 class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
-        embeddings = self.image_embedding([mm_input], device)[0]
+    def mm_process(self, mm_input, **kwargs):
+        embeddings = self.image_embedding([mm_input])[0]
         pos_ids = [1] * embeddings.shape[0]
         pos_ids[0] = 0
         pos_ids[-1] = 2
         return embeddings, torch.tensor(pos_ids, dtype=torch.int32)
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
-    def init_multimodal(self, config: GptInitModelParameters):
-        if g_parallel_info.tp_rank == 0:
-            self.mm_part = ChatGlmV4VisionImageEmbedding(config)
-            config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
-                {"vit": self.mm_part.vit}
-            )
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = ChatGlmV4VisionImageEmbedding(config)
+        config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
+            {"vit": self.mm_part.vit}
+        )
 
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":

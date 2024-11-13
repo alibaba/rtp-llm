@@ -41,11 +41,13 @@ def encode_video(video_path, max_num_frames: int = 32):
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: GptInitModelParameters):
+        self.config = config
+        config = config.mm_related_params.config
         self.vision_config = SiglipVisionConfig(**config)
         self.processor = AutoProcessor.from_pretrained(config['ckpt_path'],
                                                        trust_remote_code=True)
-        self.vpm = SiglipVisionTransformer(self.vision_config).half().cuda()
+        self.vpm = SiglipVisionTransformer(self.vision_config)
         self.embed_dim = config['llm_hidden_size']
         self.query_num = config['query_num']
         self.vision_dim = self.vision_config.hidden_size
@@ -55,9 +57,13 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                                    kv_dim=self.vision_dim,
                                    adaptive=True)
 
+    @property
+    def _device(self):
+        return self.vpm.device
+
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, device, dtype,
-                     **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
+        dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
@@ -66,7 +72,6 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
                 features = self.mm_process(cached_url_res,
-                                        device,
                                         mm_type=mm_type,
                                         **kwargs)
             if isinstance(features, list):
@@ -83,28 +88,28 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             return encode_video(data)
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
+    def mm_process(self, mm_input, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
             if isinstance(mm_input, list):
-                return self.image_embedding(mm_input, device)
+                return self.image_embedding(mm_input)
             else:
-                return self.image_embedding([mm_input], device)
+                return self.image_embedding([mm_input])
         elif mm_type == MMUrlType.IMAGE:
             if isinstance(mm_input, list):
                 raise Exception("expect single image input, but get a list")
-            return self.image_embedding([mm_input], device)
+            return self.image_embedding([mm_input])
         elif mm_type == MMUrlType.VIDEO:
             if not isinstance(mm_input, list):
                 raise Exception("expect video input, but get a single image")
-            return self.image_embedding(mm_input, device)
+            return self.image_embedding(mm_input)
         else:
             raise Exception("unknown mm url type")
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Any], device: str) -> List[torch.Tensor]:
+    def image_embedding(self, images: List[Any]) -> List[torch.Tensor]:
         data = self.processor.image_processor(images, return_tensors="pt")
-        dtype = torch.half
+        dtype = self._data_type
         tgt_sizes = data['tgt_sizes']
         pixel_values_list = data['pixel_values']
         vision_hidden_states = []
@@ -113,7 +118,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         for pixel_values in pixel_values_list:
             img_cnt.append(len(pixel_values))
             all_pixel_values.extend([
-                i.flatten(end_dim=1).permute(1, 0).to(device)
+                i.flatten(end_dim=1).permute(1, 0).to(self._device)
                 for i in pixel_values
             ])
 
@@ -136,7 +141,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
             patch_attn_mask = torch.zeros((B, 1, max_patches),
                                           dtype=torch.bool,
-                                          device=device)
+                                          device=self._device)
             for i in range(B):
                 patch_attn_mask[i,
                                 0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
@@ -205,10 +210,8 @@ class MiniCPMV(QWenV2, MultiModalMixin):
             [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id]
         ]
 
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.device(g_parallel_info.device):
-            self.mm_part = ImageEmbeddingInterface(
-                config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = ImageEmbeddingInterface(config)
         config.mm_related_params.vit_weights = MiniCPMVVitWeight({
             "vpm":
             self.mm_part.vpm,

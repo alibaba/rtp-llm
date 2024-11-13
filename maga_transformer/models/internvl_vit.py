@@ -30,6 +30,7 @@ import torchvision.transforms as T
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.utils.multimodal_util import MMUrlType
 from maga_transformer.utils.flash_attn_utils import can_use_flash_attn
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 has_flash_attn = False
 try:
@@ -150,9 +151,11 @@ def load_video(video_path, bound=None, input_size=448, max_num=1, num_segments=3
     return img_list
 
 class InternVLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: GptInitModelParameters):
+        self.config = config
+        config = config.mm_related_params.config
         self.select_layer = config["select_layer"]
-        self.vision_model = InternVisionModel(InternVisionConfig(**config)).cuda().half()
+        self.vision_model = InternVisionModel(InternVisionConfig(**config))
 
         vit_hidden_size = config["hidden_size"]
         llm_hidden_size = config["llm_hidden_size"]
@@ -163,25 +166,28 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
             nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
             nn.GELU(),
             nn.Linear(llm_hidden_size, llm_hidden_size)
-        ).cuda().half()
-        self.config = config
+        )
+    
+    @property
+    def _device(self):
+        return self.vision_model.device
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
+    def mm_process(self, mm_input, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
             if isinstance(mm_input, list):
-                return self.image_embedding(mm_input, 1, device)
+                return self.image_embedding(mm_input, 1)
             else:
-                return self.image_embedding([mm_input], 12, device)[0]
+                return self.image_embedding([mm_input], 12)[0]
         elif mm_type == MMUrlType.IMAGE:
             if isinstance(mm_input, list):
                 raise Exception("expect single image input, but get a list")
-            return self.image_embedding([mm_input], 12, device)[0]
+            return self.image_embedding([mm_input], 12)[0]
         elif mm_type == MMUrlType.VIDEO:
             if not isinstance(mm_input, list):
                 raise Exception("expect video input, but get a single image")
-            return self.image_embedding(mm_input, 1, device)
+            return self.image_embedding(mm_input, 1)
         else:
             raise Exception("unknown mm url type")
 
@@ -204,15 +210,17 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
             raise Exception("unknown mm url type")
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image], max_num, device):
+    def image_embedding(self, images: List[Image.Image], max_num):
         # hugging face default value
-        input_size = self.config["image_size"]
-        transform = build_transform(input_size=self.config["image_size"])
+        device = self._device
+        config = self.config.mm_related_params.config
+        input_size = config["image_size"]
+        transform = build_transform(input_size=config["image_size"])
         res = []
         for image in images:
             now_images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
             pixel_values = [transform(now_image) for now_image in now_images]
-            pixel_values = torch.stack(pixel_values).to(device=device).half()
+            pixel_values = torch.stack(pixel_values).to(device=device).to(self._data_type)
 
             if self.select_layer == -1:
                 vit_embeds = self.vision_model(

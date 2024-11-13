@@ -17,18 +17,22 @@ from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.util import to_torch_dtype
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config: Dict[str, Any]):
-        self.vit = QWen_VL_ViT(**config).half()
+    def __init__(self, config: GptInitModelParameters):
+        self.vit = QWen_VL_ViT(**config.mm_related_params.config)
+        self.config = config
+
+    @property
+    def _device(self):
+        return self.vit.device
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Any], device) -> torch.Tensor:
-        images = self.vit.encode(images, device, self.vit.dtype)
-        return images.to(device=device)
+    def image_embedding(self, images: List[Any]) -> torch.Tensor:
+        images = self.vit.encode(images, self._device, self._data_type)
+        return images
 
 class QWen_VL(QWen, MultiModalMixin):
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.device(g_parallel_info.device):
-            self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = QwenVLImageEmbedding(config)
         config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
 
     def load(self, device: str):

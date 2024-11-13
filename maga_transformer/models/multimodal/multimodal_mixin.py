@@ -13,7 +13,8 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
-from maga_transformer.utils.multimodal_util import MultimodalInput
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
+from maga_transformer.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
@@ -71,12 +72,22 @@ class BaseMultiModalWeightInfo:
                 llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
                 llm_weights.tp_strategy[w_name] = sp_id
 
-
 # 继承MultiModalMixin时，需要把声明写在GPT前以正确顺序构造，详情看super().__init__含义
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
+    
+    @property
+    def vit_data_type(self):
+        return get_vit_compute_dtype(self.config.data_type)
 
     def init_multimodal(self, config: GptInitModelParameters) -> None:
+        with torch.device(g_parallel_info.device):
+            torch_default_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(self.vit_data_type)
+            self._init_multimodal(config)
+            torch.set_default_dtype(torch_default_dtype)
+
+    def _init_multimodal(self, config: GptInitModelParameters) -> None:
         raise NotImplementedError
 
     @staticmethod

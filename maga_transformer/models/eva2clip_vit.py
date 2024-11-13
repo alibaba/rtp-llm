@@ -11,17 +11,19 @@ from maga_transformer.models.multimodal.multimodal_common import ImageTransform,
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):
-        # To reduce CPU memory, use fp16 for loading EVA2CLIPModel
-        torch_default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.half)
-        self.vit = EVA2CLIPModel(config)
-        torch.set_default_dtype(torch_default_dtype)
+        # EVA2CLIPModel is too big, create it in cpu
+        self.config = config
+        self.vit = EVA2CLIPModel(config).cpu()
         self.image_transform = ImageTransform(config.mm_related_params.config["image_size"])
 
-    def image_embedding(self, images: List[Any], device: Union[str, torch.device]) -> torch.Tensor:
+    @property
+    def _device(self):
+        return self.vit.device
+
+    def image_embedding(self, images: List[Any]) -> torch.Tensor:
         with torch.inference_mode():
-            tensor_images = self.image_transform.encode(images, device, self.vit.dtype)
-            tensor_images = self.vit(tensor_images).to(device=device)
+            tensor_images = self.image_transform.encode(images, self._device, self._data_type)
+            tensor_images = self.vit(tensor_images).to(device=self._device)
         assert tensor_images.shape[0] == len(images)
         return tensor_images
 

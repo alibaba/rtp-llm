@@ -98,9 +98,8 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[MultimodalInput]]:
         return MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
 
-    def init_multimodal(self, config: GptInitModelParameters):
-        with torch.device(g_parallel_info.device):
-            self.mm_part = Qwen2VLImageEmbedding(config.mm_related_params.config)
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = Qwen2VLImageEmbedding(config)
         config.mm_related_params.vit_weights = QwenVL2VitWeight({"vit": self.mm_part.visual})
 
     @classmethod

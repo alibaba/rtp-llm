@@ -16,7 +16,8 @@ from torchvision import transforms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
                                                     get_bytes_io_from_url,
-                                                    MMUrlType)
+                                                    MMUrlType,
+                                                    get_vit_compute_dtype)
 
 import threading
 mm_lock = threading.Lock()
@@ -39,10 +40,18 @@ class ImageTransform:
         ).to(device=device).to(dtype=dtype)
         return tensor_images
 
-
 class MultiModalEmbeddingInterface:
+    @property
+    def _data_type(self):
+        return get_vit_compute_dtype(self.config.data_type)
+
+    @property
+    def _device(self):
+        raise NotImplementedError
+
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, device, dtype, **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
+        dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
@@ -53,7 +62,7 @@ class MultiModalEmbeddingInterface:
             except Exception as e:
                 raise Exception(f"multimodal process for {url} error, exception {e}")
             with mm_lock:
-                features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs)
+                features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
             if isinstance(features, tuple):
                 features = (features[0].to(dtype).contiguous(), features[1].contiguous())
             else:
@@ -67,20 +76,19 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
+    def mm_process(self, mm_input, **kwargs):
         raise NotImplementedError
-
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data, **kwargs):
         return Image.open(data).convert("RGB")
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
-        return self.image_embedding([mm_input], device)[0]
+    def mm_process(self, mm_input, **kwargs):
+        return self.image_embedding([mm_input])[0]
 
     @torch.inference_mode()
-    def image_embedding(self, images: List[Image.Image], device):
+    def image_embedding(self, images: List[Image.Image]):
         raise NotImplementedError()
 
 
@@ -91,11 +99,11 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
         return torchaudio.load(data)
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
-        return self.audio_embedding(mm_input, device)
+    def mm_process(self, mm_input, **kwargs):
+        return self.audio_embedding(mm_input)
 
     @torch.inference_mode()
-    def audio_embedding(self, audio: Tuple[torch.Tensor, int], device):
+    def audio_embedding(self, audio: Tuple[torch.Tensor, int]):
         raise NotImplementedError()
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
@@ -103,9 +111,9 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
         return VideoReader(data, ctx=cpu(0))
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device, **kwargs):
-        return self.video_embedding(mm_input, device)
+    def mm_process(self, mm_input, **kwargs):
+        return self.video_embedding(mm_input)
 
     @torch.inference_mode()
-    def video_embedding(self, video: List[Image.Image], device):
+    def video_embedding(self, video: List[Image.Image]):
         raise NotImplementedError()
