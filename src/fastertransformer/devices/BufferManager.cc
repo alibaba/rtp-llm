@@ -120,7 +120,7 @@ BufferStatus BufferManager::queryStatus() {
         status.device_preserved_bytes = tracker_status.available_size;
         status.device_fragmented_bytes = tracker_status.fragmented_size;
         status.device_free_bytes = tracker_status.free_size;
-        status.device_max_consumed_bytes = device_max_allocated_bytes_;
+        status.device_max_consumed_bytes = device_max_consumed_bytes_;
     }
     return status;
 }
