@@ -103,9 +103,9 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     user: Optional[str] = None
     seed: Optional[int] = None
+    n: Optional[int] = None
 
     # ---- These functions are not implemented yet.
-    # n: Optional[int] = 1
     # presence_penalty: Optional[float] = 0.0
     # frequency_penalty: Optional[float] = 0.0
     # logit_bias: Optional[Dict[str, float]] = None

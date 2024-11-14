@@ -84,6 +84,8 @@ class OpenaiEndopoint():
             config.top_p = request.top_p
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        if request.n != None:
+            config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
@@ -113,14 +115,14 @@ class OpenaiEndopoint():
                 if (all_choices == []):
                     all_choices = [
                         ChatCompletionResponseChoice(
-                            index=0,
+                            index=i,
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
                                 content=choice.delta.content or None,
                                 function_call=choice.delta.function_call or None,
                             ),
                             finish_reason=choice.finish_reason
-                        ) for choice in response.choices
+                        ) for i, choice in enumerate(response.choices)
                     ]
                 else:
                     raise ValueError(f"response.choices has different length! "

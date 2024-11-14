@@ -23,7 +23,7 @@ from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, M
 
 class StreamStatus:
     index: int = 0
-    output: GenerateOutput
+    output: Optional[GenerateOutput] = None
     origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     last_output_ids: List[int] = []
@@ -65,43 +65,6 @@ class StreamStatus:
     @property
     def tokens_to_decode(self):
         return self.prev_token_id + self.output_ids[len(self.last_output_ids):]
-    
-def generate_stream_response(status: StreamStatus, request = None, is_first: bool = False, is_last: bool = False):
-        choices = None
-        usage = None
-        aux_info = None
-        if is_first:
-            choices=[ChatCompletionResponseStreamChoice(
-                    index=status.index,
-                    delta=DeltaMessage(
-                        role=RoleEnum.assistant,
-                        content="",
-                    )
-            )]
-        else:
-            usage=UsageInfo(
-                    prompt_tokens=status.input_token_length,
-                    total_tokens=status.input_token_length + status.output_token_length,
-                    completion_tokens=status.output_token_length,
-                    prompt_tokens_details=PromptTokensDetails(cached_tokens=status.reuse_length) if status.reuse_length > 0 else None
-                )
-            if is_last:
-                choices=[ChatCompletionResponseStreamChoice(
-                    index=status.index + 1,
-                    delta=DeltaMessage(
-                        content="",
-                    ),
-                    finish_reason=status.finish_reason
-                )]
-                aux_info=output.aux_info if request.aux_info else None
-            else:
-                choices=[ChatCompletionResponseStreamChoice(
-                        index=status.index,
-                        delta=DeltaMessage(
-                            content=status.delta_output_string,
-                        ),
-                    )]
-        return StreamResponseObject(choices=choices, usage=usage, aux_info=aux_info)
 
 @dataclass
 class StreamResponseObject:
@@ -117,6 +80,14 @@ class RendererParams:
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
     ckpt_path: str = ""
+
+@dataclass
+class OutputDelta():
+    output_str: Union[str, DeltaMessage]
+    input_length: int
+    output_length: int
+    reuse_length: int
+
 
 class RenderedInputs:
     input_ids: List[int] = []
@@ -235,6 +206,112 @@ class CustomChatRenderer():
                                                           request,
                                                           generate_config):
             yield response
+        
+    async def _create_empty_delta(self, aux_info: AuxInfo):
+        return OutputDelta(
+            output_str="", 
+            input_length=aux_info.input_len, 
+            output_length=aux_info.output_len, 
+            reuse_length=aux_info.reuse_len
+        ) 
+            
+    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+        if status.finish_reason != None:
+            return await self._create_empty_delta(status.output.aux_info)
+        status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
+        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
+        decoded_string = self.tokenizer.decode(status.tokens_to_decode) 
+        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+        if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
+            return await self._create_empty_delta(output.aux_info)
+        status.delta_output_string = decoded_string[len(decoded_prev_token):]
+        if is_truncated(status.delta_output_string, stop_words_str):
+            status.finish_reason = FinisheReason.stop
+            return await self._create_empty_delta(output.aux_info)
+        if not is_truncated(status.delta_output_string, stop_word_slice_list):
+            status.update_result()
+            delta = OutputDelta(output_str=status.delta_output_string, input_length=output.aux_info.input_len, output_length=output.aux_info.output_len, reuse_length=output.aux_info.reuse_len)
+            status.delta_output_string = ""
+            return delta
+        else:
+            return await self._create_empty_delta(output.aux_info)
+
+    async def _generate_first(self, n: int):
+        return StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=i,
+                        delta=DeltaMessage(
+                            role=RoleEnum.assistant,
+                            content="",
+                        ),
+                    ) for i in range(n)]
+        )
+    
+    async def _generate_stream_response(self, items: List[OutputDelta]) -> StreamResponseObject:
+        if len(items) == 0:
+            raise Exception("output items length should not be 0")
+        input_lengths = items[0].input_length
+        output_lengths = sum([x.output_length for x in items])
+        reuse_lengths = items[0].reuse_length
+        return StreamResponseObject(
+                choices=[ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(
+                        content=item.output_str,
+                    ) if isinstance(item.output_str, str) else item.output_str,
+                ) for i, item in enumerate(items)],
+                usage=UsageInfo(
+                    prompt_tokens=input_lengths,
+                    total_tokens=input_lengths + output_lengths,
+                    completion_tokens=output_lengths,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_lengths) if reuse_lengths > 0 else None
+                )
+        )
+
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str]):
+        output_items: List[OutputDelta] = []
+        for buffer in buffer_list: 
+            if buffer.output is None:
+                raise Exception("last output should not be None")
+            aux_info = buffer.output.aux_info
+            trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str)
+            output_items.append(OutputDelta(trunc_string, aux_info.input_len, aux_info.output_len, aux_info.reuse_len))
+        return await self._generate_stream_response(output_items)
+    
+    async def _generate_final(self, buffer_list: List[StreamStatus]):
+        input_token_length = 0
+        output_token_length = 0
+        reuse_length = 0
+        aux_info = None
+        for i, buffer in enumerate(buffer_list):
+            if buffer.output is None:
+                raise Exception("buffer last output should not be None")
+            if buffer.finish_reason == None:
+                logging.debug(f"output {i} found no stop reason! use stop as default.")
+                buffer.finish_reason = FinisheReason.stop
+            if i == 0:
+                input_token_length = buffer.output.aux_info.input_len
+                reuse_length = buffer.output.aux_info.reuse_len
+            output_token_length += buffer.output.aux_info.output_len
+        return StreamResponseObject(
+            choices=[ChatCompletionResponseStreamChoice(
+                index=i,
+                delta=DeltaMessage(
+                    content="",
+                ),
+                finish_reason=buffer.finish_reason
+            ) for i, buffer in enumerate(buffer_list)],
+            usage=UsageInfo(
+                prompt_tokens=input_token_length,
+                total_tokens=input_token_length + output_token_length,
+                completion_tokens=output_token_length,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
+            ),
+            aux_info=aux_info
+        )
+    
+    async def _create_status_list(self, n: int):
+        return [StreamStatus() for _ in range(n)]
 
     async def render_response_stream(
             self,
@@ -243,41 +320,22 @@ class CustomChatRenderer():
             generate_config: GenerateConfig
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
-        status = StreamStatus()
-
+        num_return_sequences = request.n if request.n is not None else 1
+        status_list = await self._create_status_list(num_return_sequences)
+        index = 0
         async for outputs in output_generator:
-            if status.index == 0:
-                yield generate_stream_response(status, is_first=True)
-
-            output = outputs.generate_outputs[0]
-            status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=generate_config.max_new_tokens), self._remove_stop_word_ids)
-            
-            decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
-            decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        
-            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-            if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):
-                continue
-            status.delta_output_string = decoded_string[len(decoded_prev_token):]
-            if is_truncated(status.delta_output_string, generate_config.stop_words_str):
-                status.finish_reason = FinisheReason.stop
-                break
-
-            if not is_truncated(status.delta_output_string, stop_word_slice_list):
-                status.update_result()
-                stream_response = generate_stream_response(status)
-                status.delta_output_string = ""
-                yield stream_response
-
-        if not is_truncated(status.delta_output_string, generate_config.stop_words_str):
-            status.responded_string += status.delta_output_string
-            yield generate_stream_response(status)
-
-        if status.finish_reason == None:
-            logging.debug(f"output [{status.responded_string}] found no stop reason! use stop as default.")
-            status.finish_reason = FinisheReason.stop
-
-        yield generate_stream_response(status, is_last=True, request=request)
+            if index == 0:
+                yield await self._generate_first(num_return_sequences)
+            index += 1
+            if len(outputs.generate_outputs) != num_return_sequences:
+                raise Exception("output num != num_return_sequences")
+            delta_list: List[OutputDelta] = []
+            for status, output in zip(status_list, outputs.generate_outputs):
+                delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list))
+            yield await self._generate_stream_response(delta_list)
+        if index != 0:
+            yield await self._flush_buffer(status_list, generate_config.stop_words_str)
+            yield await self._generate_final(status_list)
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1) -> Optional[FinisheReason]:
         stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list

@@ -15,7 +15,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
     DeltaMessage, FinisheReason, UsageInfo, RendererInfo, PromptTokensDetails
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs, StreamStatus, generate_stream_response
+    StreamResponseObject, RenderedInputs, StreamStatus, OutputDelta
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
@@ -54,15 +54,15 @@ class QwenStreamStatus(StreamStatus):
 
     def update_result(self):
         self.responded_string = self.total_output_string[: - len('\nAction:')]
-    
+
     @property
     def responded_length(self):
         return len(self.responded_string)
-    
+
     @property
     def output_length(self):
         return len(self.total_output_string)
-    
+
     def check_stop_reason(self):
         if self.finish_reason == None:
             logging.debug(f"output [{self.responded_string}] found no stop reason! use stop as default.")
@@ -322,71 +322,53 @@ class QwenRenderer(CustomChatRenderer):
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 
-    async def render_response_stream(
-            self,
-            output_generator: AsyncGenerator[GenerateOutputs, None],
-            request: ChatCompletionRequest,
-            generate_config: GenerateConfig
-    ) -> AsyncGenerator[StreamResponseObject, None]:
-        stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
-        status = QwenStreamStatus()
-        async for output in output_generator:
-            if status.index == 0:
-                yield generate_stream_response(status, is_first=True)
-            output = output.generate_outputs[0]
-            status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=generate_config.max_new_tokens), self._remove_stop_word_ids)
-            status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
-            if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
-                continue
-
-            if (status.total_output_string.endswith("\nAction:")):
-                status.generating_function_call = True
-                continue
-
-            if (status.generating_function_call):
-                continue
-
-            if is_truncated(status.total_output_string, generate_config.stop_words_str):
-                status.finish_reason = FinisheReason.stop
-                break
-
-            if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
-                status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
-                if is_truncated(status.delta_output_string, stop_word_slice_list):
-                    continue
-                status.update_result()
-                yield generate_stream_response(status)
-
+    async def _update_single_status(self, status: QwenStreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+        if status.finish_reason != None:
+            return await self._create_empty_delta(status.output.aux_info)
+        status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
+        status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
+        if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
+            return await self._create_empty_delta(output.aux_info)
+            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+        if (status.total_output_string.endswith("\nAction:")):
+            status.generating_function_call = True
+            return await self._create_empty_delta(output.aux_info)
         if (status.generating_function_call):
-            function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
-            if (function_message == None):
-                logging.warn(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
-                                "regarded as normal output.")
+            return await self._create_empty_delta(output.aux_info)
+        if is_truncated(status.total_output_string, stop_words_str):
+            status.finish_reason = FinisheReason.stop
+            return await self._create_empty_delta(output.aux_info)
+        if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
+            status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
+            if is_truncated(status.delta_output_string, stop_word_slice_list):
+                return await self._create_empty_delta(output.aux_info)
             else:
-                status.finish_reason = FinisheReason.function_call
-                status.responded_string = status.total_output_string
-                yield StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=status.index,
-                        delta=function_message,
-                        finish_reason=status.finish_reason,
-                    )],
-                    usage=UsageInfo(
-                        prompt_tokens=status.input_token_length,
-                        total_tokens=status.input_token_length + status.output_token_length,
-                        completion_tokens=status.output_token_length,
-                        prompt_tokens_details=PromptTokensDetails(cached_tokens=status.reuse_length) if status.reuse_length > 0 else None
-                    )
-                )
+                status.update_result()
+                return OutputDelta(status.delta_output_string, status.input_token_length, status.output_token_length, status.reuse_length)
+        return await self._create_empty_delta(output.aux_info)
+            
 
-        status.check_stop_reason()
-
-        if status.responded_length < status.output_length:
-            status.index += 1
-            status.delta_output_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], generate_config.stop_words_str)
-            yield generate_stream_response(status)
-
-        yield generate_stream_response(status, request=request, is_last=True)
+    #override
+    async def _create_status_list(self, n: int) -> List[QwenStreamStatus]:
+        return [QwenStreamStatus() for _ in range(n)]
+    
+    #override
+    async def _flush_buffer(self, buffer_list: List[QwenStreamStatus], stop_words_str: List[str]):
+        output_items: List[OutputDelta] = []
+        for status in buffer_list: 
+            if status.generating_function_call:
+                function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
+                if (function_message == None):
+                    logging.warning(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
+                                    "regarded as normal output.")
+                    function_message = ""
+                else:
+                    status.finish_reason = FinisheReason.function_call
+                output_items.append(OutputDelta(function_message, status.input_token_length, status.output_token_length, status.reuse_length))
+            else:
+                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str)
+                output_items.append(OutputDelta(trunc_string, status.input_token_length, status.output_token_length, status.reuse_length))
+        return await self._generate_stream_response(output_items) 
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
