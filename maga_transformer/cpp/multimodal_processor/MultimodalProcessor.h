@@ -28,7 +28,7 @@ struct ExpandedOutput {
 
 struct MMEmbeddingRes {
     std::vector<torch::Tensor> mm_features = {};
-    std::optional<std::vector<ft::BufferPtr>> mm_position_ids = std::nullopt;
+    std::optional<std::vector<torch::Tensor>> mm_position_ids = std::nullopt;
 };
 
 class MultimodalProcessor {
@@ -87,10 +87,10 @@ private:
                 }
                 mm_embedding_res.mm_features = mm_features;
                 auto position_id_vec = res.attr("position_ids");
-                std::vector<ft::BufferPtr> position_ids;
+                std::vector<torch::Tensor> position_ids;
                 if (!position_id_vec.is_none()) {
                     for (auto& position_id: convertPyObjectToVec(position_id_vec)) {
-                        auto pos = ft::torchTensor2Buffer(convertPyObjectToTensor(position_id));
+                        auto pos = convertPyObjectToTensor(position_id);
                         position_ids.emplace_back(pos);
                     }
                     mm_embedding_res.mm_position_ids = position_ids;

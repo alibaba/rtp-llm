@@ -82,7 +82,7 @@ public:
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<ft::BufferPtr>                text_tokens_mask; // text part for 1 and multimodal part for 0
     std::optional<ft::BufferPtr>                mm_locs; // multimodal input locations
-    std::optional<std::vector<ft::BufferPtr>>   mm_position_ids;
+    std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
     int                             lora_id       = -1;
     int                             prefix_length = 0;

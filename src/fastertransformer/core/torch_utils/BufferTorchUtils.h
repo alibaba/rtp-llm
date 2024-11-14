@@ -115,6 +115,14 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     return std::make_shared<Buffer>(memory_type, dtype, shape, data);
 }
 
+inline std::vector<BufferPtr> torchTensorVec2BufferVec(const std::vector<torch::Tensor>& tensor_vec) {
+    std::vector<BufferPtr> res;
+    for (auto& tensor: tensor_vec) {
+        res.emplace_back(torchTensor2Buffer(tensor));
+    }
+    return res;
+}
+
 inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
                                     const torch::Tensor& scales,
                                     const torch::Tensor& zeros)

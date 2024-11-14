@@ -381,8 +381,12 @@ vector<int> GenerateStream::textTokensMask() const {
 }
 
 ft::BufferPtr GenerateStream::generateContextPositionIds(ft::DeviceBase* device) {
+    optional<vector<ft::BufferPtr>> position_ids_buffer = nullopt;
+    if (generate_input_->mm_position_ids.has_value()) {
+        position_ids_buffer = ft::torchTensorVec2BufferVec(generate_input_->mm_position_ids.value());
+    }
     context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(), 
-        mm_position_ids_style_, generate_input_->mm_locs, generate_input_->mm_position_ids);
+        mm_position_ids_style_, generate_input_->mm_locs, position_ids_buffer);
     return context_position_ids_.value();
 }
 
