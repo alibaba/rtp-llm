@@ -144,4 +144,22 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 }
 
+TEST_F(RequestBlockBufferStoreTest, testAfterDelRequestBlockBuffer) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    store->delRequestBlockBuffer("request-1");
+
+    ASSERT_TRUE(store->getBlockBuffer("request-1", "b1") == nullptr);
+
+    auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
+    auto block1        = block_buffer_util_->makeBlockBuffer("b1", 1024, '0', true);
+    auto block2        = block_buffer_util_->makeBlockBuffer("b2", 1024, '1', false);
+    request_block->addBlock(block1);
+    request_block->addBlock(block2);
+    ASSERT_FALSE(store->setRequestBlockBuffer(request_block));
+
+    ASSERT_FALSE(store->setRequestBlockBufferWatchFunc(
+        "request-1",
+        [](bool success, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) { EXPECT_FALSE(success); }));
+}
+
 }  // namespace rtp_llm

@@ -308,8 +308,8 @@ TEST_F(NormalCacheStoreTest, testLoad_loadBeforeStore) {
     store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
     store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
     store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, '2', true));
-    cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) { 
-        ASSERT_TRUE(ok); 
+    cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+        ASSERT_TRUE(ok);
         ASSERT_EQ(CacheStoreErrorCode::None, ec);
     });
     mutex.lock();  // wait till callback
@@ -335,8 +335,8 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
         auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid1);
         store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
         store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
-        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) { 
-            ASSERT_TRUE(ok); 
+        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+            ASSERT_TRUE(ok);
             ASSERT_EQ(CacheStoreErrorCode::None, ec);
         });
     });
@@ -344,8 +344,8 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
         usleep(100 * 1000);  /// wait 100ms then set block
         auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid2);
         store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, '2', true));
-        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) { 
-            ASSERT_TRUE(ok); 
+        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+            ASSERT_TRUE(ok);
             ASSERT_EQ(CacheStoreErrorCode::None, ec);
         });
     });
@@ -353,16 +353,15 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
         usleep(100 * 1000);  /// wait 100ms then set block
         auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid3);
         store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("abcd", block_size, '3', true));
-        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) { 
-            ASSERT_TRUE(ok); 
+        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+            ASSERT_TRUE(ok);
             ASSERT_EQ(CacheStoreErrorCode::None, ec);
         });
     });
 
-    
     std::thread get_block_thread1([this, requestid1, block_size]() {
         std::mutex mutex1;
-        auto load_cache = std::make_shared<RequestBlockBuffer>(requestid1);
+        auto       load_cache = std::make_shared<RequestBlockBuffer>(requestid1);
         load_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
         load_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
         mutex1.lock();
@@ -379,10 +378,10 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
     });
     std::thread get_block_thread2([this, requestid2, block_size]() {
         std::mutex mutex2;
-        auto load_cache = std::make_shared<RequestBlockBuffer>(requestid2);
+        auto       load_cache = std::make_shared<RequestBlockBuffer>(requestid2);
         load_cache->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, 'c', true));
         mutex2.lock();
-        auto load_callback = [&mutex2](bool ok,CacheStoreErrorCode ec) {
+        auto load_callback = [&mutex2](bool ok, CacheStoreErrorCode ec) {
             mutex2.unlock();
             ASSERT_TRUE(ok);
             ASSERT_EQ(CacheStoreErrorCode::None, ec);
@@ -394,10 +393,10 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
     });
     std::thread get_block_thread3([this, requestid3, block_size]() {
         std::mutex mutex3;
-        auto load_cache = std::make_shared<RequestBlockBuffer>(requestid3);
+        auto       load_cache = std::make_shared<RequestBlockBuffer>(requestid3);
         load_cache->addBlock(block_buffer_util_->makeBlockBuffer("abcd", block_size, 'd', true));
         mutex3.lock();
-        auto load_callback = [&mutex3](bool ok,CacheStoreErrorCode ec) {
+        auto load_callback = [&mutex3](bool ok, CacheStoreErrorCode ec) {
             mutex3.unlock();
             ASSERT_TRUE(ok);
             ASSERT_EQ(CacheStoreErrorCode::None, ec);
@@ -420,19 +419,19 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
 void NormalCacheStoreTest::setThreadFunction(const std::string& requestid, size_t block_size) {
     usleep(100 * 1000);  // 等待100毫秒后设置block
     auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid);
-    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a"+requestid, block_size, '0', true));
-    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("ab"+requestid, block_size, '1', true));
-    cache_store1_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) { 
-        ASSERT_TRUE(ok); 
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a" + requestid, block_size, '0', true));
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("ab" + requestid, block_size, '1', true));
+    cache_store1_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+        ASSERT_TRUE(ok);
         ASSERT_EQ(CacheStoreErrorCode::None, ec);
     });
 }
 
 void NormalCacheStoreTest::getThreadFunction(const std::string& requestid, size_t block_size) {
     std::mutex mutex1;
-    auto load_cache = std::make_shared<RequestBlockBuffer>(requestid);
-    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("a"+requestid, block_size, 'a', true));
-    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab"+requestid, block_size, 'b', true));
+    auto       load_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("a" + requestid, block_size, 'a', true));
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab" + requestid, block_size, 'b', true));
     mutex1.lock();
     auto load_callback = [&mutex1](bool ok, CacheStoreErrorCode ec) {
         mutex1.unlock();
@@ -442,29 +441,24 @@ void NormalCacheStoreTest::getThreadFunction(const std::string& requestid, size_
     cache_store2_->load(load_cache, load_callback, "localhost", 1000);
     mutex1.lock();
     mutex1.unlock();
-    verifyBlock(load_cache->getBlock("a"+requestid), "a"+requestid, block_size, true, '0');
-    verifyBlock(load_cache->getBlock("ab"+requestid), "ab"+requestid, block_size, true, '1');
+    verifyBlock(load_cache->getBlock("a" + requestid), "a" + requestid, block_size, true, '0');
+    verifyBlock(load_cache->getBlock("ab" + requestid), "ab" + requestid, block_size, true, '1');
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_MultiThread2) {
     uint32_t block_size = 16;
     ASSERT_TRUE(initCacheStores(false));
 
-
     std::vector<std::thread> set_threads;
     for (int i = 0; i < 10; ++i) {
         std::string request_id = std::to_string(i);
-        set_threads.emplace_back([this, request_id, block_size]() {
-            this->setThreadFunction(request_id, block_size);
-        });
+        set_threads.emplace_back([this, request_id, block_size]() { this->setThreadFunction(request_id, block_size); });
     }
 
     std::vector<std::thread> get_threads;
     for (int i = 0; i < 10; ++i) {
         std::string request_id = std::to_string(i);
-        get_threads.emplace_back([this, request_id, block_size]() {
-            this->getThreadFunction(request_id, block_size);
-        });
+        get_threads.emplace_back([this, request_id, block_size]() { this->getThreadFunction(request_id, block_size); });
     }
 
     for (auto& t : set_threads) {
@@ -550,6 +544,32 @@ TEST_F(NormalCacheStoreTest, testLoad_remoteCallPrefillTimeout) {
 
     verifyBlock(load_cache->getBlock("a"), "a", block_size, true, 'a');
     verifyBlock(load_cache->getBlock("ab"), "ab", block_size, true, 'b');
+}
+
+TEST_F(NormalCacheStoreTest, testLoad_remoteBufferExpired) {
+
+    ASSERT_TRUE(initCacheStores(false));
+
+    std::string requestid  = "test-request-id";
+    uint32_t    block_size = 16;
+
+    cache_store2_->markRequestEnd(requestid);
+
+    auto load_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
+
+    std::mutex mutex;  // for sync test
+    auto       load_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
+        mutex.unlock();
+        ASSERT_FALSE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::LoadBufferTimeout, ec);
+    };
+
+    mutex.lock();
+    cache_store1_->load(load_cache, load_callback, autil::NetUtil::getBindIp(), 1000);
+    mutex.lock();  // wait till callback
+    mutex.unlock();
 }
 
 void doReg(

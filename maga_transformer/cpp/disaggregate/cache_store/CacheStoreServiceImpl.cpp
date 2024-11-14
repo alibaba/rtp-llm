@@ -58,7 +58,9 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
     auto context =
         std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done, request_block_buffer_store_);
     if (!context) {
-        FT_LOG_WARNING("cache store service new context failed");
+        FT_LOG_WARNING("cache store service new context failed, request id is %s, request from %s",
+                       request->requestid().c_str(),
+                       request->client_ip().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
         return;
@@ -68,7 +70,9 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
 
     auto timer = timer_manager_->addTimer(request->timeout_ms(), std::move(timer_callback));
     if (timer == nullptr) {
-        FT_LOG_WARNING("cache store service add timer failed");
+        FT_LOG_WARNING("cache store service add timer failed, request id is %s, request from %s",
+                       request->requestid().c_str(),
+                       request->client_ip().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
         return;
@@ -79,6 +83,12 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
                                                          const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
         context->loadBlockOnTcp(ok, blocks);
     };
-    request_block_buffer_store_->setRequestBlockBufferWatchFunc(request->requestid(), std::move(watch_func));
+
+    if (!request_block_buffer_store_->setRequestBlockBufferWatchFunc(request->requestid(), std::move(watch_func))) {
+        FT_LOG_WARNING("cache store service set request block buffer watch func failed, request id %s, request from %s",
+                       request->requestid().c_str(),
+                       request->client_ip().c_str());
+        context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
+    }
 }
 }  // namespace rtp_llm

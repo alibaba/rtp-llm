@@ -59,23 +59,27 @@ bool RequestBlockBufferStore::setRequestBlockBufferWatchFunc(const std::string& 
 void RequestBlockBufferStore::debugInfo() {
     std::string                         debug = "";
     std::shared_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    std::ostringstream                  oss;
     for (auto block : request_cache_map_) {
-        std::ostringstream single;
-        single << "request id: " << block.first << " block ids: ";
-        for (auto s : block.second->getBlocks()) {
-            single << s.first << " ";
+        oss << "request id is " << block.first;
+        if (block.second == nullptr) {
+            oss << " is null";
+            continue;
         }
-        single << "\n";
-        debug += single.str();
+        oss << " block ids: ";
+        for (auto s : block.second->getBlocks()) {
+            oss << s.first << " ";
+        }
+        oss << std::endl;
     }
-    FT_LOG_INFO("reqeut block buffer debug info: %s", debug.c_str());
+    FT_LOG_INFO("reqeut block buffer debug info: %s", oss.str().c_str());
 }
 
 std::string RequestBlockBufferStore::debugInfoOnRequest(const std::string& requestid) const {
     std::ostringstream stream;
     auto               request_block_buffer = getRequestBlockBuffer(requestid);
     if (request_block_buffer == nullptr) {
-        stream << "request id: " << requestid << " not found";
+        stream << "request id: " << requestid << " not found or expired";
         return stream.str();
     }
     return request_block_buffer->debugInfo();
@@ -106,6 +110,9 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 
     auto iter = request_cache_map_.find(requestid);
     if (iter != request_cache_map_.end()) {
+        if (iter->second == nullptr) {
+            FT_LOG_WARNING("request block buffer store try get expired request block buffer %s", requestid.c_str());
+        }
         return iter->second;
     }
 
@@ -182,17 +189,8 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 }
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
-    std::shared_ptr<RequestBlockBuffer> request_block_buffer;
-
-    {
-        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        auto                                iter = request_cache_map_.find(requestid);
-        if (iter == request_cache_map_.end()) {
-            return;
-        }
-        request_block_buffer = iter->second;
-        request_cache_map_.erase(iter);
-    }
+    std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    request_cache_map_[requestid] = nullptr;
 }
 
 }  // namespace rtp_llm
