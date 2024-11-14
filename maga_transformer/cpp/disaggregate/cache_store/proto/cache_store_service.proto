@@ -17,6 +17,11 @@ message RdmaNicRKey {
     optional uint32 rkey = 2;
 }
 
+message RdmaConnectionInfo {
+    optional string ip = 1;
+    optional uint32 port = 2;
+}
+
 message RdmaBlockBufferAddrInfo {
     optional uint64 addr = 1;
     repeated RdmaNicRKey nic_rkeys = 2;
@@ -33,7 +38,7 @@ message CacheLoadRequest {
     repeated BlockBufferInfo blocks = 1;
     optional uint32 timeout_ms = 2;
     optional string client_ip = 3;
-    repeated uint32 rdma_connection_ports = 4;
+    repeated RdmaConnectionInfo rdma_connections = 4;
     optional int64 request_send_start_time_us = 5;
     optional string requestid = 6;
 }
