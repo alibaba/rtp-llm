@@ -166,11 +166,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 }
                 auto text_token_mask = stream->textTokensMask();
                 memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
-    
-                for (int i = 0;i < mm_locs->size(); ++i) {
-                    *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx;
-                    mm_feature_index++;
-                }
             } 
 
             if (need_cal_position_id) {
