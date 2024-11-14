@@ -24,4 +24,8 @@ std::shared_ptr<SubscribeService> createInstanceFromNacosConfig(const NacosSubsc
     return nullptr;
 }
 
+std::shared_ptr<SubscribeService> createInstanceFromVIPConfig(const VIPSubscribeServiceConfig& config) {
+    throw std::runtime_error("not support to create service from VIPSubscribeServiceConfig");
+}
+
 }  // namespace rtp_llm

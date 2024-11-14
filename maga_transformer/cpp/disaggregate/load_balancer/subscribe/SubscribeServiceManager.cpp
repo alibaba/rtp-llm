@@ -9,7 +9,8 @@ SubscribeServiceManager::~SubscribeServiceManager() {}
 
 bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
     if (!config.validate()) {
-        FT_LOG_ERROR("subscribe service config is invalid, config is [%s]", autil::legacy::ToJsonString(config).c_str());
+        FT_LOG_ERROR("subscribe service config is invalid, config is [%s]",
+                     autil::legacy::ToJsonString(config).c_str());
         return false;
     }
 
@@ -37,9 +38,15 @@ bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
         subscribe_service_vec_.push_back(service);
     }
 
-    FT_LOG_INFO(
-              "subscribe service manager init success, config is [%s]",
-              autil::legacy::ToJsonString(config, true).c_str());
+    for (auto& vip_config : config.vip_configs) {
+        auto service = createInstanceFromVIPConfig(vip_config);
+        if (!service) {
+            return false;
+        }
+        subscribe_service_vec_.push_back(service);
+    }
+    FT_LOG_INFO("subscribe service manager init success, config is [%s]",
+                autil::legacy::ToJsonString(config, true).c_str());
     return true;
 }
 

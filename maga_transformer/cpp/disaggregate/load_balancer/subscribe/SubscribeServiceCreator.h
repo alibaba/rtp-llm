@@ -8,4 +8,6 @@ std::shared_ptr<SubscribeService> createInstanceFromLocalConfig(const LocalSubsc
 
 std::shared_ptr<SubscribeService> createInstanceFromNacosConfig(const NacosSubscribeServiceConfig& config);
 
-}
+std::shared_ptr<SubscribeService> createInstanceFromVIPConfig(const VIPSubscribeServiceConfig& config);
+
+}  // namespace rtp_llm
