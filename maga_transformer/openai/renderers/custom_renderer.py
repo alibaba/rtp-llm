@@ -173,6 +173,12 @@ class CustomChatRenderer():
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
         ids_list_from_words = self.tokenize_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
+    
+    def _check_all_finished(self, status_list) -> bool:
+        for s in status_list:
+            if s.finish_reason == None:
+                return False
+        return True
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
@@ -333,6 +339,8 @@ class CustomChatRenderer():
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list))
             yield await self._generate_stream_response(delta_list)
+            if self._check_all_finished(status_list):
+                break
         if index != 0:
             yield await self._flush_buffer(status_list, generate_config.stop_words_str)
             yield await self._generate_final(status_list)
