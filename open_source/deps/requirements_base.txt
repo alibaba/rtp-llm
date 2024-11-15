@@ -45,3 +45,4 @@ nest_asyncio
 librosa
 av
 pillow-heif
+pillow-avif-plugin
