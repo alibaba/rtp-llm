@@ -46,7 +46,6 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
     const auto expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
 
-    tensorrt_llm::kernels::MOEParallelismConfig parallelism_config;
     auto normalization_mode = moe_conf.has_moe_norm
                             ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE
                             : tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
