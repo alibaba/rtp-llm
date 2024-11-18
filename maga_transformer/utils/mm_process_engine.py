@@ -1,11 +1,12 @@
 import os
+import gc
 import torch
 import asyncio
 from io import BytesIO
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, Future
 
-from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.utils.util import to_torch_dtype, check_with_info
 from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
                                                     get_bytes_io_from_url,
                                                     MMUrlType,
@@ -22,8 +23,19 @@ class MMEmbeddingRes:
 class MMProcessEngine:
     def __init__(self, model):
         self.model = model
+        self.contains_pos: bool = self.model.config.mm_position_ids_style != 0
+        self.run_batch: bool = self.model.config.vit_run_batch
 
-    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None, preprocess_configs: Optional[List[List[int]]] = None):
+    def _maybe_tensor_to_list(self, tensor: torch.Tensor):
+        if len(tensor.shape) > 2:
+            return list(tensor)
+        else:
+            return [tensor]
+
+    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None, tensors: Optional[List[torch.Tensor]] = None, preprocess_configs: Optional[List[List[int]]] = None):
+        if self.run_batch:
+            res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
+            return MMEmbeddingRes(res, pos)
         if types is None:
             types = [MMUrlType.DEFAULT] * len(urls)
         if preprocess_configs is None:
@@ -31,35 +43,16 @@ class MMProcessEngine:
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
         try:
-            if self.model.config.mm_position_ids_style == 0:
-                res = []
-                for index in range(len(urls)):
-                    if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
-                        embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index], index=index)
-                    else:
-                        embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
-                    if len(embedding.shape) > 2:
-                        res.extend(list(embedding))
-                    else:
-                        res.append(embedding)
-                return MMEmbeddingRes(res)
-            else:
-                res = []
-                pos_id = []
-                for index in range(len(urls)):
-                    embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
-                    if len(embedding_res[0].shape) > 2:
-                        res.extend(list(embedding_res[0]))
-                    else:
-                        res.append(embedding_res[0])
-                    # expect position id is [seq_len, id_width]
-                    if len(embedding_res[1].shape) > 2:
-                        pos_id.extend(list(embedding_res[1]))
-                    else:
-                        pos_id.append(embedding_res[1])
-                return MMEmbeddingRes(res, pos_id)
+            res: List[torch.Tensor] = []
+            pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None
+            for index in range(len(urls)):
+                embedding, pos_ids = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
+                res.extend(self._maybe_tensor_to_list(embedding))
+                if self.contains_pos:
+                    check_with_info(pos_ids is not None, "pos_ids should not be None")
+                    pos.extend(self._maybe_tensor_to_list(pos_ids))
+            return MMEmbeddingRes(res, pos)
         except Exception as e:
             torch.cuda.empty_cache()
-            import gc
             gc.collect()
             raise e

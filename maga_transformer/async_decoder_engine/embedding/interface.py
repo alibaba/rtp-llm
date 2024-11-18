@@ -15,19 +15,12 @@ class EngineInputs():
                  token_type_ids: torch.Tensor,
                  input_lengths: torch.Tensor,
                  config: Dict[str, Any] = {},
-                 input_urls: List[str] = [],
-                 input_urls_type: List[MMUrlType] = []):
+                 multimodal_inputs: List[MultimodalInput] = []):
         self.token_ids = token_ids
         self.token_type_ids = token_type_ids
         self.input_lengths = input_lengths
         self.config = config
-        self.multimodal_inputs = []
-        if len(input_urls_type) == 0:
-            input_urls_type = [MMUrlType.DEFAULT] * len(input_urls)
-        elif len(input_urls_type) != len(input_urls):
-            raise Exception(f"the number of multimodal input types must match url, now types {len(input_urls_type)} urls {len(input_urls)}")
-        for url, type in zip(input_urls, input_urls_type):
-            self.multimodal_inputs.append(MultimodalInput(url, type))
+        self.multimodal_inputs = multimodal_inputs
 
     @property
     def input_length(self):

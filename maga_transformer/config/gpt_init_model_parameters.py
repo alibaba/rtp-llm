@@ -119,7 +119,8 @@ class GptInitModelParameters:
         "add_special_tokens",
         "template_type",
         "build_position_ids",
-        "routed_scaling_factor"
+        "routed_scaling_factor",
+        "vit_run_batch"
     }
 
     def __init__(self,
@@ -176,6 +177,7 @@ class GptInitModelParameters:
         self.build_position_ids = False
         self.local_rank = g_parallel_info.local_rank
         self.routed_scaling_factor = 1.0
+        self.vit_run_batch = False
 
         for k, v in kwargs.items():
             setattr(self, k, v)

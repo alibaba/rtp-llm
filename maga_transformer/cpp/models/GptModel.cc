@@ -256,15 +256,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
 
-    if (inputs.multimodal_features) {
-        hidden = device_->multimodalEmbedding({
-                hidden,
-                inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt,
-                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
-        });
-    }
-
-    // TODO: fix me
     ft::QScheme act_qscheme = description_.act_qscheme;
 
     // pre layernorm
@@ -287,6 +278,14 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                 norm_type,
                                                                 act_qscheme));
         hidden = std::move(decoder_input.output);
+    }
+
+    if (inputs.multimodal_features) {
+        hidden = device_->multimodalEmbedding({
+                hidden,
+                inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt,
+                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
+        });
     }
 
     // prepare resources for all layers

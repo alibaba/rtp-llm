@@ -207,8 +207,8 @@ class BaseModel(object):
         self.device = g_parallel_info.device
 
         self.load_tokenizer()
-        self.init_misc()
         self.may_init_multimodal()
+        self.init_misc()
         self.load(self.device)
 
     @classmethod

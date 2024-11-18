@@ -25,6 +25,7 @@ class MMUrlType(IntEnum):
     IMAGE = 1
     VIDEO = 2
     AUDIO = 3
+    TENSOR = 4
 
 @dataclass
 class MMPreprocessConfig:
@@ -38,11 +39,13 @@ class MultimodalInput:
     url: str
     mm_type: MMUrlType
     config: MMPreprocessConfig
+    tensor: torch.Tensor
 
-    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT, config: MMPreprocessConfig=MMPreprocessConfig()):
+    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT, config: MMPreprocessConfig=MMPreprocessConfig(), tensor: torch.Tensor =torch.empty(1)):
         self.url = url
         self.mm_type = mm_type
         self.config = config
+        self.tensor = tensor
 
 def get_vit_compute_dtype(dtype: str):
     if dtype == "bf16":

@@ -16,8 +16,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.utils.time_util import current_time_ms
-from maga_transformer.utils.multimodal_util import (MMUrlType,
-                                                    get_bytes_io_from_url)
+from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, get_bytes_io_from_url
 import torch.nn.functional as F
 
 from maga_transformer.models.downstream_modules.embedding.api_datatype import SimilarityRequest, OpenAIEmbeddingRequest, EmbeddingResponseType, EmbeddingResponseFormat, ContentPart, ContentPartTypeEnum
@@ -296,8 +295,7 @@ class MiniCPMVInputGenerator(object):
         return EngineInputs(token_ids=combo_tokens,
                             token_type_ids=combo_token_types,
                             input_lengths=input_lengths,
-                            input_urls=urls,
-                            input_urls_type=types)
+                            multimodal_inputs=[MultimodalInput(url=url, mm_type=mm_type) for url, mm_type in zip(urls, types)])
 
 
 class MiniCPMVHandler(CustomHandler):

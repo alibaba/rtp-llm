@@ -68,9 +68,11 @@ private:
         } else if (!mm_process_engine_.is_none()) {
             std::vector<std::string> urls;
             std::vector<int32_t> types;
+            std::vector<torch::Tensor> tensors;
             std::vector<std::vector<int32_t>> mm_preprocess_configs;
             for (auto& mm_input: mm_inputs) {
                 urls.push_back(mm_input.url);
+                tensors.push_back(mm_input.tensor);
                 types.push_back(mm_input.mm_type);
                 mm_preprocess_configs.push_back({mm_input.mm_preprocess_config.width,
                                                  mm_input.mm_preprocess_config.height,
@@ -80,7 +82,7 @@ private:
             }
             try {
                 py::gil_scoped_acquire acquire;
-                auto res = mm_process_engine_.attr("submit")(urls, types, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("submit")(urls, types, tensors, mm_preprocess_configs);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MMEmbeddingRes mm_embedding_res;

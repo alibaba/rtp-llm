@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Any
 
 import torch
 from threading import Lock
@@ -51,24 +51,22 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
-        dtype = self._data_type
+    def mm_embedding(self, url: str, mm_type: MMUrlType, device: torch.device, dtype: torch.dtype, **kwargs: Any):
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
-        if cached_res is None:
-            bytes_io = get_bytes_io_from_url(url)
-            mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
-            with mm_lock:
-                features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
-            if isinstance(features, tuple):
-                features = (features[0].to(dtype).contiguous(), features[1].contiguous())
-            else:
-                features = features.to(dtype).contiguous()
-            vit_emb_cache_.insert_cache(url, features)
-            return features
-        else:
+        if cached_res is not None:
             return cached_res
+        bytes_io = get_bytes_io_from_url(url)
+        mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
+        with mm_lock:
+            features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
+        if isinstance(features, tuple):
+            features = (features[0].to(dtype).contiguous(), features[1].contiguous())
+        else:
+            features = features.to(dtype).contiguous()
+        vit_emb_cache_.insert_cache(url, features)
+        return features
 
     def _mm_preprocess(self, data, **kwargs):
         raise NotImplementedError
