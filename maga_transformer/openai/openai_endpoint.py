@@ -95,10 +95,8 @@ class OpenaiEndopoint():
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
-        if request.sp_edit == True:
-            config.sp_edit = request.sp_edit
-        if request.sp_advice_prompt != "":
-            config.sp_advice_prompt = request.sp_advice_prompt
+        if request.logprobs != None:
+            config.return_all_probs = request.logprobs
         config.add_special_tokens(self.model.config.special_tokens)
         config.convert_select_tokens(self.model.config.vocab_size, self.tokenizer)
         return config
@@ -121,7 +119,8 @@ class OpenaiEndopoint():
                                 content=choice.delta.content or None,
                                 function_call=choice.delta.function_call or None,
                             ),
-                            finish_reason=choice.finish_reason
+                            finish_reason=choice.finish_reason,
+                            logprobs=choice.logprobs,
                         ) for i, choice in enumerate(response.choices)
                     ]
                 else:
@@ -136,11 +135,16 @@ class OpenaiEndopoint():
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
+                    if all_choices[i].logprobs != None:
+                        if response.choices[i].logprobs != None:
+                            all_choices[i].logprobs.content += response.choices[i].logprobs.content
+                    else:
+                        all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
 
         if (usage == None):
-            logging.warn(f"No usage returned from stream response. use empty value.")
+            logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(
                 prompt_tokens=0,
                 total_tokens=0,
@@ -213,7 +217,7 @@ class OpenaiEndopoint():
             mm_inputs = []
 
         if generate_config.sp_advice_prompt != "":
-            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(generate_config.sp_advice_prompt) 
+            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(generate_config.sp_advice_prompt)
 
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None

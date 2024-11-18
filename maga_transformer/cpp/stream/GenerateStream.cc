@@ -73,6 +73,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
     // TODO: need fix context block copy
     perf_test_ = true;
+
+    setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 }
 
 void GenerateStream::constructCacheKey() {
@@ -385,7 +387,7 @@ ft::BufferPtr GenerateStream::generateContextPositionIds(ft::DeviceBase* device)
     if (generate_input_->mm_position_ids.has_value()) {
         position_ids_buffer = ft::torchTensorVec2BufferVec(generate_input_->mm_position_ids.value());
     }
-    context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(), 
+    context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(),
         mm_position_ids_style_, generate_input_->mm_locs, position_ids_buffer);
     return context_position_ids_.value();
 }
@@ -583,7 +585,7 @@ void GenerateStream::matchEosToken(int batch_id) {
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
     FT_CHECK(seq_length_ >= token_num);
     std::vector<int> latest_tokens(token_num);
-    memcpy(latest_tokens.data(), 
+    memcpy(latest_tokens.data(),
         complete_token_ids_->dataWithOffset<int32_t>(seq_length_ - token_num), sizeof(int32_t) * token_num);
     return latest_tokens;
 }
@@ -764,7 +766,7 @@ void GenerateStream::resetCommonLen() {
     }
 }
 
-int GenerateStream::reuseBlockSize() const {    
+int GenerateStream::reuseBlockSize() const {
     int reuse_length = reuseLength();
     int seq_size_per_block = seqSizePerBlock();
     return reuse_length / seq_size_per_block;

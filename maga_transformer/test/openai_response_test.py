@@ -100,7 +100,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "tool_calls": None,
                 "partial": False,
             },
-            "finish_reason": "function_call"
+            "finish_reason": "function_call",
+            "logprobs": None,
         })
 
     async def test_finish_reason(self):
@@ -185,7 +186,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "tool_calls": None,
                 "partial": False,
             },
-            "finish_reason": "function_call"
+            "finish_reason": "function_call",
+            "logprobs": None,
         })
         # 非functioncall 格式返回，输入没有functions
         request = ChatCompletionRequest(messages=[])
@@ -208,7 +210,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "tool_calls": None,
                 "partial": False,
             },
-            "finish_reason": "stop"
+            "finish_reason": "stop",
+            "logprobs": None,
         })
 
     def test_chatglm_stop_word(self):

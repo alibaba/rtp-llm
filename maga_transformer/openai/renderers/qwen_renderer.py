@@ -52,6 +52,9 @@ class QwenStreamStatus(StreamStatus):
     generating_function_call: bool = False
     total_output_string: str = ""
 
+    def __init__(self, request: ChatCompletionRequest):
+        super().__init__(request)
+
     def update_result(self):
         self.responded_string = self.total_output_string[: - len('\nAction:')]
 
@@ -322,7 +325,10 @@ class QwenRenderer(CustomChatRenderer):
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 
-    async def _update_single_status(self, status: QwenStreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+        # function call is disabled when logprobs is required.
+        if not isinstance(status, QwenStreamStatus):
+            return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list)
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
@@ -344,18 +350,27 @@ class QwenRenderer(CustomChatRenderer):
                 return await self._create_empty_delta(output.aux_info)
             else:
                 status.update_result()
-                return OutputDelta(status.delta_output_string, status.input_token_length, status.output_token_length, status.reuse_length)
+                return OutputDelta(
+                    status.delta_output_string,
+                    await self._generate_log_probs(status, output),
+                    status.input_token_length,
+                    status.output_token_length,
+                    status.reuse_length)
         return await self._create_empty_delta(output.aux_info)
-            
 
     #override
-    async def _create_status_list(self, n: int) -> List[QwenStreamStatus]:
-        return [QwenStreamStatus() for _ in range(n)]
-    
+    async def _create_status_list(self, n: int, request: ChatCompletionRequest) -> List[StreamStatus]:
+        if request.logprobs:
+            return [StreamStatus(request) for _ in range(n)]
+        else:
+            return [QwenStreamStatus(request) for _ in range(n)]
+
     #override
-    async def _flush_buffer(self, buffer_list: List[QwenStreamStatus], stop_words_str: List[str]):
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str]):
+        if (not isinstance(buffer_list[0], QwenStreamStatus)):
+            return await super()._flush_buffer(buffer_list, stop_words_str)
         output_items: List[OutputDelta] = []
-        for status in buffer_list: 
+        for status in buffer_list:
             if status.generating_function_call:
                 function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
                 if (function_message == None):
@@ -364,11 +379,21 @@ class QwenRenderer(CustomChatRenderer):
                     function_message = ""
                 else:
                     status.finish_reason = FinisheReason.function_call
-                output_items.append(OutputDelta(function_message, status.input_token_length, status.output_token_length, status.reuse_length))
+                output_items.append(OutputDelta(
+                    function_message,
+                    await self._generate_log_probs(status, status.output),
+                    status.input_token_length,
+                    status.output_token_length,
+                    status.reuse_length))
             else:
                 trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str)
-                output_items.append(OutputDelta(trunc_string, status.input_token_length, status.output_token_length, status.reuse_length))
-        return await self._generate_stream_response(output_items) 
+                output_items.append(OutputDelta(
+                    trunc_string,
+                    await self._generate_log_probs(status, status.output),
+                    status.input_token_length,
+                    status.output_token_length,
+                    status.reuse_length))
+        return await self._generate_stream_response(output_items)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()

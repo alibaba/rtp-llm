@@ -51,6 +51,7 @@ class GenerateConfig(BaseModel):
     sp_advice_prompt_token_ids: List[int] = []
     sp_edit: bool = False
     force_disable_sp_run: bool = False
+    return_all_probs: bool = False
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

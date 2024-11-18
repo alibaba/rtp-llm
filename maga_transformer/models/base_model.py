@@ -91,6 +91,7 @@ class GenerateOutput(PyBaseModel):
     aux_info: AuxInfo = AuxInfo()
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
+    all_probs: Optional[torch.Tensor] = None
 
     class Config:
         arbitrary_types_allowed = True

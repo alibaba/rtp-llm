@@ -16,13 +16,15 @@ from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
-    RoleEnum, RendererInfo, PromptTokensDetails
+    RoleEnum, RendererInfo, PromptTokensDetails, \
+    ChatCompletionTokenLogprob, TopLogprob, ChoiceLogprobs
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 
 class StreamStatus:
     index: int = 0
+    request: ChatCompletionRequest
     output: Optional[GenerateOutput] = None
     origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
@@ -32,7 +34,10 @@ class StreamStatus:
     tokenizer = None
     responded_string = ""
     delta_output_string = ""
-    
+
+    def __init__(self, request: ChatCompletionRequest):
+        self.request = request
+
     def update_output(self, output: GenerateOutput, clean_output_func, check_finish_func, remove_stop_word_ids_func):
         self.index += 1
         self.output = output
@@ -49,7 +54,7 @@ class StreamStatus:
     @property
     def output_token_length(self):
         return len(self.output_ids)
-    
+
     @property
     def input_token_length(self):
         return self.output.aux_info.input_len
@@ -57,11 +62,11 @@ class StreamStatus:
     @property
     def reuse_length(self):
         return self.output.aux_info.reuse_len
-    
+
     @property
     def prev_token_id(self):
         return self.last_output_ids[-self.last_token_length:]
-    
+
     @property
     def tokens_to_decode(self):
         return self.prev_token_id + self.output_ids[len(self.last_output_ids):]
@@ -84,6 +89,7 @@ class RendererParams:
 @dataclass
 class OutputDelta():
     output_str: Union[str, DeltaMessage]
+    logprobs: Optional[ChatCompletionTokenLogprob]
     input_length: int
     output_length: int
     reuse_length: int
@@ -102,12 +108,12 @@ class RenderedInputs:
             input_urls_type = [MMUrlType.DEFAULT] * len(input_urls)
         elif len(input_urls_type) != len(input_urls):
             raise Exception(f"the number of multimodal input types must match url, now types {len(input_urls_type)} urls {len(input_urls)}")
-        
+
         if len(preprocess_configs) == 0:
             preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
         elif len(preprocess_configs) != len(preprocess_configs):
             raise Exception(f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}")
-        
+
         for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
             self.multimodal_inputs.append(MultimodalInput(url, type, config))
 
@@ -173,7 +179,7 @@ class CustomChatRenderer():
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
         ids_list_from_words = self.tokenize_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
-    
+
     def _check_all_finished(self, status_list) -> bool:
         for s in status_list:
             if s.finish_reason == None:
@@ -212,21 +218,59 @@ class CustomChatRenderer():
                                                           request,
                                                           generate_config):
             yield response
-        
+
     async def _create_empty_delta(self, aux_info: AuxInfo):
         return OutputDelta(
-            output_str="", 
-            input_length=aux_info.input_len, 
-            output_length=aux_info.output_len, 
+            output_str="",
+            logprobs=None,
+            input_length=aux_info.input_len,
+            output_length=aux_info.output_len,
             reuse_length=aux_info.reuse_len
-        ) 
-            
+        )
+
+    async def _generate_log_probs(self, status: StreamStatus, output: Optional[GenerateOutput]) -> Optional[ChatCompletionTokenLogprob]:
+        assert output is not None
+        if (status.request.logprobs == None):
+            return None
+        prob_return_num = status.request.top_logprobs or 1
+        all_probs = output.all_probs
+        output_id = output.output_ids
+        if output_id == None:
+            return None
+        selected_id = output_id[-1].item()
+        if (all_probs == None):
+            raise Exception("all_probs is None when logprobs is true. There should be a internal bug.")
+        all_probs = all_probs.squeeze()
+        probs, tokens = all_probs.sort(descending=True)
+        non_zero_size = probs.nonzero().shape[0]
+        log_values = probs.log()
+        prob_return_num = min(prob_return_num, non_zero_size)
+
+        selected_token = self.tokenizer.decode([selected_id])
+        chat_logprob = ChatCompletionTokenLogprob(
+            token=selected_token,
+            bytes=list(selected_token.encode("utf-8", errors="replace")),
+            logprob=all_probs[output_id].log().item(),
+            top_logprobs=[]
+        )
+        for i in range(prob_return_num):
+            token = self.tokenizer.decode(tokens[i].item())
+            chat_logprob.top_logprobs.append(TopLogprob(
+                token=token,
+                logprob=log_values[i].item(),
+                bytes=list(token.encode("utf-8", errors="replace")),
+            ))
+
+        logging.debug(f"chat_logprob: {chat_logprob.model_dump_json(indent=4)}")
+
+        return chat_logprob
+
     async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
-        decoded_string = self.tokenizer.decode(status.tokens_to_decode) 
+        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
             return await self._create_empty_delta(output.aux_info)
@@ -236,7 +280,12 @@ class CustomChatRenderer():
             return await self._create_empty_delta(output.aux_info)
         if not is_truncated(status.delta_output_string, stop_word_slice_list):
             status.update_result()
-            delta = OutputDelta(output_str=status.delta_output_string, input_length=output.aux_info.input_len, output_length=output.aux_info.output_len, reuse_length=output.aux_info.reuse_len)
+            delta = OutputDelta(
+                output_str=status.delta_output_string,
+                logprobs=await self._generate_log_probs(status, output),
+                input_length=output.aux_info.input_len,
+                output_length=output.aux_info.output_len,
+                reuse_length=output.aux_info.reuse_len)
             status.delta_output_string = ""
             return delta
         else:
@@ -252,7 +301,7 @@ class CustomChatRenderer():
                         ),
                     ) for i in range(n)]
         )
-    
+
     async def _generate_stream_response(self, items: List[OutputDelta]) -> StreamResponseObject:
         if len(items) == 0:
             raise Exception("output items length should not be 0")
@@ -265,6 +314,10 @@ class CustomChatRenderer():
                     delta=DeltaMessage(
                         content=item.output_str,
                     ) if isinstance(item.output_str, str) else item.output_str,
+                    logprobs=ChoiceLogprobs(
+                        content=[item.logprobs] if item.logprobs != None else None,
+                        refusal=None
+                    ) if item.logprobs != None else None
                 ) for i, item in enumerate(items)],
                 usage=UsageInfo(
                     prompt_tokens=input_lengths,
@@ -276,14 +329,19 @@ class CustomChatRenderer():
 
     async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str]):
         output_items: List[OutputDelta] = []
-        for buffer in buffer_list: 
+        for buffer in buffer_list:
             if buffer.output is None:
                 raise Exception("last output should not be None")
             aux_info = buffer.output.aux_info
             trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str)
-            output_items.append(OutputDelta(trunc_string, aux_info.input_len, aux_info.output_len, aux_info.reuse_len))
+            output_items.append(OutputDelta(
+                trunc_string,
+                await self._generate_log_probs(buffer, buffer.output),
+                aux_info.input_len,
+                aux_info.output_len,
+                aux_info.reuse_len))
         return await self._generate_stream_response(output_items)
-    
+
     async def _generate_final(self, buffer_list: List[StreamStatus]):
         input_token_length = 0
         output_token_length = 0
@@ -315,9 +373,9 @@ class CustomChatRenderer():
             ),
             aux_info=aux_info
         )
-    
-    async def _create_status_list(self, n: int):
-        return [StreamStatus() for _ in range(n)]
+
+    async def _create_status_list(self, n: int, request: ChatCompletionRequest) -> List[StreamStatus]:
+        return [StreamStatus(request) for _ in range(n)]
 
     async def render_response_stream(
             self,
@@ -327,7 +385,7 @@ class CustomChatRenderer():
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         num_return_sequences = request.n if request.n is not None else 1
-        status_list = await self._create_status_list(num_return_sequences)
+        status_list = await self._create_status_list(num_return_sequences, request)
         index = 0
         async for outputs in output_generator:
             if index == 0:

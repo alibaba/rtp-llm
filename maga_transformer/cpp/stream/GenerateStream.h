@@ -32,7 +32,7 @@ public:
 
     virtual absl::StatusOr<GenerateOutputs>     nextOutput() = 0;
     virtual bool hasOutput() {return false;}
-    
+
     virtual void updateOutput(
                       const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
@@ -58,7 +58,7 @@ public:
     virtual size_t scoreLen() const {
         return 1;
     }
-    
+
 
     // Only used in C++ world.
     virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
@@ -201,7 +201,7 @@ public:
     void beamSearchKvCacheUpdate(ft::BufferPtr beam_idx);
 
     ft::BufferPtr generateContextPositionIds(ft::DeviceBase* device);
-    
+
     void generateNextPositionId(int32_t* now_pos);
 
     int64_t vocabSize() const {
@@ -300,6 +300,7 @@ protected:
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
+    ft::BufferPtr                       all_probs_;
     ft::BufferPtr                       loss_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;

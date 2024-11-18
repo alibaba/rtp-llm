@@ -54,6 +54,7 @@ message GenerateConfigPB {
     bool sp_edit = 24;
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
+    bool return_all_probs = 27;
 }
 
 message MMPreprocessConfigPB {
@@ -67,7 +68,7 @@ message MMPreprocessConfigPB {
 message MulitmodalInputPB {
     string multimodal_url = 1;
     int32 multimodal_type = 2;
-    MMPreprocessConfigPB mm_preprocess_config = 3; 
+    MMPreprocessConfigPB mm_preprocess_config = 3;
 }
 
 message GenerateInputPB {
@@ -100,6 +101,7 @@ message GenerateOutputPB {
     TensorPB hidden_states = 4;
     TensorPB loss = 5;
     TensorPB logits = 6;
+    TensorPB all_probs = 7;
 }
 
 message GenerateOutputsPB {
@@ -147,11 +149,11 @@ message RemoteLoadRequestPB {
 
 message RemoteFinishRequestPB {
     int64 request_id = 1;
-} 
+}
 
 service RpcService {
     rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputsPB);
-    rpc remote_load(RemoteLoadRequestPB) returns (EmptyPB);    
+    rpc remote_load(RemoteLoadRequestPB) returns (EmptyPB);
     rpc remote_generate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
-    rpc remote_finish(RemoteFinishRequestPB) returns (EmptyPB); 
+    rpc remote_finish(RemoteFinishRequestPB) returns (EmptyPB);
 }

@@ -38,7 +38,6 @@ public:
                       bool                 update_queue = true) override;
 
 private:
-    void            updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs);
     GenerateOutputs prepareGenerateOutput(const ft::BufferPtr& new_tokens,
                                           const ft::BufferPtr& hidden_states,
                                           const ft::BufferPtr& logits,

@@ -104,6 +104,8 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = None
     seed: Optional[int] = None
     n: Optional[int] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0
@@ -120,8 +122,6 @@ class ChatCompletionRequest(BaseModel):
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
-    sp_advice_prompt: str = ""
-    sp_edit: bool = False
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
@@ -138,11 +138,20 @@ class UsageInfo(BaseModel):
     completion_tokens_details: Optional[CompletionTokensDetails] = None
     prompt_tokens_details: Optional[PromptTokensDetails] = None
 
-class LogProbs(BaseModel):
-    text_offset: List[int] = Field(default_factory=list)
-    token_logprobs: List[Optional[float]] = Field(default_factory=list)
-    tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[int, float]]]] = None
+class TopLogprob(BaseModel):
+    token: str
+    bytes: Optional[List[int]] = None
+    logprob: float
+
+class ChatCompletionTokenLogprob(BaseModel):
+    token: str
+    bytes: Optional[List[int]] = None
+    logprob: float
+    top_logprobs: List[TopLogprob]
+
+class ChoiceLogprobs(BaseModel):
+    content: Optional[List[ChatCompletionTokenLogprob]] = None
+    refusal: Optional[List[ChatCompletionTokenLogprob]] = None
 
 class FinisheReason(str, Enum):
     stop = "stop"
@@ -172,6 +181,7 @@ class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     finish_reason: Optional[FinisheReason] = None
+    logprobs: Optional[ChoiceLogprobs] = None
 
 class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat-")
@@ -193,6 +203,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
+    logprobs: Optional[ChoiceLogprobs] = None
 
 class ChatCompletionStreamResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat")

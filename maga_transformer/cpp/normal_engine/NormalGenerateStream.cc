@@ -24,24 +24,6 @@ bool NormalGenerateStream::hasOutput() {
     return !generate_outputs_queue_.isEmpty();
 }
 
-void NormalGenerateStream::updateState(const ft::BufferPtr& loss, const ft::BufferPtr& cum_log_probs) {
-    if (loss) {
-        setLoss(*loss);
-    }
-
-    finished_ = needFinish();
-    if (finished_) {
-        setFinishedWithoutLock();
-    }
-    if (cum_log_probs) {
-        device_->copy({*cum_log_probs_, *cum_log_probs});
-    }
-    //TODO: move it to better position
-    if (!finished_ && generate_input_->generate_config->pd_separation) {
-        need_remote_generate_ = true;
-    }
-}
-
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
                                                             const ft::BufferPtr& hidden_states,
                                                             const ft::BufferPtr& logits,
@@ -119,6 +101,14 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr&
                    sizeof(float));
         }
 
+        if (generate_input_->generate_config->return_all_probs) {
+            if (!all_probs) {
+                throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
+            }
+            generate_output.aux_info.all_probs = device_->clone(
+                {all_probs_->view(i, 1), ft::AllocationType::HOST});
+        }
+
         generate_results.generate_outputs.push_back(generate_output);
     }
     return generate_results;
@@ -143,7 +133,27 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                                         bool                 update_queue) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
-    updateState(loss, cum_log_probs);
+
+    if (loss) {
+        setLoss(*loss);
+    }
+
+    finished_ = needFinish();
+    if (finished_) {
+        setFinishedWithoutLock();
+    }
+    if (cum_log_probs) {
+        device_->copy({*cum_log_probs_, *cum_log_probs});
+    }
+    if (all_probs) {
+        all_probs_ = device_->clone({*all_probs, ft::AllocationType::HOST});
+        // printf("all_probs: %s\n", all_probs_->debugStringWithData<float>().c_str());
+    }
+
+    //TODO: move it to better position
+    if (!finished_ && generate_input_->generate_config->pd_separation) {
+        need_remote_generate_ = true;
+    }
 
     if (!isStreaming() && !finished_) {
         return;

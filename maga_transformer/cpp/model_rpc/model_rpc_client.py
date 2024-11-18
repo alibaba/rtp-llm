@@ -70,6 +70,7 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.sp_edit = input_py.generate_config.sp_edit
     if input_py.generate_config.force_disable_sp_run:
         generate_config_pb.force_disable_sp_run = input_py.generate_config.force_disable_sp_run
+    generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
@@ -134,6 +135,8 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                 output_py.loss = trans_tensor(output_pb.loss)
         if output_pb.HasField('logits'):
             output_py.logits = trans_tensor(output_pb.logits)
+        if output_pb.HasField('all_probs'):
+            output_py.all_probs = trans_tensor(output_pb.all_probs)
         outputs_py.generate_outputs.append(output_py)
 
     return outputs_py
