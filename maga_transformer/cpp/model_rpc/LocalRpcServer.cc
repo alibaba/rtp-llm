@@ -60,7 +60,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                                               int64_t                                request_id,
                                               grpc::internal::WriterInterface<GenerateOutputsPB>* writer,
                                               std::shared_ptr<GenerateStream>&       stream) {
-    while (!stream->finished()) {
+    while (!stream->finished() || stream->hasOutput()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
             auto           status = output_status.status();
