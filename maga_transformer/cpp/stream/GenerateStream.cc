@@ -516,7 +516,10 @@ void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_.status == GenerateState::WAITING
             || generate_status_.status == GenerateState::REMOTE_RUNNING) {
-        FT_LOG_WARNING("stop stream: %d %s", streamId(), "cancel stream in waiting or remote_running");
+        auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+        FT_LOG_WARNING("stop stream: %d %s, timeout: [%ld] ms, running [%ld] ms",
+            streamId(), "cancel stream in waiting or remote_running",
+            getTimeoutMs(), cost_time_ms);
         generate_status_.status = GenerateState::STOPPED;
         generate_status_.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting");
     }
@@ -659,7 +662,7 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
     }
 
     if (seq_length_ == generate_input_->inputLength()) {
-        first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();;
+        first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us_;
     }
     size_t max_token_num = maxTokenNum();
