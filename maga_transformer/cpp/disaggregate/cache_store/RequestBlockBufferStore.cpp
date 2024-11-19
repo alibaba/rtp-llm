@@ -136,14 +136,11 @@ bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& b
 
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::shared_ptr<BlockBuffer>& block) {
     // addr allocated by MemoryUtil, will be mr addr in rdma
-    auto addr = std::shared_ptr<void>(memory_util_->mallocCPU(block->len), [memory_util = memory_util_, block](void* p) {
-        if(p != nullptr){
-            FT_LOG_INFO("addr is not nullptr, address: %ld, block key: %s", p, block->key.c_str());
+    auto malloc_ptr = memory_util_->mallocCPU(block->len);
+    auto addr = std::shared_ptr<void>(malloc_ptr, [memory_util = memory_util_, malloc_ptr](void* p) {
+        if(malloc_ptr != nullptr){
             memory_util->deregUserMr(p, false);
             memory_util->freeCPU(p);
-        }
-        else{
-            FT_LOG_INFO("addr is nullptr");
         }
     });
 

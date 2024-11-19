@@ -39,7 +39,7 @@ void* MemoryUtil::mallocCPU(size_t size) {
 void MemoryUtil::freeCPU(void* ptr) {
     cudaError_t err = cudaFreeHost(ptr);
     if (err != cudaSuccess) {
-        FT_LOG_WARNING("cuda free host failed, size %lu, error is %s,  error code is %d", cudaGetErrorString(err), err);
+        FT_LOG_WARNING("cuda free host failed, error is %s", cudaGetErrorString(err));
     }
 }
 
@@ -56,7 +56,7 @@ void* MemoryUtil::mallocGPU(size_t size) {
 void MemoryUtil::freeGPU(void* ptr) {
     cudaError_t err = cudaFreeHost(ptr);
     if (err != cudaSuccess) {
-        FT_LOG_WARNING("cuda free host failed, size %lu, error is %s, error code is %d", cudaGetErrorString(err), err);
+        FT_LOG_WARNING("cuda free host failed, error is %s", cudaGetErrorString(err));
     }
 }
 
