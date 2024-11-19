@@ -35,6 +35,7 @@ protected:
     bool initCacheStores();
     bool initContext();
     void loadThreadFunction(int id);
+    void storeBlocks(int num);
     void verifyContextRunDone(int                          unloaded_block_cnt,
                               int                          write_cnt,
                               bool                         context_done_run,
@@ -48,11 +49,13 @@ protected:
     void TearDown() override {
         delete done_;
         cache_store1_.reset();
+        cache_store2_.reset();
         memory_util_.reset();
     }
 
 protected:
     std::shared_ptr<NormalCacheStore>                     cache_store1_;
+    std::shared_ptr<NormalCacheStore>                     cache_store2_;
     std::shared_ptr<MemoryUtil>                           memory_util_;
     std::shared_ptr<BlockBufferUtil>                      block_buffer_util_;
     CacheLoadRequest*                                     request_;
@@ -65,20 +68,34 @@ protected:
 };
 
 bool CacheStoreServiceImplContextTest::initCacheStores() {
-    auto port1 = autil::NetUtil::randomPort();
-    auto port2 = autil::NetUtil::randomPort();
+    auto port1      = autil::NetUtil::randomPort();
+    auto port2      = autil::NetUtil::randomPort();
+    auto rdma_port1 = autil::NetUtil::randomPort();
+    auto rdma_port2 = autil::NetUtil::randomPort();
 
     CacheStoreInitParams params1;
-    params1.listen_port   = port1;
-    params1.connect_port  = port2;
-    params1.enable_metric = false;
-    params1.memory_util   = memory_util_;
+    params1.listen_port       = port1;
+    params1.connect_port      = port2;
+    params1.rdma_listen_port  = rdma_port1;
+    params1.rdma_connect_port = rdma_port2;
+    params1.enable_metric     = false;
+    params1.memory_util       = memory_util_;
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
-    if (cache_store1_ == nullptr) {
+    if (!cache_store1_) {
         return false;
     }
-    return true;
+
+    CacheStoreInitParams params2;
+    params2.listen_port       = port2;
+    params2.connect_port      = port1;
+    params2.rdma_listen_port  = rdma_port2;
+    params2.rdma_connect_port = rdma_port1;
+    params2.enable_metric     = false;
+    params2.memory_util       = memory_util_;
+
+    cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
+    return cache_store2_ != nullptr;
 }
 bool CacheStoreServiceImplContextTest::initContext() {
     auto request_block_buffer = std::make_shared<RequestBlockBuffer>("request-1");
@@ -122,28 +139,58 @@ void CacheStoreServiceImplContextTest::verifyContextRunDone(int                 
     ASSERT_EQ(context_->done_run_.load(), context_done_run);
     ASSERT_EQ(response_->error_code(), error_code);
 }
+void CacheStoreServiceImplContextTest::storeBlocks(int num) {
+    std::string requestid   = "test-request-id";
+    auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    for (int i = 0; i < num; i++) {
+        store_cache->addBlock(block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true));
+    }
+    std::mutex mutex;  // for sync test
+    mutex.lock();
+    auto store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
+        mutex.unlock();
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::None, ec);
+    };
 
+    cache_store2_->store(store_cache, store_callback);
+    mutex.lock();
+    mutex.unlock();
+
+    auto blocks = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]->blocks_;
+    ASSERT_EQ(blocks.size(), 10);
+}
+
+// cache_store2 store block, cache_store1 load from cache_store2
 TEST_F(CacheStoreServiceImplContextTest, loadBlock_Success) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
-
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
 
+    storeBlocks(10);
+
     EXPECT_CALL(*done_, Run()).Times(1);
-    for (int i = 0; i < 10; i++) {
-        auto block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true);
-        context_->loadBlockOnTcp(true, {block});
-        ASSERT_EQ(context_->unloaded_blocks_.size(), 10 - i - 1);
+
+    int  load_cnt = 0;
+    auto blocks   = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]->blocks_;
+    for (auto& block : blocks) {
+        context_->loadBlockOnTcp(true, {block.second});
+        ++load_cnt;
+        ASSERT_EQ(context_->unloaded_blocks_.size(), 10 - load_cnt);
     }
 
     verifyContextRunDone(0, 10, true, KvCacheStoreServiceErrorCode::EC_SUCCESS);
 
     ASSERT_EQ(response_->blocks_size(), 10);
-    for (int i = 0; i < response_->blocks_size(); i++) {
-        const auto& block = response_->blocks(i);
-        ASSERT_EQ(block.key(), "b" + std::to_string(i));
-        ASSERT_EQ(block.content().data()[0], 'a' + i);
-        ASSERT_EQ(block.len(), 1024);
+    for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < response_->blocks_size(); i++) {
+            const auto& block = response_->blocks(i);
+            if (block.key() == "b" + std::to_string(i)) {
+                ASSERT_EQ(block.content().data()[0], 'a' + i);
+                ASSERT_EQ(block.len(), 1024);
+                break;
+            }
+        }
     }
 }
 
@@ -151,6 +198,8 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_Timeout) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
+
+    storeBlocks(10);
 
     std::mutex mutex;
     mutex.lock();
@@ -184,9 +233,12 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_Canceled) {
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
 
+    storeBlocks(10);
+
     EXPECT_CALL(*done_, Run()).Times(1);
     for (int i = 0; i < 5; i++) {
-        auto block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true);
+        auto block = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]
+                         ->blocks_["b" + std::to_string(i)];
         context_->loadBlockOnTcp(true, {block});
         ASSERT_EQ(context_->unloaded_blocks_.size(), 10 - i - 1);
     }
@@ -205,6 +257,7 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_AfterDoneRun) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
+    storeBlocks(10);
 
     EXPECT_CALL(*done_, Run()).Times(1);
 
@@ -213,12 +266,13 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_AfterDoneRun) {
     ASSERT_TRUE(context_->response_ == nullptr);
     verifyContextRunDone(10, 0, true, KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
 
-    auto block = block_buffer_util_->makeBlockBuffer("b0", 1024, 'a', true);
+    auto block = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]->blocks_["b0"];
     context_->loadBlockOnTcp(true, {block});
 }
 
 void CacheStoreServiceImplContextTest::loadThreadFunction(int i) {
-    auto block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true);
+    auto block = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]
+                     ->blocks_["b" + std::to_string(i)];
     context_->loadBlockOnTcp(true, {block});
 }
 
@@ -226,6 +280,7 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlockMultiThread) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
+    storeBlocks(10);
 
     EXPECT_CALL(*done_, Run()).Times(1);
     std::vector<std::thread> load_threads;
