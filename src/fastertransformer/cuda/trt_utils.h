@@ -1,7 +1,9 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "maga_transformer/cpp/utils/Exception.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
+#pragma once
 #define TLLM_LOG_TRACE FT_LOG_TRACE
 #define TLLM_LOG_DEBUG FT_LOG_DEBUG
 #define TLLM_LOG_INFO FT_LOG_INFO
@@ -13,7 +15,6 @@
 #define TLLM_CHECK_WITH_INFO FT_CHECK_WITH_INFO
 #define TLLM_CHECK FT_CHECK
 #define TLLM_CUDA_CHECK check_cuda_error
-
 #define TLLM_THROW(...)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -42,7 +43,6 @@ namespace tensorrt_llm::common
 
 using fastertransformer::ceilDiv;
 using fastertransformer::get_sm;
-
 constexpr static size_t getDTypeSize(nvinfer1::DataType type)
 {
     switch (type)
@@ -89,7 +89,7 @@ inline int8_t* nextWorkspacePtr(int8_t* ptr, uintptr_t previousWorkspaceSize)
 }
 
 inline int8_t* nextWorkspacePtr(
-        int8_t* const base, uintptr_t& offset, const uintptr_t size, const uintptr_t alignment = kCudaMemAlign)
+    int8_t* const base, uintptr_t& offset, const uintptr_t size, const uintptr_t alignment = kCudaMemAlign)
 {
     uintptr_t curr_offset = offset;
     uintptr_t next_offset = curr_offset + ((size + alignment - 1) / alignment) * alignment;
@@ -99,7 +99,7 @@ inline int8_t* nextWorkspacePtr(
 }
 
 inline int8_t* nextWorkspacePtrWithAlignment(
-        int8_t* ptr, uintptr_t previousWorkspaceSize, const uintptr_t alignment = kCudaMemAlign)
+    int8_t* ptr, uintptr_t previousWorkspaceSize, const uintptr_t alignment = kCudaMemAlign)
 {
     return nextWorkspacePtrCommon(ptr, previousWorkspaceSize, alignment);
 }

@@ -14,6 +14,7 @@ cc_library(
     deps = [
         "//src/fastertransformer/cutlass/cutlass_extensions:cutlass_extensions",
         "//src/fastertransformer/utils",
+        "//src/fastertransformer/cuda:cuda_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
