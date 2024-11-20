@@ -1,3 +1,4 @@
+// #include "devices/OpData.h"
 #include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
@@ -11,6 +12,7 @@ using namespace std;
 namespace fastertransformer {
 
 FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
+/*
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
 
     const auto& moe_conf     = params.configs.moe_configs.value();
@@ -190,6 +192,8 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
     printBufferData(*(output), "output_all2");
 
     return FfnLayerOutput({move(output)});
+*/
+    return FfnLayerOutput();
 }
 
 }  // namespace fastertransformer

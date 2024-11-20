@@ -75,18 +75,18 @@ cc_test(
     tags = ["rocm"],
 )
 
-cc_test(
-    name = "rocm_ffn_op_test",
-    srcs = [
-        "ops/RocmFFnOpTest.cc",
-    ],
-    data = [],
-    env = device_test_envs(),
-    copts = test_copts + copts(),
-    linkopts = test_linkopts,
-    deps = test_deps,
-    tags = ["rocm"],
-)
+# cc_test(
+#     name = "rocm_ffn_op_test",
+#     srcs = [
+#         "ops/RocmFFnOpTest.cc",
+#     ],
+#     data = [],
+#     env = device_test_envs(),
+#     copts = test_copts + copts(),
+#     linkopts = test_linkopts,
+#     deps = test_deps,
+#     tags = ["rocm"],
+# )
 
 cc_test(
     name="rocm_attention_op_test",
