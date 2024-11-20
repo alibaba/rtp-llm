@@ -193,9 +193,16 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 }
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
-    std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     FT_LOG_DEBUG("del request block buffer, request id %s", requestid.c_str());
-    request_cache_map_[requestid] = nullptr;
+    {	
+        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);	
+        auto                                iter = request_cache_map_.find(requestid);	
+        if (iter != request_cache_map_.end()) {	
+            request_block_buffer = iter->second;
+        }	
+        request_cache_map_[requestid] = nullptr;
+    }
 }
 
 }  // namespace rtp_llm

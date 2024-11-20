@@ -618,4 +618,44 @@ TEST_F(NormalCacheStoreTest, testRdmaMemoryRegGPU) {
     ASSERT_EQ(cudaSuccess, cudaFree(ptr));
 }
 
+TEST_F(NormalCacheStoreTest, testLoad_canceWhileLoad) {
+
+    ASSERT_TRUE(initCacheStores(false));
+
+    // store a to cache_store1 for local get
+    uint32_t    block_size   = 16;
+    std::string requestid    = "test-request-id";
+    auto        store_buffer = std::make_shared<RequestBlockBuffer>(requestid);
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+
+    cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::None, ec);
+    });
+
+    // store abc to cache_store2 for get success on later time
+    std::thread set_block_thread([this, requestid, cache_store = cache_store2_]() {
+        usleep(100 * 1000);  /// wait 100ms then set block
+        cache_store->markRequestEnd(requestid);
+    });
+
+    auto load_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
+    load_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
+
+    std::mutex mutex;  // for sync test
+    mutex.lock();
+    auto load_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
+        mutex.unlock();
+        ASSERT_FALSE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::LoadBufferTimeout, ec);
+    };
+    cache_store1_->load(load_cache, load_callback, autil::NetUtil::getBindIp(), 1000);
+
+    mutex.lock();  // wait till callback
+    mutex.unlock();
+
+    set_block_thread.join();
+}
+
 }  // namespace rtp_llm
