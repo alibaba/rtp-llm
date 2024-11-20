@@ -15,7 +15,6 @@
  */
 
 #pragma once
-#include "src/fastertransformer/core/allocator.h"
 
 #include "torch/extension.h"
 #include <cstdio>
@@ -25,7 +24,6 @@
 #include <vector>
 
 #if USING_CUDA
-#include "src/fastertransformer/cuda/allocator_torch.h"
 #include "torch/csrc/cuda/Stream.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp16.h>
@@ -67,8 +65,16 @@ inline T* get_ptr(const torch::Tensor& t) {
     return reinterpret_cast<T*>(t.data_ptr());
 }
 
-std::vector<size_t> convert_shape(torch::Tensor tensor);
+inline std::vector<size_t> convert_shape(torch::Tensor tensor) {
+    std::vector<size_t> v_shape;
+    for (int i = 0; i < tensor.dim(); i++) {
+        v_shape.push_back(tensor.size(i));
+    }
+    return v_shape;
+}
 
-size_t sizeBytes(torch::Tensor tensor);
+inline size_t sizeBytes(torch::Tensor tensor) {
+    return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
+}
 
 }  // namespace torch_ext

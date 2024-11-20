@@ -215,7 +215,8 @@ cc_library(
     hdrs = [
         "cuda_utils.h",
         "Dispatch.h",
-        "trt_utils.h"
+        "trt_utils.h",
+        "quantize_utils.h",
     ],
     deps = [
         "//src/fastertransformer/utils",

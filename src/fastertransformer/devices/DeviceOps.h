@@ -57,10 +57,17 @@ public:
     virtual void allGather(const AllGatherParams& params);
     virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
 
+    // for quantization
     virtual BufferPtr quantize(const QuantizeParams& params);
 
     // for multi thread no block copy
     virtual void noBlockCopy(const CopyParams& params);
+
+    // for device-specific weights preprocess
+    static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
+    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type);
+    static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type);
 };
 
 }  // namespace fastertransformer

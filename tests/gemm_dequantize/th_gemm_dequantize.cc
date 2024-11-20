@@ -25,6 +25,8 @@
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/quantize_utils.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 #include "cutlass/numeric_types.h"
 
@@ -406,9 +408,54 @@ std::vector<std::vector<Tensor>> benchmark_against_cublas_fp(Tensor        input
     return {{timing_tensor}, {cublas_result, ft_result}};
 }
 
+Tensor unpack_int4_packed_tensor_to_int8(Tensor weight)
+{
+    CHECK_CPU(weight);
+    CHECK_CONTIGUOUS(weight);
+    TORCH_CHECK(weight.numel() != 0, "weight should not be empty tensor");
+    TORCH_CHECK(weight.dtype() == torch::kInt8, "Weight must be a packed int8 tensor");
+
+    std::vector<long int> int8_tensor_size(weight.dim());
+    for (int i = 0; i < weight.dim(); ++i) {
+        int8_tensor_size[i] = weight.size(i);
+    }
+    int8_tensor_size[weight.dim() - 1] *= 2;
+
+    Tensor unpacked_weight =
+        torch::zeros(int8_tensor_size, torch::dtype(torch::kInt8).device(torch::kCPU).requires_grad(false));
+
+    int8_t* packed_ptr   = get_ptr<int8_t>(weight);
+    int8_t* unpacked_ptr = get_ptr<int8_t>(unpacked_weight);
+
+    for (int packed_idx = 0; packed_idx < weight.numel(); ++packed_idx) {
+        int8_t packed_data = packed_ptr[packed_idx];
+
+        int8_t elt_0 = (int8_t(packed_data << 4) >> 4);  // The double shift here is to ensure sign extension
+        int8_t elt_1 = packed_data >> 4;
+
+        unpacked_ptr[2 * packed_idx + 0] = elt_0;
+        unpacked_ptr[2 * packed_idx + 1] = elt_1;
+    }
+
+    return unpacked_weight;
+}
+
+// Same as symmetric_quantize_last_axis_of_batched_matrix but returns a tuple of:
+// (unprocessed_quantized_weights, preprocessed_quantized_weights, scales)
+// Exposed mainly for testing, so that the unprocessed weights can be passed to torch functions.
+std::vector<Tensor> _symmetric_quantize_last_axis_of_batched_matrix(Tensor weight, torch::ScalarType quant_type)
+{
+    return ft::symmetric_quantize_helper(weight, quant_type, true);
+}
+
 TORCH_LIBRARY(gemm_dq_unit_ops, m) {
     m.def("fused_gemm_dq", fused_gemm_dq);
     m.def("gemm_config_select", gemm_config_select);
     m.def("benchmark_against_cublas_fp", benchmark_against_cublas_fp);
+    m.def("unpack_int4_packed_tensor_to_int8", unpack_int4_packed_tensor_to_int8);
+    m.def("pack_int8_tensor_to_packed_int4", ft::CudaDevice::packInt8TensorToPackedInt4);
+    m.def("preprocess_weights_for_mixed_gemm", ft::CudaDevice::preprocessWeightsForMixedGemm);
+    m.def("_symmetric_quantize_last_axis_of_batched_matrix", _symmetric_quantize_last_axis_of_batched_matrix);
 }
+
 }  // namespace torch_ext

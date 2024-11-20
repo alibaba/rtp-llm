@@ -134,10 +134,12 @@ class ModelWeightsLoader:
             if self._merge_lora:
                 self._lora_log.update(lora_logs)
             for (layer_id, name, tensor) in results:
+                tensor = self._exported_device.maybe_rewrite_weight_by_key(name, tensor)
                 weights.set_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
             tensor = self._load_and_convert_tensor(weight, datatype=self._data_type)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
+            tensor = self._exported_device.maybe_rewrite_weight_by_key(weight.name, tensor)
             tensor = tensor.to(device)
             weights.set_global_weight(weight.name, tensor)
 

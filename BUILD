@@ -83,14 +83,7 @@ filegroup(
         "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc",
     ] + select({
         "//:using_cuda": [
-            "src/fastertransformer/th_op/th_utils.cc",
-            "src/fastertransformer/th_op/common/GptOps.cc",
-            "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
-        ],
-        "//:using_rocm": [
-            "src/fastertransformer/th_op/th_utils.cc",
-            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
         ],
         "//conditions:default": [],
     }),
@@ -102,7 +95,6 @@ filegroup(
     srcs = select({
         "//:using_cuda": [
             "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
-            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
         ],
         "//conditions:default": [],
     }),
@@ -176,17 +168,11 @@ cc_binary(
 
 cc_library(
     name = "th_utils",
-    srcs = [
-        "src/fastertransformer/th_op/th_utils.cc",
-    ],
     hdrs = [
         "src/fastertransformer/th_op/th_utils.h",
     ],
     deps = [
-        "//src/fastertransformer/cuda:allocator_torch",
-        "//src/fastertransformer/cuda:cuda",
         "//maga_transformer/cpp:utils",
-        "//src/fastertransformer/kernels:kernels",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

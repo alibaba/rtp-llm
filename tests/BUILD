@@ -18,6 +18,8 @@ cc_library(
         "unittests/test_activation.cu",
     ]),
     deps = torch_deps() + [
+        "//src/fastertransformer/cuda:allocator_torch",
+        "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/kernels:kernels",
         "//:th_utils",
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",

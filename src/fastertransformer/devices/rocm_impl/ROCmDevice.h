@@ -56,6 +56,9 @@ public:
     BufferPtr dequantize(const QuantizeParams& params);
     void      printBuffer(const BufferPtr buffer);
 
+    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type);
+
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
     hipDeviceProp_t* getRocmDeviceProperties() {
@@ -80,7 +83,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
-    
+
     // fmha
     std::unique_ptr<rocmFmhaWrapper>      fmha_runner_;
     bool use_openSource_fmha    = true;

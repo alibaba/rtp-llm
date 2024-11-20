@@ -22,6 +22,11 @@ public:
     ft::DeviceType getDeviceType();
     int64_t getDeviceId();
 
+    virtual torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) = 0;
+    virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight) = 0;
+    virtual torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type) = 0;
+    virtual std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, py::object quant_type) = 0;
+
 protected:
     fastertransformer::DeviceInitParams device_params_;
 };
@@ -31,6 +36,25 @@ class DeviceExporterImpl : public DeviceExporter {
 public:
     DeviceExporterImpl(const fastertransformer::DeviceInitParams& params) : DeviceExporter(params) {};
     ~DeviceExporterImpl() {};
+
+    torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
+        return Device::preprocessGemmWeightByKey(key, weight);
+    }
+
+    torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight) {
+        return Device::packInt8TensorToPackedInt4(weight);
+    }
+
+    torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type) {
+        const auto dtype = torch::python::detail::py_object_to_dtype(quant_type);
+        return Device::preprocessWeightsForMixedGemm(weight, dtype);
+    }
+
+    std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, py::object quant_type) {
+        const auto dtype = torch::python::detail::py_object_to_dtype(quant_type);
+        return Device::symmetricQuantizeLastAxisOfBatchedMatrix(weight, dtype);
+    }
+
 };
 
 } // namespace torch_ext

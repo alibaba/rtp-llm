@@ -10,13 +10,13 @@ class TestGemmDequantize(unittest.TestCase):
     def setUp(self) -> None:
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/libth_transformer.so")
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
-        self.unpack_packed_int4s = torch.ops.fastertransformer.unpack_int4_packed_tensor_to_int8
-        self.pack_int4s = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
+        self.unpack_packed_int4s = torch.ops.gemm_dq_unit_ops.unpack_int4_packed_tensor_to_int8
+        self.pack_int4s = torch.ops.gemm_dq_unit_ops.pack_int8_tensor_to_packed_int4
         self.fused_gemm_dq = torch.ops.gemm_dq_unit_ops.fused_gemm_dq
         self.bench = torch.ops.gemm_dq_unit_ops.benchmark_against_cublas_fp
-        self.preprocess_weights_for_mixed_gemm = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
+        self.preprocess_weights_for_mixed_gemm = torch.ops.gemm_dq_unit_ops.preprocess_weights_for_mixed_gemm
 
-        self.symmetric_quantizer = torch.ops.fastertransformer._symmetric_quantize_last_axis_of_batched_matrix
+        self.symmetric_quantizer = torch.ops.gemm_dq_unit_ops._symmetric_quantize_last_axis_of_batched_matrix
 
         torch.manual_seed(734876213)
 
@@ -31,7 +31,7 @@ class TestGemmDequantize(unittest.TestCase):
           ref_torch_weights = ref_torch_weights.to("cuda")
           processed_torch_weights = processed_torch_weights.to("cuda")
           torch_weight_scales = torch_weight_scales.to("cuda")
-          zeros = torch.Tensor().half() 
+          zeros = torch.Tensor().half()
 
 
           for num_rows in gemm_ms:
@@ -82,8 +82,8 @@ class TestGemmDequantize(unittest.TestCase):
                                                        -1).T.contiguous().int()
       if not uint4_input:
           w_unpacked_int4 -= 8
-      return w_unpacked_int4    
-      
+      return w_unpacked_int4
+
     def woq_assert_colwise_near_eq(self, ref, act):
       bits_in_type = 4
       quant_range_scale = 1.0 / float(1 << (bits_in_type - 1))
@@ -103,14 +103,14 @@ class TestGemmDequantize(unittest.TestCase):
           np.testing.assert_allclose(ref.cpu().numpy(),
                                      act.cpu().numpy(),
                                      atol=atol)
-    
+
     def groupwise_gemm_dequant_test_helper(self, compute_type, gemm_ms, gemm_ns, gemm_ks, group_size):
       uint4_input=1
       for gemm_m in gemm_ms:
         for gemm_k in gemm_ks:
           for gemm_n in gemm_ns:
             torch.manual_seed(0)
-            activation = torch.rand((gemm_m, gemm_k), dtype=compute_type) * 2 - 1.0 
+            activation = torch.rand((gemm_m, gemm_k), dtype=compute_type) * 2 - 1.0
             qweight_unprocessed = torch.randint(-2**31, 2**31, (gemm_k // 8, gemm_n)).int()
             scale = torch.rand((gemm_k // group_size, gemm_n), dtype=compute_type) * 2
             zero = torch.rand((gemm_k // group_size, gemm_n), dtype=compute_type) * 2
@@ -128,27 +128,27 @@ class TestGemmDequantize(unittest.TestCase):
             ref_th_weight += zero.repeat_interleave(group_size, dim=0)
 
             ft_result = self.fused_gemm_dq(activation.cuda(), qweight_int4x2_interleaved.cuda(), scale.cuda(), zero.cuda(), group_size, True)
-            
+
             reference_result = activation.cuda().matmul(ref_th_weight.cuda().to(compute_type))
             self.woq_assert_colwise_near_eq(reference_result, ft_result)
 
-      
+
     def test_fp16_int4_gemm(self):
-      self.groupwise_gemm_dequant_test_helper(torch.float16, 
+      self.groupwise_gemm_dequant_test_helper(torch.float16,
                                     gemm_ms = [1, 16, 32, 44, 256, 37],
                                     gemm_ns = [64, 128, 1024, 2048, 4096],
                                     gemm_ks = [64, 128, 1024, 4096],
                                     group_size=64)
 
     def test_fp16_int4_gemm2(self):
-      self.groupwise_gemm_dequant_test_helper(torch.float16, 
+      self.groupwise_gemm_dequant_test_helper(torch.float16,
                                     gemm_ms = [1, 16, 32, 44, 256, 37],
                                     gemm_ns = [64, 128, 1024, 2048, 4096],
                                     gemm_ks = [128, 1024, 4096],
                                     group_size=128)
     @unittest.skip("Not test yet")
     def test_bf16_int4_gemm(self):
-      self.groupwise_gemm_dequant_test_helper(torch.bfloat16, 
+      self.groupwise_gemm_dequant_test_helper(torch.bfloat16,
                                     gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
                                     gemm_ns = [1024, 2048, 4096],
                                     gemm_ks = [4096, 8192, 16384],
@@ -168,7 +168,7 @@ class TestGemmDequantize(unittest.TestCase):
                                     gemm_ms = [128],
                                     gemm_ns = [1536],
                                     gemm_ks = [12288],
-                                    rtol=rtol, atol=atol, 
+                                    rtol=rtol, atol=atol,
                                     use_tensor_core=True,
                                     benchmark=True)
 

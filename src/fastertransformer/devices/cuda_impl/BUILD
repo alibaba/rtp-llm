@@ -11,6 +11,7 @@ cc_library(
     ]),
     srcs = glob([
         "CudaDevice.cc",
+        "CudaWeights.cc",
         "CudaAttentionOp.cc",
         "CudaFfnLayer.cc",
         "CudaGemmOp.cc",
@@ -26,6 +27,7 @@ cc_library(
         "//src/fastertransformer/core:torch_cuda_allocator",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils",
+        "//:th_utils",
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",

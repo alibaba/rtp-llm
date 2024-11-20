@@ -83,11 +83,9 @@ class BgeM3EmbeddingHandler(CustomHandler):
         colbert_res = self.colbert_handler.forward_internal(batch_input_ids, batch_hidden_states, batch_attention_mask)
         sparse_res = self.sparse_handler.forward(input_ids, hidden_states, input_lengths)
         stream = torch.cuda.current_stream()
-        # async copy to cpu
-        # TODO: incompatiable with rocm, need check
-        dense_res = torch.ops.fastertransformer.async_copy_to_cpu(dense_res)
-        colbert_res = torch.ops.fastertransformer.async_copy_to_cpu(colbert_res)
-        sparse_res = torch.ops.fastertransformer.async_copy_to_cpu(sparse_res)
+        dense_res = dense_res.cpu()
+        colbert_res = colbert_res.cpu()
+        sparse_res = sparse_res.cpu()
         # this synchronize requires no gil
         stream.synchronize()
         return [{EmbeddingType.DENSE.value: d, EmbeddingType.SPARSE.value: s, EmbeddingType.COLBERT.value: c} for d,s,c in zip(dense_res, sparse_res, colbert_res)]

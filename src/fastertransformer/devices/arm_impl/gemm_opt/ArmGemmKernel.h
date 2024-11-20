@@ -7,9 +7,8 @@
 
 namespace fastertransformer {
 
-ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input);
+// declares here for test
 BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
-BufferPtr transposeWeight(ConstBufferPtr input);
 
 template<typename Ta, typename Tb, typename Tc, typename Tp>
 class GemmPartParam {
@@ -109,7 +108,7 @@ private:
 
     void gemm_thread_block_bf16(
         GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float> p, int m, int n, int m_tile, int n_tile, int k_tile);
-    
+
     template<typename Tc>
     void gemm_thread_block_bf16(
         GemmPartParam<hie::bfloat16, hie::bfloat16, Tc, float> p, int m, int n, int m_tile, int n_tile, int k_tile);
@@ -164,11 +163,11 @@ void GemmKernel::gemm_kernel_arm(int            M,
         std::cerr << "Unsupported data type for A" << std::endl;
         return;
     }
-    
+
     int k_pack_compute = std::ceil(K / 8.0) * 8;
     GemmPartParam<hie::bfloat16, hie::bfloat16, Tc, float> p(
         M, N, k_pack_compute, a_bf16, b_bf16, c, bias_fp32, with_bias, actType);
-    
+
     if constexpr (std::is_same<Tc, float>::value) {
         gemm_thread_strategy<float>(p);
     } else if constexpr (std::is_same<Tc, float16_t>::value) {

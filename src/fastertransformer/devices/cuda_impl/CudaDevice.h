@@ -95,6 +95,10 @@ public:
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
 
+    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type);
+    static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type);
+
 protected:
     void InvokeSmoothQaunt(const GemmParams&       params,
                            const CudaGemmArguments arguments,

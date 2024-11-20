@@ -151,7 +151,11 @@ void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
 void registerDeviceOps(py::module& m) {
     pybind11::class_<DeviceExporter, std::shared_ptr<DeviceExporter>>(m, "DeviceExporter")
         .def("get_device_type", &DeviceExporter::getDeviceType)
-        .def("get_device_id", &DeviceExporter::getDeviceId);
+        .def("get_device_id", &DeviceExporter::getDeviceId)
+        .def("preprocess_gemm_weight_by_key", &DeviceExporter::preprocessGemmWeightByKey)
+        .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4)
+        .def("preprocess_weights_for_mixed_gemm", &DeviceExporter::preprocessWeightsForMixedGemm)
+        .def("symmetric_quantize_last_axis_of_batched_matrix", &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix);
 
     pybind11::enum_<DeviceType>(m, "DeviceType")
         .value("Cpu", DeviceType::Cpu)

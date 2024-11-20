@@ -23,6 +23,7 @@ cc_library(
         "//src/fastertransformer/kernels:hello_kernel",
         "//src/fastertransformer/kernels:gpt_kernels_rocm",
         "//src/fastertransformer/cuda:nccl",
+        "//:th_utils",
     ],
     visibility = ["//visibility:public"],
     copts = rocm_copts(),

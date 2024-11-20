@@ -12,6 +12,8 @@
 #include "src/fastertransformer/th_op/th_utils.h"
 #include "src/fastertransformer/cuda/cublas/cublasAlgoMap.h"
 #include "src/fastertransformer/cuda/cublas/cublasMMWrapper.h"
+#include "src/fastertransformer/cuda/allocator_torch.h"
+#include "src/fastertransformer/core/allocator.h"
 
 #include "cutlass/numeric_types.h"
 

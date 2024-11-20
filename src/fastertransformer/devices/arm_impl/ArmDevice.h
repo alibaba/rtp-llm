@@ -42,6 +42,7 @@ public:
 #ifdef GEMM_DEBUG
     static void print_time();
 #endif
+    static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
 
 private:
     std::unique_ptr<IAllocator> allocator_;

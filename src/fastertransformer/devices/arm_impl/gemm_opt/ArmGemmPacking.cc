@@ -13,26 +13,9 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/arm_impl/ArmDevice.h"
 #include "src/fastertransformer/models/W.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace fastertransformer {
-
-ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
-    // Transpose and reorder
-    if (key == W::lm_head) {
-        return prepareGemmOptWeight(transposeWeight(input), true);
-    }
-
-    // Reorder RHS weight matrics for better GEMM performance
-    if (key == W::attn_qkv_w ||
-        key == W::attn_o_w ||
-        key == W::ffn_w1 ||
-        key == W::ffn_w2 ||
-        key == W::ffn_w3) {
-        return prepareGemmOptWeight(input);
-    }
-
-    return input;
-}
 
 BufferPtr transposeWeight(ConstBufferPtr input) {
 
@@ -157,6 +140,31 @@ BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose) {
         return packedBuffer;
     }
     return weight_workspace;
+}
+
+ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
+    // Transpose and reorder
+    if (key == W::lm_head) {
+        return prepareGemmOptWeight(transposeWeight(input), true);
+    }
+
+    // Reorder RHS weight matrics for better GEMM performance
+    if (key == W::attn_qkv_w ||
+        key == W::attn_o_w ||
+        key == W::ffn_w1 ||
+        key == W::ffn_w2 ||
+        key == W::ffn_w3) {
+      return prepareGemmOptWeight(input, false);
+    }
+
+    return input;
+}
+
+
+torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
+    auto buffer = torchTensor2Buffer(weight);
+    auto retBuffer = prepareGemmWeight(key, buffer);
+    return Buffer2torchTensor(*retBuffer);
 }
 
 void GemmKernel::pack_input_arm(int M, int N, int K, int lda, int K_pack, float* a_fp32, hie::bfloat16* a_bf16) {
@@ -410,8 +418,8 @@ void GemmKernel::pack_input_fp16tobf16_impl_parallel_simd(
         printf("\n");
     }
     printf("\n");
-    
-    
+
+
     // int k_pack_compute = std::ceil(K / 16.0) * 16;
     auto M_aligned = M + (M % 2);
     for (int i = 0; i < M_aligned / 2; i++) {
