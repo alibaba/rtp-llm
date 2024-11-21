@@ -3,6 +3,7 @@ import json
 import time
 import copy
 import logging
+import asyncio
 import logging.config
 import traceback
 from typing import Union, Any, Dict, Callable
@@ -26,6 +27,8 @@ def format_exception(e: BaseException):
         return _format(e.expcetion_type, e.message)
     elif isinstance(e, ConcurrencyException):
         return _format(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e))
+    elif isinstance(e, asyncio.CancelledError):
+        return _format(ExceptionType.CANCELLED_ERROR, str(e))
     elif isinstance(e, LoraCountException):
         return _format(ExceptionType.UPDATE_ERROR, str(e))
     elif isinstance(e, Exception):
