@@ -124,6 +124,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     const ck_tile::index_t shape_batch     = (mode == mode_enum::batch ? batch : 1);
     const ck_tile::index_t shape_seqlen_q  = (mode == mode_enum::batch ? seq_len : seq_len);
     const ck_tile::index_t shape_seqlen_k  = (mode == mode_enum::batch ? seq_len : seq_len);
+    const ck_tile::index_t seqlen_knew     = 0;
 
     ck_tile::HostTensor<ck_tile::half_t> lse_acc_host(
         1 < num_splits ? std::array<ck_tile::index_t, 4>{num_splits, batch, nhead, max_seqlen_q} :
@@ -152,11 +153,18 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         // QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head]
         const ck_tile::index_t stride_q = (i_perm ? hdim_q : (nhead + 2 * nhead_k) * hdim_q);
         const ck_tile::index_t stride_k = (i_perm ? hdim_q : (nhead + 2 * nhead_k) * hdim_q);
+        const ck_tile::index_t stride_knew = (i_perm ? hdim_q : (nhead + 2 * nhead_k) * hdim_q);
         const ck_tile::index_t stride_v = [&]() {
             if(is_v_rowmajor)
                 return i_perm ? hdim_v : (nhead + 2 * nhead_k) * hdim_v;
             else
                 return i_perm ? shape_seqlen_k : (nhead + 2 * nhead_k) * shape_seqlen_k;
+        }();
+        const ck_tile::index_t stride_vnew = [&]() {
+            if(is_v_rowmajor)
+                return i_perm ? hdim_v : (nhead + 2 * nhead_k) * hdim_v;
+            else
+                return i_perm ? seqlen_knew : (nhead + 2 * nhead_k) * seqlen_knew;
         }();
         const ck_tile::index_t stride_bias    = (i_perm ? shape_seqlen_k : 1 * shape_seqlen_k);
         const ck_tile::index_t stride_randval = (max_seqlen_k);
@@ -165,11 +173,18 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         // setup nhead_stride_* arguments
         const ck_tile::index_t nhead_stride_q = (i_perm ? shape_seqlen_q * hdim_q : hdim_q);
         const ck_tile::index_t nhead_stride_k = (i_perm ? shape_seqlen_k * hdim_q : hdim_q);
+        const ck_tile::index_t nhead_stride_knew = (i_perm ? seqlen_knew * hdim_q : hdim_q);
         const ck_tile::index_t nhead_stride_v = [&]() {
             if(is_v_rowmajor)
                 return i_perm ? shape_seqlen_k * hdim_v : hdim_v;
             else
                 return i_perm ? hdim_v * shape_seqlen_k : shape_seqlen_k;
+        }();
+        const ck_tile::index_t nhead_stride_vnew = [&]() {
+            if(is_v_rowmajor)
+                return i_perm ? seqlen_knew * hdim_v : hdim_v;
+            else
+                return i_perm ? hdim_v * seqlen_knew : seqlen_knew;
         }();
         const ck_tile::index_t nhead_stride_bias =
             (i_perm ? 0 * shape_seqlen_q * shape_seqlen_k : 0 * shape_seqlen_k);
@@ -181,7 +196,9 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         // setup batch_stride_* arguments
         const ck_tile::index_t batch_stride_q       = (nhead * shape_seqlen_q * hdim_q);
         const ck_tile::index_t batch_stride_k       = (nhead_k * shape_seqlen_k * hdim_q);
+        const ck_tile::index_t batch_stride_knew    = (nhead_k * seqlen_knew * hdim_q);
         const ck_tile::index_t batch_stride_v       = (nhead_k * hdim_v * shape_seqlen_k);
+        const ck_tile::index_t batch_stride_vnew    = (nhead_k * hdim_v * seqlen_knew);
         const ck_tile::index_t batch_stride_bias    = (0 * nhead * shape_seqlen_q * shape_seqlen_k);
         const ck_tile::index_t batch_stride_randval = (nhead * shape_seqlen_q * max_seqlen_k);
         const ck_tile::index_t batch_stride_lse     = (nhead * shape_seqlen_q);
@@ -198,8 +215,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
                              nullptr,                        // randval_buf.GetDeviceBuffer(),
                              //lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
-                             lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
-                             nullptr,                        // o_acc_buf.GetDeviceBuffer(),
+                             //lse_acc_buf,  // lse_acc_buf.GetDeviceBuffer(),
+                             //nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
                              seqstart_q,
@@ -213,7 +230,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              hdim_v,
                              nhead,
                              nhead_k,
-                             num_splits,
+                             //num_splits,
                              scale_s,
                              scale_p,
                              scale_o,
@@ -222,7 +239,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              stride_v,
                              bias.type == bias_enum::alibi ? (bias.rank_info == 0 ? 0 : nhead) : stride_bias,
                              stride_randval,
-                             stride_o_acc,
+                             //stride_o_acc,
                              stride_o,
                              nhead_stride_q,
                              nhead_stride_k,
@@ -230,8 +247,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              nhead_stride_bias,
                              nhead_stride_randval,
                              nhead_stride_lse,
-                             nhead_stride_lse_acc,
-                             nhead_stride_o_acc,
+                             //nhead_stride_lse_acc,
+                             //nhead_stride_o_acc,
                              nhead_stride_o,
                              batch_stride_q,
                              batch_stride_k,
@@ -239,17 +256,17 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              batch_stride_bias,
                              batch_stride_randval,
                              batch_stride_lse,
-                             batch_stride_lse_acc,
-                             batch_stride_o_acc,
+                             //batch_stride_lse_acc,
+                             //batch_stride_o_acc,
                              batch_stride_o,
-                             split_stride_lse_acc,
-                             split_stride_o_acc,
+                             //split_stride_lse_acc,
+                             //split_stride_o_acc,
                              mask.left,
                              mask.right,
                              static_cast<ck_tile::index_t>(mask.type),
                              p_drop,
                              s_randval,
-                             {drop_seed, drop_offset}};
+                             std::make_pair(drop_seed, drop_offset)};
     }();
 
     ck_tile::stream_config stream_config{
