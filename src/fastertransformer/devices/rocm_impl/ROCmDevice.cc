@@ -35,14 +35,13 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
-        const auto rank = params.tp_rank;
+        const auto rank       = params.tp_rank;
         const auto world_size = params.tp_size;
 
-        nccl_param_.rank_ = rank;
+        nccl_param_.rank_       = rank;
         nccl_param_.world_size_ = world_size;
-        auto tcpStore = createTcpStore(
-            params.master_ip, params.master_port, world_size, rank);
-        const auto nccl_id = &(nccl_param_.nccl_uid_);
+        auto       tcpStore     = createTcpStore(params.master_ip, params.master_port, world_size, rank);
+        const auto nccl_id      = &(nccl_param_.nccl_uid_);
 
         const std::string tp_group_name = "RTP_LLM_TP_GROUP_";
         if (rank == 0) {
@@ -69,18 +68,25 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         TrackerAllocatorParams tracker_params;
         tracker_params.real_allocator     = allocator_ptr;
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
-                                            params.device_reserve_memory_bytes :
-                                            free_bytes + params.device_reserve_memory_bytes - HIPBLAS_WORKSPACE_SIZE;
+                                                params.device_reserve_memory_bytes :
+                                                free_bytes + params.device_reserve_memory_bytes - ROCM_RUNTIME_MEM_SIZE;
         tracker_params.align_size         = 16;
-        FT_LOG_INFO("rocm device %d has %lu bytes free memory, trying to reserve %lu bytes.",
-                    device_id_,
-                    free_bytes,
-                    tracker_params.target_track_bytes);
+        FT_LOG_INFO("[ROCM] total = %.2f(GB), free = %.2f(GB), reserve = %.2f(GB), track = %.2f(GB)\n",
+                    total_bytes / 1024.0 / 1024.0 / 1024.0,
+                    free_bytes / 1024.0 / 1024.0 / 1024.0,
+                    params.device_reserve_memory_bytes / 1024.0 / 1024.0 / 1024.0,
+                    tracker_params.target_track_bytes / 1024.0 / 1024.0 / 1024.0);
+        assert(tracker_params.target_track_bytes <= free_bytes && tracker_params.target_track_bytes > 0);
         allocator_.reset(new TrackerAllocator(tracker_params));
         syncAndCheck();
     } else {
         allocator_.reset(allocator_ptr);
     }
+
+    origin_torch_hip_allocator_ = at::hip::HIPCachingAllocator::allocator;
+    initTorchHIPAllocator(allocator_.get(), device_id_);
+    // change torch hip gpu allocate
+    at::hip::HIPCachingAllocator::allocator.store(getTorchHIPAllocator());
 
     if (params.host_reserve_memory_bytes) {
         RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
@@ -100,10 +106,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipblasCreate(&hipblas_handle_));
     ROCM_CHECK(hipblasLtCreate(&hipblaslt_handle_));
 
-    hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
-                                                   hipblaslt_handle_,
-                                                   stream_,
-                                                   allocator_.get()));
+    hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_, hipblaslt_handle_, stream_, allocator_ptr));
     hipblas_mm_wrapper_->setGemmConfig(hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_16F,
@@ -116,6 +119,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 }
 
 ROCmDevice::~ROCmDevice() {
+    // change torch hip gpu allocate
+    if (origin_torch_hip_allocator_) {
+        at::hip::HIPCachingAllocator::allocator.store(origin_torch_hip_allocator_);
+    }
     hipblas_mm_wrapper_.reset();
     ROCM_CHECK(hipStreamDestroy(stream_));
     ROCM_CHECK(hipblasDestroy(hipblas_handle_));
@@ -525,15 +532,20 @@ DeviceStatus ROCmDevice::getDeviceStatus() {
     DeviceStatus status;
 
     size_t total_bytes;
-    auto error = hipMemGetInfo(&status.device_memory_status.free_bytes, &total_bytes);
+    auto   error                           = hipMemGetInfo(&status.device_memory_status.free_bytes, &total_bytes);
     status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
 
-    const auto buffer_status = queryBufferStatus();
+    const auto buffer_status                    = queryBufferStatus();
     status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
     status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
-    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
-    status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
+    status.host_memory_status.allocated_bytes   = buffer_status.host_allocated_bytes;
+    status.device_memory_status.available_bytes =
+        status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
 
+    FT_LOG_INFO("[ROCM] allocated = %.2f(GB), preserved = %.2f(GB), available = %.2f(GB)\n",
+                status.device_memory_status.allocated_bytes / 1024.0 / 1024.0 / 1024.0,
+                status.device_memory_status.preserved_bytes / 1024.0 / 1024.0 / 1024.0,
+                status.device_memory_status.available_bytes / 1024.0 / 1024.0 / 1024.0);
     return status;
 }
 

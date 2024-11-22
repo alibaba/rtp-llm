@@ -30,11 +30,9 @@ void ROCmDevice::broadcast(const BroadcastParams& params) {
         return;
     }
 
-    printf("[BRD] params.buffers.size = %d\n", params.buffers.size());
     for (auto i = 0; i < params.buffers.size(); ++i) {
         auto& buffer = params.buffers[i];
         auto root = params.root;
-        printf("[BRD] buffer[%d]->type = %d\n", i, buffer->type());
         auto nccl_data_type = getNcclDataType(buffer->type());
         NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root,
                             nccl_param_.nccl_comm_, stream_));

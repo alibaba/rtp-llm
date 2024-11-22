@@ -21,7 +21,8 @@
 namespace fastertransformer {
 namespace rocm {
 
-#define HIPBLAS_WORKSPACE_SIZE (1024L*1024*1024) // C*splitK
+#define HIPBLAS_WORKSPACE_SIZE (512L*1024L*1024L) // C*splitK
+#define ROCM_RUNTIME_MEM_SIZE  (HIPBLAS_WORKSPACE_SIZE + 512L*1024L*1024L)
 
 #define ROCM_CHECK(val) rocm::check((val), __FILE__, __LINE__)
 #define ROCM_SYNC_AND_CHECK() rocm::sync_and_check(__FILE__, __LINE__)

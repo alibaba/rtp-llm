@@ -1,4 +1,5 @@
 load("//:def.bzl", "rocm_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "rocm_impl",
@@ -24,7 +25,8 @@ cc_library(
         "//src/fastertransformer/kernels:gpt_kernels_rocm",
         "//src/fastertransformer/cuda:nccl",
         "//:th_utils",
-    ],
+        "//src/fastertransformer/devices/torch_impl:torch_beam_search_op_impl",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = rocm_copts(),
     alwayslink = True,

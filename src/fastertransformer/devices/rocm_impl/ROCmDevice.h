@@ -1,5 +1,6 @@
 #pragma once
 
+
 #include "src/fastertransformer/devices/DeviceOps.h"
 #include "src/fastertransformer/devices/DeviceData.h"
 #include "src/fastertransformer/devices/BufferManager.h"
@@ -18,6 +19,8 @@
 #include "src/fastertransformer/rocm/rocmFmhaWrapper.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
 #include "src/fastertransformer/rocm/rocmMoeWrapper.h"
+
+#include "torch_hip_allocator.h"
 
 namespace fastertransformer {
 
@@ -70,6 +73,7 @@ private:
     hipDeviceProp_t             rocmDevProp;
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> hostAllocator_;
+    c10::hip::HIPCachingAllocator::HIPAllocator *origin_torch_hip_allocator_;
 
     hipStream_t                 stream_ = nullptr;
     hipDeviceProp_t device_prop_;
