@@ -101,7 +101,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @property
     def _device(self):
-        return self.vpm.device
+        return next(self.vpm.parameters()).device
 
     def init_vision_module(self):
         model = timm.create_model(self.vision_encoder,
