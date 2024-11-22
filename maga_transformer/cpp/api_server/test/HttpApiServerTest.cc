@@ -115,4 +115,21 @@ TEST_F(HttpApiServerTest, testRegisterSysCmdServiceSuccess) {
     EXPECT_TRUE(server_->registerSysCmdService());
 }
 
+// -------------------------- TokenizerService Test --------------------------
+
+TEST_F(HttpApiServerTest, testRegisterTokenizerServiceFailed_HttpServerIsNull) {
+    server_->http_server_ = nullptr;
+    EXPECT_FALSE(server_->registerTokenizerService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterTokenizerServiceFailed_RegisterRouteFailed) {
+    // 将 http server 的 router 置空, 模拟 RegisterRoute 失败
+    server_->http_server_->_router = nullptr;
+    EXPECT_FALSE(server_->registerTokenizerService());
+}
+
+TEST_F(HttpApiServerTest, testRegisterTokenizerServiceSuccess) {
+    EXPECT_TRUE(server_->registerTokenizerService());
+}
+
 }  // namespace rtp_llm

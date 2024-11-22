@@ -30,25 +30,70 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + torch_deps() + device_impl_target()
  
-cc_test(
-    name = "api_server_unittest",
+# 通过 python 执行 cpp 单测
+py_test(
+    name = "api_server_unittest",  # 需要有一个同名 py 文件
+    python_version = 'PY3',
+    srcs_version = 'PY3',
+    srcs = [
+        "api_server_unittest.py",
+    ],
+    deps = [
+        ":api_server_unittest_pylib",
+    ],
+    # data = [
+    #     "testdata/annocation",
+    #     "testdata/parallel.json",
+    # ],
+    imports = [
+        ".",
+    ],
+    env = select({
+        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
+    }),
+    exec_properties = {'gpu':'A10'},
+)
+
+py_library(
+    name = "api_server_unittest_pylib",
+    srcs = [],
+    deps = [],
+    data = [
+        ":api_server_unittest_lib.so",
+    ],
+)
+
+cc_binary(
+    name = "api_server_unittest_lib.so",
+    srcs = [],
+    deps = [
+        ":api_server_unittest_lib",
+    ],
+    linkshared = 1,
+)
+
+cc_library(
+    name = "api_server_unittest_lib",
     srcs = [
         "mock/MockEngineBase.h",
         "mock/MockHttpResponseWriter.h",
+        "mock/MockTokenProcessor.h",
+        "ErrorResponseTest.cc",
         "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
         "WorkerStatusServiceTest.cc",
         "ModelStatusServiceTest.cc",
+        "ParallelInfoTest.cc",
         "SysCmdServiceTest.cc",
+        "TokenizerEncodeResponseTest.cc",
+        "TokenizerServiceTest.cc",
+        "TestBinding.cc",
     ],
     deps = test_deps + [
         "//maga_transformer/cpp:http_api_server",
     ],
     copts = test_copts,
     linkopts = test_linkopts,
-    env = select({
-        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
-    }),
-    exec_properties = {'gpu':'A10'},
+    alwayslink = 1,
 )

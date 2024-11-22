@@ -9,7 +9,7 @@
 #include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
 
 #include "maga_transformer/cpp/http_server/http_server/HttpServer.h"
-#include "maga_transformer/cpp/api_server/Pipeline.h"
+#include "maga_transformer/cpp/api_server/TokenProcessor.h"
 #include "maga_transformer/cpp/api_server/EmbeddingEndpoint.h"
 #include "autil/AtomicCounter.h"
 
@@ -19,6 +19,7 @@ class HealthService;
 class WorkerStatusService;
 class ModelStatusService;
 class SysCmdService;
+class TokenizerService;
 
 class HttpApiServer {
 public:
@@ -27,7 +28,7 @@ public:
                   std::string                 address,
                   const ft::GptInitParameter& params,
                   py::object                  token_processor):
-        engine_(engine), addr_(address), params_(params), pipeline_(new Pipeline(token_processor)) {
+        engine_(engine), addr_(address), params_(params), token_rocessor_(new TokenProcessor(token_processor)) {
 
         request_counter_.reset(new autil::AtomicCounter());
         init_controller(params);
@@ -64,6 +65,7 @@ private:
     bool registerWorkerStatusService();
     bool registerModelStatusService();
     bool registerSysCmdService();
+    bool registerTokenizerService();
 
 private:
     std::atomic_bool                      is_stopped_{true};
@@ -73,7 +75,7 @@ private:
     std::string                            addr_;
     ft::GptInitParameter                   params_;
     std::shared_ptr<ConcurrencyController> controller_;
-    std::shared_ptr<Pipeline>              pipeline_;
+    std::shared_ptr<TokenProcessor>              token_rocessor_;
 
     std::optional<EmbeddingEndpoint> embedding_endpoint_;
 
@@ -82,6 +84,7 @@ private:
     std::shared_ptr<WorkerStatusService>     worker_status_service_;
     std::shared_ptr<ModelStatusService>      model_status_service_;
     std::shared_ptr<SysCmdService>           sys_cmd_service_;
+    std::shared_ptr<TokenizerService>        tokenizer_service_;
 };
 
 }  // namespace rtp_llm

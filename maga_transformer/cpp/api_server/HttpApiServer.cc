@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/api_server/WorkerStatusService.h"
 #include "maga_transformer/cpp/api_server/ModelStatusService.h"
 #include "maga_transformer/cpp/api_server/SysCmdService.h"
+#include "maga_transformer/cpp/api_server/TokenizerService.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -66,6 +67,13 @@ bool HttpApiServer::registerServices() {
     // POST: /set_log_level
     if (!registerSysCmdService()) {
         FT_LOG_WARNING("HttpApiServer register sys cmd service failed.");
+        return false;
+    }
+
+    // add uri:
+    // POST: /tokenizer/encode
+    if (!registerTokenizerService()) {
+        FT_LOG_WARNING("HttpApiServer register tokenizer service failed.");
         return false;
     }
 
@@ -146,6 +154,21 @@ bool HttpApiServer::registerSysCmdService() {
         sys_cmd_service->setLogLevel(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/set_log_level", set_log_level_callback);
+}
+
+bool HttpApiServer::registerTokenizerService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register tokenizer service failed, http server is null");
+        return false;
+    }
+
+    tokenizer_service_.reset(new TokenizerService(token_rocessor_));
+    auto tokenizer_encode_callback = [tokenizer_service =
+                                          tokenizer_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                              const http_server::HttpRequest& request) -> void {
+        tokenizer_service->tokenizerEncode(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/tokenizer/encode", tokenizer_encode_callback);
 }
 
 void HttpApiServer::stop() {
