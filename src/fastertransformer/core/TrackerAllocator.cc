@@ -7,6 +7,9 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params)
 {
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
+    if (real_reserve_size < 0) {
+        throw std::invalid_argument("TrackerAllocator reserve bytes num must be non-negative but got %ld" + std::to_string(real_reserve_size));
+    }
     if (real_reserve_size == 0) {
         FT_LOG_WARNING("TrackerAllocator target_track_bytes is 0. Use real allocator directly.");
         return;
