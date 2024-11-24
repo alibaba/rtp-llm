@@ -142,7 +142,7 @@ def make_context(
 class QwenRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.add_extra_stop_word_ids([[37763, 367, 25]]) # Observation:
+        self.add_extra_stop_word_ids([[37763, 367, 25], [151643]]) # Observation:
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
