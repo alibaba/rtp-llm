@@ -130,7 +130,7 @@ class LlavaRenderer(CustomChatRenderer):
             conv_mode = "llava_v1"
         elif "llama3" in model_name.lower():
             conv_mode = "llava_llama3"
-        elif "next" in model_name.lower():
+        elif "next" in model_name.lower() or "onevision" in model_name.lower():
             conv_mode = "llava_qwen"
         else:
             conv_mode = "llava_v0"
