@@ -132,3 +132,10 @@ def cuda_register():
             "//conditions:default": "//src/fastertransformer/devices/cuda_impl:gpu_register",
         })
     )
+
+def libacext_so():
+    native.filegroup(
+        name = "libacext_so",
+        srcs = [],
+        visibility = ["//visibility:public"],
+    )
