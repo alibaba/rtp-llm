@@ -21,7 +21,8 @@ from maga_transformer.utils.model_weight import (
     w_half2,
     zeros,
     transpose_pad,
-    multipy_identity
+    multipy_identity,
+    stack_moe_w1
 )
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
@@ -129,13 +130,11 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.gate_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
                 WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
                 WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) \
-                                        for expert_id in range(self.expert_num_)], stack_),
                 WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight',
                                                      functools.partial(multipy_identity, scale=self.routed_scaling_factor)) \
                                         for expert_id in range(self.expert_num_)], stack_),
-                WeightInfo(W.moe_w3, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) \
-                                        for expert_id in range(self.expert_num_)], stack_),
+                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in range(self.expert_num_)] + \
+                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
             ]
         else:
             return [
