@@ -50,7 +50,7 @@ class ExceptionType(IntEnum):
             raise ValueError(f"{value} is not a valid ExceptionType")
 
 class FtRuntimeException(Exception):
-    def __init__(self, expcetion_type: ExceptionType, message: str):
-        self.expcetion_type = expcetion_type
+    def __init__(self, exception_type: ExceptionType, message: str):
+        self.exception_type = exception_type
         self.message = message
         super().__init__(self.message)

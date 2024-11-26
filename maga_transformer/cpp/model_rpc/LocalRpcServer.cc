@@ -43,7 +43,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
     const auto& error_msg = error_info.ToString();
-    FT_LOG_WARNING("request key [%s], error code [%s], error message [%s]",
+    FT_LOG_WARNING("request [%s], error code [%s], error message [%s]",
               request_key.c_str(), ErrorCodeToString(error_info.code()).c_str(), error_msg.c_str());
     auto grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
@@ -53,7 +53,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     if (error_details.SerializeToString(&error_details_serialized)) {
         return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        FT_LOG_WARNING("request:[%ld] error details serialize to string error", request_key.c_str());
+        FT_LOG_WARNING("request [%s] error details serialize to string failed", request_key.c_str());
         return grpc::Status(grpc_error_code, error_msg);
     }
 }
@@ -71,17 +71,17 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                 break;
             }
         }
-        FT_LOG_DEBUG("request:[%ld] generate next output success", request_key.c_str());
+        FT_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(&outputs_pb, &(result.value()));
         if (context->IsCancelled()) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%ld] cancelled by user", request_key.c_str());
+            FT_LOG_WARNING("request:[%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%ld] write outputs pb failed", request_key.c_str());
+            FT_LOG_WARNING("request:[%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->needRemoteGenerate()) {
@@ -114,9 +114,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
-    FT_LOG_DEBUG("request:[%ld] trans to stream success", request_id);
+    FT_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     generate_context.stream = engine_->enqueue(input);
-    FT_LOG_DEBUG("request:[%ld] enqueue success", request_id);
+    FT_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
     generate_context.error_status = pollStreamOutput(
             context, generate_context.request_key, writer, generate_context.stream);

@@ -330,7 +330,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     } else {
         // TODO(xinfei.sxf) add retry for part failed blocks.
         auto load_done_time_us = currentTimeUs();
-        FT_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld]ms",
+        FT_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld] ms",
             request_key.c_str(), load_status->toString().c_str(), (load_done_time_us - start_load_time_us) / 1000);
     }
     return load_status->errorInfo();
