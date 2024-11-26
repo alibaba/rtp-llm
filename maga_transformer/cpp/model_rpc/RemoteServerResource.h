@@ -8,8 +8,8 @@
 namespace rtp_llm {
 
 struct RemoteServerResource {
-    int isParallel() const {
-        return workers.size() != 0;
+    int isTensorParallel() const {
+        return workers.size() != 1;
     }
 
     std::vector<std::string> workers;

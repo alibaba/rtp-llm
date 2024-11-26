@@ -5,6 +5,7 @@ namespace rtp_llm {
 enum class ErrorCode {
     NONE_ERROR = 0,
     LONG_PROMPT_ERROR = 511,
+    EXCEEDS_KV_CACHE_MAX_LEN = 513,
     UNKNOWN_ERROR = 514,
     MALLOC_FAILED = 602,
     GENERATE_TIMEOUT = 603,
@@ -24,6 +25,7 @@ enum class ErrorCode {
     REMOTE_GENERATE_FAILED = 710,
     RPC_FINISH_FAILED = 711,
     DECODE_MALLOC_FAILED = 712,
+    LOAD_KV_CACHE_FAILED = 713,
 
     // load cache error
     LOAD_CACHE_TIMEOUT = 810,
@@ -41,6 +43,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "NONE_ERROR";
         case ErrorCode::LONG_PROMPT_ERROR:
             return "LONG_PROMPT_ERROR";
+        case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
+            return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::UNKNOWN_ERROR:
             return "UNKNOWN_ERROR";
         case ErrorCode::MALLOC_FAILED:
@@ -67,6 +71,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "RPC_FINISH_FAILED";
         case ErrorCode::DECODE_MALLOC_FAILED:
             return "DECODE_MALLOC_FAILED";    
+        case ErrorCode::LOAD_KV_CACHE_FAILED:
+            return "LOAD_KV_CACHE_FAILED";
         case ErrorCode::LOAD_CACHE_TIMEOUT:
             return "LOAD_CACHE_TIMEOUT";
         case ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED:

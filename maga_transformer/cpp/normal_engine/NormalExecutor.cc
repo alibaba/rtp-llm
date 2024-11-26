@@ -27,10 +27,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 
     model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
     // when warmup, cache manager maybe nullptr
-    auto block_size = cache_manager ? cache_manager->cacheConfig().kv_block_stride: 0;
-    auto scale_block_size = cache_manager ? cache_manager->cacheConfig().kv_scale_block_stride: 0;
+    // auto block_size = cache_manager ? cache_manager->cacheConfig().kv_block_stride: 0;
+    // auto scale_block_size = cache_manager ? cache_manager->cacheConfig().kv_scale_block_stride: 0;
+    const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.gpt_init_parameter, warm_up_, block_size, scale_block_size));
+        params.gpt_init_parameter, cache_config, warm_up_));
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {

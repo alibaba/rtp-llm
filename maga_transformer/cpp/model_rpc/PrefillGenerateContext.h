@@ -51,7 +51,7 @@ public:
     PrefillGenerateContext(RemoteServerResource* resource, RPCContext& rpc_context,
                            int64_t timeout_ms, grpc::ServerContext* server_context,
                            kmonitor::MetricsReporterPtr& metrics_reporter)
-                           : GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter), 
+                           : GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter),
                              resource(resource), rpc_context(rpc_context) {}
     ~PrefillGenerateContext();
     void reset() override;

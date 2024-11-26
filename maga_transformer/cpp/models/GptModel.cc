@@ -6,6 +6,7 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/models/W.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 #include <memory>
 
 using namespace std;
@@ -164,9 +165,12 @@ void GptModel::prepareAttentionInputs(
             false // sparse head not support now
         });
 
-    attention_inputs.cache_keys = inputs.cache_keys;
-    attention_inputs.query_id = inputs.query_id;
-    attention_inputs.query_pd_separation = inputs.query_pd_separation;
+    if (inputs.cache_keys) {
+        vector<int64_t> cache_keys_vec = ft::buffer2vector<int64_t>(*inputs.cache_keys);
+        attention_inputs.cache_keys = transVectorToString(cache_keys_vec);
+    }
+    attention_inputs.request_id = inputs.request_id;
+    attention_inputs.request_pd_separation = inputs.request_pd_separation;
     attention_inputs.block_size = inputs.block_size;
     attention_inputs.scale_block_size = inputs.scale_block_size;
     attention_inputs.pd_separation = inputs.pd_separation;

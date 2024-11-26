@@ -60,7 +60,6 @@ public:
 public:
     DecodeRpcContext&           rpc_context;
     std::string                 peer_ip;
-    std::string                 request_key;
     GenerateRequestPB           allocate_request;
     DecodeStatInfo              stat_info;
     int64_t                     loading_cache_requests  = 0;

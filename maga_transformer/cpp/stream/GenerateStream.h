@@ -69,7 +69,7 @@ public:
     void incrFallbackBlock(int fallback_blocks);
 
     void constructCacheKey();
-    const std::vector<int32_t>& cacheKeys() const;
+    const std::vector<int64_t>& cacheKeys() const;
     int reuseBlockSize() const;
     const std::string& cacheStorePeer() const;
 
@@ -297,7 +297,7 @@ protected:
 
     bool                                need_remote_generate_   = false;
     bool                                use_cache_store_        = false;
-    std::vector<int32_t>                cache_keys_;
+    std::vector<int64_t>                cache_keys_;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     ft::SpecialTokens                   special_tokens_;

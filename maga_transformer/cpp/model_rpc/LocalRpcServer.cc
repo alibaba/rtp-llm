@@ -41,10 +41,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(int64_t request_id, ErrorInfo error_info) {
+grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
     const auto& error_msg = error_info.ToString();
-    FT_LOG_WARNING("request id [%lu], error code [%s], error message [%s]",
-              request_id, ErrorCodeToString(error_info.code()).c_str(), error_msg.c_str());
+    FT_LOG_WARNING("request key [%s], error code [%s], error message [%s]",
+              request_key.c_str(), ErrorCodeToString(error_info.code()).c_str(), error_msg.c_str());
     auto grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
@@ -53,43 +53,42 @@ grpc::Status LocalRpcServer::serializeErrorMsg(int64_t request_id, ErrorInfo err
     if (error_details.SerializeToString(&error_details_serialized)) {
         return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        FT_LOG_WARNING("request:[%ld] error details serialize to string error", request_id);
+        FT_LOG_WARNING("request:[%ld] error details serialize to string error", request_key.c_str());
         return grpc::Status(grpc_error_code, error_msg);
     }
 }
 
-// TODO(xinfei.sxf) use request key to replace request_id
-grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                   context,
-                                              int64_t                                request_id,
-                                              grpc::internal::WriterInterface<GenerateOutputsPB>* writer,
-                                              std::shared_ptr<GenerateStream>&       stream) {
+grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              context,
+                                              const string&                     request_key,
+                                              WriterInterface*                  writer,
+                                              std::shared_ptr<GenerateStream>&  stream) {
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
-                return serializeErrorMsg(request_id, result.status());
+                return serializeErrorMsg(request_key, result.status());
             } else {
                 break;
             }
         }
-        FT_LOG_DEBUG("request:[%ld] generate next output success", request_id);
+        FT_LOG_DEBUG("request:[%ld] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(&outputs_pb, &(result.value()));
         if (context->IsCancelled()) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%ld] cancelled by user", request_id);
+            FT_LOG_WARNING("request:[%ld] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%ld] write outputs pb failed", request_id);
+            FT_LOG_WARNING("request:[%ld] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->needRemoteGenerate()) {
             break;
         }
     }
-    FT_LOG_DEBUG("request:[%ld] local generate done", request_id);
+    FT_LOG_DEBUG("request:[%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
 }
@@ -119,7 +118,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     generate_context.stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request_id);
 
-    generate_context.error_status = pollStreamOutput(context, request_id, writer, generate_context.stream);
+    generate_context.error_status = pollStreamOutput(
+            context, generate_context.request_key, writer, generate_context.stream);
     return generate_context.error_status;
 }
 

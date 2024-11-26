@@ -93,7 +93,7 @@ void PrefillGenerateContext::nextStage() {
 }
 
 void PrefillGenerateContext::markRequestEnd() {
-    if (!resource->isParallel()) {
+    if (!resource->isTensorParallel()) {
         resource->cache_store->markRequestEnd(std::to_string(request_id));
         return;
     }

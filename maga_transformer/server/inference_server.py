@@ -54,7 +54,7 @@ class InferenceServer(object):
         self._inference_worker = None
         self._openai_endpoint = None
         self._lora_manager = None
-        self._atomic_count = AtomicCounter()
+        self._request_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
         self._init_controller()
         # just rank 0 report metric
@@ -146,7 +146,7 @@ class InferenceServer(object):
             req = json.loads(req)
         assert isinstance(req, dict)
 
-        req[request_id_field_name] = self._atomic_count.increment()
+        req[request_id_field_name] = self._request_count.increment()
 
         def generate_call():
             assert self._inference_worker is not None
@@ -162,7 +162,7 @@ class InferenceServer(object):
         return rep
 
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
-        request_id = self._atomic_count.increment()
+        request_id = self._request_count.increment()
         def generate_call():
             assert (self._openai_endpoint != None)
             response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
@@ -181,7 +181,7 @@ class InferenceServer(object):
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
-        request[request_id_field_name] = self._atomic_count.increment()
+        request[request_id_field_name] = self._request_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
         try:
             with self._controller:
@@ -326,7 +326,7 @@ class InferenceServer(object):
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()
-        request[request_id_field_name] = self._atomic_count.increment()
+        request[request_id_field_name] = self._request_count.increment()
         lora_infos: Dict[str, Any] = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})

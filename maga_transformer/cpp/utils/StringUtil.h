@@ -31,16 +31,11 @@ inline std::string fmtstr(const std::string& format, Args... args) {
     return std::string(buf.get(), buf.get() + size - 1);  // We don't want the '\0' inside
 }
 
-// TODO(xinfei.sxf) optimize repeated code
 template<typename T>
-inline std::string vectorToString(T* begin, T* end) {
-    std::string result;
-    while (begin != end) {
-        result += std::to_string(*begin) + ",";
-        begin++;
-    }
-    if (!result.empty()) {
-        result.pop_back();
+inline std::vector<std::string> transVectorToString(const std::vector<T>& vec) {
+    std::vector<std::string> result;
+    for (const auto& value : vec) {
+        result.push_back(std::to_string(value));
     }
     return result;
 }

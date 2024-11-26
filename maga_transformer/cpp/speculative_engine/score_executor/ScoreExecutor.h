@@ -27,11 +27,10 @@ public:
         device_(device),
         score_normal_executor_(params, cache_manager, device_, lora_manager, warm_up),
         normal_executor_(params, cache_manager, device_, lora_manager, warm_up) {
-        auto block_size = cache_manager ? cache_manager->cacheConfig().kv_block_stride: 0;
-        auto scale_block_size = cache_manager ? cache_manager->cacheConfig().kv_scale_block_stride: 0;
+        const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
         score_normal_executor_.setBatchProcessor(
             std::move(std::make_unique<ScoreBatchStreamProcessor>(
-            params.gpt_init_parameter, warm_up, block_size, scale_block_size)));
+            params.gpt_init_parameter, cache_config, warm_up)));
     }
 
     absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) {

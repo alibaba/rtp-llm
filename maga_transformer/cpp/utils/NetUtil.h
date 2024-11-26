@@ -25,43 +25,4 @@ inline std::string extractIP(const std::string& address) {
     return "";
 }
 
-inline std::string getHostName() {
-    char hostname[HOST_NAME_MAX];
-    if (gethostname(hostname, sizeof(hostname)) == -1) {
-        perror("gethostname failed");
-        return "";
-    }
-    return hostname;
-}
-
-inline std::string getLocalIP() {
-    char hostname[HOST_NAME_MAX];
-    if (gethostname(hostname, sizeof(hostname)) == -1) {
-        perror("gethostname failed");
-        return "";
-    }
-
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET; // IPv4
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(hostname, nullptr, &hints, &res) != 0) {
-        perror("getaddrinfo failed");
-        return "";
-    }
-
-    char ip[INET_ADDRSTRLEN];
-    for (struct addrinfo *p = res; p != nullptr; p = p->ai_next) {
-        // 将 IP 地址转为字符串
-        if (getnameinfo(p->ai_addr, p->ai_addrlen, ip, sizeof(ip), nullptr, 0, NI_NUMERICHOST) == 0) {
-            freeaddrinfo(res);
-            return ip; // 返回第一个找到的 IP 地址
-        }
-    }
-
-    freeaddrinfo(res);
-    return "";
-}
-
 }

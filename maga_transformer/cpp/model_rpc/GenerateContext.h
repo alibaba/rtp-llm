@@ -18,7 +18,7 @@ class GenerateContext {
 public:
     GenerateContext(int64_t request_id, int64_t request_timeout_ms,
                     grpc::ServerContext* server_context, kmonitor::MetricsReporterPtr& metrics_reporter)
-        : request_id(request_id), request_timeout_ms(request_timeout_ms),
+        : request_id(request_id), request_key(std::to_string(request_id)), request_timeout_ms(request_timeout_ms),
           server_context(server_context), metrics_reporter(metrics_reporter) { 
             request_begin_time_us = currentTimeUs();
         }
@@ -34,6 +34,7 @@ public:
 
 public:
     int64_t                         request_id;
+    std::string                     request_key;
     int64_t                         retry_times             = 0;
     int64_t                         retry_cost_time_ms      = 0;
     int64_t                         onflight_requests       = 0;
@@ -67,7 +68,7 @@ public:
                 + " ms" + ", request timeout is "                                               \
                 + std::to_string(generate_context.request_timeout_ms) + " ms");                 \
         generate_context.error_status =                                                         \
-            serializeErrorMsg(generate_context.request_id, generate_context.error_info);        \
+            serializeErrorMsg(generate_context.request_key, generate_context.error_info);       \
         return generate_context.error_status;                                                   \
     }                                                                                           \
 }
@@ -76,7 +77,7 @@ public:
     if (generate_context.server_context->IsCancelled()) {                                       \
         generate_context.error_info = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");  \
         generate_context.error_status =                                                         \
-            serializeErrorMsg(generate_context.request_id, generate_context.error_info);        \
+            serializeErrorMsg(generate_context.request_key, generate_context.error_info);       \
         return generate_context.error_status;                                                   \
     }
 

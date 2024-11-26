@@ -41,11 +41,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.kv_cache_offset = device_->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
         model_input.cache_keys = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {total_context_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
+            {ft::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
     }
-    model_input.query_id = device_->allocateBuffer(
+    model_input.request_id = device_->allocateBuffer(
             {ft::DataType::TYPE_INT64, {total_context_batch_size}, ft::AllocationType::HOST}, {});
-    model_input.query_pd_separation = device_->allocateBuffer(
+    model_input.request_pd_separation = device_->allocateBuffer(
             {ft::DataType::TYPE_BOOL, {total_context_batch_size}, ft::AllocationType::HOST}, {});
     model_input.input_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -182,10 +182,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                             kv_cache.batch_offset[i].size() * sizeof(int));
                 std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                         stream->cacheKeys().data(),
-                        stream->cacheKeys().size() * sizeof(int32_t));
+                        stream->cacheKeys().size() * sizeof(int64_t));
             }
-            *(model_input.query_id->dataWithOffset<int64_t>(batch_idx - total_decode_batch_size)) = stream->streamId();
-            *(model_input.query_pd_separation->dataWithOffset<bool>(batch_idx - total_decode_batch_size)) = stream->queryPdSep();
+            *(model_input.request_id->dataWithOffset<int64_t>(batch_idx - total_decode_batch_size)) = stream->streamId();
+            *(model_input.request_pd_separation->dataWithOffset<bool>(batch_idx - total_decode_batch_size)) = stream->queryPdSep();
             batch_idx += 1;
             token_idx += input_tokens.size();
         }

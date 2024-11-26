@@ -86,14 +86,14 @@ void GenerateStream::constructCacheKey() {
     cache_keys_.reserve(stream_cache_resource_.singleBatchNeedBlocks(seq_length_));
     auto seq_size_per_block = seqSizePerBlock();
     auto data = generate_input_->input_ids->data<int32_t>();
-    int32_t hash = 0;
+    int64_t hash = 0;
     for (int pos = 0; pos < seq_length_; pos += seq_size_per_block) {
-        hash = hashInt32Array(hash, data + pos, data + min(seq_length_, pos + seq_size_per_block));
+        hash = hashInt64Array(hash, data + pos, data + min(seq_length_, pos + seq_size_per_block));
         cache_keys_.push_back(hash);
     }
 }
 
-const std::vector<int32_t>& GenerateStream::cacheKeys() const {
+const std::vector<int64_t>& GenerateStream::cacheKeys() const {
     return cache_keys_;
 }
 
@@ -435,10 +435,11 @@ bool GenerateStream::checkTokenId(int token_id) {
 
 void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    FT_LOG_WARNING("stop stream [%d], error_msg: [%s], current state [%s], "
-                    "input len [%d], seq len [%d]",
+    auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    FT_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
+                    "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
                     streamId(), error_msg.c_str(), GenerateStateToString(generate_status_.status).c_str(),
-                    inputLength(), seqLength());
+                    inputLength(), seqLength(), getTimeoutMs(), cost_time_ms);
     generate_status_.status     = GenerateState::STOPPED;
     generate_status_.error_info = ErrorInfo(error_code, error_msg);
 }
@@ -517,11 +518,12 @@ void GenerateStream::cancelIfNotRunning() {
     if (generate_status_.status == GenerateState::WAITING
             || generate_status_.status == GenerateState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-        FT_LOG_WARNING("stop stream: %d %s, timeout: [%ld] ms, running [%ld] ms",
-            streamId(), "cancel stream in waiting or remote_running",
+        FT_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
+            streamId(), "cancel stream in waiting or remote running",
+            inputLength(), seqLength(),
             getTimeoutMs(), cost_time_ms);
         generate_status_.status = GenerateState::STOPPED;
-        generate_status_.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting");
+        generate_status_.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting or remote running");
     }
 }
 
@@ -694,7 +696,7 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
-    // TODO(xinfei.sxf) fix this
+    // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss, update_queue);
 }
 

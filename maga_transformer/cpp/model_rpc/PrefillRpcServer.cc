@@ -42,7 +42,7 @@ namespace rtp_llm {
         }                                                                                                       \
         prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                  \
         prefill_context.error_status = serializeErrorMsg(                                                       \
-                prefill_context.request_id, prefill_context.error_info);                                        \
+                prefill_context.request_key, prefill_context.error_info);                                       \
         return;                                                                                                 \
     }
 
@@ -128,7 +128,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!host || host->ip.empty()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_HOST_FAILED,
                 "get host for decode cluster " + docode_cluster_name_ + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_id, prefill_context.error_info);
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
     auto decode_addr = host->ip + ":" + std::to_string(host->port);
@@ -136,7 +136,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!connect_status.ok()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                 "get grpc connection for decode addr " + decode_addr + " failed");
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_id, prefill_context.error_info);
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
     prefill_context.decode_addr = decode_addr;
@@ -188,7 +188,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCache(PrefillGenerateContext& prefill_context) {
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.stream);
     if (prefill_context.error_info.hasError()) {
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_id, prefill_context.error_info);
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
     AtomicGuard request_guard(loading_cache_requests_);
@@ -207,7 +207,7 @@ void PrefillRpcServer::remoteLoadCache(PrefillGenerateContext& prefill_context) 
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
     // TODO(xinfei.sxf) first token write to client affected by decode's load kv cache
-    auto first_status = pollStreamOutput(prefill_context.server_context, prefill_context.request_id,
+    auto first_status = pollStreamOutput(prefill_context.server_context, prefill_context.request_key,
                                          prefill_context.rpc_context.writer, prefill_context.stream);
     if (!first_status.ok()) {
         prefill_context.error_status = first_status;
@@ -261,7 +261,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         prefill_context.stream->setStop(ErrorCode::RPC_FINISH_FAILED, status.error_message());
         prefill_context.error_info = ErrorInfo(ErrorCode::REMOTE_GENERATE_FAILED,
                 "decode addr is " + prefill_context.decode_addr + ", " + status.error_message());
-        prefill_context.error_status = serializeErrorMsg(request_id, prefill_context.error_info);
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
     prefill_context.stream->setFinishedWithoutLock();
@@ -313,11 +313,13 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
         prefill_context.stat_info.nextStage();
     } catch (const std::exception& e) {
-        auto error_msg = "request [" + std::to_string(prefill_context.request_id) + "] catch exception [" + e.what() + "]";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return prefill_context.error_status;
     } catch (...) {
-        auto error_msg = "request [" + std::to_string(prefill_context.request_id) + "] catch unknown exception";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        auto error_msg = "request [" + prefill_context.request_key + "] catch unknown exception";
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return prefill_context.error_status;
     }
 
     return grpc::Status::OK;
@@ -338,9 +340,9 @@ bool PrefillRpcServer::ready() {
     return ret;
 }
 
-grpc::Status PrefillRpcServer::RemoteFinish(grpc::ServerContext*           ontext,
-                                             const RemoteFinishRequestPB*   request,
-                                             EmptyPB*                       response) {
+grpc::Status PrefillRpcServer::RemoteFinish(grpc::ServerContext*            ontext,
+                                            const RemoteFinishRequestPB*    request,
+                                            EmptyPB*                        response) {
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

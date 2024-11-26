@@ -163,7 +163,7 @@ message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
     string peer_ip = 3;
-    repeated int32 cache_keys = 4;
+    repeated int64 cache_keys = 4;
     repeated int32 block_ids = 5;
     int64 block_num = 6;
     int64 reuse_block_size = 7;

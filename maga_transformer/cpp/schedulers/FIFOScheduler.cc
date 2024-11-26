@@ -194,8 +194,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             FT_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxSeqLen()) {
-                stream->stopAndRelease(ErrorCode::LONG_PROMPT_ERROR, "input len " + std::to_string(stream->inputLength()) +
-                                        " is greater than kv cache max seq len " + std::to_string(cache_manager_->maxSeqLen()));
+                stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN, 
+                    "input len " + std::to_string(stream->inputLength()) +
+                    " is greater than kv cache max seq len " + std::to_string(cache_manager_->maxSeqLen()));
             } else {
                 stream->stopAndRelease(ErrorCode::MALLOC_FAILED, "LACK MEM");
             }

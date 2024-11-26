@@ -26,7 +26,7 @@ def format_exception(e: BaseException):
 
     def _format_ft_exception(e: FtRuntimeException):
         error_code = int(e.expcetion_type)
-        error_code_str = str(error_code) + " " + ExceptionType.from_value(error_code)
+        error_code_str = str(error_code) + "_" + ExceptionType.from_value(error_code)
         return _format(error_code, error_code_str, e.message)
 
     if isinstance(e, FtRuntimeException):

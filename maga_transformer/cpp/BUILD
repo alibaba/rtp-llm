@@ -378,16 +378,17 @@ cc_library(
     srcs =  glob(["model_rpc/*.cc"]),
     hdrs =  glob(["model_rpc/*.h"]),
     deps = [
+        ":embedding_arpc_deps",
+        "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp/embedding_engine:embedding_engine",
-        ":embedding_arpc_deps",
         "//maga_transformer/cpp:speculative_engine",
-        "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp:multimodal_processor",
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
         "//maga_transformer/cpp/disaggregate/load_balancer:load_balancer",
+        "@havenask//aios/autil:net",
     ],
     visibility = ["//visibility:public"]
 )

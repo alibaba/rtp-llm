@@ -55,8 +55,8 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     GRPC_RET_IF_ERROR(decode_context, allocate_request.stage() == RemoteStage::ALLOCATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::ALLOCATE");
-    decode_context.request_id   = allocate_request.request_id();
-    decode_context.request_key  = makeRequestKey(allocate_request.client_id(), decode_context.request_id);
+    decode_context.request_id  = allocate_request.request_id();
+    decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
 
     decode_context.peer_ip = extractIP(decode_context.server_context->peer());
     if (decode_context.peer_ip.empty()) {
@@ -124,7 +124,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     engine_->enqueue(generate_stream);
     FT_LOG_DEBUG("request:[%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status = pollStreamOutput(decode_context.server_context,
-                                   generate_request.request_id(),
+                                   decode_context.request_key,
                                    dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                                    generate_stream);
     decode_context.time_info.updateGenerateEndTime();
@@ -162,7 +162,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto& cache_keys = generate_stream->cacheKeys();
     auto& block_ids  = generate_stream->kvCache().blocks(0);
     if (cache_keys.size() != block_ids.size()) {
-        return ErrorInfo(ErrorCode::UNKNOWN_ERROR,
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                           "cache keys size " + std::to_string(cache_keys.size()) +
                           " not equal to block size " + std::to_string(block_ids.size()));
     }
@@ -247,7 +247,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         }
         if (!ok) {
             string error_msg = "async get next event from grpc completion queue failed";
-            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, error_msg);
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
         }
         auto rank = reinterpret_cast<uintptr_t>(got_tag);
         const auto& status = all_context[rank].status;
@@ -256,7 +256,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         const auto& pb_error_message = response.error_info().error_message();
         if (!status.ok()) {
             all_success = false;
-            error_code = ErrorCode::UNKNOWN_ERROR;
+            error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
             error_msg += std::to_string(rank) + ": " + status.error_message() + ", ";
         } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
             all_success = false;
@@ -338,7 +338,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext* server_context, 
                                          const BroadcastLoadRequestPB* request, BroadcastLoadResponsePB* response) {
-    std::vector<int32_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());
     auto error_info = loadCache({request->request_id(), request->request_key(), request->peer_ip(),
                                 cache_keys, block_ids, request->reuse_block_size(), request->timeout_ms(), server_context});
@@ -378,10 +378,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         decode_context.stat_info.nextStage();
     } catch (const std::exception& e) {
         auto error_msg = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return decode_context.error_status;
     } catch (...) {
         auto error_msg = "request [" + decode_context.request_key + "] catch unknown exception";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        return decode_context.error_status;
     }
 
     return grpc::Status::OK;

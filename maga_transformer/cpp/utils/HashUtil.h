@@ -4,18 +4,20 @@
 
 namespace rtp_llm {
 
-// TODO(xinfei.sxf) return uint64_t hash value
-inline int32_t hashInt32Array(int32_t hash, int32_t* begin, int32_t* end) {
+inline int64_t hashInt64Array(int64_t hash, int32_t* begin, int32_t* end) {
     std::hash<int32_t> hasher;
-    auto hashValue = [&](int32_t hash, int32_t& value) {
-        hash ^= hasher(value) + 0x9e3779b9 + (hash << 6) + (hash >> 2); // Jenkins hash function
+    auto hashValue = [&](int64_t hash, int32_t& value) {
+        // Jenkins hash function (modified for 64 bits)
+        hash ^= hasher(value) + 0x9e3779b97f4a7c15 + (hash << 12) + (hash >> 32);
         return hash;
     };
+    
     while (begin != end) {
         // Combine the hash of each element
         hash = hashValue(hash, *begin);
         begin++;
     }
+    
     return hash;
 }
 

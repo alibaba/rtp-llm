@@ -95,7 +95,6 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
 
     FT_CHECK_WITH_INFO(param.cache_store_inputs.has_value()
                         && param.cache_store_inputs->host_kv_cache_offset, "failed to get host_kv_cache_offset");
-    const auto& cache_keys = param.cache_keys;
     const auto max_blocks_per_batch = param.cache_store_inputs->host_kv_cache_offset->shape()[1];
     const auto seq_size_per_block  = params.configs.tokens_per_block;
     auto offset_addr = param.cache_store_inputs->host_kv_cache_offset->data<int32_t>();
@@ -109,11 +108,12 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
     cudaEventCreate(event_ptr.get());
     cudaEventRecord(*event_ptr, stream);
     
-    FT_CHECK_WITH_INFO(param.context_batch_size == param.query_pd_separation->size(), "size not same");
-    FT_CHECK_WITH_INFO(param.context_batch_size == param.query_id->size(), "size not same");
+    FT_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
+    FT_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
+                        "context batch size and request id size is not same");
 
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
-        if (*(param.query_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
+        if (*(param.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
             continue;
         }
         FT_CHECK_WITH_INFO(param.cache_store_inputs.has_value()
@@ -125,11 +125,10 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
         int reuse_block_num = param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] / seq_size_per_block;
         int block_num = (param.cache_store_inputs->input_lengths_host->data<int>()[param.decoder_batch_size + batch_id] 
                             + seq_size_per_block - 1) / seq_size_per_block;
-        auto query_id = *(param.query_id->dataWithOffset<int64_t>(batch_id));
-        // TODO(xinfei.sxf) optimize to string
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(query_id), event_ptr);
+        auto request_id = *(param.request_id->dataWithOffset<int64_t>(batch_id));
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event_ptr);
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
-            auto cache_key = makeCacheKey(std::to_string(cache_keys->index(batch_id)->data<int32_t>()[index]), param.layer_id);
+            auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
             void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.block_size);
             void* v_addr = (void*)((int8_t*)v_cache_data + block_id * param.block_size);
@@ -146,10 +145,10 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
                 request_blocks->addBlock("v_scale" + cache_key, v_scale_block_addr, param.scale_block_size, true, true);
             }
         }
-        auto storeCallback = [layer_id = param.layer_id, query_id](bool success, CacheStoreErrorCode ec) {
+        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {
                 FT_LOG_WARNING("query [%ld], layer id [%d], "
-                               "call store kv cache failed, ec is %d", query_id, layer_id, ec);
+                               "call store kv cache failed, ec is %d", request_id, layer_id, ec);
             }
         };
         cache_store->store(request_blocks, storeCallback);

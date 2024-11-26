@@ -65,9 +65,9 @@ struct GptModelInputs {
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
     ft::BufferPtr                             mm_features_locs;    // features index
 
-    ft::BufferPtr                             query_id;            // int64, [context_batch_size]
-    ft::BufferPtr                             query_pd_separation; // bool, [context_batch_size]
-    ft::BufferPtr                             cache_keys;          // [context_batch_size]
+    ft::BufferPtr                             request_id;               // int64, [context_batch_size]
+    ft::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
+    ft::BufferPtr                             cache_keys;               // [context_batch_size]
     size_t                                    block_size;
     size_t                                    scale_block_size;
     bool                                      pd_separation = false;
@@ -101,11 +101,11 @@ public:
         if (attention_mask) {
             debug_string << ", attention_mask: " << attention_mask->debugString();
         }
-        if (query_id) {
-            debug_string << ", query_id: " << query_id->debugString();
+        if (request_id) {
+            debug_string << ", request_id: " << request_id->debugString();
         }
-        if (query_pd_separation) {
-            debug_string << ", query_pd_separation: " << query_pd_separation->debugString();
+        if (request_pd_separation) {
+            debug_string << ", request_pd_separation: " << request_pd_separation->debugString();
         }
         if (cache_keys) {
             debug_string << ", cache_keys: " << cache_keys->debugString();
@@ -201,11 +201,11 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
                     {ft::DataType::TYPE_INT32,
                     {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, ft::AllocationType::HOST});
             inputs.cache_keys = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT32, {context_batch_size, max_blocks}, ft::AllocationType::HOST});
+                    {ft::DataType::TYPE_INT64, {context_batch_size, max_blocks}, ft::AllocationType::HOST});
         }
-        inputs.query_id = device->allocateBuffer(
+        inputs.request_id = device->allocateBuffer(
             {ft::DataType::TYPE_INT64, {context_batch_size}, ft::AllocationType::HOST});
-        inputs.query_pd_separation = device->allocateBuffer(
+        inputs.request_pd_separation = device->allocateBuffer(
             {ft::DataType::TYPE_BOOL, {context_batch_size}, ft::AllocationType::HOST});
         inputs.lm_output_indexes = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
@@ -251,8 +251,8 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         buffers.emplace_back(inputs.kv_cache_offset);
         buffers.emplace_back(inputs.cache_keys);
     }
-    buffers.emplace_back(inputs.query_id);
-    buffers.emplace_back(inputs.query_pd_separation);
+    buffers.emplace_back(inputs.request_id);
+    buffers.emplace_back(inputs.request_pd_separation);
     buffers.emplace_back(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         buffers.emplace_back(inputs.combo_position_ids);

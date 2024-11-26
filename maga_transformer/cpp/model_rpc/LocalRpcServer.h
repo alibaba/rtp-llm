@@ -48,12 +48,15 @@ public:
         return true;
     }
 
+public:
+    typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
+
 protected:
-    grpc::Status serializeErrorMsg(int64_t request_id, ErrorInfo error_info);
-    grpc::Status pollStreamOutput(grpc::ServerContext*                   context,
-                                  int64_t                                request_id,
-                                  grpc::internal::WriterInterface<GenerateOutputsPB>* writer,
-                                  std::shared_ptr<GenerateStream>&       stream);
+    grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
+    grpc::Status pollStreamOutput(grpc::ServerContext*              context,
+                                  const std::string&                request_key,
+                                  WriterInterface*                  writer,
+                                  std::shared_ptr<GenerateStream>&  stream);
 
 protected:
     std::shared_ptr<EngineBase>             engine_;
