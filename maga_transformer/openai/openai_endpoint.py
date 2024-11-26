@@ -42,13 +42,13 @@ class OpenaiEndopoint():
         if (self.eos_token_id == None):
             self.eos_token_id = self.model.config.special_tokens.eos_token_id
 
-        self.stop_word_ids_list = self.model.config.special_tokens.stop_words_list
+        self.stop_words_id_list = self.model.config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
             model_type=os.environ["MODEL_TYPE"],
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
-            stop_word_ids_list=self.stop_word_ids_list,
+            stop_word_ids_list=self.stop_words_id_list,
             template_type=self.model.config.template_type,
             ckpt_path=self.model.config.ckpt_path
         )
@@ -60,13 +60,26 @@ class OpenaiEndopoint():
             else BasicRenderer(self.tokenizer, render_params)
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
-        self.stop_word_ids_list.extend(extra_stop_word_ids_list)
-        self.stop_words_list = []
-        for stop_word_ids in self.stop_word_ids_list:
+        self.stop_words_id_list.extend(extra_stop_word_ids_list)
+        self.stop_words_str_list = []
+        for stop_word_ids in self.stop_words_id_list:
             word = self.tokenizer.decode(stop_word_ids)
             if len(word):
-                self.stop_words_list.append(word)
-        logging.info(f"use stop_words_list [{self.stop_words_list}]")
+                self.stop_words_str_list.append(word)
+        
+        env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
+        env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
+        env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
+        env_stop_words_id_list = json.loads(env_stop_words_id) if env_stop_words_id else []
+        env_force_stop = os.environ.get('FORCE_STOP_WORDS', None)
+        if env_force_stop and str_to_bool(env_force_stop):
+            self.stop_words_str_list = env_stop_words_str_list
+            self.stop_words_id_list = env_stop_words_id_list
+        else:
+            self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
+            self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
+        
+        logging.info(f"use stop_words_list [{self.stop_words_str_list}]")
 
     async def list_models(self):
         global model_args
@@ -89,8 +102,8 @@ class OpenaiEndopoint():
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
-        config.stop_words_str = self.stop_words_list + request_stop_words_list
-        config.stop_words_list = self.stop_word_ids_list + self.chat_renderer.tokenize_words(request_stop_words_list)
+        config.stop_words_str = self.stop_words_str_list + request_stop_words_list
+        config.stop_words_list = self.stop_words_id_list + self.chat_renderer.tokenize_words(request_stop_words_list)
         if request.chat_id != None:
             config.chat_id = request.chat_id
         if request.seed != None:
@@ -189,8 +202,8 @@ class OpenaiEndopoint():
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
-            stop_word_ids_list=self.stop_word_ids_list,
-            stop_words_list=self.stop_words_list,
+            stop_word_ids_list=self.stop_words_id_list,
+            stop_words_list=self.stop_words_str_list,
             renderer_info=self.chat_renderer.get_renderer_info(),
             generate_config=gen_config
         )

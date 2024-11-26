@@ -123,7 +123,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                 output_str = output_str[1:]
 
         output_str = output_str.strip(u'\uFFFD')
-        for stop_word in self.stop_words_list:
+        for stop_word in self.stop_words_str_list:
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 

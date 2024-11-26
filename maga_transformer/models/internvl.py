@@ -37,7 +37,7 @@ class InternVL(BaseModel, MultiModalMixin):
         config.mm_related_params.vit_weights = InternVLVitWeight({"vision_model": self.mm_part.vision_model,
                                                                     "mlp1": self.mm_part.mlp1}, True)
         config.mm_sep_tokens = [[self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]]
-        config.special_tokens.stop_words_list = [self.tokenizer.encode("<|im_end|>")]
+        config.special_tokens.stop_words_id_list = [self.tokenizer.encode("<|im_end|>")]
 
 
     @staticmethod
@@ -83,7 +83,7 @@ class InternVL(BaseModel, MultiModalMixin):
                 InternVL._init_vit_params(config, config_json)
         else:
             raise Exception("no config.json found")
-        config.special_tokens.stop_words_str = ["<|im_end|>"]
+        config.special_tokens.stop_words_str_list = ["<|im_end|>"]
         assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
         config.mm_related_params.special_tokens.update({'default_mm_token': '<image>'})
         return config

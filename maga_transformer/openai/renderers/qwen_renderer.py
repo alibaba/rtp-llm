@@ -321,7 +321,7 @@ class QwenRenderer(CustomChatRenderer):
         output_str = self.tokenizer.decode(output_ids)
         output_str = output_str.strip(u'\uFFFD')
 
-        for stop_word in self.stop_words_list:
+        for stop_word in self.stop_words_str_list:
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 

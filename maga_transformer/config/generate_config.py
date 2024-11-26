@@ -104,8 +104,8 @@ class GenerateConfig(BaseModel):
 
     def add_special_tokens(self, special_tokens: Any):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
-        self.stop_words_list += special_tokens.stop_words_list
-        self.stop_words_str += special_tokens.stop_words_str
+        self.stop_words_list += special_tokens.stop_words_id_list
+        self.stop_words_str += special_tokens.stop_words_str_list
 
     def validate(self):
         try:

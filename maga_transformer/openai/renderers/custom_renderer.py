@@ -126,9 +126,9 @@ class CustomChatRenderer():
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
         self.eos_token_id = renderer_params.eos_token_id
-        self.stop_word_ids_list = renderer_params.stop_word_ids_list
-        self.stop_words_list = [
-            self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
+        self.stop_words_id_list = renderer_params.stop_word_ids_list
+        self.stop_words_str_list = [
+            self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_words_id_list
         ]
         self.ckpt_path = renderer_params.ckpt_path
         # NOTE: stop words or their ids only need to be added to one of these two lists.
@@ -404,7 +404,7 @@ class CustomChatRenderer():
             yield await self._generate_final(status_list)
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1) -> Optional[FinisheReason]:
-        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list
+        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         if max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
             return FinisheReason.length
         if len(token_ids) + input_token_length >= self.max_seq_len:
@@ -417,7 +417,7 @@ class CustomChatRenderer():
         return None
 
     def _remove_stop_word_ids(self, output_ids: List[int]) -> List[int]:
-        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list
+        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         for stop_word_ids in stop_word_ids_list_all:
             #  此处应该从最大的范围开始判断
             # 有可能会有stopword_ids 重复的情况，比如[144575, 14098, 144575]

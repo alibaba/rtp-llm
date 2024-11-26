@@ -101,7 +101,7 @@ class QWenV2(QWen):
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
-        config.special_tokens.stop_words_list = [[151645], [151644]]
+        config.special_tokens.stop_words_id_list = [[151645], [151644]]
         config.special_tokens.system.token_ids = [151644, 8948, 198] # '<|im_start|>system\n'
         config.special_tokens.system.eos_token_ids = [151645, 198] # '<|im_end|>\n'
         config.special_tokens.user.token_ids = [151644, 872, 198] # '<|im_start|>user\n'

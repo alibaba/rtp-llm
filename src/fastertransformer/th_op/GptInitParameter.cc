@@ -147,8 +147,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(user)                          \
     DEF_PROPERTY(assistant)                     \
     DEF_PROPERTY(system)                        \
-    DEF_PROPERTY(stop_words_list)               \
-    DEF_PROPERTY(stop_words_str)                \
+    DEF_PROPERTY(stop_words_id_list)            \
+    DEF_PROPERTY(stop_words_str_list)           \
     DEF_PROPERTY(pad_token_id)
 
     pybind11::class_<SpecialTokens>(m, "SpecialTokens")

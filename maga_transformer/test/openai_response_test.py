@@ -221,8 +221,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             encode_special_tokens=True)
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndopoint(self.model)
-        self.assertEqual(self.endpoint.stop_word_ids_list, [[64795], [64797], [2]])
-        self.assertEqual(self.endpoint.stop_words_list, ['<|user|>', '<|observation|>'])
+        self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
+        self.assertEqual(self.endpoint.stop_words_str_list, ['<|user|>', '<|observation|>'])
 
 if __name__ == '__main__':
     main()

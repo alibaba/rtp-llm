@@ -110,13 +110,13 @@ class WeightsQuantizer:
         if (self.eos_token_id == None):
             self.eos_token_id = self.config.special_tokens.eos_token_id
 
-        self.stop_word_ids_list = self.config.special_tokens.stop_words_list
+        self.stop_words_id_list = self.config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
             model_type=model_type,  
             max_seq_len=self.config.max_seq_len,
             eos_token_id=self.eos_token_id,
-            stop_word_ids_list=self.stop_word_ids_list,
+            stop_word_ids_list=self.stop_words_id_list,
         )
 
         self._open_ai_request_render = self.chat_renderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)

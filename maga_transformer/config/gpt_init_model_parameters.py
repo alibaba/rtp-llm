@@ -376,19 +376,18 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_data_type: {self.kv_cache_data_type}')
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
-        # Update stop_words_str and stop_word_ids from ENV
-        stop_words_str = os.environ.get('STOP_WORDS_STR', None)
-        stop_words_str_list = json.loads(stop_words_str) if stop_words_str else []
-        force_stop = os.environ.get('FORCE_STOP', None)
-        if force_stop and str_to_bool(force_stop):
-            self.special_tokens.stop_words_str = stop_words_str_list
+        # use environment variables to update stop_words_str and stop_words_id 
+        env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
+        env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
+        env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
+        env_stop_words_id_list = json.loads(env_stop_words_id) if env_stop_words_id else []
+        env_force_stop = os.environ.get('FORCE_STOP_WORDS', None)
+        if env_force_stop and str_to_bool(env_force_stop):
+            self.special_tokens.stop_words_str_list = env_stop_words_str_list
+            self.special_tokens.stop_words_id_list = env_stop_words_id_list
         else:
-            self.special_tokens.stop_words_str = self.special_tokens.stop_words_str + stop_words_str_list
-
-        if os.environ.get('STOP_WORDS_LIST', None) is not None:
-            self.special_tokens.stop_words_list = self.special_tokens.stop_words_list + json.loads(os.environ['STOP_WORDS_LIST'])
-        elif os.environ.get('FORCE_STOP_WORDS_LIST', None):
-            self.special_tokens.stop_words_list = json.loads(os.environ['FORCE_STOP_WORDS_LIST'])
+            self.special_tokens.stop_words_str_list = self.special_tokens.stop_words_str_list + env_stop_words_str_list
+            self.special_tokens.stop_words_id_list = self.special_tokens.stop_words_id_list + env_stop_words_id_list
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

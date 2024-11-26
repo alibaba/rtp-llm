@@ -16,7 +16,7 @@ class ChatGlmV4(ChatGlmV3):
         # chatglm4 config.json is list[int], bad format
         if isinstance(config_json['eos_token_id'], list):            
             config.special_tokens.eos_token_id = config_json['eos_token_id'][0]
-            config.special_tokens.stop_words_list = [[x] for x in config_json['eos_token_id']]
+            config.special_tokens.stop_words_id_list = [[x] for x in config_json['eos_token_id']]
         else:
             config.special_tokens.eos_token_id = config_json['eos_token_id']
     

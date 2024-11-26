@@ -66,8 +66,8 @@ class GenerateConfigTest(TestCase):
 
     def test_stop_words_merge(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        parameter.special_tokens.stop_words_list = [[1233, 19912]]
-        parameter.special_tokens.stop_words_str = ["gg"]
+        parameter.special_tokens.stop_words_id_list = [[1233, 19912]]
+        parameter.special_tokens.stop_words_str_list = ["gg"]
         generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
                                                           special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848], [1233, 19912]])
@@ -88,8 +88,8 @@ class GenerateConfigTest(TestCase):
 
     def test_same(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        parameter.special_tokens.stop_words_list = [[1233, 19912]]
-        parameter.special_tokens.stop_words_str = ["gg"]
+        parameter.special_tokens.stop_words_id_list = [[1233, 19912]]
+        parameter.special_tokens.stop_words_str_list = ["gg"]
 
         a = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
                                             special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())

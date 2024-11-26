@@ -40,8 +40,8 @@ public:
     RoleSpecialTokens user_;
     RoleSpecialTokens assistant_;
     RoleSpecialTokens system_;
-    std::vector<std::vector<int64_t>>     stop_words_list_;
-    std::vector<std::string>              stop_words_str_;
+    std::vector<std::vector<int64_t>>     stop_words_id_list_;
+    std::vector<std::string>              stop_words_str_list_;
 };
 
 class GptInitParameter {
