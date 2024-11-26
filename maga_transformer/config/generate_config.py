@@ -1,9 +1,10 @@
 import copy
 import hashlib
+from pydantic import BaseModel
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Union
+from maga_transformer.utils.check_util import *
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
-from pydantic import BaseModel
 
 class RequestFormat:
     RAW = 'raw'
@@ -35,7 +36,7 @@ class GenerateConfig(BaseModel):
     print_stop_words: bool = False
     timeout_ms: Optional[int] = -1
     chat_id: Optional[str] = None
-    task_id: Optional[Union[str,int]] = None
+    task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
@@ -107,15 +108,24 @@ class GenerateConfig(BaseModel):
 
     def validate(self):
         try:
-            assert isinstance(self.top_k, int) or \
-             (isinstance(self.top_k, list) and all([isinstance(i, int) for i in self.top_k]))
-            assert isinstance(self.top_p, (float, int)) or \
-             (isinstance(self.top_p, list) and all([isinstance(i, (int, float)) for i in self.top_p]))
-            assert isinstance(self.min_new_tokens, int) or \
-             (isinstance(self.min_new_tokens, list) and all([isinstance(i, int) for i in self.min_new_tokens]))
-            assert isinstance(self.repetition_penalty, (float, int)) or \
-             (isinstance(self.repetition_penalty, list) and all([isinstance(i, (int, float)) for i in self.repetition_penalty]))
-
+            assert is_union_positive_integer(self.top_k)
+            assert is_union_positive_number(self.top_p)
+            assert is_union_positive_integer(self.min_new_tokens)
+            assert is_union_positive_number(self.repetition_penalty)
+            assert is_positive_integer(self.max_new_tokens)
+            assert is_positive_integer(self.num_beams)
+            assert is_positive_integer(self.num_return_sequences)
+            assert is_union_positive_number(self.temperature)            
+            assert check_optional(is_union_positive_integer, self.no_repeat_ngram_size)
+            assert check_optional(is_union_positive_integer, self.random_seed)
+            assert check_optional(is_union_positive_number, self.top_p_decay)
+            assert check_optional(is_union_positive_number, self.top_p_min)
+            assert check_optional(is_union_positive_integer, self.top_p_reset_ids)
+            assert check_optional(is_positive_integer, self.eos_token_id)
+            assert check_optional(is_positive_integer, self.pad_token_id)
+            assert check_optional(is_positive_integer, self.bos_token_id)
+            assert is_list_positive_integer_list(self.stop_words_list)
+            assert is_union_positive_integer(self.sp_advice_prompt_token_ids)
             calculate_loss_list = [0, 1, 2]
             assert self.calculate_loss in calculate_loss_list, \
                 f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"

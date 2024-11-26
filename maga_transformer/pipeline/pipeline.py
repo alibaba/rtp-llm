@@ -64,6 +64,7 @@ class Pipeline(object):
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
+        config.validate()
         return config
 
     def __call__(self, prompt: str, urls: Optional[List[str]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
