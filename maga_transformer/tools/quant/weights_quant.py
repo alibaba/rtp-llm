@@ -25,7 +25,7 @@ from maga_transformer.models.base_model import ModelConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.tools.quant.datasets_adapter import DatasetsAdapter
 from maga_transformer.tools.quant.datasets_adapter import DatasetParams, DatasetsAdapter, DatasetType
-from maga_transformer.tools.api.model_type_analyzer import parse_ft_model_type
+from maga_transformer.tools.api.model_basic_info_analyzer import parse_ft_model_type
 from maga_transformer.openai.api_datatype import ChatCompletionRequest
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.openai.renderers.custom_renderer import RendererParams
@@ -43,7 +43,7 @@ def register_gptq_models(hf_model_type: str, model_gptq_cls: Type[BaseGPTQForCau
         raise Exception(f"try register {hf_model_type}'s gtpq_cls {model_gptq_cls} confict with registed_cls: {registed_model_gptq_cls}")
     GPTQ_CAUSAL_LM_MODEL_MAP.update({hf_model_type: model_gptq_cls})
     logging.info(f"register {hf_model_type}'s gtpq_cls {model_gptq_cls}")
-    
+
     from auto_gptq.modeling._const import SUPPORTED_MODELS
     if hf_model_type not in SUPPORTED_MODELS:
         SUPPORTED_MODELS.append(hf_model_type)
@@ -59,15 +59,15 @@ def register_awq_models(hf_model_type: str, model_gptq_cls: Type[BaseAWQForCausa
         raise Exception(f"try register {hf_model_type}'s awq_cls {model_gptq_cls} confict with registed_cls: {registed_model_awq_cls}")
     AWQ_CAUSAL_LM_MODEL_MAP.update({hf_model_type: model_gptq_cls})
     logging.info(f"register {hf_model_type}'s awq_cls {model_gptq_cls}")
-    
-    
+
+
     from awq.models.base import TRANSFORMERS_AUTO_MAPPING_DICT
     if hf_model_type not in TRANSFORMERS_AUTO_MAPPING_DICT:
         TRANSFORMERS_AUTO_MAPPING_DICT[hf_model_type]='AutoModelForCausalLM'
         logging.info("append {hf_model_type} to gptq supported_models")
     else:
         logging.info(f"hf_model_type:[{hf_model_type}] have been registed")
-        
+
 class SampleStrategy(NamedTuple):
     distinct_attrs: List[str] = []
     sample_size: int = 128
@@ -82,13 +82,13 @@ class WeightsQuantizer:
             os.makedirs(self.offload_folder, exist_ok=True)
         else:
             self.offload_folder = offload_folder
-        
+
         assert self.model_path
         if not model_type:
             model_type = parse_ft_model_type(self.model_path).get('ft_model_type', None)
             assert model_type
         self.model_type = model_type
-        
+
         self.model_cls = ModelFactory.get_model_cls(self.model_type)
         model_config = ModelConfig(
             model_type=self.model_type,
@@ -113,7 +113,7 @@ class WeightsQuantizer:
         self.stop_words_id_list = self.config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
-            model_type=model_type,  
+            model_type=model_type,
             max_seq_len=self.config.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
@@ -121,22 +121,22 @@ class WeightsQuantizer:
 
         self._open_ai_request_render = self.chat_renderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
 
-    
-        
+
+
     def quantize(self, quant_type_str: str, quantize_config: Dict[str, str], dataset_params: DatasetParams, sample_strategy: SampleStrategy, output_path: str):
         ret_code = 0
         try:
             dataset = DatasetsAdapter.load_dataset(dataset_params)
             if isinstance(dataset, datasets.dataset_dict.DatasetDict):
                 dataset = dataset['train']
-            
+
             dataset = self.stratified_sampling_by_attributes(dataset, sample_strategy)
-            
+
             quant_type = QUANT_TYPE.from_str(quant_type_str)
             quanter = self.create_quanter(quant_type, quantize_config)
 
             examples = self.create_tokenized_samples(dataset, dataset_params)
-                        
+
             with Timer() as t:
                 # quanter.quantize(examples)
                 examples_for_quant: List[Dict[str, torch.Tensor]] = [{'input_ids': input_ids, 'attention_mask':torch.ones_like(input_ids)} for input_ids in examples]
@@ -148,7 +148,7 @@ class WeightsQuantizer:
                 save_ret = True
             except BaseException as e:
                 logging.warn(f"save to {output_path} failed, e: {str(e)}")
-                    
+
             if not save_ret:
                 raise Exception(f"save to {output_path} failed")
 
@@ -175,14 +175,14 @@ class WeightsQuantizer:
         # 1. 创建一个组合键，它将属性列表中的所有属性结合起来
         def group_key(example):
             return {'group_key': '+'.join([str(example[attr]) for attr in attributes])}
-        
+
         # 2. 为每个样本添加组合键
         dataset = dataset.map(group_key)
 
         # 3. 获取每个组合键的计数
         group_counts =  Counter(dataset['group_key'])
         total_count = dataset.num_rows
-        
+
         # 4. 计算每个组合键的采样比例，并确定应该采样的数量
         proportional_sample_sizes = {
             group_key: math.ceil(sample_size * count / total_count) for group_key, count in group_counts.items()
@@ -193,7 +193,7 @@ class WeightsQuantizer:
             # 从计数最多的组开始减少
             group_key_to_reduce = max(proportional_sample_sizes, key=lambda k: (proportional_sample_sizes[k], group_counts[k]))
             proportional_sample_sizes[group_key_to_reduce] -= 1
-        
+
         # 6. 从每个分组采样
         sampled_indices = []
         for group_key, size in proportional_sample_sizes.items():
@@ -202,9 +202,9 @@ class WeightsQuantizer:
                 sampled_indices.extend(group_indices)
             else:
                 sampled_indices.extend(np.random.choice(group_indices, size=size, replace=False))
-                
+
         # 7. 从数据集中选择采样的样本
-        sampled_dataset = dataset.select(sampled_indices)        
+        sampled_dataset = dataset.select(sampled_indices)
         return sampled_dataset
 
     @timer_wrapper('create tokenizer')
@@ -258,7 +258,7 @@ class WeightsQuantizer:
         with open(config_file, "w") as f:
             json.dump(config, f, indent=4, sort_keys=True, ensure_ascii=False)
         # cp tokenizer and model
-            
+
         # touch done
         done_file = os.path.join(output_path, 'done')
         with open(done_file, 'w') as f:
@@ -272,7 +272,7 @@ class WeightsQuantizer:
                 request = json.loads(request_json_str)
             except Exception:
                 continue
-            
+
             if not request:
                 continue
 
@@ -285,7 +285,7 @@ class WeightsQuantizer:
                 continue
             if not responses:
                 continue
-            
+
             response = responses[0]
 
             if request.get('messages'):
@@ -296,7 +296,7 @@ class WeightsQuantizer:
                 samples.append(token_ids)
 
         return samples
-                
+
     def _encode_ft_acccess_log_json_str(self, dataset: datasets.Dataset) -> List[torch.Tensor]:
         # DOTO(luoli.hn) 某些任务需要根据指定字段进行采样
         samples = []
@@ -310,15 +310,15 @@ class WeightsQuantizer:
             response = raw_data.get('response', {}).get('responses', None)
             if not request or not response:
                 continue
-            
+
             if 'messages' in request:
                 token_ids = self._encode_openai_request(request, response)
             else:
                 token_ids = self._encode_pipeline_request(response, request)
             if token_ids is not None:
                 samples.append(token_ids)
-        return samples            
-            
+        return samples
+
 
     def _encode_text(self, dataset: datasets.Dataset) -> List[torch.Tensor]:
         samples = []
@@ -356,7 +356,7 @@ class WeightsQuantizer:
         inference_request, remain_args = RequestExtractor(GenerateConfig()).extract_request(request)
         if inference_request.batch_infer or inference_request.num_return_sequences > 1:
             return None
-        
+
         if inference_request.generate_configs[0].request_format == RequestFormat.CHAT_API:
             response_str = response.get('response')[0]
             if isinstance(inference_request.input_texts[0], str):
@@ -367,11 +367,11 @@ class WeightsQuantizer:
         # 调用DefaultPlugin encode
         token_ids = DefaultPlugin.process_encode_func(inference_request.input_texts[0], inference_request.generate_configs[0].dict(), self.special_tokens, self.tokenizer)
         return torch.tensor(token_ids, dtype=torch.int)
-    
+
 def main():
     # 创建 ArgumentParser 对象
     parser = argparse.ArgumentParser(description='Quantize model weights.')
-    
+
     # 添加参数
     parser.add_argument('--pretrained_model_dir', type=str, help='Pretrained model path')
     parser.add_argument('--output_dir_base', type=str, help='Output base folder')
@@ -383,7 +383,7 @@ def main():
     parser.add_argument('--quant_config', type=str, help='Json desc the quantization config')
     parser.add_argument('--workdir_path', type=str, default = None, help='Json desc the quantization config')
     parser.add_argument('--sample_strategy', type=str, default='{}', help='Strategy for sample dateset will be used to quantize model')
-    
+
     # 解析参数
     args = parser.parse_args()
     weights_quantizer = WeightsQuantizer(args.pretrained_model_dir, args.model_type, args.workdir_path)
@@ -394,7 +394,7 @@ def main():
     sample_strategy = SampleStrategy(**json.loads(args.sample_strategy))
     ret_code = weights_quantizer.quantize(args.quant_type, json.loads(args.quant_config), dataset_params, sample_strategy, args.output_dir_base)
     exit(ret_code)
-    
+
 if __name__ == '__main__':
     # logging.config.dictConfig(LOGGING_CONFIG)
     main()
