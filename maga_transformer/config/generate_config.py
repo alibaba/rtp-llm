@@ -3,6 +3,7 @@ import hashlib
 from pydantic import BaseModel
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Union
+from maga_transformer.utils.util import check_with_info
 from maga_transformer.utils.check_util import *
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 
@@ -108,26 +109,45 @@ class GenerateConfig(BaseModel):
 
     def validate(self):
         try:
-            assert is_union_positive_integer(self.top_k)
-            assert is_union_positive_number(self.top_p)
-            assert is_union_positive_integer(self.min_new_tokens)
-            assert is_union_positive_number(self.repetition_penalty)
-            assert is_positive_integer(self.max_new_tokens)
-            assert is_positive_integer(self.num_beams)
-            assert is_positive_integer(self.num_return_sequences)
-            assert is_union_positive_number(self.temperature)            
-            assert check_optional(is_union_positive_integer, self.no_repeat_ngram_size)
-            assert check_optional(is_union_positive_integer, self.random_seed)
-            assert check_optional(is_union_positive_number, self.top_p_decay)
-            assert check_optional(is_union_positive_number, self.top_p_min)
-            assert check_optional(is_union_positive_integer, self.top_p_reset_ids)
-            assert check_optional(is_positive_integer, self.eos_token_id)
-            assert check_optional(is_positive_integer, self.pad_token_id)
-            assert check_optional(is_positive_integer, self.bos_token_id)
-            assert is_list_positive_integer_list(self.stop_words_list)
-            assert is_union_positive_integer(self.sp_advice_prompt_token_ids)
+            check_with_info(is_union_positive_integer(self.top_k), \
+                f"top_k {self.top_k} is wrong data type")
+            check_with_info(is_union_positive_number(self.top_p), \
+                f"top_p {self.top_p} is wrong data type")
+            check_with_info(is_union_positive_integer(self.min_new_tokens), \
+                f"min_new_tokens {self.min_new_tokens} is wrong data type")
+            check_with_info(is_union_positive_number(self.repetition_penalty), \
+                f"repetition_penalty {self.repetition_penalty} is wrong data type")
+            check_with_info(is_positive_integer(self.max_new_tokens), \
+                f"max_new_tokens {self.max_new_tokens} is wrong data type")
+            check_with_info(is_positive_integer(self.num_beams), \
+                f"num_beams {self.num_beams} is wrong data type")
+            check_with_info(is_positive_integer(self.num_return_sequences), \
+                f"num_return_sequences {self.num_return_sequences} is wrong data type")
+            check_with_info(is_union_positive_number(self.temperature), \
+                f"temperature {self.temperature} is wrong data type")            
+            check_with_info(check_optional(is_union_positive_integer, self.no_repeat_ngram_size), \
+                f"no_repeat_ngram_size {self.no_repeat_ngram_size} is wrong data type")
+            check_with_info(check_optional(is_union_positive_integer, self.random_seed), \
+                f"random_seed {self.random_seed} is wrong data type")
+            check_with_info(check_optional(is_union_positive_number, self.top_p_decay), 
+                f"top_p_decay {self.top_p_decay} is wrong data type")
+            check_with_info(check_optional(is_union_positive_number, self.top_p_min), \
+                f"top_p_min {self.top_p_min} is wrong data type")
+            check_with_info(check_optional(is_union_positive_integer, self.top_p_reset_ids), \
+                f"top_p_reset_ids {self.top_p_reset_ids} is wrong data type")
+            check_with_info(check_optional(is_positive_integer, self.eos_token_id), \
+                f"eos_token_id {self.eos_token_id} is wrong data type")
+            check_with_info(check_optional(is_positive_integer, self.pad_token_id), \
+                f"pad_token_id {self.pad_token_id} is wrong data type")
+            check_with_info(check_optional(is_positive_integer, self.bos_token_id), \
+                f"bos_token_id {self.bos_token_id} is wrong data type")
+            check_with_info(is_list_positive_integer_list(self.stop_words_list), \
+                f"stop_words_list {self.stop_words_list} is wrong data type")
+            check_with_info(is_union_positive_integer(self.sp_advice_prompt_token_ids), 
+                f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type")
             calculate_loss_list = [0, 1, 2]
-            assert self.calculate_loss in calculate_loss_list, \
-                f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"
-        except:
-            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "wrong data type in generate config")
+            check_with_info(self.calculate_loss in calculate_loss_list, \
+                f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list}," \
+                " but it's {self.calculate_loss}")
+        except Exception as e:
+            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))

@@ -65,8 +65,6 @@ class Llama(BaseModel):
         else:
             raise Exception("llama parameter from unkown source")
 
-
-
         return config
 
     @staticmethod
