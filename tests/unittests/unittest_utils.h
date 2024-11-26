@@ -189,8 +189,3 @@ template<typename T>
 bool isHalf() {
     return std::is_same<T, half>::value;
 }
-
-template<typename T>
-static inline void printMatrixWithLimit(T* ptr, int m, int k, int stride, bool is_device_ptr) {
-    printMatrix(ptr, std::min(PRINT_LIMIT, m), std::min(PRINT_LIMIT, k), stride, is_device_ptr);
-}

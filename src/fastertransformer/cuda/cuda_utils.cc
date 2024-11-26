@@ -21,329 +21,327 @@
 
 namespace fastertransformer {
 
-/* **************************** debug tools ********************************* */
-
-template<typename T>
-void print_to_file(
-    const T* result, const int size, const char* file, cudaStream_t stream, std::ios::openmode open_mode) {
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
-    printf("[INFO] file: %s with size %d.\n", file, size);
-    std::ofstream outFile(file, open_mode);
-    if (outFile) {
-        T* tmp = new T[size];
-        check_cuda_error(cudaMemcpyAsync(tmp, result, sizeof(T) * size, cudaMemcpyDeviceToHost, stream));
-        for (int i = 0; i < size; ++i) {
-            float val = (float)(tmp[i]);
-            outFile << val << std::endl;
-        }
-        delete[] tmp;
-    } else {
-        throw std::runtime_error(std::string("[FT][ERROR] Cannot open file: ") + file + "\n");
-    }
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
+static const char* _cudaGetErrorEnum(cudaError_t error) {
+    return cudaGetErrorString(error);
 }
 
-template void
-print_to_file(const float* result, const int size, const char* file, cudaStream_t stream, std::ios::openmode open_mode);
-template void
-print_to_file(const half* result, const int size, const char* file, cudaStream_t stream, std::ios::openmode open_mode);
-#ifdef ENABLE_BF16
-template void print_to_file(
-    const __nv_bfloat16* result, const int size, const char* file, cudaStream_t stream, std::ios::openmode open_mode);
-#endif
+static const char* _cudaGetErrorEnum(cublasStatus_t error) {
+    switch (error) {
+        case CUBLAS_STATUS_SUCCESS:
+            return "CUBLAS_STATUS_SUCCESS";
 
-template<typename T>
-void print_abs_mean(const T* buf, uint size, cudaStream_t stream, std::string name) {
-    if (buf == nullptr) {
-        FT_LOG_WARNING("It is an nullptr, skip!");
-        return;
+        case CUBLAS_STATUS_NOT_INITIALIZED:
+            return "CUBLAS_STATUS_NOT_INITIALIZED";
+
+        case CUBLAS_STATUS_ALLOC_FAILED:
+            return "CUBLAS_STATUS_ALLOC_FAILED";
+
+        case CUBLAS_STATUS_INVALID_VALUE:
+            return "CUBLAS_STATUS_INVALID_VALUE";
+
+        case CUBLAS_STATUS_ARCH_MISMATCH:
+            return "CUBLAS_STATUS_ARCH_MISMATCH";
+
+        case CUBLAS_STATUS_MAPPING_ERROR:
+            return "CUBLAS_STATUS_MAPPING_ERROR";
+
+        case CUBLAS_STATUS_EXECUTION_FAILED:
+            return "CUBLAS_STATUS_EXECUTION_FAILED";
+
+        case CUBLAS_STATUS_INTERNAL_ERROR:
+            return "CUBLAS_STATUS_INTERNAL_ERROR";
+
+        case CUBLAS_STATUS_NOT_SUPPORTED:
+            return "CUBLAS_STATUS_NOT_SUPPORTED";
+
+        case CUBLAS_STATUS_LICENSE_ERROR:
+            return "CUBLAS_STATUS_LICENSE_ERROR";
     }
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
-    T* h_tmp = new T[size];
-    cudaMemcpyAsync(h_tmp, buf, sizeof(T) * size, cudaMemcpyDeviceToHost, stream);
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
-    double   sum        = 0.0f;
-    uint64_t zero_count = 0;
-    float    max_val    = -1e10;
-    bool     find_inf   = false;
-    for (uint i = 0; i < size; i++) {
-        if (std::isinf((float)(h_tmp[i]))) {
-            find_inf = true;
-            continue;
-        }
-        sum += abs((double)h_tmp[i]);
-        if ((float)h_tmp[i] == 0.0f) {
-            zero_count++;
-        }
-        max_val = max_val > abs(float(h_tmp[i])) ? max_val : abs(float(h_tmp[i]));
-    }
-    printf("[INFO][FT] %20s size: %u, abs mean: %f, abs sum: %f, abs max: %f, find inf: %s",
-           name.c_str(),
-           size,
-           sum / size,
-           sum,
-           max_val,
-           find_inf ? "true" : "false");
-    std::cout << std::endl;
-    delete[] h_tmp;
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
+    return "<unknown>";
 }
 
-template void print_abs_mean(const float* buf, uint size, cudaStream_t stream, std::string name);
-template void print_abs_mean(const half* buf, uint size, cudaStream_t stream, std::string name);
-#ifdef ENABLE_BF16
-template void print_abs_mean(const __nv_bfloat16* buf, uint size, cudaStream_t stream, std::string name);
-#endif
-template void print_abs_mean(const int* buf, uint size, cudaStream_t stream, std::string name);
-template void print_abs_mean(const uint* buf, uint size, cudaStream_t stream, std::string name);
-template void print_abs_mean(const int8_t* buf, uint size, cudaStream_t stream, std::string name);
-#ifdef ENABLE_FP8
-template void print_abs_mean(const __nv_fp8_e4m3* buf, uint size, cudaStream_t stream, std::string name);
-#endif
-
 template<typename T>
-void print_to_screen(const T* result, const int size) {
-    if (result == nullptr) {
-        FT_LOG_WARNING("It is an nullptr, skip! \n");
-        return;
+void check(T result, const char* const file, int const line) {
+    if (result) {
+        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
+                     + std::to_string(line) + " \n");
+        fflush(stdout);
+        throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
+                                 + file + ":" + std::to_string(line) + " \n");
     }
-    T* tmp = reinterpret_cast<T*>(malloc(sizeof(T) * size));
-    check_cuda_error(cudaMemcpy(tmp, result, sizeof(T) * size, cudaMemcpyDeviceToHost));
-    for (int i = 0; i < size; ++i) {
-        printf("%d, %f\n", i, static_cast<float>(tmp[i]));
-    }
-    free(tmp);
 }
 
-template void print_to_screen(const float* result, const int size);
-template void print_to_screen(const half* result, const int size);
-#ifdef ENABLE_BF16
-template void print_to_screen(const __nv_bfloat16* result, const int size);
-#endif
-template void print_to_screen(const int* result, const int size);
-template void print_to_screen(const uint* result, const int size);
-template void print_to_screen(const bool* result, const int size);
-#ifdef ENABLE_FP8
-template void print_to_screen(const __nv_fp8_e4m3* result, const int size);
-#endif
+template void check<cudaError_t>(cudaError_t result, const char* const file, int const line);
+template void check<cublasStatus_t>(cublasStatus_t result, const char* const file, int const line);
 
-template<typename T>
-void printMatrix(T* ptr, int m, int k, int stride, bool is_device_ptr) {
-    T* tmp;
-    if (is_device_ptr) {
-        // k < stride ; stride = col-dimension.
-        tmp = reinterpret_cast<T*>(malloc(m * stride * sizeof(T)));
-        check_cuda_error(cudaMemcpy(tmp, ptr, sizeof(T) * m * stride, cudaMemcpyDeviceToHost));
+void syncAndCheck(const char* const file, int const line) {
+    if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         cudaDeviceSynchronize();
-    } else {
-        tmp = ptr;
+        cudaError_t result = cudaGetLastError();
+        check(result, file, line);
+        FT_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
+    }
+}
+
+int get_sm() {
+    static int sm = []() {
+        int device;
+        check_cuda_error(cudaGetDevice(&device));
+        cudaDeviceProp deviceProp;
+        check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
+        return deviceProp.major * 10 + deviceProp.minor;
+    }();
+    return sm;
+}
+
+bool is_sm70() {
+    static bool IS_SM70 = []() {
+        return get_sm() == 70;
+    }();
+    return IS_SM70;
+}
+
+bool is_sm8x() {
+    static bool IS_SM8X = []() {
+        return (get_sm() >= 80) && (get_sm() <= 89);
+    }();
+    return IS_SM8X;
+}
+
+bool is_sm90() {
+    static bool IS_SM90 = []() {
+        return get_sm() == 90;
+    }();
+    return IS_SM90;
+}
+
+float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaDeviceSynchronize();
+    cudaEventRecord(start, stream);
+
+    for (int64_t iter = 0; iter < timing_iterations; ++iter) {
+        operation(stream);
     }
 
-    for (int ii = -1; ii < m; ++ii) {
-        if (ii >= 0) {
-            printf("%02d ", ii);
-        } else {
-            printf("   ");
-        }
+    cudaEventRecord(stop, stream);
+    cudaEventSynchronize(stop);
+    float total_time_ms = 0;
+    cudaEventElapsedTime(&total_time_ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
-        for (int jj = 0; jj < k; jj += 1) {
-            if (ii >= 0) {
-                printf("%7.3f ", (float)tmp[ii * stride + jj]);
-            } else {
-                printf("%7d ", jj);
+    return total_time_ms / float(timing_iterations);
+}
+
+int getDevice() {
+    int current_dev_id = 0;
+    check_cuda_error(cudaGetDevice(&current_dev_id));
+    return current_dev_id;
+}
+
+int getDeviceCount() {
+    int count = 0;
+    check_cuda_error(cudaGetDeviceCount(&count));
+    return count;
+}
+
+std::string getDriverVersion() {
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+    size_t device_count = getDeviceCount();
+    if (device_count == 0) {
+        throw std::runtime_error("no cuda device");
+    }
+
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
+    }
+
+    char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+    check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
+    result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
+    }
+
+    char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
+    result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: " + std::to_string(result));
+    }
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
+    }
+    return std::string(driverVersion);
+}
+
+int getCudaVersion() {
+    int cuda_driver_version;
+    check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
+    return cuda_driver_version;
+}
+
+bool checkAllNVLinks(std::vector<size_t> device_ids) {
+    nvmlReturn_t result;
+    nvmlDevice_t deviceHandles[2];
+
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
+    }
+
+    for (size_t i = 0; i < device_ids.size(); i++) {
+        for (size_t j = i + 1; j < device_ids.size(); j++) {
+            size_t device_id1 = device_ids[i];
+            size_t device_id2 = device_ids[j];
+
+            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
+            }
+
+            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
+            }
+
+            nvmlGpuP2PStatus_t isActive;
+            result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API, Error code: " + std::to_string(result));
+            }
+            if (isActive != NVML_P2P_STATUS_OK) {
+                FT_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
+                return false;
             }
         }
-        printf("\n");
     }
-    if (is_device_ptr) {
-        free(tmp);
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
     }
-    fflush(stdout);
+    FT_LOG_INFO("All GPUs are connected via NVLink");
+    return true;
 }
 
-template void printMatrix(float* ptr, int m, int k, int stride, bool is_device_ptr);
-template void printMatrix(half* ptr, int m, int k, int stride, bool is_device_ptr);
-#ifdef ENABLE_BF16
-template void printMatrix(__nv_bfloat16* ptr, int m, int k, int stride, bool is_device_ptr);
-#endif
+bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
+    nvmlReturn_t result;
+    nvmlDevice_t deviceHandles[2];
 
-void printMatrix(unsigned long long* ptr, int m, int k, int stride, bool is_device_ptr) {
-    typedef unsigned long long T;
-    T*                         tmp;
-    if (is_device_ptr) {
-        // k < stride ; stride = col-dimension.
-        tmp = reinterpret_cast<T*>(malloc(m * stride * sizeof(T)));
-        check_cuda_error(cudaMemcpy(tmp, ptr, sizeof(T) * m * stride, cudaMemcpyDeviceToHost));
-        cudaDeviceSynchronize();
-    } else {
-        tmp = ptr;
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
     }
 
-    for (int ii = -1; ii < m; ++ii) {
-        if (ii >= 0) {
-            printf("%02d ", ii);
-        } else {
-            printf("   ");
-        }
+    for (size_t i = 0; i < device_ids.size(); i++) {
+        for (size_t j = i + 1; j < device_ids.size(); j++) {
+            size_t device_id1 = device_ids[i];
+            size_t device_id2 = device_ids[j];
 
-        for (int jj = 0; jj < k; jj += 1) {
-            if (ii >= 0) {
-                printf("%4llu ", tmp[ii * stride + jj]);
-            } else {
-                printf("%4d ", jj);
+            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
+            }
+
+            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
+            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
+            }
+
+            nvmlGpuTopologyLevel_t topo;
+            result = nvmlDeviceGetTopologyCommonAncestor(deviceHandles[0], deviceHandles[1], &topo);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API, Error code: " + std::to_string(result));
+            }
+            if (topo == NVML_TOPOLOGY_SYSTEM) {
+                FT_LOG_INFO("GPU %d and GPU %d are not on same numa node", device_id1, device_id2);
+                return false;
             }
         }
-        printf("\n");
     }
-    if (is_device_ptr) {
-        free(tmp);
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
     }
-    fflush(stdout);
+    FT_LOG_INFO("All GPUs are on same numa node");
+    return true;
 }
 
-void printMatrix(int* ptr, int m, int k, int stride, bool is_device_ptr) {
-    typedef int T;
-    T*          tmp;
-    if (is_device_ptr) {
-        // k < stride ; stride = col-dimension.
-        tmp = reinterpret_cast<T*>(malloc(m * stride * sizeof(T)));
-        check_cuda_error(cudaMemcpy(tmp, ptr, sizeof(T) * m * stride, cudaMemcpyDeviceToHost));
-        cudaDeviceSynchronize();
-    } else {
-        tmp = ptr;
-    }
-
-    for (int ii = -1; ii < m; ++ii) {
-        if (ii >= 0) {
-            printf("%02d ", ii);
-        } else {
-            printf("   ");
-        }
-
-        for (int jj = 0; jj < k; jj += 1) {
-            if (ii >= 0) {
-                printf("%4d ", tmp[ii * stride + jj]);
-            } else {
-                printf("%4d ", jj);
-            }
-        }
-        printf("\n");
-    }
-    if (is_device_ptr) {
-        free(tmp);
-    }
-    fflush(stdout);
+int getVisibleDeviceNum() {
+    int device_count;
+    check_cuda_error(cudaGetDeviceCount(&device_count));
+    return device_count;
 }
 
-void printMatrix(size_t* ptr, int m, int k, int stride, bool is_device_ptr) {
-    typedef size_t T;
-    T*             tmp;
-    if (is_device_ptr) {
-        // k < stride ; stride = col-dimension.
-        tmp = reinterpret_cast<T*>(malloc(m * stride * sizeof(T)));
-        check_cuda_error(cudaMemcpy(tmp, ptr, sizeof(T) * m * stride, cudaMemcpyDeviceToHost));
-        cudaDeviceSynchronize();
-    } else {
-        tmp = ptr;
-    }
+std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm)
+{
+    if (useUvm)
+    {
+        size_t freeSysMem, totalSysMem;
+#ifndef _WIN32 // Linux
+        struct sysinfo info;
+        sysinfo(&info);
+        totalSysMem = info.totalram * info.mem_unit;
+        freeSysMem = info.freeram * info.mem_unit;
+#else  // Windows
+        MEMORYSTATUSEX memInfo;
+        memInfo.dwLength = sizeof(memInfo);
+        GlobalMemoryStatusEx(&memInfo);
+        totalSysMem = memInfo.ullTotalPhys;
+        freeSysMem = memInfo.ullAvailPhys;
+#endif // WIN32
 
-    for (int ii = -1; ii < m; ++ii) {
-        if (ii >= 0) {
-            printf("%02d ", ii);
-        } else {
-            printf("   ");
-        }
-
-        for (int jj = 0; jj < k; jj += 1) {
-            if (ii >= 0) {
-                printf("%4ld ", tmp[ii * stride + jj]);
-            } else {
-                printf("%4d ", jj);
-            }
-        }
-        printf("\n");
+        FT_LOG_INFO("Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+            ((double) totalSysMem / 1e9), ((double) freeSysMem / 1e9));
+        return {freeSysMem, totalSysMem};
     }
-    if (is_device_ptr) {
-        free(tmp);
+    else
+    {
+        size_t free, total;
+        check_cuda_error(cudaMemGetInfo(&free, &total));
+        FT_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
+            ((double) total / 1e9), ((double) free / 1e9));
+        return {free, total};
     }
-    fflush(stdout);
 }
 
-template<typename T>
-void check_max_val(const T* result, const int size) {
-    T* tmp = new T[size];
-    cudaMemcpy(tmp, result, sizeof(T) * size, cudaMemcpyDeviceToHost);
-    float max_val = -100000;
-    for (int i = 0; i < size; i++) {
-        float val = static_cast<float>(tmp[i]);
-        if (val > max_val) {
-            max_val = val;
-        }
-    }
-    delete tmp;
-    printf("[INFO][CUDA] addr %p max val: %f \n", result, max_val);
-}
+bool shared_mem_sufficient(int smem_size) {
+    //
+    // Determine SMEM requirements and waive if not satisfied
+    //
+    cudaDeviceProp properties;
+    int            device_idx;
+    check_cuda_error(cudaGetDevice(&device_idx));
+    check_cuda_error(cudaGetDeviceProperties(&properties, device_idx));
 
-template void check_max_val(const float* result, const int size);
-template void check_max_val(const half* result, const int size);
-#ifdef ENABLE_BF16
-template void check_max_val(const __nv_bfloat16* result, const int size);
-#endif
-
-template<typename T>
-void check_abs_mean_val(const T* result, const int size) {
-    T* tmp = new T[size];
-    cudaMemcpy(tmp, result, sizeof(T) * size, cudaMemcpyDeviceToHost);
-    float sum = 0.0f;
-    for (int i = 0; i < size; i++) {
-        sum += abs(static_cast<float>(tmp[i]));
-    }
-    delete tmp;
-    printf("[INFO][CUDA] addr %p abs mean val: %f \n", result, sum / size);
-}
-
-template void check_abs_mean_val(const float* result, const int size);
-template void check_abs_mean_val(const half* result, const int size);
-#ifdef ENABLE_BF16
-template void check_abs_mean_val(const __nv_bfloat16* result, const int size);
-#endif
-
-/* ***************************** common utils ****************************** */
-
-cudaError_t getSetDevice(int i_device, int* o_device) {
-    int         current_dev_id = 0;
-    cudaError_t err            = cudaSuccess;
-
-    if (o_device != NULL) {
-        err = cudaGetDevice(&current_dev_id);
-        if (err != cudaSuccess) {
-            return err;
-        }
-        if (current_dev_id == i_device) {
-            *o_device = i_device;
-        } else {
-            err = cudaSetDevice(i_device);
-            if (err != cudaSuccess) {
-                return err;
-            }
-            *o_device = current_dev_id;
-        }
-    } else {
-        err = cudaSetDevice(i_device);
-        if (err != cudaSuccess) {
-            return err;
-        }
+    if (int(properties.sharedMemPerMultiprocessor) < smem_size) {
+        return false;
     }
 
-    return cudaSuccess;
+    return true;
 }
 
+bool should_print() {
+    static char* tp_rank = std::getenv("WORLD_RANK");
+    if (tp_rank && (strcmp(tp_rank, "0") != 0)) {
+        return false;
+    }
 
+    return rtp_llm::Logger::getEngineLogger().isTraceMode();
+}
 
 /*
   b = batch_szie
@@ -725,144 +723,5 @@ DECLARE_PRINT_TYPE(int64_t);
 #ifdef ENABLE_FP8
 DECLARE_PRINT_TYPE(__nv_fp8_e4m3);
 #endif
-
-
-std::string getDriverVersion() {
-    nvmlReturn_t result;
-    nvmlDevice_t device;
-    size_t device_count = getDeviceCount();
-    if (device_count == 0) {
-        throw std::runtime_error("no cuda device");
-    }
-
-    result = nvmlInit();
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
-    }
-
-    char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-    check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
-    result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
-    }
-
-    char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
-    result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: " + std::to_string(result));
-    }
-    result = nvmlShutdown();
-    if (NVML_SUCCESS != result) {
-        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
-    }
-    return std::string(driverVersion);
-}
-
-int getCudaVersion() {
-    int cuda_driver_version;
-    check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
-    return cuda_driver_version;
-}
-
-bool checkAllNVLinks(std::vector<size_t> device_ids) {
-    nvmlReturn_t result;
-    nvmlDevice_t deviceHandles[2];
-
-    result = nvmlInit();
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
-    }
-
-    for (size_t i = 0; i < device_ids.size(); i++) {
-        for (size_t j = i + 1; j < device_ids.size(); j++) {
-            size_t device_id1 = device_ids[i];
-            size_t device_id2 = device_ids[j];
-
-            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
-            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
-            }
-
-            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
-            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
-            }
-
-            nvmlGpuP2PStatus_t isActive;
-            result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API, Error code: " + std::to_string(result));
-            }
-            if (isActive != NVML_P2P_STATUS_OK) {
-                FT_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
-                return false;
-            }
-        }
-    }
-    result = nvmlShutdown();
-    if (NVML_SUCCESS != result) {
-        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
-    }
-    FT_LOG_INFO("All GPUs are connected via NVLink");
-    return true;
-}
-
-bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
-    nvmlReturn_t result;
-    nvmlDevice_t deviceHandles[2];
-
-    result = nvmlInit();
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
-    }
-
-    for (size_t i = 0; i < device_ids.size(); i++) {
-        for (size_t j = i + 1; j < device_ids.size(); j++) {
-            size_t device_id1 = device_ids[i];
-            size_t device_id2 = device_ids[j];
-            
-            char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
-            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
-            }
-
-            char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
-            result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
-            }
-
-            nvmlGpuTopologyLevel_t topo;
-            result = nvmlDeviceGetTopologyCommonAncestor(deviceHandles[0], deviceHandles[1], &topo);
-            if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API, Error code: " + std::to_string(result));
-            }
-            if (topo == NVML_TOPOLOGY_SYSTEM) {
-                FT_LOG_INFO("GPU %d and GPU %d are not on same numa node", device_id1, device_id2);
-                return false;
-            }
-        }
-    }
-    result = nvmlShutdown();
-    if (NVML_SUCCESS != result) {
-        FT_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
-    }
-    FT_LOG_INFO("All GPUs are on same numa node");
-    return true;
-}
-
-int getVisibleDeviceNum() {
-    int device_count;
-    check_cuda_error(cudaGetDeviceCount(&device_count));
-    return device_count;
-}
 
 }  // namespace fastertransformer

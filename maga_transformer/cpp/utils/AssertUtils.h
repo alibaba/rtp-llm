@@ -10,11 +10,6 @@
 
 namespace rtp_llm {
 
-#define PRINT_FUNC_NAME_()                                                                                             \
-    do {                                                                                                               \
-        std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
-    } while (0)
-
 [[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
@@ -49,5 +44,3 @@ namespace rtp_llm {
 #define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")
 
 #define FT_FAIL(info, ...) rtp_llm::myAssert(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
-
-

@@ -51,8 +51,6 @@
 
 namespace fastertransformer {
 
-#define MAX_CONFIG_NUM 20
-#define COL32_ 32
 // workspace for cublas gemm : 32MB
 #define CUBLAS_WORKSPACE_SIZE 33554432
 
@@ -133,222 +131,6 @@ enum class OperationType {
     FP8
 };
 
-/* **************************** debug tools ********************************* */
-static const char* _cudaGetErrorEnum(cudaError_t error) {
-    return cudaGetErrorString(error);
-}
-
-static const char* _cudaGetErrorEnum(cublasStatus_t error) {
-    switch (error) {
-        case CUBLAS_STATUS_SUCCESS:
-            return "CUBLAS_STATUS_SUCCESS";
-
-        case CUBLAS_STATUS_NOT_INITIALIZED:
-            return "CUBLAS_STATUS_NOT_INITIALIZED";
-
-        case CUBLAS_STATUS_ALLOC_FAILED:
-            return "CUBLAS_STATUS_ALLOC_FAILED";
-
-        case CUBLAS_STATUS_INVALID_VALUE:
-            return "CUBLAS_STATUS_INVALID_VALUE";
-
-        case CUBLAS_STATUS_ARCH_MISMATCH:
-            return "CUBLAS_STATUS_ARCH_MISMATCH";
-
-        case CUBLAS_STATUS_MAPPING_ERROR:
-            return "CUBLAS_STATUS_MAPPING_ERROR";
-
-        case CUBLAS_STATUS_EXECUTION_FAILED:
-            return "CUBLAS_STATUS_EXECUTION_FAILED";
-
-        case CUBLAS_STATUS_INTERNAL_ERROR:
-            return "CUBLAS_STATUS_INTERNAL_ERROR";
-
-        case CUBLAS_STATUS_NOT_SUPPORTED:
-            return "CUBLAS_STATUS_NOT_SUPPORTED";
-
-        case CUBLAS_STATUS_LICENSE_ERROR:
-            return "CUBLAS_STATUS_LICENSE_ERROR";
-    }
-    return "<unknown>";
-}
-
-template<typename T>
-void check(T result, const char* const file, int const line) {
-    if (result) {
-        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
-                     + std::to_string(line) + " \n");
-        fflush(stdout);
-        throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
-    }
-}
-
-#define check_cuda_error(val) fastertransformer::check((val), __FILE__, __LINE__)
-
-inline void syncAndCheck(const char* const file, int const line) {
-    if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
-        cudaDeviceSynchronize();
-        cudaError_t result = cudaGetLastError();
-	check(result, file, line);
-        FT_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
-    }
-}
-
-#define sync_check_cuda_error() fastertransformer::syncAndCheck(__FILE__, __LINE__)
-
-inline int get_sm() {
-    static int sm = []() {
-        int device;
-        check_cuda_error(cudaGetDevice(&device));
-        cudaDeviceProp deviceProp;
-        check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
-        return deviceProp.major * 10 + deviceProp.minor;
-    }();
-    return sm;
-}
-
-inline bool is_sm70() {
-    static bool IS_SM70 = []() {
-        return get_sm() == 70;
-    }();
-    return IS_SM70;
-}
-
-inline bool is_sm8x() {
-    static bool IS_SM8X = []() {
-        return (get_sm() >= 80) && (get_sm() <= 89);
-    }();
-    return IS_SM8X;
-}
-
-inline bool is_sm90() {
-    static bool IS_SM90 = []() {
-        return get_sm() == 90;
-    }();
-    return IS_SM90;
-}
-
-#define checkCUDNN(expression)                                                                                         \
-    {                                                                                                                  \
-        cudnnStatus_t status = (expression);                                                                           \
-        if (status != CUDNN_STATUS_SUCCESS) {                                                                          \
-            std::cerr << "Error on file " << __FILE__ << " line " << __LINE__ << ": " << cudnnGetErrorString(status)   \
-                      << std::endl;                                                                                    \
-            std::exit(EXIT_FAILURE);                                                                                   \
-        }                                                                                                              \
-    }
-
-template<typename T>
-void print_to_file(const T*           result,
-                   const int          size,
-                   const char*        file,
-                   cudaStream_t       stream    = 0,
-                   std::ios::openmode open_mode = std::ios::out);
-
-template<typename T>
-void print_abs_mean(const T* buf, uint size, cudaStream_t stream, std::string name = "");
-
-template<typename T>
-void print_to_screen(const T* result, const int size);
-
-template<typename T>
-void printMatrix(T* ptr, int m, int k, int stride, bool is_device_ptr);
-
-void printMatrix(unsigned long long* ptr, int m, int k, int stride, bool is_device_ptr);
-void printMatrix(int* ptr, int m, int k, int stride, bool is_device_ptr);
-void printMatrix(size_t* ptr, int m, int k, int stride, bool is_device_ptr);
-
-template<typename T>
-void check_max_val(const T* result, const int size);
-
-template<typename T>
-void check_abs_mean_val(const T* result, const int size);
-
-#define PRINT_FUNC_NAME_()                                                                                             \
-    do {                                                                                                               \
-        std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
-    } while (0)
-
-/*************Time Handling**************/
-class CudaTimer {
-private:
-    cudaEvent_t  event_start_;
-    cudaEvent_t  event_stop_;
-    cudaStream_t stream_;
-
-public:
-    explicit CudaTimer(cudaStream_t stream = 0) {
-        stream_ = stream;
-    }
-    void start() {
-        check_cuda_error(cudaEventCreate(&event_start_));
-        check_cuda_error(cudaEventCreate(&event_stop_));
-        check_cuda_error(cudaEventRecord(event_start_, stream_));
-    }
-    float stop() {
-        float time;
-        check_cuda_error(cudaEventRecord(event_stop_, stream_));
-        check_cuda_error(cudaEventSynchronize(event_stop_));
-        check_cuda_error(cudaEventElapsedTime(&time, event_start_, event_stop_));
-        check_cuda_error(cudaEventDestroy(event_start_));
-        check_cuda_error(cudaEventDestroy(event_stop_));
-        return time;
-    }
-    ~CudaTimer() {}
-};
-
-static double diffTime(timeval start, timeval end) {
-    return (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) * 0.001;
-}
-
-/* ***************************** common utils ****************************** */
-
-inline void print_mem_usage(std::string time = "after allocation") {
-    size_t free_bytes, total_bytes;
-    check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
-    float free  = static_cast<float>(free_bytes) / 1024.0 / 1024.0 / 1024.0;
-    float total = static_cast<float>(total_bytes) / 1024.0 / 1024.0 / 1024.0;
-    float used  = total - free;
-    FT_LOG_INFO("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
-}
-
-inline int getMaxSharedMemoryPerBlock() {
-    int device{-1};
-    check_cuda_error(cudaGetDevice(&device));
-    int max_shared_memory_size = 0;
-    check_cuda_error(cudaDeviceGetAttribute(&max_shared_memory_size, cudaDevAttrMaxSharedMemoryPerBlock, device));
-    return max_shared_memory_size;
-}
-
-inline std::string getDeviceName() {
-    int device{-1};
-    check_cuda_error(cudaGetDevice(&device));
-    cudaDeviceProp props;
-    check_cuda_error(cudaGetDeviceProperties(&props, device));
-    return std::string(props.name);
-}
-
-inline float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream) {
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaDeviceSynchronize();
-    cudaEventRecord(start, stream);
-
-    for (int64_t iter = 0; iter < timing_iterations; ++iter) {
-        operation(stream);
-    }
-
-    cudaEventRecord(stop, stream);
-    cudaEventSynchronize(stop);
-    float total_time_ms = 0;
-    cudaEventElapsedTime(&total_time_ms, start, stop);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-
-    return total_time_ms / float(timing_iterations);
-}
 
 inline int div_up(int a, int n) {
     return (a + n - 1) / n;
@@ -361,64 +143,46 @@ auto constexpr ceilDiv(T numerator, U denominator)
     return (numerator + denominator - 1) / denominator;
 }
 
-cudaError_t getSetDevice(int i_device, int* o_device = NULL);
-
-inline int getDevice() {
-    int current_dev_id = 0;
-    check_cuda_error(cudaGetDevice(&current_dev_id));
-    return current_dev_id;
+inline size_t pad_to_multiple_of_16(const size_t& input) {
+    static constexpr int ALIGNMENT = 16;
+    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
 }
 
-inline int getDeviceCount() {
-    int count = 0;
-    check_cuda_error(cudaGetDeviceCount(&count));
-    return count;
-}
+template<typename T>
+void check(T result, const char* const file, int const line);
+#define check_cuda_error(val) fastertransformer::check((val), __FILE__, __LINE__)
 
-/// Get the memory info
-/// \return The free and total amount of memory in bytes
-inline std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm)
-{
-    if (useUvm)
-    {
-        size_t freeSysMem, totalSysMem;
-#ifndef _WIN32 // Linux
-        struct sysinfo info;
-        sysinfo(&info);
-        totalSysMem = info.totalram * info.mem_unit;
-        freeSysMem = info.freeram * info.mem_unit;
-#else  // Windows
-        MEMORYSTATUSEX memInfo;
-        memInfo.dwLength = sizeof(memInfo);
-        GlobalMemoryStatusEx(&memInfo);
-        totalSysMem = memInfo.ullTotalPhys;
-        freeSysMem = memInfo.ullAvailPhys;
-#endif // WIN32
+void syncAndCheck(const char* const file, int const line);
+#define sync_check_cuda_error() fastertransformer::syncAndCheck(__FILE__, __LINE__)
 
-        FT_LOG_INFO("Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-            ((double) totalSysMem / 1e9), ((double) freeSysMem / 1e9));
-        return {freeSysMem, totalSysMem};
-    }
-    else
-    {
-        size_t free, total;
-        check_cuda_error(cudaMemGetInfo(&free, &total));
-        FT_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-            ((double) total / 1e9), ((double) free / 1e9));
-        return {free, total};
-    }
-}
+int get_sm();
+bool is_sm70();
+bool is_sm8x();
+bool is_sm90();
 
+float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream);
+int getDevice();
+int getDeviceCount();
+std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm);
+bool shared_mem_sufficient(int smem_size);
 std::string getDriverVersion();
-
 int getCudaVersion();
-
 bool checkAllNVLinks(std::vector<size_t> device_ids);
-
 bool checkOnSameNumaNodes(std::vector<size_t> device_ids);
-
 int getVisibleDeviceNum();
 
+
+template<typename T>
+T getCudaValue(const T* ptr, int index) {
+    T tmp;
+    check_cuda_error(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
+    return tmp;
+}
+
+template<typename T>
+void setCudaValue(T* ptr, int index, T value) {
+    check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
+}
 
 template<typename T>
 CublasDataType getCublasDataType() {
@@ -675,103 +439,7 @@ inline __device__ float2 operator*(float2 a, float  b) { return make_float2(a.x 
 inline __device__ float2 operator+(float2 a, float  b) { return make_float2(a.x + b, a.y + b); }
 inline __device__ float2 operator-(float2 a, float  b) { return make_float2(a.x - b, a.y - b); }
 
-// clang-format on
-
-template<typename T1, typename T2>
-void compareTwoTensor(
-    const T1* pred, const T2* ref, const int size, const int print_size = 0, const std::string filename = "") {
-    T1* h_pred = new T1[size];
-    T2* h_ref  = new T2[size];
-    check_cuda_error(cudaMemcpy(h_pred, pred, size * sizeof(T1), cudaMemcpyDeviceToHost));
-    check_cuda_error(cudaMemcpy(h_ref, ref, size * sizeof(T2), cudaMemcpyDeviceToHost));
-
-    FILE* fd = nullptr;
-    if (filename != "") {
-        fd = fopen(filename.c_str(), "w");
-        fprintf(fd, "| %10s | %10s | %10s | %10s | \n", "pred", "ref", "abs_diff", "rel_diff(%)");
-    }
-
-    if (print_size > 0) {
-        FT_LOG_INFO("  id |   pred  |   ref   |abs diff | rel diff (%) |");
-    }
-    float mean_abs_diff = 0.0f;
-    float mean_rel_diff = 0.0f;
-    int   count         = 0;
-    for (int i = 0; i < size; i++) {
-        if (i < print_size) {
-            FT_LOG_INFO("%4d | % 6.4f | % 6.4f | % 6.4f | % 7.4f |",
-                        i,
-                        (float)h_pred[i],
-                        (float)h_ref[i],
-                        abs((float)h_pred[i] - (float)h_ref[i]),
-                        abs((float)h_pred[i] - (float)h_ref[i]) / (abs((float)h_ref[i]) + 1e-6f) * 100.f);
-        }
-        if ((float)h_pred[i] == 0) {
-            continue;
-        }
-        count += 1;
-        mean_abs_diff += abs((float)h_pred[i] - (float)h_ref[i]);
-        mean_rel_diff += abs((float)h_pred[i] - (float)h_ref[i]) / (abs((float)h_ref[i]) + 1e-6f) * 100.f;
-
-        if (fd != nullptr) {
-            fprintf(fd,
-                    "| %10.5f | %10.5f | %10.5f | %11.5f |\n",
-                    (float)h_pred[i],
-                    (float)h_ref[i],
-                    abs((float)h_pred[i] - (float)h_ref[i]),
-                    abs((float)h_pred[i] - (float)h_ref[i]) / (abs((float)h_ref[i]) + 1e-6f) * 100.f);
-        }
-    }
-    mean_abs_diff = mean_abs_diff / (float)count;
-    mean_rel_diff = mean_rel_diff / (float)count;
-    FT_LOG_INFO("mean_abs_diff: % 6.4f, mean_rel_diff: % 6.4f (%%)", mean_abs_diff, mean_rel_diff);
-
-    if (fd != nullptr) {
-        fprintf(fd, "mean_abs_diff: % 6.4f, mean_rel_diff: % 6.4f (%%)", mean_abs_diff, mean_rel_diff);
-        fclose(fd);
-    }
-    delete[] h_pred;
-    delete[] h_ref;
-}
-
-static inline size_t pad_to_multiple_of_16(const size_t& input) {
-    static constexpr int ALIGNMENT = 16;
-    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
-}
-
-static inline bool shared_mem_sufficient(int smem_size) {
-    //
-    // Determine SMEM requirements and waive if not satisfied
-    //
-    cudaDeviceProp properties;
-    int            device_idx;
-    cudaError_t    result = cudaGetDevice(&device_idx);
-
-    if (result != cudaSuccess) {
-        throw std::runtime_error("cudaGetDevice() API call failed.");
-    }
-
-    result = cudaGetDeviceProperties(&properties, device_idx);
-
-    if (result != cudaSuccess) {
-        throw std::runtime_error("cudaGetDeviceProperties() failed");
-    }
-
-    if (int(properties.sharedMemPerMultiprocessor) < smem_size) {
-        return false;
-    }
-
-    return true;
-}
-
-static inline bool should_print() {
-    static char* tp_rank = std::getenv("WORLD_RANK");
-    if (tp_rank && (strcmp(tp_rank, "0") != 0)) {
-        return false;
-    }
-
-    return rtp_llm::Logger::getEngineLogger().isTraceMode();
-}
+bool should_print();
 
 template<typename T>
 void print_bshd(const int   layer_id,
@@ -834,19 +502,5 @@ void print_kv_cache(const int   layer_id,
                     int         dim6,
                     bool        print_all     = true,
                     bool        is_device_ptr = true);
-
-template<typename T>
-T getCudaValue(const T* ptr, int index) {
-    T tmp;
-    check_cuda_error(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
-    return tmp;
-}
-
-template<typename T>
-void setCudaValue(T* ptr, int index, T value) {
-    check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
-}
-
-/* ************************** end of common utils ************************** */
 
 }  // namespace fastertransformer
