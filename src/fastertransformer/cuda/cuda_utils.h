@@ -174,7 +174,7 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error) {
 }
 
 template<typename T>
-void check(T result, char const* const func, const char* const file, int const line) {
+void check(T result, const char* const file, int const line) {
     if (result) {
         FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
                      + std::to_string(line) + " \n");
@@ -184,31 +184,14 @@ void check(T result, char const* const func, const char* const file, int const l
     }
 }
 
-#define check_cuda_error(val) fastertransformer::check((val), #val, __FILE__, __LINE__)
-#define check_cuda_error_2(val, file, line) fastertransformer::check((val), #val, file, line)
+#define check_cuda_error(val) fastertransformer::check((val), __FILE__, __LINE__)
 
 inline void syncAndCheck(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         cudaDeviceSynchronize();
         cudaError_t result = cudaGetLastError();
-        if (result) {
-            std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file
-                              + ":" + std::to_string(line) + " \n";
-            FT_LOG_INFO(msg);
-            fflush(stdout);
-            throw std::runtime_error(msg);
-        }
+	check(result, file, line);
         FT_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
-    }
-}
-
-inline void CheckError(const char* const file, int const line) {
-    cudaError_t result = cudaGetLastError();
-    if (result) {
-        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
-                     + std::to_string(line) + " \n");
-        fflush(stdout);
-        abort();
     }
 }
 
