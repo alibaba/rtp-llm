@@ -372,10 +372,13 @@ class GptInitModelParameters:
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
         # Update stop_words_str and stop_word_ids from ENV
-        if os.environ.get('STOP_WORDS_STR', None) is not None:
-            self.special_tokens.stop_words_str = self.special_tokens.stop_words_str + json.loads(os.environ['STOP_WORDS_STR'])
-        elif os.environ.get('FORCE_STOP_WORDS_STR', None):
-            self.special_tokens.stop_words_str = json.loads(os.environ['FORCE_STOP_WORDS_STR'])
+        stop_words_str = os.environ.get('STOP_WORDS_STR', None)
+        stop_words_str_list = json.loads(stop_words_str) if stop_words_str else []
+        force_stop = os.environ.get('FORCE_STOP', None)
+        if force_stop and str_to_bool(force_stop):
+            self.special_tokens.stop_words_str = stop_words_str_list
+        else:
+            self.special_tokens.stop_words_str = self.special_tokens.stop_words_str + stop_words_str_list
 
         if os.environ.get('STOP_WORDS_LIST', None) is not None:
             self.special_tokens.stop_words_list = self.special_tokens.stop_words_list + json.loads(os.environ['STOP_WORDS_LIST'])
