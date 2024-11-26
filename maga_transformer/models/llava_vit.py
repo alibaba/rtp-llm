@@ -97,11 +97,12 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
         return image_features
     
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
+        vision_tower_name = os.environ.get('EXTRA_DATA_PATH', '')
         vision_tower = os.environ.get('LOCAL_EXTRA_DATA_PATH', None)
         if vision_tower is None:
             vision_tower = vision_tower_cfg['vit_tower_path']
         is_absolute_path_exists = os.path.exists(vision_tower)
-        if "siglip" in vision_tower:
+        if "siglip" in vision_tower_name:
             return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
         elif is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
             return CLIPVisionTower(vision_tower,
