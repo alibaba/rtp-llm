@@ -176,4 +176,70 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_NEAR(2.25525, *(torch::mean(ft::Buffer2torchTensor(*loss4)).exp().data_ptr<float>()), 0.0001);
 }
 
+
+TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
+    ResourceContext  resource_context;
+    GptInitParameter param;
+    param.max_seq_len_   = 2048;
+    param.vocab_size_    = 2048;
+    param.num_layers_    = 2;
+    param.kv_cache_data_type_ = DataType::TYPE_INT8;
+    param.is_multimodal_ = true;
+    NormalBatchStreamProcessor     processor(param, 0, 0, 0);
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = createBuffer<int32_t>({5}, {1, -1, -1, -1, 2}, AllocationType::HOST);
+    query1->generate_config               = make_shared<GenerateConfig>();
+    query1->mm_locs                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 0, 0, 0, 1}, AllocationType::HOST);
+    query1->multimodal_features           = {torch::rand({3, 10}, torch::kFloat16)};
+    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    stream1->setIsContextStream(true);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = createBuffer<int32_t>({3}, {3, 4, 5}, AllocationType::HOST);
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, param, resource_context, nullptr);
+    stream2->setIsContextStream(true);
+
+    std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
+    query3->input_ids                     = createBuffer<int32_t>({5}, {6, 7, -1, -1, 8}, AllocationType::HOST);
+    query3->generate_config               = make_shared<GenerateConfig>();
+    query3->mm_locs                       = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
+    query3->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 1, 0, 0, 1}, AllocationType::HOST);
+    query3->multimodal_features           = {torch::rand({2, 10}, torch::kFloat16)};
+    GenerateStreamPtr     stream3         = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    stream3->setIsContextStream(true);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+    streams.emplace_back(stream3);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+
+    {
+        StreamGroups stream_groups(streams);
+
+        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        EXPECT_TRUE(merge_input_status.ok());
+        
+        auto& model_input = merge_input_status.value();
+        vector<int> combo_tokens     = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
+        vector<int> input_lengths    = {5, 3, 5};
+        vector<int> text_tokens_mask = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
+        vector<int> mm_features_locs = {1, 10};
+
+        EXPECT_EQ(combo_tokens, buffer2vector<int>(*model_input.combo_tokens));
+        EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
+        EXPECT_EQ(text_tokens_mask, buffer2vector<int>(*model_input.text_tokens_mask));
+        EXPECT_EQ(mm_features_locs, buffer2vector<int>(*model_input.mm_features_locs));
+        
+        EXPECT_EQ(model_input.multimodal_features.value().size(), 2);
+        EXPECT_EQ(model_input.multimodal_features.value()[0]->size(), 3 * 10);
+        EXPECT_EQ(model_input.multimodal_features.value()[1]->size(), 2 * 10);
+    }
+}
+
 }  // namespace rtp_llm

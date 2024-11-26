@@ -157,15 +157,17 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (has_multimodal_input) {
                 std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
                 ft::BufferPtr mm_locs = stream->multimodalLocations();
-                for (int i = 0;i < mm_locs->size(); ++i) {
-                    mm_features_locs[mm_feature_index] = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
-                    mm_feature_index++;
+                if (mm_locs != nullptr) {
+                    for (int i = 0;i < mm_locs->size(); ++i) {
+                        mm_features_locs[mm_feature_index] = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
+                        mm_feature_index++;
+                    }
+                    for (auto& mm_feature: mm_features) {
+                        gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
+                    }
+                    auto text_token_mask = stream->textTokensMask();
+                    memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
                 }
-                for (auto& mm_feature: mm_features) {
-                    gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
-                }
-                auto text_token_mask = stream->textTokensMask();
-                memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
             } 
 
             if (need_cal_position_id) {
