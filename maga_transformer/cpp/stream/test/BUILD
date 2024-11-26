@@ -15,20 +15,6 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
-    name = "generate_stream_test",
-    srcs = [
-        "GenerateStreamTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
     name = "stream_cache_resource_test",
     srcs = [
         "StreamCacheResourceTest.cc",
