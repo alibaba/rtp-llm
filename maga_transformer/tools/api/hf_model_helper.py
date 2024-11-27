@@ -105,25 +105,13 @@ class HfStyleModelInfo:
 
     @staticmethod
     def is_from_hf(model_path: str) -> bool:
-        return model_path.startswith(HfStyleModelInfo.HF_URI_PREFIX)
-
+        return model_path.startswith(HfStyleModelInfo.HF_URI_PREFIX) or not model_path.startswith(("oss:", "http:", "https:" "dfs:", "hdfs:", "/"))
     @staticmethod
     def _get_repo_from_hf_link(model_link: str) -> str:
         return model_link.replace(HfStyleModelInfo.HF_URI_PREFIX, "")
 
 def get_hf_model_info(model_path_or_name: str, revision: Optional[str] = None):
     info = HfStyleModelInfo(model_path_or_name, revision)
-    # if os.path.exists(model_path_or_name):
-    #     meta_info_file = None
-    #     if os.path.exists(os.path.join(model_path_or_name, HfStyleModelInfo.MODEL_META_INFO_FILE_NAME)):
-    #         meta_info_file = os.path.join(model_path_or_name, HfStyleModelInfo.MODEL_META_INFO_FILE_NAME)
-    #     elif os.path.exists(os.path.join(model_path_or_name, HfStyleModelInfo.TORCH_BIN_INDEX_FILE_NAME)):
-    #         meta_info_file = os.path.join(model_path_or_name, HfStyleModelInfo.TORCH_BIN_INDEX_FILE_NAME)
-
-    #     config_file = os.path.join(model_path_or_name, HfStyleModelInfo.CONFIG_FILE)
-    #     info = HfStyleModelInfo(repo_or_link=None)  # Pass a dummy repo_or_link, load info from files
-    # else:
-    #     info = HfStyleModelInfo(model_path_or_name, revision)
     return info
 
 def get_model_info_from_hf(model_path_or_name: str, revision: Optional[str] = None) -> Tuple[str, str]:
