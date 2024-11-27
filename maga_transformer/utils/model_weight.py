@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import gc
 from functools import reduce
 import threading
 import torch
@@ -451,7 +452,7 @@ class W:
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
-    
+
     #per tensor quant
     pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
     pre_decoder_ln_static_quant_reciprocal = 'pre_decoder_layernorm.static_quant_reciprocal'
@@ -566,7 +567,7 @@ class W:
     sq_quant_shifts = [
         attn_o_shift
     ]
-    
+
     static_quant_scales = [
         pre_ln_static_quant,
         pre_ln_static_quant_reciprocal,
@@ -874,7 +875,7 @@ class Fp8WeightStyle(Enum):
     NONE = 0
     TRT_ENGINE = 1
     TRANSFORMER_ENGINE = 2
-    
+
 class ModelWeightInfo:
     layer_weights: Union[List[WeightInfo], List[List[WeightInfo]]]
     weights: List[WeightInfo]
@@ -1190,6 +1191,7 @@ class ModelWeights:
 
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
+        gc.collect()
 
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor

@@ -42,5 +42,4 @@ class DeviceBase:
         raise NotImplementedError("moe_apply_int8 is not implemented")
 
     def maybe_rewrite_weight_by_key(self, key: str, weight: torch.Tensor) -> torch.Tensor:
-        print(f"rewriting weight by key: {key}")
         return weight
