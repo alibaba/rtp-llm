@@ -426,7 +426,7 @@ class GptInitModelParameters:
         attn_buffer_size = self.max_seq_len * self.gpt_init_params.hidden_size
         ffn_export_num = self.expert_num if self.gpt_init_params.moe_k else 1
         ffn_w_count = 1 if self.activation_type == 'gelu' else 2
-        ffn_buffer = (self.max_seq_len * self.gpt_init_params.hidden_size * ffn_w_count + self.max_seq_len * self.inter_size)*ffn_export_num
+        ffn_buffer = (self.max_seq_len * self.gpt_init_params.hidden_size + ffn_w_count* self.max_seq_len * self.inter_size)*ffn_export_num
         return input_buffer + qkv_gemm_buffer_size + attn_buffer_size + ffn_buffer
 
     @property

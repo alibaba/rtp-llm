@@ -44,7 +44,7 @@ def _analyze_model_type(model_path):
 
 def _get_raw_config(model_path):
     if HfStyleModelInfo.is_from_hf(model_path):
-        hf_model_info = HfStyleModelInfo.get_hf_model_info(model_path)
+        hf_model_info = get_hf_model_info(model_path)
         return hf_model_info.model_config
     else:
         model_path = fetch_remote_file_to_local(model_path)
