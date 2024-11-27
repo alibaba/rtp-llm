@@ -26,12 +26,13 @@ namespace tensorrt_llm::kernels::cutlass_kernels
 template <typename T, typename WeightType, typename EpilogueTag = cutlass_extensions::EpilogueOpDefault>
 constexpr bool isValidHopperMOESpecialisation()
 {
-#if defined(CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED)
-    return cutlass::platform::is_same<T, WeightType>::value
-        && cutlass::platform::is_same<EpilogueTag, cutlass_extensions::EpilogueOpDefault>::value;
-#else
     return false; // CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED is set when Hopper kernels are enabled
-#endif
+// #if defined(CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED)
+//     return cutlass::platform::is_same<T, WeightType>::value
+//         && cutlass::platform::is_same<EpilogueTag, cutlass_extensions::EpilogueOpDefault>::value;
+// #else
+//     return false; // CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED is set when Hopper kernels are enabled
+// #endif
 }
 
 // Hopper arch
