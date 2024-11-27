@@ -5,14 +5,22 @@ import re
 import torch
 import torch.nn as nn
 
+import copy
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
-from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
+from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from maga_transformer.utils.multimodal_util import MMUrlType
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
-class LlavaImageEmbedding(ImageEmbeddingInterface):
+try:
+    import av
+    from decord import VideoReader, cpu
+except ImportError:
+    print("Please install pyav to use video processing functions.")
+
+class LlavaImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, config: GptInitModelParameters):
         self.config = config
         if config.mm_related_params.config.get("vision_config", None) != None:
@@ -24,6 +32,62 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
             self.image_newline = nn.Parameter(
                 torch.empty(self.config.mm_related_params.config["hidden_size"])
             )
+    
+    @torch.inference_mode()
+    def mm_process(self, mm_input, **kwargs):
+        mm_type = kwargs.get("mm_type")
+        if mm_type == MMUrlType.DEFAULT:
+            if isinstance(mm_input, list):
+                return torch.cat(self.image_embedding(mm_input))
+            else:
+                return self.image_embedding([mm_input])[0]
+        elif mm_type == MMUrlType.IMAGE:
+            if isinstance(mm_input, list):
+                raise Exception("expect single image input, but get a list")
+            return self.image_embedding([mm_input])[0]
+        elif mm_type == MMUrlType.VIDEO:
+            if not isinstance(mm_input, list):
+                raise Exception("expect video input, but get a single image")
+            return torch.cat(self.image_embedding(mm_input))
+        else:
+            raise Exception("unknown mm url type")
+
+    def _mm_preprocess(self, data, **kwargs):
+        mm_type = kwargs.get("mm_type")
+        if mm_type == MMUrlType.DEFAULT:
+            origin_data = copy.copy(data)
+            try:
+                return self.load_image(data)
+            except Exception as e:
+                try:
+                    return self.load_video(origin_data)
+                except Exception as e:
+                    raise Exception(str(e))
+        elif mm_type == MMUrlType.IMAGE:
+            return self.load_image(data, **kwargs)
+        elif mm_type == MMUrlType.VIDEO:
+            return self.load_video(data, **kwargs)
+        else:
+            raise Exception("unknown mm url type")
+    
+    def load_image(self, data, **kwargs):
+        return Image.open(data).convert("RGB")
+
+    def load_video(self, data, **kwargs):
+        vr = VideoReader(data, ctx=cpu(0), num_threads=1)
+        total_frame_num = len(vr)
+        video_time = total_frame_num / vr.get_avg_fps()
+        # frame num set to 10 for now
+        avg_fps = round(total_frame_num / 10)
+        frame_idx = [i for i in range(0, total_frame_num, avg_fps)]
+        frame_time = [i/avg_fps for i in frame_idx]
+        
+        video = vr.get_batch(frame_idx).asnumpy()
+        frame_time = ",".join([f"{i:.2f}s" for i in frame_time])
+
+        num_frames_to_sample = num_frames = len(frame_idx)
+        vr.seek(0)
+        return [Image.fromarray(frame) for frame in video]
 
     @property
     def _device(self):
@@ -100,15 +164,15 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
         vision_tower_name = os.environ.get('EXTRA_DATA_PATH', '')
         vision_tower = os.environ.get('LOCAL_EXTRA_DATA_PATH', None)
         if vision_tower is None:
+            vision_tower_name = vision_tower_cfg['vit_tower_path']
             vision_tower = vision_tower_cfg['vit_tower_path']
-        is_absolute_path_exists = os.path.exists(vision_tower)
         if "siglip" in vision_tower_name:
             return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
-        elif is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
+        else:
             return CLIPVisionTower(vision_tower,
-                                select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
-                                select_feature=vision_tower_cfg.get("mm_vision_select_feature", "patch"),
-                                **kwargs)
+                    select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
+                    select_feature=vision_tower_cfg.get("mm_vision_select_feature", "patch"),
+                    **kwargs)
             
         raise ValueError(f'Unknown vision tower: {vision_tower}')
     

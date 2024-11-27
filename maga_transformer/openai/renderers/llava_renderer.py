@@ -18,6 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
 from maga_transformer.openai.renderer_factory_register import register_renderer
+from maga_transformer.utils.multimodal_util import MMUrlType
 
 class SeparatorStyle(Enum):
     SINGLE = auto()
@@ -35,6 +36,7 @@ class Conversation:
     def render_messages(self, messages: List[ChatMessage], tokenizer) -> PromptWithMMInput:
         prompt: str = ""
         images: List[str] = []
+        mm_types: List[MMUrlType] = []
 
         if self.sep_style == SeparatorStyle.LLAMA_3:
             chat_template_messages = [{"role": "system", "content": self.system_content}]
@@ -73,6 +75,12 @@ class Conversation:
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         images.append(content_part.image_url.url)
+                        mm_types.append(MMUrlType.IMAGE)
+                        now_prompt = now_prompt + "<image>\n"
+                    elif content_part.type == ContentPartTypeEnum.video_url:
+                        assert (content_part.video_url != None)
+                        images.append(content_part.video_url.url)
+                        mm_types.append(MMUrlType.VIDEO)
                         now_prompt = now_prompt + "<image>\n"
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
@@ -80,7 +88,7 @@ class Conversation:
             else:
                 prompt += self.seps[0]
         prompt += self.roles[RoleEnum.assistant] + self.connector[1]
-        return PromptWithMMInput(prompt, images)
+        return PromptWithMMInput(prompt, images, mm_types)
 
 conv_llava_v0 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
