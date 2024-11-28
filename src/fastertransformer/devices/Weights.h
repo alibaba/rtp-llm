@@ -118,7 +118,6 @@ struct LayerWeights {
     std::shared_ptr<const DenseWeights>     pre_attention_smoother_weight;
     std::shared_ptr<const LayerNormWeights> post_layernorm;
     std::shared_ptr<const DenseWeights>     post_layernorm_quant_scale;
-    std::shared_ptr<const LayerNormWeights> post_layernorm_2;
     FfnLayerWeights                         ffn_weights;
     std::shared_ptr<const LayerNormWeights> post_ffn_layernorm;
 };

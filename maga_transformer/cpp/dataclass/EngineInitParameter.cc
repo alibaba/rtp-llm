@@ -308,8 +308,6 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
                                                                 W::post_ln_s,
                                                                 W::post_ln_sr);
 
-        layer_ws.post_layernorm_2 = mayCreateLayerNormWeights(layer_weights, W::post_ln_2_gamma, W::post_ln_2_beta);
-
         layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
         layer_ws.ffn_weights = createFfnWeights(layer_weights);
         gpt_weights.layers.emplace_back(std::move(layer_ws));
