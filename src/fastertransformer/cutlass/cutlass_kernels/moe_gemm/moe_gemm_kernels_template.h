@@ -188,6 +188,9 @@ void genericMoeGemmKernelLauncher(T const* A, WeightType const* B, GemmOutputTyp
             bias_is_broadcast, reinterpret_cast<ElementType*>(C), total_tokens_including_expert, num_rows, gemm_n,
             gemm_k, num_experts, multi_processor_count, stream, kernel_occupancy);
     }
+    else{
+        TLLM_LOG_ERROR("NOT IMPLEMENTED YET");
+    }
 }
 
 } // namespace kernels::cutlass_kernels
@@ -200,7 +203,6 @@ static void dispatch(T const* A, WeightType const* B, GemmOutputType const* weig
     int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, bool use_fused_moe,
     float const** alpha_scale_ptr_array, cudaStream_t stream, int* occupancy = nullptr)
 {
-
     static_assert(!std::is_same_v<Arch, cutlass::arch::Sm90>, "Use TMA specialised functions for arch SM90");
 #if defined(ENABLE_FP8)
     constexpr bool isFp8 = std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>;
@@ -549,7 +551,35 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getValidConfig
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
     typename ScaleBiasType>
 cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getChosenConfig(
-    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, cudaStream_t stream)
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,  ActivationType activation_type, cudaStream_t stream)
+{
+    switch(activation_type){
+    case ActivationType::Relu:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefaultReLU>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::Gelu:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefaultFtGelu>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::Silu:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefaultSilu>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::Identity:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefault>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::Swiglu:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefaultSilu>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::Geglu:
+        return dispatchChosenConfig<cutlass_extensions::EpilogueOpDefaultFtGelu>(total_rows, gemm_n, gemm_k, num_experts, use_fused_moe, stream);
+    case ActivationType::InvalidType:
+        TLLM_THROW("Activation type for moe gemm must be valid.");
+        return cutlass_extensions::CutlassGemmConfig();
+    default:
+        TLLM_THROW("Invalid activation type.");
+        return cutlass_extensions::CutlassGemmConfig();
+    }
+}
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
+    typename ScaleBiasType>
+template <typename EpilogueTag>
+cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchChosenConfig(
+    int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,  cudaStream_t stream)
 {
     kernels::cutlass_kernels::GemmParamKey cur_key{(int) total_rows, (int) gemm_n, (int) gemm_k, num_experts};
     if (gemm_lut_ != nullptr)
@@ -580,9 +610,9 @@ cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, Outp
     HopperGroupedGemmInput hopper_input{};
     for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
     {
-        dispatchToArch<cutlass_extensions::EpilogueOpDefault>(nullptr, nullptr, nullptr, nullptr, gemm_k, nullptr,
+        dispatchToArch<EpilogueTag>(nullptr, nullptr, nullptr, nullptr, gemm_k, nullptr,
             false, nullptr, nullptr, hopper_input, total_rows, gemm_n, gemm_k, num_experts, valid_splitk_configs[ii],
-            false, nullptr, stream, &occupancies[ii]);
+            use_fused_moe, nullptr, stream, &occupancies[ii]);
     }
     cutlass_extensions::CutlassGemmConfig chosen_config
         = tensorrt_llm::kernels::cutlass_kernels::estimate_best_config_from_occupancies(
@@ -682,9 +712,9 @@ bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::supportsF
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,
     typename ScaleBiasType>
 bool MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::isFusedGatedActivation(
-    cutlass_extensions::CutlassGemmConfig gemm_config, bool is_gated_activation, int gemm_n, int gemm_k) const
+    bool is_gated_activation, int gemm_n, int gemm_k) const
 {
-    return supportsFusedGatedActivation(is_gated_activation, gemm_n, gemm_k) && !gemm_config.is_sm90;
+    return supportsFusedGatedActivation(is_gated_activation, gemm_n, gemm_k) && !(sm_ == 90);
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename OutputType,

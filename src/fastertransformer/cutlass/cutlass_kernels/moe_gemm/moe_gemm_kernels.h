@@ -188,7 +188,7 @@ public:
     [[nodiscard]] bool isHopperSpecialised(cutlass_extensions::CutlassGemmConfig gemm_config) const;
     [[nodiscard]] bool supportsHopperSpecialisation() const;
     [[nodiscard]] bool isFusedGatedActivation(
-        cutlass_extensions::CutlassGemmConfig gemm_config, bool is_gated_activation, int gemm_n, int gemm_k) const;
+        bool is_gated_activation, int gemm_n, int gemm_k) const;
     [[nodiscard]] bool supportsFusedGatedActivation(bool is_gated_activation, int gemm_n, int gemm_k) const;
 
     size_t getMaxWorkspaceSize(int num_experts) const;
@@ -203,9 +203,14 @@ public:
         bool use_fused_moe, float const** alpha_scale_ptr_array, cudaStream_t stream);
 
     cutlass_extensions::CutlassGemmConfig getChosenConfig(
-        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, cudaStream_t stream);
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe,  ActivationType activation_type, cudaStream_t stream);
+
 
 private:
+    template <typename EpilogueTag>
+    cutlass_extensions::CutlassGemmConfig dispatchChosenConfig(
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, bool use_fused_moe, cudaStream_t stream);
+
     template <typename EpilogueTag>
     void dispatchToArch(T const* A, WeightType const* B, ScaleBiasType const* weight_scales,
         ScaleBiasType const* weight_zeros, int group_size, ScaleBiasType const* biases, bool bias_is_broadcast, void* C,

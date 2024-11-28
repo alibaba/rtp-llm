@@ -122,7 +122,7 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, v
     MOEParallelismConfig parallelism_config = getParallelismConfig();
     LoraParams lora_params;
 
-    mMOERunner->setTactic(num_rows, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, stream);
+    mMOERunner->setTactic(num_rows, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, mActivationType, stream);
     mMOERunner->runMoe(input, // const void*
         moe_gates, fc1_expert_weight, fc1_expert_bias, mActivationType, fc2_expert_weight, fc2_expert_bias,
         QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize), num_rows,

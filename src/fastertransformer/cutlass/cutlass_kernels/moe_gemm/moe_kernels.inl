@@ -823,7 +823,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
 
     bool const is_gated_activation = isGatedActivation(activation_type);
     bool const gemm1_using_fused_moe
-        = moe_gemm_runner_.isFusedGatedActivation(*gemm1_config_, is_gated_activation, inter_size, hidden_size);
+        = moe_gemm_runner_.isFusedGatedActivation(is_gated_activation, inter_size, hidden_size);
     bool const gemm1_using_hopper = moe_gemm_runner_.isHopperSpecialised(*gemm1_config_);
     bool const hopper_has_glu = gemm1_using_hopper && (mayHaveDifferentGEMMOutputType() || is_gated_activation);
     // We always use fused path if we can
@@ -875,7 +875,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     bool const using_hopper_gemm1 = gemm_runner.isHopperSpecialised(config);
     bool const is_gated_activation = isGatedActivation(fc1_activation_type);
     bool const use_ampere_activation_fusion
-        = gemm_runner.isFusedGatedActivation(config, is_gated_activation, inter_size, hidden_size);
+        = gemm_runner.isFusedGatedActivation(is_gated_activation, inter_size, hidden_size);
     size_t const fc1_out_size = ((!use_ampere_activation_fusion) && is_gated_activation) ? inter_size * 2 : inter_size;
 
     int64_t const* total_tokens_including_expert = expert_first_token_offset + 1;

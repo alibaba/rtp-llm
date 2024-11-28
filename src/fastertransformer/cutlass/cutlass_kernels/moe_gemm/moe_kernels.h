@@ -217,7 +217,7 @@ public:
         = 0;
 
     virtual void setTactic(int64_t const num_rows, int64_t const hidden_size, int64_t const fc1_output_size,
-        int const num_experts, int const k, cudaStream_t stream)
+        int const num_experts, int const k, ActivationType fc1_activation_type, cudaStream_t stream)
         = 0;
     virtual std::vector<cutlass_extensions::CutlassGemmConfig> getTactics() = 0;
 
@@ -308,11 +308,12 @@ public:
     }
 
     void setTactic(int64_t const num_rows, int64_t const hidden_size, int64_t const fc1_output_size,
-        int const num_experts, int const k, cudaStream_t stream) override
+        int const num_experts, int const k, ActivationType fc1_activation_type, cudaStream_t stream) override
     {
         int64_t total_rows = num_rows * k;
-        auto gemm1_config = moe_gemm_runner_.getChosenConfig(total_rows, fc1_output_size, hidden_size, num_experts, stream);
-        auto gemm2_config = moe_gemm_runner_.getChosenConfig(total_rows, hidden_size, fc1_output_size, num_experts, stream);
+        bool use_fused_moe = moe_gemm_runner_.isFusedGatedActivation(isGatedActivation(fc1_activation_type), fc1_output_size, hidden_size);
+        auto gemm1_config = moe_gemm_runner_.getChosenConfig(total_rows, fc1_output_size, hidden_size, num_experts, use_fused_moe,   fc1_activation_type, stream);
+        auto gemm2_config = moe_gemm_runner_.getChosenConfig(total_rows, hidden_size, fc1_output_size, num_experts, false, ActivationType::Identity, stream);
         gemm1_config_ = std::move(gemm1_config);
         gemm2_config_ = std::move(gemm2_config);
     }
