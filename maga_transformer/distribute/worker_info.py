@@ -57,7 +57,7 @@ class ParallelInfo(object):
                 local_world_size=int(os.environ.get('LOCAL_WORLD_SIZE', '1')))
         if (info.tp_size * info.pp_size != info.world_size or
             info.world_rank >= info.world_size):
-            raise Exception(f'tp_size:{info.tp_size}, ex_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
+            raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
             raise Exception("not support info.world_size mod info.local_world_size != 0")
@@ -126,7 +126,7 @@ class WorkerInfo(object):
         else:
             base_port = WorkerInfo.self_server_port()
         return base_port + local_rank * WORKER_INFO_PORT_NUM
-    
+
     @staticmethod
     def rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 1
@@ -164,7 +164,7 @@ class WorkerInfo(object):
     def __str__(self):
         return f"""
         WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} http_port={self.http_port} rpc_port={self.rpc_server_port} \n
-        cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port} 
+        cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port}
         name={self.name} info={self.info} ]
         """
 
