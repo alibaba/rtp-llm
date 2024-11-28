@@ -185,7 +185,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     param.num_layers_    = 2;
     param.kv_cache_data_type_ = DataType::TYPE_INT8;
     param.is_multimodal_ = true;
-    NormalBatchStreamProcessor     processor(param, 0, 0, 0);
+    NormalBatchStreamProcessor     processor(param, CacheConfig(), false);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({5}, {1, -1, -1, -1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -224,7 +224,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
 
         auto merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
-        
+
         auto& model_input = merge_input_status.value();
         vector<int> combo_tokens     = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
         vector<int> input_lengths    = {5, 3, 5};
@@ -235,7 +235,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
         EXPECT_EQ(text_tokens_mask, buffer2vector<int>(*model_input.text_tokens_mask));
         EXPECT_EQ(mm_features_locs, buffer2vector<int>(*model_input.mm_features_locs));
-        
+
         EXPECT_EQ(model_input.multimodal_features.value().size(), 2);
         EXPECT_EQ(model_input.multimodal_features.value()[0]->size(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1]->size(), 2 * 10);
