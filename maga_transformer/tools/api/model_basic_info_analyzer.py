@@ -136,9 +136,6 @@ def _load_as_hf_style(model_path, ft_model_type, env_params) -> ModelBasicInfo:
             quant_algo = quant_method,
         )
 
-    if not is_quant_weight and get_weight_type_from_env(env_params) == WEIGHT_TYPE.INT8 and total_size is not None:
-        total_size = total_size / 2
-
     return ModelBasicInfo(
         ft_model_type=ft_model_type if ft_model_type else None,
         hidden_size=hidden_size,

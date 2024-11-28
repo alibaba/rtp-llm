@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Tuple
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
+from pathlib import Path
 
 from maga_transformer.model_factory_register import ModelDict
 
@@ -18,6 +19,7 @@ class HfStyleModelInfo:
         self._is_from_hf = self.is_from_hf(repo_or_link)
         self.model_info = None
         self.meta_info_file = None
+        self.repo_or_link = repo_or_link
         if self._is_from_hf:
             self.model_info = self._get_model_info(repo_or_link, revision)
             self.model_config_file = self._get_model_config_file(repo_or_link, revision)
@@ -91,6 +93,17 @@ class HfStyleModelInfo:
             with open(self.meta_info_file, 'r') as f:
                 meta_info = json.load(f)
                 total_size = meta_info.get("metadata", {}).get("total_size", None)
+        if total_size is None and not self._is_from_hf:
+            # try get file size from disk
+                    # standard HF
+            patterns = ["*.safetensors", "*.bin", "*.pth", "*.pt"]
+            total_size = 0
+            for pattern in patterns:
+                for file in Path(self.repo_or_link).glob(pattern):
+                    if os.path.isfile(file):
+                        total_size += file.stat().st_size
+            logging.info(f"fallback to get file size from disk: {total_size}")
+
         logging.info(f'{self.meta_info_file} {self.model_config_file} {self.model_info} param_count: {param_count}, total_size: {total_size}')
         return param_count, total_size
 
