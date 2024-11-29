@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import MMUrlType, MMPreprocessConfig
 from maga_transformer.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from maga_transformer.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -95,14 +95,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
-            origin_data = copy.copy(data)
-            try:
-                return self.load_image(data)
-            except Exception as e:
-                try:
-                    return self.load_video(origin_data)
-                except Exception as e:
-                    raise Exception(str(e))
+            raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
             return self.load_image(data, **kwargs)
         elif mm_type == MMUrlType.VIDEO:
