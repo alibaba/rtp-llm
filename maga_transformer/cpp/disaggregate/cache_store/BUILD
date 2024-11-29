@@ -36,9 +36,11 @@ cc_library(
         "CacheStore.h",
         "MemoryUtil.h",
         "RequestBlockBuffer.h",
+        "LoadContext.h",
     ],
     srcs = [
         "RequestBlockBuffer.cpp",
+        "LoadContext.cpp",
     ],
     deps = [
         "@havenask//aios/autil:log",

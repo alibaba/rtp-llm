@@ -51,18 +51,21 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         }
     }
     timer_manager_ = std::make_shared<arpc::TimerManager>();
-    if(!timer_manager_){
+    if (!timer_manager_) {
         FT_LOG_INFO("normal cache store init failed, timer init failed");
         return false;
     }
-    messager_client_= std::move(createMessagerClient(memory_util_));
-    if (!messager_client_ || !messager_client_->init(params.connect_port, params.rdma_connect_port, params.enable_metric)) {
+    messager_client_ = std::move(createMessagerClient(memory_util_));
+    if (!messager_client_
+        || !messager_client_->init(params.connect_port, params.rdma_connect_port, params.enable_metric)) {
         FT_LOG_ERROR("normal cache store init failed : init messager client failed");
         return false;
     }
 
-    messager_server_ = std::move(createMessagerServer(memory_util_, request_block_buffer_store_, metrics_reporter_, timer_manager_));
-    if (!messager_server_ || !messager_server_->init(params.listen_port, params.rdma_listen_port, params.enable_metric)) {
+    messager_server_ =
+        std::move(createMessagerServer(memory_util_, request_block_buffer_store_, metrics_reporter_, timer_manager_));
+    if (!messager_server_
+        || !messager_server_->init(params.listen_port, params.rdma_listen_port, params.enable_metric)) {
         FT_LOG_ERROR("normal cache store init failed : init messager server failed");
         return false;
     }
@@ -104,6 +107,17 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     }
 }
 
+std::shared_ptr<StoreContext>
+NormalCacheStore::storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                        int64_t                                                 timeout_ms) {
+    if (request_block_buffers.empty()) {
+        return nullptr;
+    }
+    auto store_context = std::make_shared<StoreContext>(shared_from_this());
+    store_context->store(request_block_buffers, timeout_ms);
+    return store_context;
+}
+
 void NormalCacheStore::debugInfo() {
     request_block_buffer_store_->debugInfo();
 }
@@ -118,9 +132,8 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
 
     CacheStoreClientStoreMetricsCollector::markEnd(collector, ret);
     if (!ret) {
-        FT_LOG_WARNING(
-                  "normal cache store run store task failed, request id is %s",
-                  request_block_buffer->getRequestId().c_str());
+        FT_LOG_WARNING("normal cache store run store task failed, request id is %s",
+                       request_block_buffer->getRequestId().c_str());
         callback(false, CacheStoreErrorCode::StoreFailed);
         return;
     }
@@ -148,9 +161,8 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-        FT_LOG_WARNING(
-                  "normal cache store push load task for request id [%s] to thread pool failed",
-                  request_block_buffer->getRequestId().c_str());
+        FT_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
+                       request_block_buffer->getRequestId().c_str());
         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
         return;
     }
@@ -164,6 +176,20 @@ void NormalCacheStore::runLoadTask(const std::shared_ptr<RequestBlockBuffer>&   
 
     CacheStoreClientLoadMetricsCollector::markLoadRequestBegin(collector, request_block_buffer->getBlocksCount());
     messager_client_->load(ip, request_block_buffer, callback, timeout_ms, collector);
+}
+
+std::shared_ptr<LoadContext>
+NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                       const std::string&                                      ip,
+                       int64_t                                                 timeout_ms,
+                       LoadContext::CheckCancelFunc                            check_cancel_func) {
+    if (request_block_buffers.empty() || ip.empty()) {
+        return nullptr;
+    }
+
+    auto load_context = std::make_shared<LoadContext>(shared_from_this(), memory_util_->isRdmaMode());
+    load_context->load(request_block_buffers, ip, timeout_ms, check_cancel_func);
+    return load_context;
 }
 
 void NormalCacheStore::markRequestEnd(const std::string& requestid) {

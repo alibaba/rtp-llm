@@ -633,4 +633,168 @@ TEST_F(NormalCacheStoreTest, testLoad_canceWhileLoad) {
     set_block_thread.join();
 }
 
+TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
+    ASSERT_TRUE(initCacheStores());
+
+    // store a to cache_store1 for local get
+    uint32_t    block_size   = 16;
+    std::string requestid    = "test-request-id";
+    auto        store_buffer = std::make_shared<RequestBlockBuffer>(requestid);
+    store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+
+    cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::None, ec);
+    });
+
+    // store abc to cache_store2 for get success on later time
+    std::thread set_block_thread([this, requestid, block_size]() {
+        usleep(100 * 1000);  /// wait 100ms then set block
+
+        auto store_buffer = std::make_shared<RequestBlockBuffer>(requestid);
+        store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
+        store_buffer->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, '2', true));
+        cache_store2_->store(store_buffer, [](bool ok, CacheStoreErrorCode ec) {
+            ASSERT_TRUE(ok);
+            ASSERT_EQ(CacheStoreErrorCode::None, ec);
+        });
+    });
+
+    auto load_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache1->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
+    auto load_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
+    load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, 'c', true));
+    std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
+
+    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; });
+    ASSERT_TRUE(load_context != nullptr);
+    load_context->waitDone();
+
+    ASSERT_TRUE(load_context->success());
+
+    verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, '0');
+    verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, '1');
+    verifyBlock(load_cache2->getBlock("abc"), "abc", block_size, true, '2');
+
+    set_block_thread.join();
+}
+
+TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {
+    ASSERT_TRUE(initCacheStores());
+
+    std::string requestid  = "test-request-id";
+    uint32_t    block_size = 16;
+
+    auto load_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache1->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
+    auto load_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
+    std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
+
+    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; });
+    ASSERT_TRUE(load_context != nullptr);
+    load_context->waitDone();
+
+    ASSERT_FALSE(load_context->success());
+    ASSERT_EQ(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, load_context->getErrorInfo().code());
+
+    verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, 'a');
+    verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, 'b');
+}
+
+TEST_F(NormalCacheStoreTest, testLoadContext_loadCancel) {
+    ASSERT_TRUE(initCacheStores());
+
+    std::string requestid  = "test-request-id";
+    uint32_t    block_size = 16;
+
+    auto load_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache1->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true));
+    auto load_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
+    load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
+    std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
+
+    auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    auto load_context  = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, [start_time_ms]() {
+        return start_time_ms + 100 < autil::TimeUtility::currentTimeInMilliSeconds();
+    });
+
+    ASSERT_TRUE(load_context != nullptr);
+    load_context->waitDone();
+
+    ASSERT_FALSE(load_context->success());
+    ASSERT_EQ(ErrorCode::CANCELLED, load_context->getErrorInfo().code());
+
+    verifyBlock(load_cache1->getBlock("a"), "a", block_size, true, 'a');
+    verifyBlock(load_cache2->getBlock("ab"), "ab", block_size, true, 'b');
+}
+
+TEST_F(NormalCacheStoreTest, testStoreContext_Success) {
+    ASSERT_TRUE(initCacheStores());
+
+    uint32_t    block_size = 16;
+    std::string requestid  = "test-request-id";
+
+    std::vector<std::shared_ptr<RequestBlockBuffer>> store_caches;
+    auto                                             store_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
+    store_cache1->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+    store_caches.push_back(store_cache1);
+
+    auto store_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
+    store_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
+    store_caches.push_back(store_cache2);
+
+    auto store_context = cache_store1_->storeBuffers(store_caches, 1000);
+    ASSERT_TRUE(store_context != nullptr);
+    store_context->waitDone();
+    ASSERT_TRUE(store_context->success());
+
+    // save to local cache
+    if (memory_util_->isRdmaMode()) {
+        // rdma block cache store will store mr memory, there will be no copy
+        verifyBlock(
+            cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "a"), "a", block_size, true, '0');
+        verifyBlock(
+            cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "ab"), "ab", block_size, true, '1');
+    } else {
+        // cpu block cache store will store only cpu memory, so there will be a copy
+        verifyBlock(
+            cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "a"), "a", block_size, false, '0');
+        verifyBlock(
+            cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "ab"), "ab", block_size, false, '1');
+    }
+}
+
+TEST_F(NormalCacheStoreTest, testStoreContext_storeToBufferStoreFailed) {
+    ASSERT_TRUE(initMockMemoryUtil());
+    ASSERT_TRUE(initCacheStores());
+
+    uint32_t    block_size  = 16;
+    std::string requestid   = "test-request-id";
+    auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(true));
+
+    std::vector<std::shared_ptr<RequestBlockBuffer>> store_caches;
+    auto                                             store_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
+    store_cache1->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+    store_caches.push_back(store_cache1);
+
+    auto store_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
+    store_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
+    store_caches.push_back(store_cache2);
+
+    // mock call from isMemoryMr, then return false in tcp mode
+    EXPECT_CALL(*mock_memory_util_, isMemoryMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(false));
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(false));
+
+    auto store_context = cache_store1_->storeBuffers(store_caches, 1000);
+    ASSERT_TRUE(store_context != nullptr);
+    store_context->waitDone();
+    ASSERT_FALSE(store_context->success());
+}
+
 }  // namespace rtp_llm

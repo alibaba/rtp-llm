@@ -138,7 +138,7 @@ std::shared_ptr<arpc::RPCChannelBase> MessagerClient::openChannel(const std::str
 
     std::string spec = "tcp:" + ip + ":" + std::to_string(connect_port_);
     return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec)));
+        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
 }
 
 }  // namespace rtp_llm

@@ -12,7 +12,8 @@ ft::Buffer BlockBuffer::toDeviceBuffer() {
     return fastertransformer::Buffer(device_type, ft::DataType::TYPE_UINT8, {len}, addr.get());
 }
 
-RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid): requestid_(requestid) {}
+RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::string& request_key):
+    requestid_(requestid), request_key_(request_key) {}
 
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, ft::DeviceEventPtr event):
     requestid_(requestid), event_(std::move(event)) {}
@@ -23,6 +24,10 @@ RequestBlockBuffer::~RequestBlockBuffer() {
 
 const std::string& RequestBlockBuffer::getRequestId() const {
     return requestid_;
+}
+
+const std::string& RequestBlockBuffer::getRequestKey() const {
+    return request_key_.empty() ? requestid_ : request_key_;
 }
 
 const ft::DeviceEvent* RequestBlockBuffer::getEvent() const {
@@ -89,13 +94,10 @@ bool RequestBlockBuffer::isValid() const {
 }
 
 bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func) {
+    // set callback
     {
         std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
-        if (watch_func_ != nullptr) {
-            FT_LOG_WARNING("set request block buffer watch func twice, request id is %s", requestid_.c_str());
-            return false;
-        }
-        watch_func_ = watch_func;
+        watch_funcs_.push_back(watch_func);
     }
 
     // current blocks trigger once
@@ -115,15 +117,17 @@ bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func
 
 void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
     std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
-    if (watch_func_) {
-        watch_func_(ok, blocks);
+    for (auto watch_func : watch_funcs_) {
+        if (watch_func) {
+            watch_func(ok, blocks);
+        }
     }
 }
 
 std::string RequestBlockBuffer::debugInfo() const {
     std::ostringstream stream;
     stream << "request id: " << requestid_ << ", blocks count: " << getBlocksCount();
-    if (watch_func_) {
+    if (!watch_funcs_.empty()) {
         stream << ", has watch func";
     } else {
         stream << ", no watch func";

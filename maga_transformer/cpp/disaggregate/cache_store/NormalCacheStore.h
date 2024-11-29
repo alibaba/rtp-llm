@@ -12,7 +12,7 @@
 
 namespace rtp_llm {
 
-class NormalCacheStore : public CacheStore {
+class NormalCacheStore: public CacheStore {
 private:
     NormalCacheStore() = default;
 
@@ -22,12 +22,20 @@ public:
 public:
     static std::shared_ptr<NormalCacheStore> createNormalCacheStore(const CacheStoreInitParams& params);
 
-    void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, CacheStoreStoreDoneCallback callback);
+    void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+               CacheStoreStoreDoneCallback                callback) override;
 
     void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
               CacheStoreLoadDoneCallback                 callback,
               const std::string&                         ip         = "",
-              uint32_t                                   timeout_ms = 1000);
+              uint32_t                                   timeout_ms = 1000) override;
+
+    std::shared_ptr<LoadContext>  loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                                       const std::string&                                      ip,
+                                       int64_t                                                 timeout_ms,
+                                       LoadContext::CheckCancelFunc check_cancel_func) override;
+    std::shared_ptr<StoreContext> storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                                        int64_t                                                 timeout_ms) override;
 
     void markRequestEnd(const std::string& requestid);
 

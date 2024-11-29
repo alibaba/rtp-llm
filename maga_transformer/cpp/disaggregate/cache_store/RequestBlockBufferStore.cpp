@@ -5,7 +5,8 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, ft::DeviceBase* device):
+RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util,
+                                                 ft::DeviceBase*                    device):
     memory_util_(memory_util), device_(device) {}
 
 bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
@@ -111,7 +112,7 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
     if (iter != request_cache_map_.end()) {
         if (iter->second == nullptr) {
             FT_LOG_WARNING("request block buffer store try get expired request block buffer, request id %s",
-                            requestid.c_str());
+                           requestid.c_str());
         }
         return iter->second;
     }
@@ -146,9 +147,7 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
     }
 
     auto malloc_ptr = buffer->data();
-    auto addr = std::shared_ptr<void>(malloc_ptr, [buffer = std::move(buffer)](void* p) mutable {
-        buffer.reset();
-    });
+    auto addr = std::shared_ptr<void>(malloc_ptr, [buffer = std::move(buffer)](void* p) mutable { buffer.reset(); });
 
     if (!memory_util_->isMemoryMr(addr.get(), block->len, false, false)) {
         const auto reg_success = memory_util_->regUserMr(addr.get(), block->len, false);

@@ -32,13 +32,14 @@ public:
 //  request 关联的 block buffer
 class RequestBlockBuffer {
 public:
-    RequestBlockBuffer(const std::string& requestid);
+    RequestBlockBuffer(const std::string& requestid, const std::string& request_key = "");
     RequestBlockBuffer(const std::string& requestid, fastertransformer::DeviceEventPtr event);
 
     ~RequestBlockBuffer();
 
 public:
     const std::string&                    getRequestId() const;
+    const std::string&                    getRequestKey() const;
     const fastertransformer::DeviceEvent* getEvent() const;
 
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> getBlocks() const;
@@ -62,13 +63,15 @@ private:
 
 private:
     std::string                       requestid_;
+    std::string                       request_key_;
+
     fastertransformer::DeviceEventPtr event_;
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;
 
     mutable std::shared_mutex watch_func_mutex_;
-    WatchFunc                 watch_func_{nullptr};
+    std::vector<WatchFunc>    watch_funcs_;
 };
 
 }  // namespace rtp_llm

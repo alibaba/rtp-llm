@@ -7,7 +7,6 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "maga_transformer/cpp/utils/NetUtil.h"
 #include "maga_transformer/cpp/utils/KVCacheUtils.h"
-#include "maga_transformer/cpp/model_rpc/LoadStatus.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/model_rpc/DecodeRpcServer.h"
 
@@ -287,53 +286,53 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        block_size    = cache_config.kv_block_stride;
     auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        block_num     = load_context.block_ids.size();
-
+    auto        layer_num = maga_init_params_.gpt_init_parameter.num_layers_;
+    
     auto start_load_time_us = currentTimeUs();
-    auto load_cache    = std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id));
-    for (size_t layer_id = 0; layer_id < maga_init_params_.gpt_init_parameter.num_layers_; layer_id++) {
+    std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
+    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+        auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
+        auto load_layer_cache = std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
+        auto block_num        = load_context.block_ids.size();
+
         for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
             auto                  cache_key = makeCacheKey(std::to_string(load_context.cache_keys[block_pos]), layer_id);
             auto                  block_id  = load_context.block_ids[block_pos];
             auto                  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
             std::shared_ptr<void> k_block_addr(addr_info.k_addr, [](void* p) {});
             std::shared_ptr<void> v_block_addr(addr_info.v_addr, [](void* p) {});
-            load_cache->addBlock("k_" + cache_key, k_block_addr, block_size, true, true);
-            load_cache->addBlock("v_" + cache_key, v_block_addr, block_size, true, true);
+            load_layer_cache->addBlock("k_" + cache_key, k_block_addr, block_size, true, true);
+            load_layer_cache->addBlock("v_" + cache_key, v_block_addr, block_size, true, true);
             if (addr_info.k_scale_addr) {
                 std::shared_ptr<void> k_scale_addr(addr_info.k_scale_addr, [](void* p) {});
                 std::shared_ptr<void> v_scale_addr(addr_info.v_scale_addr, [](void* p) {});
-                load_cache->addBlock("k_scale" + cache_key, k_scale_addr, scale_block_size, true, true);
-                load_cache->addBlock("v_scale" + cache_key, v_scale_addr, scale_block_size, true, true);
+                load_layer_cache->addBlock("k_scale" + cache_key, k_scale_addr, scale_block_size, true, true);
+                load_layer_cache->addBlock("v_scale" + cache_key, v_scale_addr, scale_block_size, true, true);
             }
         }
+        layer_caches.push_back(load_layer_cache);
     }
 
-    auto load_status = make_shared<LoadStatus>(load_context.timeout_ms + EXTRA_TIMEOUT_MS, load_context.server_context);
-    auto load_callback = [request_key, start_load_time_us, load_status](bool success, CacheStoreErrorCode ec) {
-        auto load_done_time_us = currentTimeUs();
-        load_status->updateResult(success, ec);
-        if (ec != CacheStoreErrorCode::None) {
-            FT_LOG_WARNING("request %s all layers load finished, state:[%s], error code[%s], cost time %ldus",
-                request_key.c_str(), success ? "success" : "failed",
-                CacheStoreErrorCodeToString(ec).c_str(), load_done_time_us - start_load_time_us);
-        } else {
-            FT_LOG_DEBUG("request %s all layers load finished, state:[%s], cost time %ldus",
-                request_key.c_str(), success ? "success" : "failed", load_done_time_us - start_load_time_us);
-        }
+    auto cancel_check_func = [&load_context]() -> bool {
+        return load_context.server_context->IsCancelled();
     };
 
-    resource_.cache_store->load(load_cache, load_callback, load_context.peer_ip, load_context.timeout_ms);
-    load_status->waitDone();
-    if (load_status->ok()) {
+    auto layer_cache_load_context = resource_.cache_store->loadBuffers(layer_caches, load_context.peer_ip, load_context.timeout_ms, cancel_check_func);
+    if (!layer_cache_load_context) {
+        FT_LOG_WARNING("request [%s] load cache failed, layer cache load context is nullptr", request_key.c_str());
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
+    }
+
+    layer_cache_load_context->waitDone();
+    if (layer_cache_load_context->success()) {
         FT_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
     } else {
         // TODO(xinfei.sxf) add retry for part failed blocks.
         auto load_done_time_us = currentTimeUs();
         FT_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld] ms",
-            request_key.c_str(), load_status->toString().c_str(), (load_done_time_us - start_load_time_us) / 1000);
+            request_key.c_str(), layer_cache_load_context->getErrorInfoString().c_str(), (load_done_time_us - start_load_time_us) / 1000);
     }
-    return load_status->errorInfo();
+    return layer_cache_load_context->getErrorInfo();
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext* server_context,
