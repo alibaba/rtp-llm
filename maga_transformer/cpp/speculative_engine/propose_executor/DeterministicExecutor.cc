@@ -34,9 +34,9 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
     const auto&  advice_prompt_token_ids = config->sp_advice_prompt_token_ids;
     const auto&  sp_edit_search_index    = stream->spEditSearchIndex();
     const size_t output_token_len        = stream->outputTokenLen();
-
+    size_t max_new_tokens = std::min((size_t)config->max_new_tokens, stream->maxSeqLen() - stream->seqLength() - 1);
     if (stream->spEditFirstTime()) {
-        size_t propose_len    = std::min((size_t)config->max_new_tokens,
+        size_t propose_len    = std::min(max_new_tokens,
                                       std::min(propose_step_, advice_prompt_token_ids.size() - sp_edit_search_index));
         stream_output->tokens = std::make_shared<fastertransformer::Buffer>(fastertransformer::MemoryType::MEMORY_CPU,
                                                                             ft::DataType::TYPE_INT32,
@@ -61,9 +61,8 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                 if (j == match_len) {
                     size_t start_propose_index = i + match_len;
                     size_t propose_len =
-                        std::min((size_t)config->max_new_tokens,
+                        std::min(max_new_tokens,
                                  std::min(propose_step_, advice_prompt_token_ids.size() - start_propose_index));
-                    stream->setSpEditSearchIndex(start_propose_index);
                     stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
                         fastertransformer::MemoryType::MEMORY_CPU,
                         ft::DataType::TYPE_INT32,
@@ -83,6 +82,7 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
     auto& advice_prompt_token_ids = config->sp_advice_prompt_token_ids;
 
     const size_t seq_len = stream->seqLength();
+    size_t max_new_tokens = std::min((size_t)config->max_new_tokens, stream->maxSeqLen() - stream->seqLength() - 1);
 
     if (min_token_match_len_ <= seq_len) {
         size_t           begin_match_len   = std::min(max_token_match_len_, seq_len);
@@ -100,7 +100,7 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
                 if (j == match_len) {
                     size_t start_propose_index = i + match_len;
                     size_t propose_len =
-                        std::min((size_t)config->max_new_tokens,
+                        std::min(max_new_tokens,
                                  std::min(propose_step_, advice_prompt_token_ids.size() - start_propose_index));
                     stream->setSpEditSearchIndex(start_propose_index);
                     stream_output->tokens = std::make_shared<fastertransformer::Buffer>(

@@ -758,7 +758,8 @@ std::string GenerateStream::debugString() const {
                  << ", batch_size:" << batchSize()
                  << ", tile_num:" << tileNum()
                  << ", need_release_resource: " << need_release_resource_
-                 << ", fallback_prefix_length: " << fallback_prefix_length_;
+                 << ", fallback_prefix_length: " << fallback_prefix_length_
+                 << ", sp_edit_search_index: " << sp_edit_search_index_;
 
     debug_string << ", complete_token_ids: [";
     for (size_t i = 0; i < tileNum(); i++) {
