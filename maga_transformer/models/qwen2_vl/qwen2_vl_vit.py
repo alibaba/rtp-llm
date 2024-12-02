@@ -153,7 +153,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         height, width = video.shape[2:]
         video = video[idx]
 
-        if configs.height != -1 and configs.width:
+        if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
                 configs.height,
                 configs.width,
