@@ -45,7 +45,7 @@ public:
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
-    bool useGroupGemm() const override;
+    bool useGroupGemm() const;
 
 private:
     void checkUseOpenSourceFMHA();

@@ -37,7 +37,7 @@ TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerTest) {
 
 TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForGroupGemmTest) {
     static_cast<CudaDevice*>(device_)->use_group_gemm = false;
-    ASSERT_TRUE(!device_->useGroupGemm());
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->useGroupGemm());
     std::vector<int> ms = {64, 1024};
     std::vector<int> ns = {64, 1024};
     std::vector<int> ks = {64, 1024};

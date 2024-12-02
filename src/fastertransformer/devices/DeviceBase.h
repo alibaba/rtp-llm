@@ -34,9 +34,6 @@ public:
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
-    virtual bool useGroupGemm() const {
-        return false;
-    };
 
 public:
     // device-independence op implementations
@@ -50,6 +47,7 @@ public:
     MaskOutput attentionMask(const MaskParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     BufferPtr mhaQKVGemm(const AttentionLayerParams& params) override;
+    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

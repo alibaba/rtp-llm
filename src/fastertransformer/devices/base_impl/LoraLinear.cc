@@ -41,27 +41,11 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
                                     ActivationType::Identity,
                                     1.0f,
                                     1.0f});
-            } else if (useGroupGemm()) {
-                FT_LOG_DEBUG("use group gemm");
+            } else {
                 // M = X * A
                 auto tmp = groupedGemm({inputs, lora_as});
                 // Y = M * B + Y
                 auto result = groupedGemm({tmp.output, lora_bs, outputs});
-            } else {
-                FT_LOG_DEBUG("use for gemm");
-                for (int i = 0; i < inputs.size(); i++) {
-                    auto tmp = gemm({*inputs[i], *lora_as[i]});
-                    auto result = gemm({*tmp,
-                                        *lora_bs[i],
-                                        std::nullopt,
-                                        outputs[i],
-                                        DataType::TYPE_INVALID,
-                                        TransposeOperation::NONE,
-                                        TransposeOperation::NONE,
-                                        ActivationType::Identity,
-                                        1.0f,
-                                        1.0f});
-                }
             }
 
         }

@@ -16,7 +16,9 @@ namespace fastertransformer {
 GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     // ensure A B C has the same size and dtype and shape is invalide.
     params.check();
-
+    if (!useGroupGemm()) {
+        return DeviceBase::groupedGemm(params);
+    }
     size_t num = params.A.size();
     auto dtype = params.A[0]->type();
     FT_CHECK_WITH_INFO((dtype == DataType::TYPE_FP16 || dtype == DataType::TYPE_BF16 || dtype == DataType::TYPE_FP32),
