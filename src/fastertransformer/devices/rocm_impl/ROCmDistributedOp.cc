@@ -47,12 +47,41 @@ AllReduceOutput ROCmDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
+    // if custom allreduce fails, fallback to the default ncclAllReduce
+    if (custom_allreduce_comm_ && nccl_op == ncclSum
+        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
+        auto custom_ar_res_buf =
+            allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
+        custom_allreduce_comm_->allReduce(
+            buffer->data(), custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream_);
+        return AllReduceOutput{custom_ar_res_buf};
+    }
+
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
                           "Invalid reduce op: %d", params.op);
  
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
     return {params.buffer};
+}
+
+PrepareAllReduceOutput ROCmDevice::prepareAllReduce(const PrepareAllReduceParams& params) {
+    if (nccl_param_.world_size_ < 2) {
+        return PrepareAllReduceOutput{params.buffer};
+    }
+
+    auto& buffer = params.buffer;
+    if (custom_allreduce_comm_ && static_cast<ncclRedOp_t>(params.op) == ncclSum &&
+        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
+        void* custom_ar_buf_ptr = custom_allreduce_comm_->peerCommBufferPtr();
+        return PrepareAllReduceOutput{
+            BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                buffer->type(),
+                buffer->shape(),
+                custom_ar_buf_ptr))
+        };
+    }
+    return PrepareAllReduceOutput{params.buffer};
 }
 
 void ROCmDevice::allGather(const AllGatherParams& params) {

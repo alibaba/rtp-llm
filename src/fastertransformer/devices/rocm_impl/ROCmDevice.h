@@ -21,6 +21,7 @@
 #include "src/fastertransformer/rocm/rocmMoeWrapper.h"
 
 #include "torch_hip_allocator.h"
+#include "custom_ar_comm.h"
 
 namespace fastertransformer {
 
@@ -53,6 +54,7 @@ public:
     void syncCommunication(bool timeout = true) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
+    PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
     void preRun() override { ROCM_CHECK(hipSetDevice(device_id_)); }
 
@@ -97,6 +99,9 @@ private:
 
     //moe
     std::unique_ptr<rocmMoeWrapper> moe_runner_;
+    
+    // for custom allreduce use
+    std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
 };
 
 }  // namespace fastertransformer
