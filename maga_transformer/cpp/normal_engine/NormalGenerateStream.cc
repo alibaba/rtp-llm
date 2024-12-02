@@ -151,7 +151,6 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
     }
     if (all_probs) {
         all_probs_ = device_->clone({*all_probs, ft::AllocationType::HOST});
-        // printf("all_probs: %s\n", all_probs_->debugStringWithData<float>().c_str());
     }
 
     //TODO: move it to better position

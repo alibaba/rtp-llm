@@ -132,6 +132,7 @@ public:
     void checkTimeout();
     bool checkTokenId(int token_id);
     void setStop(ErrorCode error_code, const std::string& error_msg);
+    void setStopWithoutLock(ErrorCode error_code, const std::string& error_msg);
     void stopAndRelease(ErrorCode error_code, const std::string& error_msg);
     ErrorInfo statusInfo();
     bool isDoneWithoutLock(int batch_id) const;

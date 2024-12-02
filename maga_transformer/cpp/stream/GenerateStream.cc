@@ -427,8 +427,7 @@ bool GenerateStream::checkTokenId(int token_id) {
     return token_id >= 0 && token_id < vocab_size_;
 }
 
-void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
+void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     FT_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
                     "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
@@ -436,6 +435,11 @@ void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg)
                     inputLength(), seqLength(), getTimeoutMs(), cost_time_ms);
     generate_status_.status     = GenerateState::STOPPED;
     generate_status_.error_info = ErrorInfo(error_code, error_msg);
+}
+
+void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    setStopWithoutLock(error_code, error_msg);
 }
 
 void GenerateStream::stopAndRelease(ErrorCode error_code, const std::string& error_msg) {
@@ -651,6 +655,7 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
                             const ft::BufferPtr& all_probs,
                             const ft::BufferPtr& loss,
                             bool                 update_queue) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
@@ -675,7 +680,7 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!checkTokenId(current_token_id)) {
-                setStop(ErrorCode::OUT_OF_VOCAB_RANGE, 
+                setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE, 
                         "output token id:" + to_string(current_token_id) + 
                         " out of vocab size: " + to_string(vocab_size_));
                 return;
