@@ -190,7 +190,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 stream->releaseResource();
                 it++;
             }
-        } else if (running_streams_.empty() && new_streams.empty()) {
+        } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             FT_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxSeqLen()) {
