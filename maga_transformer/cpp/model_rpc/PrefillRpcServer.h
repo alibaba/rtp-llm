@@ -1,7 +1,7 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
-#include "maga_transformer/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
+#include "maga_transformer/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "maga_transformer/cpp/model_rpc/RemoteRpcServer.h"
 #include "maga_transformer/cpp/model_rpc/PrefillGenerateContext.h"
 
@@ -39,7 +39,7 @@ private:
     void pollRemoteOutput(PrefillGenerateContext& prefill_context);
 
 private:
-    std::shared_ptr<RRLoadBalancer> load_balancer_;
+    std::shared_ptr<WRRLoadBalancer> load_balancer_;
     std::string docode_cluster_name_;
 };
 

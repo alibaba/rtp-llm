@@ -54,14 +54,14 @@ int main(int argc, char** argv) {
         if (!host) {
             std::cout << "choose biz1 host failed" << std::endl;
         } else {
-            std::cout << "choose biz1 host " << host->ip  << ":" << host->port << std::endl;
+            std::cout << "choose biz1 host " << host->ip << ":" << host->rpc_port << std::endl;
         }
 
         host = load_balancer->chooseHost("biz2");
         if (!host) {
             std::cout << "choose biz2 host failed" << std::endl;
         } else {
-            std::cout << "choose biz2 host " << host->ip << ":" << host->port << std::endl;
+            std::cout << "choose biz2 host " << host->ip << ":" << host->rpc_port << std::endl;
         }
         sleep(1);
     }

@@ -60,7 +60,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 
 void PrefillRpcServer::initLoadBalancer() {
     auto config        = makeConfig();
-    load_balancer_ = std::make_shared<RRLoadBalancer>();
+    load_balancer_ = std::make_shared<WRRLoadBalancer>();
     FT_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
     FT_LOG_INFO("load balancer init success");
 }
@@ -103,6 +103,7 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
     LoadBalancerInitParams params;
     params.subscribe_config = subscribe_config;
     params.update_interval_ms = 100;
+    params.sync_status_interval_ms = 10;
     return params;
 }
 
@@ -131,7 +132,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
-    auto decode_addr = host->ip + ":" + std::to_string(host->port);
+    auto decode_addr = host->ip + ":" + std::to_string(host->rpc_port);
     auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
     if (!connect_status.ok()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,

@@ -7,13 +7,13 @@ namespace rtp_llm {
 bool LocalSubscribeService::init(const LocalSubscribeServiceConfig& config) {
     for (auto& node_config : config.nodes) {
         if (!node_config.validate()) {
-            FT_LOG_WARNING(
-                      "local subscribe service init failed, node config is invalid, config is [%s]",
-                      autil::legacy::ToJsonString(node_config).c_str());
+            FT_LOG_WARNING("local subscribe service init failed, node config is invalid, config is [%s]",
+                           autil::legacy::ToJsonString(node_config).c_str());
             return false;
         }
 
-        auto node = std::make_shared<const TopoNode>(node_config.biz, node_config.ip, node_config.arpc_port);
+        auto node = std::make_shared<const TopoNode>(
+            node_config.biz, node_config.ip, node_config.rpc_port, node_config.http_port);
         nodes_.push_back(node);
     }
     inited_ = true;

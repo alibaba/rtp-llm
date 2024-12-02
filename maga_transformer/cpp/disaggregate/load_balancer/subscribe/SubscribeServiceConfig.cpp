@@ -31,17 +31,21 @@ bool CM2SubscribeServiceConfig::validate() const {
     return !zk_host.empty() && !zk_path.empty() && zk_timeout_ms > 0;
 }
 
-LocalNodeJsonize::LocalNodeJsonize(const std::string& biz_, const std::string& ip_, uint32_t arpc_port_):
-    biz(biz_), ip(ip_), arpc_port(arpc_port_) {}
+LocalNodeJsonize::LocalNodeJsonize(const std::string& biz_,
+                                   const std::string& ip_,
+                                   uint32_t           rpc_port_,
+                                   uint32_t           http_port_):
+    biz(biz_), ip(ip_), rpc_port(rpc_port_), http_port(http_port_) {}
 
 void LocalNodeJsonize::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
     json.Jsonize("biz", biz, biz);
     json.Jsonize("ip", ip, ip);
-    json.Jsonize("arpc_port", arpc_port, arpc_port);
+    json.Jsonize("rpc_port", rpc_port, rpc_port);
+    json.Jsonize("http_port", http_port, http_port);
 }
 
 bool LocalNodeJsonize::validate() const {
-    return !biz.empty() && !ip.empty() && arpc_port > 0;
+    return !biz.empty() && !ip.empty() && rpc_port > 0;
 }
 
 void LocalSubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {

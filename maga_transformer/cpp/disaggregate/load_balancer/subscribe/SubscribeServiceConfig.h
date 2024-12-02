@@ -39,7 +39,7 @@ public:
 class LocalNodeJsonize: public autil::legacy::Jsonizable {
 public:
     LocalNodeJsonize() = default;
-    LocalNodeJsonize(const std::string& biz, const std::string& ip, uint32_t arpc_port);
+    LocalNodeJsonize(const std::string& biz, const std::string& ip, uint32_t rpc_port, uint32_t http_port = 0);
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
@@ -48,7 +48,8 @@ public:
 public:
     std::string biz;
     std::string ip;
-    uint32_t    arpc_port;
+    uint32_t    rpc_port;
+    uint32_t    http_port;
 };
 
 class LocalSubscribeServiceConfig: public autil::legacy::Jsonizable {
