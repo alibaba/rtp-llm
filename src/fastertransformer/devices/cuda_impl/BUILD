@@ -31,6 +31,7 @@ cc_library(
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
+        "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

@@ -1,5 +1,8 @@
 #pragma once
 
+#include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/Event.h"
+
 #include <shared_mutex>
 #include <unordered_map>
 #include <memory>
@@ -17,6 +20,8 @@ public:
     BlockBuffer(const BlockBuffer& rhs):
         key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
 
+    fastertransformer::Buffer toDeviceBuffer();
+
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
@@ -28,13 +33,13 @@ public:
 class RequestBlockBuffer {
 public:
     RequestBlockBuffer(const std::string& requestid);
-    RequestBlockBuffer(const std::string& requestid, const std::shared_ptr<void>& event);
+    RequestBlockBuffer(const std::string& requestid, fastertransformer::DeviceEventPtr event);
 
     ~RequestBlockBuffer();
 
 public:
-    const std::string&           getRequestId() const;
-    const std::shared_ptr<void>& getEvent() const;
+    const std::string&                    getRequestId() const;
+    const fastertransformer::DeviceEvent* getEvent() const;
 
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> getBlocks() const;
     std::shared_ptr<BlockBuffer>                                  getBlock(const std::string& id) const;
@@ -56,8 +61,8 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
-    std::string           requestid_;
-    std::shared_ptr<void> event_;
+    std::string                       requestid_;
+    fastertransformer::DeviceEventPtr event_;
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;

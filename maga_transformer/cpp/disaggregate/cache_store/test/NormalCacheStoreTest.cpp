@@ -118,7 +118,7 @@ TEST_F(NormalCacheStoreTest, testStore_Success) {
     mutex.unlock();
 
     // save to local cache
-    if (memory_util_->rdmaMode()) {
+    if (memory_util_->isRdmaMode()) {
         // rdma block cache store will store mr memory, there will be no copy
         verifyBlock(
             cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "a"), "a", block_size, true, '0');

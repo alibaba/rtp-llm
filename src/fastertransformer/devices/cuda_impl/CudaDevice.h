@@ -30,6 +30,18 @@ nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype);
 
 class CudaGemmArguments;
 
+class CudaEvent : public DeviceEvent {
+public:
+    CudaEvent(cudaStream_t stream);
+    ~CudaEvent() override;
+
+    void synchronize() const override;
+
+private:
+    cudaEvent_t event_;
+    cudaStream_t stream_;
+};
+
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -45,6 +57,7 @@ public:
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
+    DeviceEventPtr createEvent() override;
     bool useGroupGemm() const;
 
 private:
@@ -111,7 +124,7 @@ protected:
     void selectCuFMHARunner(const DevicePrepParams& params);
 
     // for pd seperation
-    void writeCacheStore(DeviceBase* device, const AttentionModuleParams& params, rtp_llm::NormalCacheStore* cache_store, cudaStream_t stream);
+    void writeCacheStore(DeviceBase* device, const AttentionModuleParams& params, rtp_llm::CacheStore* cache_store, cudaStream_t stream);
 
 protected:
     cudaStream_t stream_;

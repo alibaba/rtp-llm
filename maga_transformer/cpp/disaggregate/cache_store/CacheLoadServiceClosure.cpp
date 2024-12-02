@@ -52,15 +52,12 @@ void CacheLoadServiceClosure::Run() {
             return;
         }
 
-        if (!memory_util_->memcopy(
-                unload_block->addr.get(), unload_block->gpu_mem, block.content().data(), false, block.len())) {
-            FT_LOG_WARNING(
-                      "copy load response to dst block failed, block %s, request %s",
-                      block.key().c_str(),
-                      request_block_buffer_->getRequestId().c_str());
-            end(false, CacheStoreErrorCode::LoadBufferTimeout);
-            return;
-        }
+        auto dst_buffer = unload_block->toDeviceBuffer();
+        auto src_buffer = fastertransformer::Buffer(
+            fastertransformer::MemoryType::MEMORY_CPU,
+            fastertransformer::DataType::TYPE_UINT8,
+            {block.len()}, block.content().data());
+        device_->noBlockCopy({dst_buffer, src_buffer});
     }
     end(true, CacheStoreErrorCode::None);
 }

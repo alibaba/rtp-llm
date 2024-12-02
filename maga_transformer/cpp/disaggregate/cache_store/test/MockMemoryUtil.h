@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 class MockMemoryUtil: public MemoryUtil {
 public:
-    MockMemoryUtil(std::unique_ptr<MemoryUtilBase> impl): MemoryUtil(std::move(impl)) {}
+    MockMemoryUtil(std::unique_ptr<MemoryUtil> impl): MemoryUtil(std::move(impl)) {}
 
 public:
     MOCK_METHOD(bool, gpuEventBarrier, (void*), (override));

@@ -5,13 +5,13 @@
 
 namespace rtp_llm {
 
-MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtilBase> impl): instance_(std::move(impl)) {}
+MemoryUtil::MemoryUtil(std::unique_ptr<MemoryUtil> impl): instance_(std::move(impl)) {}
 
-bool MemoryUtil::rdmaMode() {
+bool MemoryUtil::isRdmaMode() {
     throw std::runtime_error("not implemeted");
 }
 
-MemoryUtilBase& MemoryUtil::getInstance() {
+MemoryUtil& MemoryUtil::getInstance() {
     throw std::runtime_error("not implemeted");
 }
 

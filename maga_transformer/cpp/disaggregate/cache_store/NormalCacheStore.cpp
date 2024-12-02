@@ -39,10 +39,10 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     if (params_.memory_util != nullptr) {
         memory_util_ = params.memory_util;
     } else {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(params_.rdma_mode));
+        memory_util_ = createMemoryUtilImpl(params_.rdma_mode);
     }
 
-    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, params.stream);
+    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, params.device);
 
     metrics_reporter_ = std::make_shared<CacheStoreMetricsReporter>();
     if (params.enable_metric) {

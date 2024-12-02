@@ -77,14 +77,14 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         FT_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
-    } 
-    kv_cache_buffer.cache_type = cache_type;    
+    }
+    kv_cache_buffer.cache_type = cache_type;
     sync_check_cuda_error();
     return kv_cache_buffer;
 }
 
 void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams& params,
-                     rtp_llm::NormalCacheStore* cache_store, cudaStream_t stream) {
+                     rtp_llm::CacheStore* cache_store, cudaStream_t stream) {
     auto& param = params.common;
     if (param.warmup) {
         return;
@@ -100,14 +100,14 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
     auto offset_addr = param.cache_store_inputs->host_kv_cache_offset->data<int32_t>();
     auto k_cache_data = (uint64_t*)param.kv_cache->k_cache_buffer->data();
     auto v_cache_data = (uint64_t*)param.kv_cache->v_cache_buffer->data();
-    auto k_scale_data = (uint64_t*)(param.kv_cache->k_scale_buffer ? param.kv_cache->k_scale_buffer->data() : nullptr); 
-    auto v_scale_data = (uint64_t*)(param.kv_cache->v_scale_buffer ? param.kv_cache->v_scale_buffer->data() : nullptr); 
+    auto k_scale_data = (uint64_t*)(param.kv_cache->k_scale_buffer ? param.kv_cache->k_scale_buffer->data() : nullptr);
+    auto v_scale_data = (uint64_t*)(param.kv_cache->v_scale_buffer ? param.kv_cache->v_scale_buffer->data() : nullptr);
 
-    auto event_ptr = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(), 
-                        [](cudaEvent_t* event) { cudaEventDestroy(*event); delete event;});
-    cudaEventCreate(event_ptr.get());
-    cudaEventRecord(*event_ptr, stream);
-    
+    // auto event_ptr = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(),
+    //                     [](cudaEvent_t* event) { cudaEventDestroy(*event); delete event;});
+    // cudaEventCreate(event_ptr.get());
+    // cudaEventRecord(*event_ptr, stream);
+
     FT_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     FT_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
                         "context batch size and request id size is not same");
@@ -123,10 +123,10 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
         FT_CHECK_WITH_INFO(param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] % seq_size_per_block == 0,
                             "prefix_length \% seq_size_per_block != 0");
         int reuse_block_num = param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] / seq_size_per_block;
-        int block_num = (param.cache_store_inputs->input_lengths_host->data<int>()[param.decoder_batch_size + batch_id] 
+        int block_num = (param.cache_store_inputs->input_lengths_host->data<int>()[param.decoder_batch_size + batch_id]
                             + seq_size_per_block - 1) / seq_size_per_block;
         auto request_id = *(param.request_id->dataWithOffset<int64_t>(batch_id));
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event_ptr);
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
             auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
@@ -233,8 +233,8 @@ void MHA(const AttentionModuleParams& params,
                                         false);
             if (need_quant_fmha_out) {
                 DataType quant_out_data_type = DataType::TYPE_FP8_E4M3;
-                auto quant_params = QuantizeParams(*tmp_fmha_output, 
-                                                   quant_out_data_type, 
+                auto quant_params = QuantizeParams(*tmp_fmha_output,
+                                                   quant_out_data_type,
                                                    1,
                                                    QScheme::Qfp8PerTensor,
                                                    std::nullopt,
@@ -374,7 +374,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
                                     {"v_output"});
-    
+
     BufferPtr qkv_buf_fp8;
     if (use_fp8_fmha_) {
         qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3,
@@ -395,7 +395,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
-    
+
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
         kv_cache_block_id = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
@@ -418,7 +418,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.count_length             = 1;
         }
     }
-    
+
     // int8
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
@@ -489,9 +489,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             printBufferData(*qkv_buf_fp8.get(), "after invoke transpse fp8");
         }
         sync_check_cuda_error();
-        
+
         writeCacheStore(this, params, cache_store_.get(), stream_);
-        
+
         // printBufferData(params.input, "after invoke transpse");
         printBufferData(*q_output, "Q after invoke transpose");
         printBufferData(*k_output, "K after invoke transpose");

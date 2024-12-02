@@ -60,7 +60,7 @@ TEST_F(MemoryUtilTest, testMemoryOps) {
 }
 
 TEST_F(MemoryUtilTest, testMemoryMr_tcpMode) {
-    if (memory_util_->rdmaMode()) {
+    if (memory_util_->isRdmaMode()) {
         return;
     }
 
@@ -90,7 +90,7 @@ TEST_F(MemoryUtilTest, testMemoryMr_tcpMode) {
 }
 
 TEST_F(MemoryUtilTest, testMemoryMr_rdmaMode) {
-    if (!memory_util_->rdmaMode()) {
+    if (!memory_util_->isRdmaMode()) {
         return;
     }
 

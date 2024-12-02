@@ -126,7 +126,7 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     void* ptr      = nullptr;
-    check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
+    check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
 }
 
@@ -137,8 +137,7 @@ void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
 }
 
 void Allocator<AllocatorType::CUDA>::doFree(void* address) {
-    check_cuda_error(cudaFreeAsync(address, stream_));
-    // cudaStreamSynchronize(stream_);
+    check_cuda_error(cudaFree(address));
     return;
 }
 

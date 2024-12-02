@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 namespace rtp_llm {
-std::unique_ptr<MemoryUtilBase> createMemoryUtilImpl(bool rdma_mode) {
+std::unique_ptr<MemoryUtil> createMemoryUtilImpl(bool rdma_mode) {
     if (rdma_mode) {
         throw std::runtime_error("rdma mode not supported");
     }

@@ -1,24 +1,23 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
+namespace ft = fastertransformer;
+
 namespace rtp_llm {
 
-RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, void* stream):
-    memory_util_(memory_util), stream_(stream) {}
+RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, ft::DeviceBase* device):
+    memory_util_(memory_util), device_(device) {}
 
 bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     // event to sync wait compute
-    if (request_block_buffer->getEvent()) {
-        if (!memory_util_->gpuEventBarrier(request_block_buffer->getEvent().get())) {
-            FT_LOG_WARNING("set request block buffer to request block buffer store failed, request id %s",
-                           request_block_buffer->getRequestId().c_str());
-            return false;
-        }
+    auto event = request_block_buffer->getEvent();
+    if (event) {
+        event->synchronize();
     }
 
     auto store_request_block_buffer = getOrInsertRequestBlockBuffer(request_block_buffer->getRequestId());
     if (store_request_block_buffer == nullptr) {
-        FT_LOG_WARNING("set request block buffer to request block buffer store failed, request id %s",
+        FT_LOG_WARNING("set request block buffer failed to get block buffer, request id %s",
                        request_block_buffer->getRequestId().c_str());
         return false;
     }
@@ -32,9 +31,11 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
             continue;
         }
 
+        FT_LOG_WARNING("Found unregistered request block for request id %s, this is typically unwanted",
+                        request_block_buffer->getRequestId().c_str());
         auto valid_block = makeValidBlock(block);
         if (!valid_block) {
-            FT_LOG_WARNING("set request block buffer to request block buffer store failed, request id %s",
+            FT_LOG_WARNING("set request block buffer failed to make valid block, request id %s",
                            request_block_buffer->getRequestId().c_str());
             return false;
         }
@@ -128,30 +129,35 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 }
 
 bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& block) {
-    if (memory_util_->rdmaMode()) {
+    if (memory_util_->isRdmaMode()) {
         return memory_util_->isMemoryMr(block->addr.get(), block->len, block->gpu_mem, block->adopted);
     }
     return block->gpu_mem == false;
 }
 
 std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::shared_ptr<BlockBuffer>& block) {
-    // addr allocated by MemoryUtil, will be mr addr in rdma
-    auto malloc_ptr = memory_util_->mallocCPU(block->len);
-    auto addr = std::shared_ptr<void>(malloc_ptr, [memory_util = memory_util_, malloc_ptr](void* p) {
-        if(malloc_ptr != nullptr){
-            memory_util->deregUserMr(p, false);
-            memory_util->freeCPU(p);
-        }
-    });
+    if (!device_) {
+        FT_LOG_WARNING("make valid block failed, device is null, block %s", block->key.c_str());
+        return nullptr;
+    }
 
-    if (addr == nullptr) {
+    auto buffer = device_->allocateBuffer({ft::DataType::TYPE_UINT8, {block->len}, ft::AllocationType::HOST});
+    if (!buffer) {
         FT_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
         return nullptr;
     }
 
-    if (!memory_util_->regUserMr(addr.get(), block->len, false)) {
-        FT_LOG_WARNING("malloc valid block mr failed, block %s", block->key.c_str());
-        return nullptr;
+    auto malloc_ptr = buffer->data();
+    auto addr = std::shared_ptr<void>(malloc_ptr, [buffer = std::move(buffer)](void* p) mutable {
+        buffer.reset();
+    });
+
+    if (!memory_util_->isMemoryMr(addr.get(), block->len, false, false)) {
+        const auto reg_success = memory_util_->regUserMr(addr.get(), block->len, false);
+        if (!reg_success) {
+            FT_LOG_WARNING("malloc valid block mr failed, block %s", block->key.c_str());
+            return nullptr;
+        }
     }
 
     auto new_block = std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true);
@@ -169,38 +175,21 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
         return true;
     }
 
-    // different ptr, same addr, no need copy
-    if (dst_block->addr == src_block->addr) {
-        return true;
-    }
-
-    if (dst_block->len != src_block->len) {
-        FT_LOG_WARNING("copy block cache failed, block %s len %d vs %d not equal",
-                       src_block->key.c_str(),
-                       src_block->len,
-                       dst_block->len);
-        return false;
-    }
-
     FT_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
 
-    if (!memory_util_->memcopy(
-            dst_block->addr.get(), dst_block->gpu_mem, src_block->addr.get(), src_block->gpu_mem, src_block->len)) {
-        FT_LOG_WARNING("block cache store copy failed");
-        return false;
-    }
+    device_->noBlockCopy({dst_block->toDeviceBuffer(), src_block->toDeviceBuffer()});
     return true;
 }
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     FT_LOG_DEBUG("del request block buffer, request id %s", requestid.c_str());
-    {	
-        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);	
-        auto                                iter = request_cache_map_.find(requestid);	
-        if (iter != request_cache_map_.end()) {	
+    {
+        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+        auto                                iter = request_cache_map_.find(requestid);
+        if (iter != request_cache_map_.end()) {
             request_block_buffer = iter->second;
-        }	
+        }
         request_cache_map_[requestid] = nullptr;
     }
 }

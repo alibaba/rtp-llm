@@ -10,6 +10,7 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/core/torch_utils/torch_cuda_allocator.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
@@ -142,7 +143,7 @@ CudaDevice::~CudaDevice() {
         origin_torch_cuda_allocator_ = nullptr;
     }
     curandstate_buf_.reset();
-    cublas_mm_wrapper_.reset();    
+    cublas_mm_wrapper_.reset();
     check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
@@ -174,6 +175,7 @@ void CudaDevice::initCacheStore(const DeviceInitParams& device_params) {
     params.rdma_mode = device_params.cache_store_rdma_mode;
     params.thread_count = 4;
     params.queue_size = 500;
+    params.device = this;
     FT_LOG_INFO("cache store listen port is [%ld], connect port is [%d], rdma_mode is [%d]",
         params.listen_port, params.connect_port, params.rdma_mode);
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
@@ -438,6 +440,23 @@ nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype)
         case fastertransformer::DataType::TYPE_QINT4X2 : return nvinfer1::DataType::kINT4;
         default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+}
+
+DeviceEventPtr CudaDevice::createEvent() {
+    return std::make_unique<CudaEvent>(stream_);
+}
+
+CudaEvent::CudaEvent(cudaStream_t stream) : stream_(stream) {
+    check_cuda_error(cudaEventCreate(&event_));
+    check_cuda_error(cudaEventRecord(event_, stream));
+}
+
+CudaEvent::~CudaEvent() {
+    check_cuda_error(cudaEventDestroy(event_));
+}
+
+void CudaEvent::synchronize() const {
+    check_cuda_error(cudaEventSynchronize(event_));
 }
 
 }; // namespace fastertransformer

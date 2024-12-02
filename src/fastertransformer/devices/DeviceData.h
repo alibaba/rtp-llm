@@ -69,7 +69,7 @@ struct MemoryStatus {
     size_t available_bytes     = 0; // free + preserved
     size_t allocated_bytes     = 0; // memory allocated via current device
     size_t preserved_bytes     = 0; // memory preserved by current Device object, but not allocated yet
-    size_t max_consumed_bytes      = 0; // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
+    size_t max_consumed_bytes  = 0; // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
 };
 
 // runtime device status, such as available memory.

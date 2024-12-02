@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
@@ -40,7 +41,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
 void CacheManager::regUserMr() {
     if (device_->cacheStore()) {
         FT_LOG_INFO("start to register user mr");
-        auto memory_util = device_->cacheStore()->getMemoryUtil();
+        auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true)) {
             FT_FAIL("register user mr failed");
         }
@@ -53,7 +54,7 @@ void CacheManager::regUserMr() {
 void CacheManager::deregUserMr() {
     if (device_->cacheStore()) {
         FT_LOG_INFO("start to deregUserMr user mr");
-        auto memory_util = device_->cacheStore()->getMemoryUtil();
+        auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
             FT_FAIL("deregUserMr user mr failed");
         }
@@ -125,7 +126,7 @@ void CacheManager::allocateAndTpSync() {
     config_.refresh();
     cache_aligned_buffer_ =
         device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.total_size}});
-    
+
     cache_base_ptr_ = cache_aligned_buffer_->data();
 }
 

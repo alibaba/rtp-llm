@@ -28,7 +28,7 @@ void DeviceBase::setTraceMemory(bool trace_memory) {
     buffer_manager_->setTraceMemory(trace_memory);
 }
 
-std::shared_ptr<rtp_llm::NormalCacheStore> DeviceBase::cacheStore() {
+std::shared_ptr<rtp_llm::CacheStore> DeviceBase::cacheStore() {
     return cache_store_;
 }
 
@@ -84,6 +84,10 @@ DevicePrepOutput DeviceBase::prepareModelRun(const DevicePrepParams& params) {
 
 void DeviceBase::syncCommunication(bool timeout) {
     return;
+}
+
+DeviceEventPtr DeviceBase::createEvent() {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 CloneOutput DeviceBase::clone(const CloneParams& params) {

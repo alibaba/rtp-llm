@@ -30,9 +30,28 @@ cc_library(
 )
 
 cc_library(
-    name = "cache_store_base",
+    name = "cache_store_interface",
+    hdrs = [
+        "CommonDefine.h",
+        "CacheStore.h",
+        "RequestBlockBuffer.h",
+    ],
     srcs = [
         "RequestBlockBuffer.cpp",
+    ],
+    deps = [
+        "@havenask//aios/autil:log",
+        "@havenask//aios/autil:env_util",
+        "//maga_transformer/cpp:utils",
+        "//src/fastertransformer/core:buffer",
+        "//src/fastertransformer/core:event",
+    ],
+    visibility=['//visibility:public'],
+)
+
+cc_library(
+    name = "cache_store_base",
+    srcs = [
         "RequestBlockBufferStore.cpp",
         "CacheStoreServiceImpl.cpp",
         "CacheStoreServiceImplContext.cpp",
@@ -43,16 +62,11 @@ cc_library(
         "NoRdmaMemoryUtilImpl.cpp",
         "TimerManager.cpp",
         "Timer.cpp"
-    ] + select({
-        "//:using_cuda": ["MemoryUtil.cpp"],
-        "//conditions:default": ["FakeMemoryUtil.cpp"]
-    }),
+    ],
     hdrs = [
         "NoRdmaMemoryUtilImpl.h",
-        "CommonDefine.h",
         "Interface.h",
         "MemoryUtil.h",
-        "RequestBlockBuffer.h",
         "RequestBlockBufferStore.h",
         "InitParams.h",
         "CacheStoreServiceImpl.h",
@@ -65,20 +79,14 @@ cc_library(
         "Timer.h"
     ],
     deps = [
+        ":cache_store_interface",
         "//maga_transformer/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//maga_transformer/cpp/disaggregate/cache_store/metrics:metrics",
-        "//maga_transformer/cpp:utils",
-        "@havenask//aios/autil:log",
+        "//src/fastertransformer/devices:devices_base",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         ":arpc_dep",
-    ] + select({
-        "//:using_cuda": [
-            "@local_config_cuda//cuda:cuda",
-            "@local_config_cuda//cuda:cudart",
-        ],
-        "//conditions:default": []
-    }),
+    ],
     visibility=['//visibility:public'],
 )
 

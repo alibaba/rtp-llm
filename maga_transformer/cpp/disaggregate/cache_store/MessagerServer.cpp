@@ -45,7 +45,7 @@ bool MessagerServer::initTcpServer(uint32_t listen_port, bool enable_metric) {
     rpc_service_ = std::move(createCacheStoreServiceImpl(memory_util_, request_block_buffer_store_, metrics_reporter_, timer_manager_));
 
     if (rpc_server_transport_ == nullptr) {
-        int tcp_server_io_thread_count = memory_util_->rdmaMode() ? 1 : 3;
+        int tcp_server_io_thread_count = memory_util_->isRdmaMode() ? 1 : 3;
         rpc_server_transport_.reset(new anet::Transport(tcp_server_io_thread_count));
         if (!rpc_server_transport_ || !rpc_server_transport_->start()) {
             return false;

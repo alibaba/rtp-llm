@@ -28,7 +28,7 @@ bool MessagerClient::init(uint32_t connect_port, uint32_t rdma_connect_port, boo
 
 bool MessagerClient::initTcpClient(bool enable_metric) {
     if (rpc_channel_transport_ == nullptr) {
-        int tcp_client_io_thread_count = memory_util_->rdmaMode() ? 1 : 3;
+        int tcp_client_io_thread_count = memory_util_->isRdmaMode() ? 1 : 3;
         rpc_channel_transport_.reset(new anet::Transport(tcp_client_io_thread_count));
         if (!rpc_channel_transport_ || !rpc_channel_transport_->start()) {
             return false;

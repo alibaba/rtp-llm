@@ -183,7 +183,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     if (maga_init_params_.gpt_init_parameter.tp_size_ == 1) {
         for (size_t i = 0; i < maga_init_params_.gpt_init_parameter.rdma_connect_retry_times_ + 1; i++) {
             auto error_info = loadCache(load_context);
-            if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED && 
+            if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED &&
                 error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
                 return error_info;
             }
@@ -308,7 +308,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
     }
-    
+
     auto load_status = make_shared<LoadStatus>(load_context.timeout_ms + EXTRA_TIMEOUT_MS, load_context.server_context);
     auto load_callback = [request_key, start_load_time_us, load_status](bool success, CacheStoreErrorCode ec) {
         auto load_done_time_us = currentTimeUs();
@@ -336,7 +336,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     return load_status->errorInfo();
 }
 
-grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext* server_context, 
+grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext* server_context,
                                          const BroadcastLoadRequestPB* request, BroadcastLoadResponsePB* response) {
     std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());

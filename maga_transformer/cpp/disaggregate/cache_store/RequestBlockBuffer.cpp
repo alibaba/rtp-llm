@@ -3,12 +3,19 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
+namespace ft = fastertransformer;
+
 namespace rtp_llm {
+
+ft::Buffer BlockBuffer::toDeviceBuffer() {
+    const auto device_type = gpu_mem ? ft::MemoryType::MEMORY_GPU : ft::MemoryType::MEMORY_CPU;
+    return fastertransformer::Buffer(device_type, ft::DataType::TYPE_UINT8, {len}, addr.get());
+}
 
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid): requestid_(requestid) {}
 
-RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::shared_ptr<void>& event):
-    requestid_(requestid), event_(event) {}
+RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, ft::DeviceEventPtr event):
+    requestid_(requestid), event_(std::move(event)) {}
 
 RequestBlockBuffer::~RequestBlockBuffer() {
     triggerWatchFunc(false, {});
@@ -18,8 +25,8 @@ const std::string& RequestBlockBuffer::getRequestId() const {
     return requestid_;
 }
 
-const std::shared_ptr<void>& RequestBlockBuffer::getEvent() const {
-    return event_;
+const ft::DeviceEvent* RequestBlockBuffer::getEvent() const {
+    return event_.get();
 }
 
 std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> RequestBlockBuffer::getBlocks() const {

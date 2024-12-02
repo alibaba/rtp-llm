@@ -6,6 +6,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsCollector.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CommonDefine.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "aios/network/arpc/arpc/CommonMacros.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 
@@ -26,7 +27,8 @@ public:
         request_(request),
         response_(response),
         callback_(callback),
-        collector_(collector) {}
+        collector_(collector),
+        device_(fastertransformer::DeviceFactory::getDefaultDevice()) {}
 
     ~CacheLoadServiceClosure();
 
@@ -47,6 +49,7 @@ protected:
     CacheLoadResponse*                                    response_{nullptr};
     CacheStoreLoadDoneCallback                            callback_{nullptr};
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
+    fastertransformer::DeviceBase*                        device_{nullptr};
 };
 
 }  // namespace rtp_llm

@@ -54,7 +54,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
 }
 
 void RemoteRpcServer::initCacheStore() {
-    resource_.cache_store = engine_->getDevice()->cacheStore();
+    resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(engine_->getDevice()->cacheStore());
     if (!resource_.cache_store) {
         FT_FAIL("cache store is nullptr");
     }

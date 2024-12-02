@@ -5,13 +5,14 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/CacheStore.h"
 #include "autil/ThreadPool.h"
 
 #include <memory>
 
 namespace rtp_llm {
 
-class NormalCacheStore {
+class NormalCacheStore : public CacheStore{
 private:
     NormalCacheStore() = default;
 

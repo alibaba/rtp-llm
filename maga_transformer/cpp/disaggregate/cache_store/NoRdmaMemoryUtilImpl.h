@@ -2,7 +2,7 @@
 
 namespace rtp_llm {
 
-class NoRdmaMemoryUtilImpl: public MemoryUtilBase {
+class NoRdmaMemoryUtilImpl: public MemoryUtil {
 public:
     bool regUserMr(void* buf, uint64_t size, bool gpu) override;
     bool deregUserMr(void* buf, bool gpu) override;

@@ -4,7 +4,8 @@
 #include "src/fastertransformer/devices/DeviceData.h"
 #include "src/fastertransformer/devices/BufferManager.h"
 #include "src/fastertransformer/devices/OpData.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "src/fastertransformer/core/Event.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/CacheStore.h"
 
 namespace fastertransformer {
 
@@ -13,7 +14,7 @@ public:
     DeviceBase(const DeviceInitParams& params);
 
     virtual void init();
-    std::shared_ptr<rtp_llm::NormalCacheStore> cacheStore();
+    std::shared_ptr<rtp_llm::CacheStore> cacheStore();
 
     // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments
     // needs to be reset again in a new thread(such as cudaSetDevice,
@@ -34,6 +35,7 @@ public:
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
+    virtual DeviceEventPtr createEvent();
 
 public:
     // device-independence op implementations
@@ -67,7 +69,7 @@ private:
 protected:
     int device_id_;
     DeviceInitParams init_params_;
-    std::shared_ptr<rtp_llm::NormalCacheStore> cache_store_;
+    std::shared_ptr<rtp_llm::CacheStore> cache_store_;
 
 private:
     std::unique_ptr<BufferManager> buffer_manager_;
