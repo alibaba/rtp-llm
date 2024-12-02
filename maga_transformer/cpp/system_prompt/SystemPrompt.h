@@ -11,15 +11,13 @@ namespace rtp_llm {
 
 struct SystemPromptParams {
     SystemPromptParams() {}
-    SystemPromptParams(const std::vector<int>& _prompt_token, const std::vector<int>& _block_cache) {
+    SystemPromptParams(const std::vector<int>& _prompt_token, const std::vector<int>& _block_id) {
         prompt_token = _prompt_token;
-        prompt_length = prompt_token.size();
-        block_cache = _block_cache;
+        block_id = _block_id;
     }
-    
+
     std::vector<int>                prompt_token;
-    size_t                          prompt_length;
-    std::vector<int>                block_cache;
+    std::vector<int>                block_id;
 };
 
 class SystemPrompt {

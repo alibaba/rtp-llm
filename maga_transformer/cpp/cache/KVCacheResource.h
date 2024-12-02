@@ -9,6 +9,7 @@ class CacheManager;
 
 class KVCacheResource {
 public:
+    KVCacheResource(const std::vector<int>& block_id) : block_id(block_id) {}
     void clear();
     KVCacheResource clone(std::shared_ptr<CacheManager>& cache_manager) const;
 

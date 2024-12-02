@@ -75,9 +75,11 @@ public:
     }
 
 public:
-    int64_t                         request_id;
+    int64_t                         request_id              = 0;
     std::shared_ptr<GenerateConfig> generate_config;
     ft::BufferPtr                   input_ids;
+    int                             lora_id                 = -1;
+    bool                            need_release_resource   = true;
 
     // For multi-modality models
     // std::optional<MultimodalFeature> multimodal_features;
@@ -87,12 +89,8 @@ public:
     std::optional<ft::BufferPtr>                mm_locs; // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
-    int                             lora_id       = -1;
     int                             prefix_length = 0;
     int64_t                         begin_time_us = 0;
-
-    // config
-    bool                            need_release_resource = true;
 };
 
 class AuxInfo {

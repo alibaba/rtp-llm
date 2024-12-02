@@ -26,7 +26,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
             loss = ft::buffer2vector<float>(*(stream_->getLoss()));
         }
         // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
-        CacheManager::FreeInfo free_info(blocks, tokens_id, cache_keys, loss);
+        CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss);
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
         resource_context_.cache_manager->free(blocks);
@@ -98,7 +98,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         auto common_cache_keys = stream_->cacheKeys(0);
         auto mm_bounds_vec = stream_->multimodalIntervals();
         // TODO(xinfei.sxf) fix need loss param
-        CacheManager::MallocInfo malloc_info(common_tokens_vec, common_cache_keys, mm_bounds_vec);
+        CacheManager::MallocInfo malloc_info(stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec);
         auto match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
@@ -133,37 +133,31 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
     auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
 
-    auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(common_blocks_nums);
+    auto [success, kv_cache_resource] = resource_context_.cache_manager->malloc(stream_->streamId(), common_blocks_nums);
     if (!success) {
         return absl::InternalError("malloc failed");
     }
-    batch_resource_.appendClone(kv_cache_block_addr, resource_context_.cache_manager);
+    batch_resource_.appendClone(kv_cache_resource, resource_context_.cache_manager);
 
     auto extra_blocks_num = singleBatchNeedBlocks(seq_len);
     if (extra_blocks_num <= 0) {
         return real_occupy;
     }
-    if (extra_blocks_num) {
-        auto                          batch_size  = stream_->tileNum();
-        bool                          all_success = true;
+
+    auto batch_size  = stream_->tileNum();
+    auto total_blocks = batch_size * extra_blocks_num;
+    std::tie(success, kv_cache_resource) = resource_context_.cache_manager->malloc(stream_->streamId(), total_blocks);
+    if (success) {
+        const auto& all_blocks = kv_cache_resource.block_id;
         std::vector<KVCacheResource> resource;
-        // TODO(xinfei.sxf) optimize code -> call malloc only once
         for (uint32_t i = 0; i < batch_size; i++) {
-            auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(extra_blocks_num);
-            if (success) {
-                resource.push_back(kv_cache_block_addr);
-            } else {
-                all_success = false;
-                break;
-            }
+            auto blocks = std::vector<int32_t>(all_blocks.begin() + i * extra_blocks_num,
+                                                all_blocks.begin() + (i + 1) * extra_blocks_num);
+            resource.push_back(KVCacheResource(blocks));
         }
-
-        if (!all_success) {
-            resource_context_.cache_manager->free(resource);
-            return absl::InternalError("malloc failed");
-        }
-
         batch_resource_.append(resource);
+    } else {
+        return absl::InternalError("malloc failed");
     }
 
     return real_occupy;
@@ -178,8 +172,8 @@ const BatchKVCacheResource& StreamCacheResource::kvCache() const {
     return batch_resource_;
 }
 
-void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_block_addr) {
-    batch_resource_ = kv_cache_block_addr;
+void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
+    batch_resource_ = kv_cache_resource;
 }
 
 void StreamCacheResource::beamSearchKvCacheUpdate(const std::vector<int>& beam_index) {

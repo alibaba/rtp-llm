@@ -24,6 +24,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->max_new_tokens = 1;
         std::vector<size_t> shape = {tokens_id.size()};
+        generate_input->request_id = 0;
         generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void *)(tokens_id.data()));
         generate_input->generate_config = generate_config;
         generate_input->need_release_resource = false;
@@ -32,11 +33,12 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
 
         const auto& kv_cache = stream->kvCache();
         const auto& cache_keys = stream->cacheKeys(0);
-        FT_CHECK(kv_cache.batch_block_id.size() == 1);
-        FT_CHECK(kv_cache.batch_block_id[0].size() > 0);
-        CacheManager::FreeInfo free_info(kv_cache.batch_block_id[0], tokens_id, cache_keys);
+        const auto& all_blocks = kv_cache.batch_block_id;
+        const auto& blocks = all_blocks[0];
+        FT_CHECK(blocks.size() > 0);
+        CacheManager::FreeInfo free_info(stream->streamId(), tokens_id, cache_keys, blocks);
         cache_manager->insertResidentCache(free_info);
-        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, kv_cache.batch_block_id[0]);
+        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
     }
     return multi_task_prompt_args;
 }

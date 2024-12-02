@@ -152,7 +152,7 @@ public:
     size_t iterCount() const;
 
     const ResourceContext& resourceContext() const;
-    void setKVCache(const BatchKVCacheResource &kv_cache_block_addr);
+    void setKVCache(const BatchKVCacheResource &kv_cache_resource);
     void setLoss(const ft::Buffer& loss);
     const BatchKVCacheResource& kvCache() const;
     size_t maxBlockSize() const;
@@ -267,7 +267,6 @@ protected:
     int64_t                             first_token_time_us_ = 0;
     int64_t                             first_token_latency_us_ = 0;
     StreamCacheResource                 stream_cache_resource_;
-    SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_      = true;
     size_t                              iter_count_             = 0;
     size_t                              last_output_pos_        = 0;

@@ -255,7 +255,7 @@ protected:
         rtp_llm::BatchKVCacheResource batch_kv_cache;
 
         for (auto i = 0; i < batch_size; i++) {
-            auto [success, kv_cache] = cache_manager_->malloc(batch_layer_kv_block_num);
+            auto [success, kv_cache] = cache_manager_->malloc(0, batch_layer_kv_block_num);
             EXPECT_TRUE(success);
             batch_kv_cache.pushBack(kv_cache);
         }

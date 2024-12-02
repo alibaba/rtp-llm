@@ -198,15 +198,15 @@ bool GenerateStream::calculateLoss() const {
 
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
     if (system_prompt) {
-        prompt_param_ = system_prompt->getPromptParams(*generate_input_->generate_config);
-        if (!prompt_param_.prompt_token.empty()) {
-            auto total_input_len = inputLength() + prompt_param_.prompt_token.size();
+        auto prefix_param = system_prompt->getPromptParams(*generate_input_->generate_config);
+        if (!prefix_param.prompt_token.empty()) {
+            auto total_input_len = inputLength() + prefix_param.prompt_token.size();
             if (total_input_len >= max_seq_len_) {
                 setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len) 
                     + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
-            generate_input_->updatePrefix(prompt_param_.prompt_token);
+            generate_input_->updatePrefix(prefix_param.prompt_token);
         }
     }
     return true;
@@ -538,8 +538,8 @@ size_t GenerateStream::iterCount() const {
     return iter_count_;
 }
 
-void GenerateStream::setKVCache(const BatchKVCacheResource& kv_cache_block_addr) {
-    stream_cache_resource_.setKVCache(kv_cache_block_addr);
+void GenerateStream::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
+    stream_cache_resource_.setKVCache(kv_cache_resource);
 }
 
 const BatchKVCacheResource& GenerateStream::kvCache() const {

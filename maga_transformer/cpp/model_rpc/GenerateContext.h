@@ -1,7 +1,7 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
-#include "autil/TimeUtility.h"
+#include "maga_transformer/cpp/utils/TimeUtil.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
@@ -9,10 +9,6 @@
 namespace rtp_llm {
 
 const int64_t MAX_GRPC_TIMEOUT_MS = 180 * 1000;
-
-inline int64_t currentTimeUs() {
-    return autil::TimeUtility::currentTimeInMicroSeconds();
-}
 
 class GenerateContext {
 public:

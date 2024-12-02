@@ -238,9 +238,10 @@ int FIFOScheduler::runningStreamsSize() {
 void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
-        collector.fallback_stream_size = fallback_stream_size;
-        collector.running_stream_size = running_streams_.size();
         collector.wait_stream_size = waiting_streams_.size();
+        collector.running_stream_size = running_streams_.size();
+        collector.remote_running_stream_size = remote_running_streams_.size();
+        collector.fallback_stream_size = fallback_stream_size;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
 }

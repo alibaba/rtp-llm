@@ -7,6 +7,7 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
+#include "maga_transformer/cpp/utils/TimeUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "src/fastertransformer/core/Buffer.h"
@@ -42,12 +43,13 @@ void CacheManager::regUserMr() {
     if (device_->cacheStore()) {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
+        auto start_time_us = currentTimeUs();
         if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true)) {
             FT_FAIL("register user mr failed");
         }
-        FT_LOG_INFO("cache base address = %p, len = %lu, end address = %p",
-            cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
-        FT_LOG_INFO("register user mr success");
+        auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
+        FT_LOG_INFO("register user mr success: cost %ld ms, cache base address %p, len %lu, end address %p",
+            cost_time_ms, cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
     }
 }
 
@@ -223,7 +225,9 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
 }
 
 CacheManager::MatchInfo CacheManager::mallocWithCache(const MallocInfo& malloc_info) {
+    auto match_begin_time_us = currentTimeUs();
     auto match_info = matchImpl(malloc_info);
+    auto match_cost_time_us = currentTimeUs() - match_begin_time_us;
     if (match_info.loss.empty() && malloc_info.need_loss) {
         return {0, {}, {}};
     }
@@ -232,6 +236,7 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const MallocInfo& malloc_i
     if (metrics_reporter_) {
         RtpLLMCacheReuseMetricsCollector collector;
         collector.kv_cache_reuse_length = match_info.reuse_length;
+        collector.match_cost_time_us = match_cost_time_us;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
     }
     return match_info;
@@ -289,21 +294,21 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     }
 }
 
-std::tuple<bool, KVCacheResource> CacheManager::malloc(int nums) {
+std::tuple<bool, KVCacheResource> CacheManager::malloc(int64_t request_id, int nums) {
     std::lock_guard<std::mutex> guard(mutex_);
-    auto [success, block_indices] = mallocIndex(nums);
+    auto [success, block_indices] = mallocIndex(request_id, nums);
     return {success, {block_indices}};
 }
 
-std::tuple<bool, std::vector<int>> CacheManager::mallocIndex(int nums) {
+std::tuple<bool, std::vector<int>> CacheManager::mallocIndex(int64_t request_id, int nums) {
     maybeFreeBlockFromCache(nums);
-    return mallocImpl(nums);
+    return mallocImpl(request_id, nums);
 }
 
-std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int nums) {
+std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int64_t request_id, int nums) {
     if (free_blocks_index_.size() < static_cast<size_t>(nums)) {
-        std::string error_msg = "Failed to malloc " + std::to_string(nums) + " blocks, only "
-                                + std::to_string(free_blocks_index_.size()) + " blocks left";
+        std::string error_msg = "request " + std::to_string(request_id) + " failed to malloc " + std::to_string(nums)
+                                + " blocks, only " + std::to_string(free_blocks_index_.size()) + " blocks left";
         FT_LOG_ERROR("%s", error_msg.c_str());
         return {false, {}};
     } else {

@@ -46,7 +46,7 @@ public:
     int  maxBlockSize() const;
 
     const BatchKVCacheResource& kvCache() const;
-    void                         setKVCache(const BatchKVCacheResource& kv_cache_block_addr);
+    void                         setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
     void beamSearchKvCacheUpdate(const std::vector<int>& beam_index);
 

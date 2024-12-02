@@ -152,16 +152,18 @@ void RtpEmbeddingStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpEmb
 }
 
 bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(fallback_stream_size_metric, "rtp_llm_fallback_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_stream_size_metric, "rtp_llm_wait_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(fallback_stream_size_metric, "rtp_llm_fallback_stream_size");
     return true;
 }
 
 void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(fallback_stream_size_metric, collector->fallback_stream_size);
     REPORT_MUTABLE_METRIC(wait_stream_size_metric, collector->wait_stream_size);
     REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
+    REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
+    REPORT_MUTABLE_METRIC(fallback_stream_size_metric, collector->fallback_stream_size);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -254,11 +256,13 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us, "rtp_llm_match_cost_time_us");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
     return true;
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(match_cost_time_us, collector->match_cost_time_us);
     REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
 }
 

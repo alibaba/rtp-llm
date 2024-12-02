@@ -164,9 +164,10 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t fallback_stream_size = 0;
-    int64_t wait_stream_size     = 0;
-    int64_t running_stream_size  = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t fallback_stream_size        = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -175,9 +176,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* fallback_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* wait_stream_size_metric     = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* fallback_stream_size_metric        = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -329,6 +331,7 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
+    int64_t match_cost_time_us = 0;
     int64_t kv_cache_reuse_length = 0;
 };
 
@@ -338,6 +341,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* match_cost_time_us = nullptr;
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
 
 private:
