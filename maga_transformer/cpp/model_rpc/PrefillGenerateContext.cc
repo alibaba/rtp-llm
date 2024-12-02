@@ -76,11 +76,14 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return grpc::Status::OK;
     }
     grpc_stream_closed = true;
-    if (cancelled()) {
+    if (cancelled() && client_context) {
         client_context->TryCancel();
     }
-    client_stream->WritesDone();
-    return client_stream->Finish();
+    if (client_stream) {
+        client_stream->WritesDone();
+        return client_stream->Finish();
+    }
+    return grpc::Status::OK;
 }
 
 void PrefillGenerateContext::reset() {
