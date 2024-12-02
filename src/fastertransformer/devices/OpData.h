@@ -338,6 +338,8 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef multimodal_locs;
 };
 
+using MultimodalEmbeddingOutput = BufferPtr;
+
 struct CacheStoreInputs {
     BufferPtr input_lengths_host;
     BufferPtr prefix_lengths_host;

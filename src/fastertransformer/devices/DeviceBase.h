@@ -48,6 +48,7 @@ public:
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     BufferPtr mhaQKVGemm(const AttentionLayerParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
+    MultimodalEmbeddingOutput multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

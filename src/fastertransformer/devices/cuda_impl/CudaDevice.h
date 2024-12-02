@@ -78,7 +78,6 @@ public:
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     MultiplyOutput multiply(const MultiplyParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
-    BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
