@@ -30,9 +30,9 @@ class GenerateConfig(BaseModel):
     stop_words_str: List[str] = []
     stop_words_list: List[List[int]] = []
     bad_words_list: Optional[Union[List[List[List[int]]], List[List[int]]]] = None
-    eos_token_id: Optional[int] = None
-    pad_token_id: Optional[int] = None
-    bos_token_id: Optional[int] = None
+    eos_token_id: Optional[Union[List[int],int]] = None
+    pad_token_id: Optional[Union[List[int],int]] = None
+    bos_token_id: Optional[Union[List[int],int]] = None
     using_hf_sampling: bool = False
     print_stop_words: bool = False
     timeout_ms: Optional[int] = -1
@@ -135,11 +135,11 @@ class GenerateConfig(BaseModel):
                 f"top_p_min {self.top_p_min} is wrong data type")
             check_with_info(check_optional(is_union_positive_integer, self.top_p_reset_ids), \
                 f"top_p_reset_ids {self.top_p_reset_ids} is wrong data type")
-            check_with_info(check_optional(is_positive_integer, self.eos_token_id), \
+            check_with_info(check_optional(is_union_positive_integer, self.eos_token_id), \
                 f"eos_token_id {self.eos_token_id} is wrong data type")
-            check_with_info(check_optional(is_positive_integer, self.pad_token_id), \
+            check_with_info(check_optional(is_union_positive_integer, self.pad_token_id), \
                 f"pad_token_id {self.pad_token_id} is wrong data type")
-            check_with_info(check_optional(is_positive_integer, self.bos_token_id), \
+            check_with_info(check_optional(is_union_positive_integer, self.bos_token_id), \
                 f"bos_token_id {self.bos_token_id} is wrong data type")
             check_with_info(is_list_positive_integer_list(self.stop_words_list), \
                 f"stop_words_list {self.stop_words_list} is wrong data type")
