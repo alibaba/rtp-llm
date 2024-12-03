@@ -26,14 +26,14 @@ class CustomModule(object):
     def get_handler(self) -> 'CustomHandler':
         return self.handler
 
-# Class for c++
 class CustomHandler(object):    
     def __init__(self, config: GptInitModelParameters):
         self.config_ = config        
     
     def tensor_info(self) -> List[str]:
         return []
-    
+
+    # for cpp    
     def init_cpp_handler(self) -> None:
         pass
 

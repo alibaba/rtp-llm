@@ -57,6 +57,12 @@ def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
             raise ValueError(f"Cannot convert to torch data type, got {maybe_str_dtype}")
     return dtype
 
+def check_get_config_from_path(ckpt_path: str) -> Dict[str, Any]:
+    config_json = get_config_from_path(ckpt_path)
+    if config_json is None:
+        raise Exception(f"Failed to get config.json from path: {ckpt_path}")
+    return config_json
+
 def get_config_from_path(ckpt_path: str) -> Optional[Dict[str, Any]]:
     if os.path.isdir(ckpt_path):
         # load from huggingface
