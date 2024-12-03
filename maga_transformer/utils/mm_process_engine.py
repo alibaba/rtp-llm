@@ -30,31 +30,36 @@ class MMProcessEngine:
             configs = [MMPreprocessConfig()] * len(urls)
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
-        if self.model.config.mm_position_ids_style == 0:
-            res = []
-            for index in range(len(urls)):
-                if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index], index=index)
-                else:
-                    embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
-                if len(embedding.shape) > 2:
-                    res.extend(list(embedding))
-                else:
-                    res.append(embedding)
-            return MMEmbeddingRes(res)
-        else:
-            res = []
-            pos_id = []
-            for index in range(len(urls)):
-                embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
-                if len(embedding_res[0].shape) > 2:
-                    res.extend(list(embedding_res[0]))
-                else:
-                    res.append(embedding_res[0])
-                # expect position id is [seq_len, id_width]
-                if len(embedding_res[1].shape) > 2:
-                    pos_id.extend(list(embedding_res[1]))
-                else:
-                    pos_id.append(embedding_res[1])
-            return MMEmbeddingRes(res, pos_id)
-                
+        try:
+            if self.model.config.mm_position_ids_style == 0:
+                res = []
+                for index in range(len(urls)):
+                    if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
+                        embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index], index=index)
+                    else:
+                        embedding = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
+                    if len(embedding.shape) > 2:
+                        res.extend(list(embedding))
+                    else:
+                        res.append(embedding)
+                return MMEmbeddingRes(res)
+            else:
+                res = []
+                pos_id = []
+                for index in range(len(urls)):
+                    embedding_res = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
+                    if len(embedding_res[0].shape) > 2:
+                        res.extend(list(embedding_res[0]))
+                    else:
+                        res.append(embedding_res[0])
+                    # expect position id is [seq_len, id_width]
+                    if len(embedding_res[1].shape) > 2:
+                        pos_id.extend(list(embedding_res[1]))
+                    else:
+                        pos_id.append(embedding_res[1])
+                return MMEmbeddingRes(res, pos_id)
+        except Exception as e:
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            raise e

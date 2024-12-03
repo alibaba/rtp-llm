@@ -57,11 +57,8 @@ class MultiModalEmbeddingInterface:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
-            try:
-                bytes_io = get_bytes_io_from_url(url)
-                mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
-            except Exception as e:
-                raise Exception(f"multimodal process for {url} error, exception {e}")
+            bytes_io = get_bytes_io_from_url(url)
+            mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
             with mm_lock:
                 features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
             if isinstance(features, tuple):

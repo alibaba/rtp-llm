@@ -2,9 +2,13 @@ import copy
 import math
 from typing import List, Any, Tuple, Dict
 from PIL import Image
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
 from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
-import tempfile
 import torch
 import torch.nn as nn
 
@@ -127,20 +131,12 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         return image
         
     def load_video(self, data, configs, **kwargs):
-        with tempfile.NamedTemporaryFile() as tmpfile:
-            tmpfile.write(data.getbuffer())
-            tmpfile_name = tmpfile.name
-            video, audio, info = io.read_video(
-                tmpfile_name,
-                start_pts=0.0,
-                end_pts=None,
-                pts_unit="sec",
-                output_format="TCHW",
-            )
-
+        vr = VideoReader(data, ctx=cpu(0), num_threads=1)
+        frames = len(vr)
+        
         fps = FPS if configs.fps == -1 else configs.fps
         size_factor = FRAME_FACTOR
-        nframes = video.size(0) / info["video_fps"] * fps
+        nframes = frames / vr.get_avg_fps() * fps
         nframes = round_by_factor(nframes, size_factor)
         min_frames = FPS_MIN_FRAMES
         if nframes < min_frames:
@@ -149,9 +145,11 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         if nframes > max_frames:
             nframes = floor_by_factor(max_frames, size_factor)
 
-        idx = torch.linspace(0, video.size(0) - 1, nframes).round().long()
-        height, width = video.shape[2:]
-        video = video[idx]
+        idx = torch.linspace(0, frames - 1, nframes).round().long().tolist()
+        height, width = vr[0].shape[:2]
+        video = [torch.tensor(vr[i].asnumpy().transpose(2, 0, 1)) for i in idx]
+        del vr
+        video = torch.stack(video)
 
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
