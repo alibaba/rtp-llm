@@ -39,14 +39,14 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 97);
 
     const auto& item1 = result["1"];
-    ASSERT_EQ(item1.prompt_length, 3);
-    ASSERT_TRUE(!item1.block_cache.empty());
-    ASSERT_EQ(item1.prompt_token, prompt_1);
+    ASSERT_EQ(item1.prompt_tokens.size(), 3);
+    ASSERT_TRUE(!item1.block_ids.empty());
+    ASSERT_EQ(item1.prompt_tokens, prompt_1);
 
     const auto& item2 = result["2"];
-    ASSERT_EQ(item2.prompt_length, 4);
-    ASSERT_TRUE(!item2.block_cache.empty());
-    ASSERT_EQ(item2.prompt_token, prompt_2);
+    ASSERT_EQ(item2.prompt_tokens.size(), 4);
+    ASSERT_TRUE(!item2.block_ids.empty());
+    ASSERT_EQ(item2.prompt_tokens, prompt_2);
 }
 
 }

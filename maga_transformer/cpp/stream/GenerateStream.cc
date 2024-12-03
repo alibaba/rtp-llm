@@ -199,14 +199,14 @@ bool GenerateStream::calculateLoss() const {
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
     if (system_prompt) {
         auto prefix_param = system_prompt->getPromptParams(*generate_input_->generate_config);
-        if (!prefix_param.prompt_token.empty()) {
-            auto total_input_len = inputLength() + prefix_param.prompt_token.size();
+        if (!prefix_param.prompt_tokens.empty()) {
+            auto total_input_len = inputLength() + prefix_param.prompt_tokens.size();
             if (total_input_len >= max_seq_len_) {
                 setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len) 
                     + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
-            generate_input_->updatePrefix(prefix_param.prompt_token);
+            generate_input_->updatePrefix(prefix_param.prompt_tokens);
         }
     }
     return true;
