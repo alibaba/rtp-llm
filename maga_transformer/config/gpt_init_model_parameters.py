@@ -330,7 +330,7 @@ class GptInitModelParameters:
         if random_block:
             import random
             random_number = random.random()
-            self.block_nums = self.block_nums * random_number
+            self.block_nums = int(self.block_nums * random_number)
             logging.info(f'after random, block_nums: {self.block_nums}')
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
         logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
@@ -361,7 +361,7 @@ class GptInitModelParameters:
             policy_list = ["RR", "WRR"]
             if not self.load_balance_policy_name in policy_list:
                 raise Exception(f"load_balance_policy_name {self.load_balance_policy_name} " \
-                    "is not right, it must in {policy_list}")
+                    f"is not right, it must in {policy_list}")
 
         self.use_cache_store = bool(int(os.environ.get('USE_CACHE_STORE', 0)))
         logging.info(f'use_cache_store: {self.use_cache_store}')
