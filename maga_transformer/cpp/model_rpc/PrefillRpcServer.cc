@@ -60,7 +60,11 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 
 void PrefillRpcServer::initLoadBalancer() {
     auto config        = makeConfig();
-    load_balancer_ = std::make_shared<WRRLoadBalancer>();
+    if (maga_init_params_.gpt_init_parameter.load_balance_policy_name_ == "RR") {
+        load_balancer_ = std::make_shared<RRLoadBalancer>();
+    } else {
+        load_balancer_ = std::make_shared<WRRLoadBalancer>();
+    }
     FT_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
     FT_LOG_INFO("load balancer init success");
 }

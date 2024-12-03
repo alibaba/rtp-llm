@@ -1,23 +1,33 @@
 
 #include <random>
 
+#include "aios/network/anet/connection.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "maga_transformer/cpp/http_server/http_client/HandleHttpPacket.h"
 
-#include "maga_transformer/cpp/utils/Logger.h"
-
-#include "aios/network/anet/connection.h"
-
 namespace rtp_llm {
+
+double generateRandomDouble() {
+    static int               seed = (int)std::chrono::system_clock::now().time_since_epoch().count();
+    static std::minstd_rand0 generator(seed);
+    static std::uniform_real_distribution<double> distribution(0.0, 1.0);
+
+    auto rand = distribution(generator);
+    return rand;
+}
+
 WRRLoadBalancer::~WRRLoadBalancer() {
     sync_worker_status_stop_ = true;
     sync_worker_status_thread_->join();
     sync_worker_status_thread_.reset();
     service_discovery_thread_->stop();
     service_discovery_thread_.reset();
-}
-bool WRRLoadBalancer::init(const LoadBalancerInitParams& params) {
 
+    FT_LOG_INFO("destroy WRRLoadBalancer done");
+}
+
+bool WRRLoadBalancer::init(const LoadBalancerInitParams& params) {
     subscribe_service_manager_.reset(new SubscribeServiceManager);
     if (!subscribe_service_manager_->init(params.subscribe_config)) {
         FT_LOG_WARNING("random load balancer init failed, subscribe service manager init failed");
@@ -36,6 +46,8 @@ bool WRRLoadBalancer::init(const LoadBalancerInitParams& params) {
     sync_worker_status_interval_ms_ = params.sync_status_interval_ms;
     sync_worker_status_thread_ =
         autil::Thread::createThread(std::bind(&WRRLoadBalancer::syncWorkerThread, this), "sync_woker_status");
+
+    FT_LOG_INFO("WRRLoadBalancer init done");
     return true;
 }
 
@@ -108,11 +120,11 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz) 
     }
     return current_host;
 }
+
 std::shared_ptr<const Host>
 WRRLoadBalancer::chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz_hosts) const {
     std::shared_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
     double                              threshold = calculateThreshold(biz_hosts);
-    // FT_LOG_INFO("threshold: %lf", threshold);
     double weight_acc = 0;
     for (auto& host : biz_hosts) {
         // calculate weight sum
@@ -127,14 +139,6 @@ WRRLoadBalancer::chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz
         }
     }
     return nullptr;
-}
-double generateRandomDouble() {
-    static int               seed = (int)std::chrono::system_clock::now().time_since_epoch().count();
-    static std::minstd_rand0 generator(seed);
-    static std::uniform_real_distribution<double> distribution(0.0, 1.0);
-
-    auto rand = distribution(generator);
-    return rand;
 }
 
 double WRRLoadBalancer::calculateThreshold(std::vector<std::shared_ptr<const Host>> biz_hosts) const {

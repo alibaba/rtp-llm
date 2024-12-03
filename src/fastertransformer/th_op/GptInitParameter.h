@@ -195,6 +195,7 @@ public:
     int64_t     decode_retry_timeout_ms_    = 0;
     int64_t     rdma_connect_retry_times_   = 0;
     bool        pd_sep_enable_fallback_     = false;
+    std::string load_balance_policy_name_   = "";
     int64_t     load_cache_timeout_ms_      = 0;
     int64_t     max_rpc_timeout_ms_         = 0;
     int64_t     worker_port_offset_         = 0;

@@ -1,5 +1,4 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/BaseLoadBalancer.h"
-
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {

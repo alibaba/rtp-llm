@@ -1,6 +1,6 @@
 #pragma once
 #include "maga_transformer/cpp/model_rpc/RPCPool.h"
-#include "maga_transformer/cpp/model_rpc/RpcErrorCode.h"
+#include "maga_transformer/cpp/utils/RpcErrorCode.h"
 #include "maga_transformer/cpp/model_rpc/LocalRpcServer.h"
 #include "maga_transformer/cpp/model_rpc/RemoteServerResource.h"
 

@@ -15,8 +15,6 @@ cc_library(
     srcs = ["model_rpc_service.pb.cc",
             "model_rpc_service.grpc.pb.cc"],
     deps = [":model_rpc_service_cc_impl"],
-    # include_prefix = import_prefix,
-    # strip_include_prefix = strip_import_prefix,
     visibility = ["//visibility:public"],
 )
 
@@ -25,7 +23,5 @@ py_library(
     srcs = ["model_rpc_service_pb2.py",
             "model_rpc_service_pb2_grpc.py"],
     deps = [":model_rpc_service_py"],
-    # include_prefix = import_prefix,
-    # strip_include_prefix = strip_import_prefix,
     visibility = ["//visibility:public"],
 )

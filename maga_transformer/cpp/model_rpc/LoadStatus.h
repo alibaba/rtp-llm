@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 #include "autil/TimeUtility.h"
-#include "maga_transformer/cpp/model_rpc/RpcErrorCode.h"
+#include "maga_transformer/cpp/utils/RpcErrorCode.h"
 
 namespace rtp_llm {
 

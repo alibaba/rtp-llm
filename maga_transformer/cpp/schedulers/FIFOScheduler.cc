@@ -14,8 +14,8 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     max_seq_len_(params.max_seq_len_),
     max_context_batch_size_(params.max_context_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
-    enable_partial_fallback_(params.enable_partial_fallback_),
-    // not support enable_whole_fallback_ when use pd_speration
+    // not support fallback when use pd_speration:use_cache_store
+    enable_partial_fallback_(params.enable_partial_fallback_ && params.use_cache_store_ == false),
     enable_whole_fallback_(params.use_cache_store_ == false),
     enable_fast_gen_(params.enable_fast_gen_),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),

@@ -43,9 +43,6 @@ protected:
     void discovery();
 
 protected:
-    std::unique_ptr<SubscribeServiceManager> subscribe_service_manager_;
-    autil::LoopThreadPtr                     service_discovery_thread_;
-
     struct BizHosts {
         std::string                              biz;
         std::shared_ptr<std::atomic_uint32_t>    index{0};
@@ -59,6 +56,9 @@ protected:
 
     mutable std::shared_mutex                        biz_hosts_mutex_;
     std::map<std::string, std::shared_ptr<BizHosts>> biz_hosts_;
+
+    std::unique_ptr<SubscribeServiceManager> subscribe_service_manager_;
+    autil::LoopThreadPtr                     service_discovery_thread_;
 };
 
 }  // namespace rtp_llm

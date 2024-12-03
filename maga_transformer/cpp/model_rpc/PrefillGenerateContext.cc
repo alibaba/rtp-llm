@@ -59,6 +59,10 @@ PrefillGenerateContext::~PrefillGenerateContext() {
     printTime();
     reportTime();
     closeGrpcStream();
+    stopStream();
+}
+
+void PrefillGenerateContext::stopStream() {
     if (stream) {
         // if is waiting, cancel it
         stream->cancelIfNotRunning();

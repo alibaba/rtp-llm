@@ -56,10 +56,13 @@ public:
     ~PrefillGenerateContext();
     void reset() override;
     void nextStage();
+    grpc::Status closeGrpcStream();
+
+private:
     void markRequestEnd();
     void printTime();
     void reportTime();
-    grpc::Status closeGrpcStream();
+    void stopStream();
 
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;

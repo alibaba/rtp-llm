@@ -5,8 +5,9 @@ import asyncio
 import numpy as np
 import functools
 import logging
-import grpc
 import torch
+import grpc
+from grpc import StatusCode 
 
 from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
@@ -192,8 +193,11 @@ class ModelRpcClient(object):
                 raise FtRuntimeException(ExceptionType(error_details.error_code), error_details.error_message)
             else:
                 logging.error(f"request: [{input_pb.request_id}] RPC failed: "
-                              f"{e.code()}, {e.details()}")
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+                              f"error code is {e.code()}, detail is {e.details()}")
+                if e.code() == StatusCode.DEADLINE_EXCEEDED:
+                    raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
+                else:
+                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:
             logging.error(f'rpc unknown error:{str(e)}')
             raise e

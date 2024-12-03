@@ -324,6 +324,14 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
+        # for test, will delete soon
+        random_block = bool(int(os.environ.get('RANDOM_BLOCK', 0)))
+        logging.info(f'random_block: {random_block}')
+        if random_block:
+            import random
+            random_number = random.random()
+            self.block_nums = self.block_nums * random_number
+            logging.info(f'after random, block_nums: {self.block_nums}')
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
         logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
@@ -348,6 +356,12 @@ class GptInitModelParameters:
             logging.info(f'prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}')
             self.pd_sep_enable_fallback = bool(int(os.environ.get('PD_SEP_ENABLE_FALLBACK', 0)))
             logging.info(f'pd_sep_enable_fallback: {self.pd_sep_enable_fallback}')
+            self.load_balance_policy_name = os.environ.get('LOAD_BALANCE_POLICY_NAME', "RR")
+            logging.info(f'load_balance_policy_name: {self.load_balance_policy_name}')
+            policy_list = ["RR", "WRR"]
+            if not self.load_balance_policy_name in policy_list:
+                raise Exception(f"load_balance_policy_name {self.load_balance_policy_name} " \
+                    "is not right, it must in {policy_list}")
 
         self.use_cache_store = bool(int(os.environ.get('USE_CACHE_STORE', 0)))
         logging.info(f'use_cache_store: {self.use_cache_store}')

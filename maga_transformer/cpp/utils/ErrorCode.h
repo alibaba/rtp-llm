@@ -8,6 +8,8 @@ enum class ErrorCode {
     UNKNOWN_ERROR = 514,
     MALLOC_FAILED = 602,
     GENERATE_TIMEOUT = 603,
+    ERROR_GENERATE_CONFIG_FORMAT = 604,
+    INVALID_PARAMS = 605,
 
     // Error codes starting from 8000 can be retried
     CANCELLED = 8100,
@@ -29,14 +31,17 @@ enum class ErrorCode {
     DECODE_MALLOC_FAILED = 8208,
     LOAD_KV_CACHE_FAILED = 8209,
 
-    // load cache error
+    // cache store error
     LOAD_CACHE_TIMEOUT = 8300,
-    CACHE_STORE_LOAD_CONNECT_FAILED = 8301,
-    CACHE_STORE_LOAD_SEND_REQUEST_FAILED = 8302,
-    CACHE_STORE_CALL_PREFILL_TIMEOUT = 8303,
-    CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 8304,
-    CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8305,
-    CACHE_STORE_LOAD_BUFFER_TIMEOUT = 8306,
+    CACHE_STORE_PUSH_ITEM_FAILED = 8301,
+    CACHE_STORE_LOAD_CONNECT_FAILED = 8302,
+    CACHE_STORE_LOAD_SEND_REQUEST_FAILED = 8303,
+    CACHE_STORE_CALL_PREFILL_TIMEOUT = 8304,
+    CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 8305,
+    CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8306,
+    CACHE_STORE_LOAD_BUFFER_TIMEOUT = 8307,
+    CACHE_STORE_LOAD_UNKNOWN_ERROR = 8308,
+    CACHE_STORE_STORE_FAILED = 8309,
 
     // multimodal error
     MM_LONG_PROMPT_ERROR = 901,
@@ -60,6 +65,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MALLOC_FAILED";
         case ErrorCode::GENERATE_TIMEOUT:
             return "GENERATE_TIMEOUT";
+        case ErrorCode::INVALID_PARAMS:
+            return "INVALID_PARAMS";
         case ErrorCode::CANCELLED:
             return "CANCELLED";
         case ErrorCode::GET_HOST_FAILED:
@@ -84,6 +91,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "LOAD_KV_CACHE_FAILED";
         case ErrorCode::LOAD_CACHE_TIMEOUT:
             return "LOAD_CACHE_TIMEOUT";
+        case ErrorCode::CACHE_STORE_PUSH_ITEM_FAILED:
+            return "CACHE_STORE_PUSH_ITEM_FAILED";
         case ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED:
             return "CACHE_STORE_LOAD_CONNECT_FAILED";
         case ErrorCode::CACHE_STORE_LOAD_SEND_REQUEST_FAILED:
@@ -96,6 +105,10 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "CACHE_STORE_LOAD_RDMA_WRITE_FAILED";
         case ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT:
             return "CACHE_STORE_LOAD_BUFFER_TIMEOUT";
+        case ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR:
+            return "CACHE_STORE_LOAD_UNKNOWN_ERROR";
+        case ErrorCode::CACHE_STORE_STORE_FAILED:
+            return "CACHE_STORE_STORE_FAILED";
         case ErrorCode::MM_LONG_PROMPT_ERROR:
             return "MM_LONG_PROMPT_ERROR";
         case ErrorCode::MM_WRONG_FORMAT_ERROR:

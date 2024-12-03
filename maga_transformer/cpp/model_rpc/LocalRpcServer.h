@@ -10,7 +10,7 @@
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/cache/KVCacheResource.h"
-#include "maga_transformer/cpp/model_rpc/RpcErrorCode.h"
+#include "maga_transformer/cpp/utils/RpcErrorCode.h"
 #include "maga_transformer/cpp/model_rpc/GenerateContext.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"

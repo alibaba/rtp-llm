@@ -12,6 +12,7 @@
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "maga_transformer/cpp/utils/KVCacheUtils.h"
+#include "maga_transformer/cpp/utils/RpcErrorCode.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -148,7 +149,8 @@ void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {
                 FT_LOG_WARNING("query [%ld], layer id [%d], "
-                               "call store kv cache failed, ec is %d", request_id, layer_id, ec);
+                               "call store kv cache failed, ec is %d, error msg is [%s]",
+                               request_id, layer_id, ec, ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
             }
         };
         cache_store->store(request_blocks, storeCallback);
