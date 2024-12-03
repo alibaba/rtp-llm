@@ -80,12 +80,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
-        model_input.attention_mask =
-            NormalBatchStreamProcessor::createAttentionMask({model_input.input_lengths->view(2, 2),
-                                                             *model_input.prefix_lengths,
-                                                             ft::DataType::TYPE_FP16,
-                                                             true,
-                                                             device_});
         vector<int> combo_tokens     = {2, 3, 1, 2, 3, 2, 3, 4};
         vector<int> input_lengths    = {1, 2, 3, 3};
         vector<int> sequence_lengths = {1, 2};
@@ -96,7 +90,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, buffer2vector<int>(*model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.attention_mask->size(), 2 * 3 * 4);
     }
     {
         NormalBatchStreamProcessor processor(param, CacheConfig(), false);

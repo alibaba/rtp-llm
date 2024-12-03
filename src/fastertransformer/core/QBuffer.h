@@ -6,6 +6,7 @@ namespace fastertransformer {
 
 enum QScheme : size_t {
     NoQuantize = 0,
+    Qint8WeightOnly,
     Qint8PerToken,
     Qint8PerTensor,
     Qfp8PerTensor

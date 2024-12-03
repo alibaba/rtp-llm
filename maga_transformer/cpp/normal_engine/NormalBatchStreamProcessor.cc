@@ -168,12 +168,12 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     auto text_token_mask = stream->textTokensMask();
                     memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
                 }
-            } 
+            }
 
             if (need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds(device_);
-                memcpy(combo_position_ids + token_idx * position_id_len_factor_, 
-                       context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_), 
+                memcpy(combo_position_ids + token_idx * position_id_len_factor_,
+                       context_pos_ids->dataWithOffset<int>(stream->reuseLength() * position_id_len_factor_),
                        (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_) * context_pos_ids->typeSize());
             }
             lora_ids[batch_idx]           = stream->loraId();
@@ -202,41 +202,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     return model_input;
-}
-
-ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& params) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const int *input_lengths = params.input_lengths.data<int32_t>();
-    const int batch_size = params.input_lengths.size();
-    const int max_input_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
-    const auto torch_type = ft::dataTypeToTorchType(params.dtype);
-    auto tensor_options = torch::TensorOptions(torch::kBool).device(torch::Device(torch::kCPU));
-    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len}, tensor_options);
-    if (params.is_causal) {
-        attention_mask = attention_mask.tril();
-    }
-    attention_mask = attention_mask.unsqueeze_(0).tile({(int)batch_size, 1, 1}).to(torch_type);
-
-    for (int i = 0; i < batch_size; ++i) {
-        attention_mask[i].slice(0, input_lengths[i], max_input_seq_len) = 0;
-        if (!params.is_causal) {
-            attention_mask[i].slice(1, input_lengths[i], max_input_seq_len) = 0;
-        }
-    }
-    if (params.prefix_lengths.size()) {
-        FT_CHECK(int(params.prefix_lengths.size()) == batch_size);
-        const int *prefix_lengths = params.prefix_lengths.data<int32_t>();
-        auto max_reuse_length = *std::max_element(prefix_lengths, prefix_lengths + batch_size);
-        attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}).to(torch_type)}, -1);
-        if (max_reuse_length) {
-            for (int i = 0; i < batch_size; ++i) {
-                attention_mask[i] = attention_mask[i].roll({prefix_lengths[i]}, {-1});
-                attention_mask[i].slice(0, 0, input_lengths[i]).slice(1, 0, prefix_lengths[i]) = 1;
-            }
-        }
-    }
-    // tmp clone to insure mask liftcycle, maybe can remove
-    return params.device->clone({*ft::torchTensor2Buffer(attention_mask)});
 }
 
 absl::StatusOr<SamplerInputs>

@@ -41,8 +41,6 @@ public:
                                                       const GptModelInputs&  model_inputs,
                                                       const GptModelOutputs& model_output) const;
 
-    static ft::BufferPtr createAttentionMask(const MaskParams& params);
-
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const ft::BufferPtr& sequence_length) const;

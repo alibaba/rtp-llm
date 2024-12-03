@@ -225,7 +225,8 @@ public:
         auto host_B = tensorToBuffer(input.B, AllocationType::HOST);
         auto QB = device_->quantize({*host_B,
                                     DataType::TYPE_QINT8,
-                                    1});
+                                    1,
+                                    QScheme::Qint8WeightOnly});
         auto device_B  = device_->clone({*QB});
         auto D = device_->allocateBuffer({A->type(), {A->shape()[0], device_B->shape()[1]}});
         GemmParams params {*A, *device_B, std::nullopt, D};
@@ -249,9 +250,9 @@ public:
     }
 
     void BasicQGemmOpTest(size_t m,
-                        size_t n,
-                        size_t k,
-                        DataType dtype)
+                          size_t n,
+                          size_t k,
+                          DataType dtype)
     {
         auto input = PrepareGemmOpInput(m, n, k, dtype);
         auto result = BasicCUDAQGemmOpRun(input);

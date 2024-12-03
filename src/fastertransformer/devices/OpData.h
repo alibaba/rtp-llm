@@ -685,6 +685,11 @@ struct QuantizeParams {
         axis(axis),
         qscheme(QScheme::Qint8PerToken),
         groupSize(groupSize) {}
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis, QScheme qscheme):
+        input(input),
+        qtype(qtype),
+        axis(axis),
+        qscheme(qscheme){}
 };
 
 }  // namespace fastertransformer
