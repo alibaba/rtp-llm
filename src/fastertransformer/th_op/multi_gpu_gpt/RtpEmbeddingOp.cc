@@ -34,7 +34,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
                 params.gpt_init_parameter.include_sep_tokens_,
                 params.gpt_init_parameter.max_seq_len_));
         }
-        startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
+        startRpcServer(gpt_init_params, py_render, params.metrics_reporter, mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, gpt_init_params, py_render);
     } catch (const std::exception& e) {
         FT_FAIL("init embedding engine failed, error msg: %s", e.what());
@@ -69,8 +69,9 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
 
 void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params,
                                     py::object py_render,
-                                    kmonitor::MetricsReporterPtr reporter) {
-    auto arpc_service = std::move(createEmbeddingArpcService(gpt_init_params, py_render, embedding_engine_, reporter));
+                                    kmonitor::MetricsReporterPtr reporter,
+                                    std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor) {
+    auto arpc_service = std::move(createEmbeddingArpcService(gpt_init_params, py_render, mm_processor, embedding_engine_, reporter));
     if (arpc_service) {
         FT_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service),

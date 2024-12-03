@@ -283,7 +283,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (inputs.multimodal_features) {
         hidden = device_->multimodalEmbedding({
                 hidden,
-                inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt,
+                (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
                 mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
         });
     }

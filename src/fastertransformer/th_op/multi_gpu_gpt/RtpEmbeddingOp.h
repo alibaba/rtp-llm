@@ -37,7 +37,8 @@ public:
 private:
     void startRpcServer(const ft::GptInitParameter& gpt_init_params,
                         py::object py_render,
-                        kmonitor::MetricsReporterPtr reporter);
+                        kmonitor::MetricsReporterPtr reporter,
+                        std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor);
 
     void startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,
                          std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,

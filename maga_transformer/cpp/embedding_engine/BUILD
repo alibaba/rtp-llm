@@ -85,7 +85,8 @@ cc_library(
     deps = [
         "@havenask//aios/network/arpc:arpc",
         ":embedding_engine",
-        ":embedding_engine_arpc_server_header"
+        ":embedding_engine_arpc_server_header",
+        "//maga_transformer/cpp:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
 )

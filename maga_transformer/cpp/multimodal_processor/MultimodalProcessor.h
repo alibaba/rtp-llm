@@ -135,12 +135,6 @@ private:
             expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
         }
 
-        if (expanded_len >= max_seq_len_) {
-            std::stringstream exception_str;
-            exception_str << "input after multimodal process is " << expanded_len << " > max_seq_len(" << max_seq_len_ << ")";
-            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
-        }
-
         auto device = ft::DeviceFactory::getDefaultDevice();
         ft::BufferPtr expanded_ids = device->allocateBuffer(
             {token_ids->type(), {(size_t)expanded_len}, ft::AllocationType::HOST}, {});
@@ -233,6 +227,15 @@ private:
         return locs;
     }
 
+    absl::Status checkExpendLength(const ExpandedOutput& expand_output) {
+        if (expand_output.expanded_ids->size() >= max_seq_len_) {
+            std::stringstream exception_str;
+            exception_str << "input after multimodal process is " << expand_output.expanded_ids->size() << " > max_seq_len(" << max_seq_len_ << ")";
+            return absl::InternalError(exception_str.str());
+        }
+        return absl::OkStatus();
+    }
+
 public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
         if (input->generate_config && input->generate_config->calculate_loss) {
@@ -243,6 +246,7 @@ public:
         input->multimodal_features = std::move(mm_embedding_res.mm_features);
         input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
         CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
+        THROW_IF_STATUS_ERROR(checkExpendLength(expanded_ids));
         input->input_ids = expanded_ids.expanded_ids;
         input->text_tokens_mask = expanded_ids.text_tokens_mask;
         input->mm_locs = expanded_ids.locs;
