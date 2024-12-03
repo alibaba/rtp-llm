@@ -50,9 +50,7 @@ gen_cpp_code("gemv_inst", [T, Layout, Tile],
 
 cc_library(
     name = "weight_only_gemm_cu",
-    srcs = glob([
-        "decoder_masked_multihead_attention/*.cu",
-    ]) + [
+    srcs = [
         ":gemv_inst"
     ],
     hdrs = glob([
