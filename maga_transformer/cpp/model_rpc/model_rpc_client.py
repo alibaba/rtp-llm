@@ -196,6 +196,8 @@ class ModelRpcClient(object):
                               f"error code is {e.code()}, detail is {e.details()}")
                 if e.code() == StatusCode.DEADLINE_EXCEEDED:
                     raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
+                elif e.code() == StatusCode.CANCELLED:
+                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
                 else:
                     raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:
