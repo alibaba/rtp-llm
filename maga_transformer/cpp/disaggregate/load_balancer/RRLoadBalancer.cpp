@@ -3,8 +3,9 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-
 RRLoadBalancer::~RRLoadBalancer() {
+    service_discovery_thread_->stop();
+    service_discovery_thread_.reset();
     FT_LOG_INFO("destroy RRLoadBalancer done");
 }
 

@@ -37,23 +37,38 @@ public:
     bool                        init(const LoadBalancerInitParams& params) override;
 
 private:
-    bool                                         sync_worker_status_stop_{false};
-    int                                          sync_worker_status_interval_ms_{10};
-    autil::ThreadPtr                             sync_worker_status_thread_;
+    std::shared_ptr<const Host> chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
+    double                      calculateThreshold(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
+
+    void syncWorkerThread();
+    void syncWorkerStatus(const std::shared_ptr<std::atomic_int>&   sync_cnt,
+                          const std::shared_ptr<std::shared_mutex>& new_host_load_balance_info_map_mutex,
+                          const std::shared_ptr<std::unordered_map<std::string, int>>& new_host_load_balance_info_map);
+    bool waitDone(const std::shared_ptr<std::atomic_int>& sync_cnt);
+    void
+         getConcurrencyFromHost(const std::string&                        spec,
+                                const std::shared_ptr<std::atomic_int>&   sync_cnt,
+                                const std::shared_ptr<std::shared_mutex>& new_host_load_balance_info_map_mutex,
+                                const std::shared_ptr<std::unordered_map<std::string, int>>& new_host_load_balance_info_map);
+    void processWorkerStatusResponse(
+        const std::string&                                           host_ip,
+        const std::string&                                           response_body,
+        const std::shared_ptr<std::shared_mutex>&                    new_host_load_balance_info_map_mutex,
+        const std::shared_ptr<std::unordered_map<std::string, int>>& new_host_load_balance_info_map);
+    int getHostCnt();
+
+private:
+    bool                    sync_worker_status_stop_{false};
+    int                     sync_worker_status_interval_ms_{10};
+    autil::ThreadPtr        sync_worker_status_thread_;
+    std::condition_variable sync_worker_status_cv_;
+    std::mutex              cv_mutex_;
+    int                     total_host_cnt_{0};
+
     mutable std::shared_mutex                    host_load_balance_info_map_mutex_;
     mutable std::unordered_map<std::string, int> host_load_balance_info_map_;
 
-    mutable std::shared_mutex                      new_host_load_balance_info_map_mutex_;
-    mutable std::unordered_map<std::string, int>   new_host_load_balance_info_map_;
     std::shared_ptr<http_server::SimpleHttpClient> http_client_;
-
-private:
-    std::shared_ptr<const Host> chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
-    double                      calculateThreshold(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
-    void                        syncWorkerStatus();
-    void                        syncWorkerThread();
-    void                        getConcurrencyFromHost(const std::string& spec);
-    void processWorkerStatusResponse(const std::string& host_ip, const std::string& response_body);
 };
 
 }  // namespace rtp_llm
