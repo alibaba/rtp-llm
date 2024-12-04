@@ -7,6 +7,7 @@
 #include <torch/python.h>
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/utils/ErrorCode.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
@@ -22,7 +23,7 @@ struct ExpandedOutput {
     ft::BufferPtr expanded_ids;
     ft::BufferPtr text_tokens_mask;
     ft::BufferPtr locs;
-    ExpandedOutput(ft::BufferPtr expanded_ids, ft::BufferPtr text_tokens_mask = nullptr, ft::BufferPtr locs = nullptr):
+    ExpandedOutput(ft::BufferPtr expanded_ids = nullptr, ft::BufferPtr text_tokens_mask = nullptr, ft::BufferPtr locs = nullptr):
         expanded_ids(expanded_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
 };
 
@@ -43,10 +44,12 @@ private:
     bool include_sep_tokens_;
     int64_t max_seq_len_;
 
-    absl::Status getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {
+    ErrorInfo getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {
         int url_len = url.length(), data_size_scale = std::max(int(sizeof(size_t) / sizeof(int32_t)), 1);
         if (mm_emb_len / data_size_scale <= 0) {
-            return absl::InternalError("length of multimodal input is too short");
+            std::stringstream exception_str;
+            exception_str << "length of multimodal input is too short, at least " << data_size_scale << ", get " << mm_emb_len;
+            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
         }
         int substr_len = (url_len - 1) / (mm_emb_len / data_size_scale) + 1;
         int now_idx = 0;
@@ -56,10 +59,10 @@ private:
             memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(size_t));
             now_idx++;
         }
-        return absl::OkStatus();
+        return ErrorInfo::OkStatus();
     }
 
-    virtual absl::StatusOr<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    virtual ErrorResult<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_inputs.size() == 0) {
             return MMEmbeddingRes();
         } else if (!mm_process_engine_.is_none()) {
@@ -97,14 +100,14 @@ private:
                 }
                 return mm_embedding_res;
             } catch (py::error_already_set &e) {
-                return absl::InternalError(std::string(e.what()));
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, std::string(e.what()));
             }
         } else {
-            return absl::InternalError("no mm process engine!");
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
         }
     }
 
-    absl::StatusOr<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids, const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids, const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_embedding.size() == 0) {
             return ExpandedOutput(token_ids);
         }
@@ -123,7 +126,7 @@ private:
         if (locs.size() != mm_num) {
             std::stringstream exception_str;
             exception_str << "number of multimodal tags and multimodal input not matched, expect " << locs.size() << ", get " << mm_num;
-            return absl::InternalError(exception_str.str());
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
         }
         for (int i = 0;i < mm_num;i++) {
             // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
@@ -133,7 +136,7 @@ private:
         if (expanded_len >= max_seq_len_) {
             std::stringstream exception_str;
             exception_str << "input after multimodal process is " << expanded_len << " > max_seq_len(" << max_seq_len_ << ")";
-            return absl::InternalError(exception_str.str());
+            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
         }
 
         auto device = ft::DeviceFactory::getDefaultDevice();
@@ -157,21 +160,24 @@ private:
             *(new_locs->dataWithOffset<int32_t>(i)) = copy_len + new_loc_idx;
 
             if (hash_urls) {
-                THROW_IF_STATUS_ERROR(getStrHash(expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i], mm_embedding[i].sizes()[0]));
+                auto hash_status = getStrHash(expanded_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len), urls[i], mm_embedding[i].sizes()[0]);
+                if (!hash_status.ok()) {
+                    return hash_status;
+                }
             }
 
             new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
             old_loc_idx = loc.second;
         }
         if (expanded_ids->shape()[0] - new_loc_idx != token_ids->shape()[0] - old_loc_idx) {
-            throw std::runtime_error("expanded length calculate error");
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "expanded length calculate error");
         }
         memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx), token_ids->dataWithOffset<int32_t>(old_loc_idx), token_ids->typeSize() * (expanded_ids->shape()[0] - new_loc_idx));
 
         return ExpandedOutput(std::move(expanded_ids), std::move(token_masks), std::move(new_locs));
     }
 
-    absl::StatusOr<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(ft::BufferPtr token_ids) {
+    ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(ft::BufferPtr token_ids) {
         // sep_tokens will split input tokens to text part and multimodal part
         int32_t* data = token_ids->data<int32_t>();
         std::vector<std::pair<int32_t, int32_t>> locs;
@@ -193,7 +199,7 @@ private:
                     auto now_id = *(data + i);
                     if (now_id == sep_token_id[0]) {
                         if (right.size() != left.size()) {
-                            return absl::InternalError("unmatched multimodal tag pairs");
+                            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "unmatched multimodal tag pairs");
                         }
                         if (!include_sep_tokens_){
                             left.emplace_back(i + 1);
@@ -207,18 +213,18 @@ private:
                             right.emplace_back(i + 1);
                         }
                         if (right.size() != left.size()) {
-                            return absl::InternalError("unmatched multimodal tag pairs");
+                            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "unmatched multimodal tag pairs");
                         }
                     }
                 }
                 if (left.size() != right.size()) {
-                    return absl::InternalError("unclosed multimodal tag pairs");
+                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "unclosed multimodal tag pairs");
                 }
                 for (int i = 0;i < left.size();i++) {
                     locs.emplace_back(left[i], right[i]);
                 }
             } else {
-                return absl::InternalError("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "more than 2 sep tokens or no sep tokens for multimodal model is not supported");
             }
         }
         std::sort(locs.begin(), locs.end());
@@ -226,9 +232,9 @@ private:
     }
 
 public:
-    absl::Status updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
         if (input->generate_config && input->generate_config->calculate_loss) {
-            return absl::InternalError("cannot calculate loss in multimodal query");
+            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
         }
 
         CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value()));
@@ -238,10 +244,10 @@ public:
         input->input_ids = expanded_ids.expanded_ids;
         input->text_tokens_mask = expanded_ids.text_tokens_mask;
         input->mm_locs = expanded_ids.locs;
-        return absl::OkStatus();
+        return ErrorInfo::OkStatus();
     }
 
-    absl::StatusOr<MultimodalFeature> getMultimodallFeatures(const ft::BufferPtr& input_ids, const std::vector<MultimodalInput> &mm_inputs) {
+    ErrorResult<MultimodalFeature> getMultimodallFeatures(const ft::BufferPtr& input_ids, const std::vector<MultimodalInput> &mm_inputs) {
         MultimodalFeature mm_features;
         CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
         mm_features.features = std::move(mm_embedding_res.mm_features);

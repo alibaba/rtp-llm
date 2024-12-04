@@ -18,7 +18,7 @@ class FakeMultimodalProcessor: public MultimodalProcessor {
     FakeMultimodalProcessor(std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int max_seq_len): 
         MultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len) {}
 
-    absl::StatusOr<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    ErrorResult<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         MMEmbeddingRes res = MMEmbeddingRes();
         for (auto& mm_input: mm_inputs) {
             res.mm_features.push_back(torch::randn({std::stoi(mm_input.url), 2}));
@@ -104,12 +104,14 @@ TEST_F(MultimodalProcessorTest, testWrongMMTag) {
     input->multimodal_inputs = mm_inputs;
     auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
-    EXPECT_EQ(res.ToString(), "INTERNAL: more than 2 sep tokens or no sep tokens for multimodal model is not supported");
+    EXPECT_EQ(res.ToString(), "more than 2 sep tokens or no sep tokens for multimodal model is not supported");
+    EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
 
     processor.sep_token_ids_ = {{3, 5}};
     res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
-    EXPECT_EQ(res.ToString(), "INTERNAL: unclosed multimodal tag pairs");
+    EXPECT_EQ(res.ToString(), "unclosed multimodal tag pairs");
+    EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
 }
 
 TEST_F(MultimodalProcessorTest, testTooLongInput) {
@@ -121,7 +123,8 @@ TEST_F(MultimodalProcessorTest, testTooLongInput) {
     input->multimodal_inputs = mm_inputs;
     auto res = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
-    EXPECT_EQ(res.ToString(), "INTERNAL: input after multimodal process is 14 > max_seq_len(10)");
+    EXPECT_EQ(res.ToString(), "input after multimodal process is 14 > max_seq_len(10)");
+    EXPECT_EQ(res.code(), ErrorCode::MM_LONG_PROMPT_ERROR);
 }
 
 TEST_F(MultimodalProcessorTest, testGetMMFeatures) {

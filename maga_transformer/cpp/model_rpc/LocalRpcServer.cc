@@ -107,7 +107,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
-            generate_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
     }
     CHECK_ERROR_STATUS(generate_context);

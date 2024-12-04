@@ -35,6 +35,13 @@ enum class ErrorCode {
     CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 814,
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 815,
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 816,
+
+    // multimodal error
+    MM_LONG_PROMPT_ERROR = 901,
+    MM_WRONG_FORMAT_ERROR = 902,
+    MM_PROCESS_ERROR = 903,
+    MM_EMPTY_ENGINE_ERROR = 904,
+    MM_NOT_SUPPORTED_ERROR = 905,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -87,6 +94,16 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "CACHE_STORE_LOAD_RDMA_WRITE_FAILED";
         case ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT:
             return "CACHE_STORE_LOAD_BUFFER_TIMEOUT";
+        case ErrorCode::MM_LONG_PROMPT_ERROR:
+            return "MM_LONG_PROMPT_ERROR";
+        case ErrorCode::MM_WRONG_FORMAT_ERROR:
+            return "MM_WRONG_FORMAT_ERROR";
+        case ErrorCode::MM_PROCESS_ERROR:
+            return "MM_PROCESS_ERROR";
+        case ErrorCode::MM_EMPTY_ENGINE_ERROR:
+            return "MM_EMPTY_ENGINE_ERROR";
+        case ErrorCode::MM_NOT_SUPPORTED_ERROR:
+            return "MM_NOT_SUPPORTED_ERROR";
         default:
             return "Error: Unrecognized ErrorCode";
     }

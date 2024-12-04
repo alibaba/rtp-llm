@@ -41,6 +41,13 @@ class ExceptionType(IntEnum):
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 815
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 816
 
+    # multimodal error
+    MM_LONG_PROMPT_ERROR = 901
+    MM_WRONG_FORMAT_ERROR = 902
+    MM_PROCESS_ERROR = 903
+    MM_EMPTY_ENGINE_ERROR = 904
+    MM_NOT_SUPPORTED_ERROR = 905
+
     @classmethod
     def from_value(cls, value):
         """根据给定的值返回对应的枚举名称，或者引发值错误。"""
