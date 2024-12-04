@@ -7,9 +7,10 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 class MockCacheLoadServiceClosure: public CacheLoadServiceClosure {
@@ -42,7 +43,7 @@ protected:
                               KvCacheStoreServiceErrorCode error_code);
 
     void SetUp() override {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
+        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
     }
 
@@ -72,6 +73,7 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     auto port2      = autil::NetUtil::randomPort();
     auto rdma_port1 = autil::NetUtil::randomPort();
     auto rdma_port2 = autil::NetUtil::randomPort();
+    fastertransformer::DeviceFactory::initDevices(fastertransformer::GptInitParameter());
 
     CacheStoreInitParams params1;
     params1.listen_port       = port1;
@@ -80,6 +82,7 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     params1.rdma_connect_port = rdma_port2;
     params1.enable_metric     = false;
     params1.memory_util       = memory_util_;
+    params1.device            = fastertransformer::DeviceFactory::getDefaultDevice();
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
     if (!cache_store1_) {
@@ -93,6 +96,7 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     params2.rdma_connect_port = rdma_port1;
     params2.enable_metric     = false;
     params2.memory_util       = memory_util_;
+    params2.device            = fastertransformer::DeviceFactory::getDefaultDevice();
 
     cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
     return cache_store2_ != nullptr;
@@ -143,7 +147,9 @@ void CacheStoreServiceImplContextTest::storeBlocks(int num) {
     std::string requestid   = "test-request-id";
     auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
     for (int i = 0; i < num; i++) {
-        store_cache->addBlock(block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true));
+        auto buffer_block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, 'a' + i, true);
+        ASSERT_NE(buffer_block, nullptr);
+        store_cache->addBlock(buffer_block);
     }
     std::mutex mutex;  // for sync test
     mutex.lock();

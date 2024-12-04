@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
 #include "autil/NetUtil.h"
@@ -28,6 +28,7 @@ protected:
 
     MockMemoryUtil*                  mock_memory_util_{nullptr};
     std::shared_ptr<MemoryUtil>      memory_util_;
+    std::shared_ptr<DeviceUtil>      device_util_;
     std::shared_ptr<BlockBufferUtil> block_buffer_util_;
 };
 
@@ -36,9 +37,10 @@ bool NormalCacheStoreTest::initMemoryUtil(bool mock) {
         mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         memory_util_.reset(mock_memory_util_);
     } else {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
+        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
     }
 
+    device_util_ = std::make_shared<DeviceUtil>();
     block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
     return true;
 }
@@ -56,6 +58,7 @@ bool NormalCacheStoreTest::initCacheStores(bool mock) {
     params1.connect_port  = port2;
     params1.enable_metric = false;
     params1.memory_util   = memory_util_;
+    params1.device        = device_util_->device_;
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
     if (!cache_store1_) {
@@ -67,6 +70,7 @@ bool NormalCacheStoreTest::initCacheStores(bool mock) {
     params2.connect_port  = port1;
     params2.enable_metric = false;
     params2.memory_util   = memory_util_;
+    params2.device        = device_util_->device_;
 
     cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
     return cache_store2_ != nullptr;
@@ -89,11 +93,11 @@ void NormalCacheStoreTest::verifyBlock(
         return;
     }
 
-    auto buf = memory_util_->mallocCPU(len);
-    ASSERT_TRUE(memory_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len));
+    auto buf = device_util_->mallocCPU(len);
+    ASSERT_TRUE(device_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len));
     ASSERT_EQ(val, ((char*)(buf))[0]) << key << " " << reinterpret_cast<uint64_t>(block->addr.get());
 
-    memory_util_->freeCPU(buf);
+    device_util_->freeCPU(buf);
 }
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {
@@ -198,32 +202,6 @@ TEST_F(NormalCacheStoreTest, testStore_pushWorkItemFailed) {
     };
 
     cache_store1_->thread_pool_->stop();
-    cache_store1_->store(store_cache, store_callback);
-    mutex.lock();
-    mutex.unlock();
-}
-
-TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
-    ASSERT_TRUE(initCacheStores(true));
-
-    uint32_t    block_size  = 16;
-    std::string requestid   = "test-request-id";
-    auto        store_cache = std::make_shared<RequestBlockBuffer>(
-        requestid, std::shared_ptr<void>((void*)0x1, [](void*) {}));  // invalid event barrier
-    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
-    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
-
-    std::mutex mutex;  // for sync test
-    mutex.lock();
-    auto store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
-        mutex.unlock();
-        ASSERT_FALSE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::StoreFailed, ec);
-    };
-
-    // mock call from gpu event then return false
-    EXPECT_CALL(*mock_memory_util_, gpuEventBarrier((void*)0x1)).WillOnce(::testing::Return(false));
-
     cache_store1_->store(store_cache, store_callback);
     mutex.lock();
     mutex.unlock();

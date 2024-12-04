@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
 #include "autil/NetUtil.h"
@@ -27,7 +27,7 @@ bool CacheLoadServiceClosureTest::initMemoryUtil(bool mock) {
         mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         memory_util_.reset(mock_memory_util_);
     } else {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
+        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
     }
 
     block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);

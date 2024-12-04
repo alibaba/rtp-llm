@@ -3,9 +3,10 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "autil/EnvUtil.h"
 
 namespace rtp_llm {
@@ -13,7 +14,7 @@ namespace rtp_llm {
 class RequestBlockBufferStoreTest: public ::testing::Test {
 public:
     void SetUp() override {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
+        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
     }
 
@@ -29,7 +30,7 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     request_block->addBlock(block1);
     request_block->addBlock(block2);
 
-    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     store->setRequestBlockBuffer(request_block);
@@ -63,7 +64,7 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
 }
 
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
-    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
@@ -106,7 +107,7 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
 }
 
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
-    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
@@ -145,7 +146,7 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
 }
 
 TEST_F(RequestBlockBufferStoreTest, testAfterDelRequestBlockBuffer) {
-    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
     store->delRequestBlockBuffer("request-1");
 
     ASSERT_TRUE(store->getBlockBuffer("request-1", "b1") == nullptr);

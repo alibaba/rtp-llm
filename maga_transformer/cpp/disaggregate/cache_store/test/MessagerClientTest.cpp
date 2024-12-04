@@ -3,9 +3,10 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 
@@ -22,6 +23,7 @@ protected:
 protected:
     MockMemoryUtil*                          mock_memory_util_{nullptr};
     std::shared_ptr<MemoryUtil>              memory_util_;
+    std::shared_ptr<DeviceUtil>              device_util_;
     std::shared_ptr<BlockBufferUtil>         block_buffer_util_;
     std::shared_ptr<RequestBlockBufferStore> server_buffer_store_;
 
@@ -34,11 +36,12 @@ bool MessagerClientTest::initMemoryUtil(bool mock) {
         mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         memory_util_.reset(mock_memory_util_);
     } else {
-        memory_util_ = std::make_shared<MemoryUtil>(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
+        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
     }
+    device_util_ = std::make_shared<DeviceUtil>();
 
     block_buffer_util_   = std::make_shared<BlockBufferUtil>(memory_util_);
-    server_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, nullptr);
+    server_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
     return true;
 }
 
@@ -81,11 +84,11 @@ void MessagerClientTest::verifyBlock(
         return;
     }
 
-    auto buf = memory_util_->mallocCPU(len);
-    ASSERT_TRUE(memory_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len));
+    auto buf = device_util_->mallocCPU(len);
+    ASSERT_TRUE(device_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len));
     ASSERT_EQ(val, ((char*)(buf))[0]) << key << " " << reinterpret_cast<uint64_t>(block->addr.get());
 
-    memory_util_->freeCPU(buf);
+    device_util_->freeCPU(buf);
 }
 
 TEST_F(MessagerClientTest, testSendLoadRequest_Success) {

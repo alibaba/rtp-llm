@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/disaggregate/cache_store/BlockBufferUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 #include "maga_transformer/cpp/utils/Logger.h"
@@ -11,24 +11,27 @@
 
 namespace rtp_llm {
 
-BlockBufferUtil::BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util): memory_util_(memory_util) {}
+BlockBufferUtil::BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util)
+    : memory_util_(memory_util)
+    , device_util_(std::make_shared<DeviceUtil>())
+    {}
 
 BlockBufferUtil::~BlockBufferUtil() {}
 
 std::shared_ptr<BlockBuffer>
 BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val, bool gpu) {
-    void* buffer = gpu ? memory_util_->mallocGPU(len) : memory_util_->mallocCPU(len);
+    void* buffer = gpu ? device_util_->mallocGPU(len) : device_util_->mallocCPU(len);
     if (buffer == nullptr) {
         FT_LOG_WARNING("block buffer util malloc failed");
         return nullptr;
     }
 
-    std::shared_ptr<void> shared_buffer(buffer, [memory_util = memory_util_, gpu](void* p) {
+    std::shared_ptr<void> shared_buffer(buffer, [memory_util = memory_util_, device_util = device_util_, gpu](void* p) {
         memory_util->deregUserMr(p, true);
         if (gpu) {
-            memory_util->freeGPU(p);
+            device_util->freeGPU(p);
         } else {
-            memory_util->freeCPU(p);
+            device_util->freeCPU(p);
         }
     });
 
@@ -38,12 +41,12 @@ BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val,
     }
 
     if (gpu) {
-        if (!memory_util_->memsetGPU(buffer, val, len)) {
+        if (!device_util_->memsetGPU(buffer, val, len)) {
             FT_LOG_WARNING("block buffer memset gpu failed");
             return nullptr;
         }
     } else {
-        memory_util_->memsetCPU(buffer, val, len);
+        device_util_->memsetCPU(buffer, val, len);
     }
     return std::make_shared<BlockBuffer>(key, shared_buffer, len, gpu, true);
 }
@@ -72,7 +75,7 @@ std::vector<std::shared_ptr<RequestBlockBuffer>> BlockBufferUtil::makeRequestBlo
 
     std::shared_ptr<std::atomic_int> ref_count(new std::atomic_int(0));
 
-    auto del_func = [mem, ref_count, memory_util = memory_util_](void* p) {
+    auto del_func = [mem, ref_count, memory_util = memory_util_, device_util = device_util_](void* p) {
         (*ref_count)--;
         if (ref_count->load() == 0) {
             memory_util->deregUserMr(mem, true);

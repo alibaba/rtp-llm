@@ -1,0 +1,70 @@
+#include "maga_transformer/cpp/disaggregate/cache_store/test/DeviceUtil.h"
+#include "maga_transformer/cpp/utils/Logger.h"
+
+using namespace std;
+using namespace fastertransformer;
+
+namespace rtp_llm {
+
+DeviceUtil::DeviceUtil() {
+    ft::DeviceFactory::initDevices(GptInitParameter());
+    device_ = DeviceFactory::getDefaultDevice();
+}
+
+DeviceUtil::~DeviceUtil() {
+
+}
+
+void* DeviceUtil::mallocCPU(size_t size) {
+    auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
+    buffer_map_.insert({buffer->data(), buffer});
+    return buffer->data();
+}
+
+void  DeviceUtil::freeCPU(void* ptr) {
+    auto iter = buffer_map_.find(ptr);
+    if (iter != buffer_map_.end()) {
+        buffer_map_.erase(iter);
+    } else {
+        FT_LOG_ERROR("freeCPU failed, ptr not found");
+    }
+}
+
+void* DeviceUtil::mallocGPU(size_t size) {
+    auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
+    buffer_map_.insert({buffer->data(), buffer});
+    return buffer->data();
+}
+
+void  DeviceUtil::freeGPU(void* ptr) {
+    auto iter = buffer_map_.find(ptr);
+    if (iter != buffer_map_.end()) {
+        buffer_map_.erase(iter);
+    } else {
+        FT_LOG_ERROR("freeGPU failed, ptr not found");
+    }
+}
+
+void  DeviceUtil::memsetCPU(void* ptr, int value, size_t len) {
+    memset(ptr, value, len);
+}
+
+bool  DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
+    auto buffer = ft::Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {len}, ptr);
+    device_->bufMemset(buffer, value);
+    return true;
+}
+
+bool  DeviceUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
+    const auto dst_memory_type = dst_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    const auto src_memory_type = src_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    auto dst_buffer = ft::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
+    auto src_buffer = ft::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
+    device_->copy({dst_buffer, src_buffer});
+    device_->syncAndCheck();
+    return true;
+}
+
+
+}  // namespace rtp_llm
+

@@ -2,6 +2,7 @@
 
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/DeviceUtil.h"
 
 namespace rtp_llm {
 
@@ -19,6 +20,7 @@ public:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
+    std::shared_ptr<DeviceUtil> device_util_;
 };
 
 }  // namespace rtp_llm

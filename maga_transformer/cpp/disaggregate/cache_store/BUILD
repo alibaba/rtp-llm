@@ -89,17 +89,3 @@ cc_library(
     ],
     visibility=['//visibility:public'],
 )
-
-cc_library(
-    name = "block_buffer_util",
-    srcs = [
-        "BlockBufferUtil.cpp",
-    ],
-    hdrs = [
-        "BlockBufferUtil.h",
-    ],
-    deps = [
-        "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-    ],
-    visibility=['//visibility:public'],
-)
