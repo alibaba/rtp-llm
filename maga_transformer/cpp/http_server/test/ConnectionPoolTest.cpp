@@ -82,7 +82,7 @@ TEST_F(ConnectionPoolTest, testMakeAndRecyleMultiConnection) {
         conns.push_back(conn);
     }
     for (int i = 0; i < 10; i++) {
-        ASSERT_TRUE(conns[i]->isConnected());
+        ASSERT_TRUE(!conns[i]->isClosed());
     }
 
     ASSERT_TRUE(connection_pool_->busy_connection_pool_.size() == 1);
@@ -143,7 +143,7 @@ TEST_F(ConnectionPoolTest, testMakeConnectionAfterClosed) {
         conns.push_back(conn);
     }
     for (int i = 0; i < 10; i++) {
-        ASSERT_TRUE(conns[i]->isConnected());
+        ASSERT_TRUE(!conns[i]->isClosed());
     }
     ASSERT_TRUE(connection_pool_->busy_connection_pool_[address]->size() == 10);
     ASSERT_TRUE(connection_pool_->idle_connection_pool_[address]->size() == 0);
@@ -168,7 +168,7 @@ TEST_F(ConnectionPoolTest, testMakeConnectionAfterClosed) {
         conns.push_back(conn);
     }
     for (int i = 0; i < 20; i++) {
-        ASSERT_TRUE(conns[i]->isConnected());
+        ASSERT_TRUE(!conns[i]->isClosed());
     }
     ASSERT_TRUE(connection_pool_->busy_connection_pool_[address]->size() == 20);
     ASSERT_TRUE(connection_pool_->idle_connection_pool_[address]->size() == 0);
