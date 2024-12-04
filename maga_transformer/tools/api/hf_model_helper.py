@@ -40,7 +40,7 @@ class HfStyleModelInfo:
         self.param_count, self.total_size = self._calculate_model_parameters()
 
         # Load auto config if available
-        self.auto_config_py = self._get_auto_config_py(repo_or_link, revision)
+        self.auto_config_py = self._get_auto_config_py(repo_or_link, revision) if self._is_from_hf else None
 
     def _get_model_info(self, repo_or_link: str, revision: Optional[str]) -> ModelInfo:
         repo = self._get_repo_from_hf_link(repo_or_link)
