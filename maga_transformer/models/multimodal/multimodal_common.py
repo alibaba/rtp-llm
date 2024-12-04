@@ -51,7 +51,8 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, device: torch.device, dtype: torch.dtype, **kwargs: Any):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs: Any):
+        dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
@@ -64,7 +65,7 @@ class MultiModalEmbeddingInterface:
         if isinstance(features, tuple):
             features = (features[0].to(dtype).contiguous(), features[1].contiguous())
         else:
-            features = features.to(dtype).contiguous()
+            features = (features.to(dtype).contiguous(), None)
         vit_emb_cache_.insert_cache(url, features)
         return features
 

@@ -135,9 +135,9 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             if isinstance(features, list):
                 features = torch.stack(features).to(dtype).contiguous()
             vit_emb_cache_.insert_cache(url, features)
-            return features
+            return (features, None)
         else:
-            return cached_res
+            return (cached_res, None)
         
     def _mm_preprocess(self, data, type, **kwargs):
         if type == MMUrlType.IMAGE:

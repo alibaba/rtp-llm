@@ -180,6 +180,7 @@ class InferenceServer(object):
             return ORJSONResponse(format_exception(e), status_code=500)
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
+        start_time = time.time()
         if isinstance(request, str):
             request = json.loads(request)
         request[request_id_field_name] = self._request_count.increment()

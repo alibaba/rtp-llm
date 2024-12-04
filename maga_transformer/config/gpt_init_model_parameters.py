@@ -89,7 +89,7 @@ class VitParameters:
     config: Dict[str, Any] = {}
     special_token_ids: Dict[str, Any] = {}
     special_tokens: Dict[str, Any] = {}
-    vit_weights = None
+    vit_weights: Any = None
 
 
 class TemplateType(Enum):

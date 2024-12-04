@@ -227,13 +227,13 @@ private:
         return locs;
     }
 
-    absl::Status checkExpendLength(const ExpandedOutput& expand_output) {
+    ErrorInfo checkExpandLength(const ExpandedOutput& expand_output) {
         if (expand_output.expanded_ids->size() >= max_seq_len_) {
             std::stringstream exception_str;
             exception_str << "input after multimodal process is " << expand_output.expanded_ids->size() << " > max_seq_len(" << max_seq_len_ << ")";
-            return absl::InternalError(exception_str.str());
+            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());            
         }
-        return absl::OkStatus();
+        return ErrorInfo::OkStatus();
     }
 
 public:
@@ -246,7 +246,7 @@ public:
         input->multimodal_features = std::move(mm_embedding_res.mm_features);
         input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
         CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
-        THROW_IF_STATUS_ERROR(checkExpendLength(expanded_ids));
+        RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
         input->input_ids = expanded_ids.expanded_ids;
         input->text_tokens_mask = expanded_ids.text_tokens_mask;
         input->mm_locs = expanded_ids.locs;

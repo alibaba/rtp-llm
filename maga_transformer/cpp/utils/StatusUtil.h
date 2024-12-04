@@ -11,7 +11,7 @@
 
 #define RETURN_IF_STATUS_ERROR(status)                                                                                 \
     do {                                                                                                               \
-        ::absl::Status _status = (status);                                                                             \
+        auto _status = (status);                                                                             \
         if (ABSL_PREDICT_FALSE(!_status.ok()))                                                                         \
             return _status;                                                                                            \
     } while (0)
