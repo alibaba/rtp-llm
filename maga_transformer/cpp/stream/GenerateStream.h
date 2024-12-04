@@ -16,6 +16,18 @@ namespace rtp_llm {
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
+struct StreamUpdateInfo {
+    const ft::BufferPtr new_tokens;
+    int                 num_new_tokens;
+    const ft::BufferPtr hidden_states;
+    const ft::BufferPtr logits;
+    const ft::BufferPtr softmax_result;
+    const ft::BufferPtr cum_log_probs;
+    const ft::BufferPtr all_probs;
+    const ft::BufferPtr loss;
+    bool update_queue = true;
+};
+
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ft::GptInitParameter& params,
@@ -32,26 +44,11 @@ public:
     virtual ErrorResult<GenerateOutputs>     nextOutput() = 0;
     virtual bool hasOutput() {return false;}
 
-    virtual void updateOutput(
-                      const ft::BufferPtr& new_tokens,
-                      const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss,
-                      bool update_queue = true) = 0;
+    virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
+    void update(const StreamUpdateInfo& update_info);
 
-    void update(const ft::BufferPtr& new_tokens,
-                int                  num_new_tokens,
-                const ft::BufferPtr& hidden_states,
-                const ft::BufferPtr& logits,
-                const ft::BufferPtr& cum_log_probs,
-                const ft::BufferPtr& all_probs,
-                const ft::BufferPtr& loss,
-                bool                 update_queue = true);
-
-    void update(const GptModelOutputs& gpt_model_outputs,
-                SamplerOutput&   sampler_output);
+    // void update(const GptModelOutputs& gpt_model_outputs,
+    //             SamplerOutput&   sampler_output);
 
 
     virtual size_t scoreLen() const {

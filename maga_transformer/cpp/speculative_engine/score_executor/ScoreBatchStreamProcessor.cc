@@ -118,6 +118,8 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
         auto current_batch_size = stream->scoreLen();
         auto token_size = stream->currentExecuteTokenSize();
         auto batch_logits = model_output.logits->slice(batch_idx, current_batch_size);
+        // auto batch_softmax_result = model_output.softmax_result->slice(batch_idx, current_batch_size);
+        BufferPtr batch_softmax_result;
         auto batch_hidden_states = model_output.hidden_states->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
 
@@ -125,17 +127,22 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - current_batch_size);
             auto tokens = stream->currentExecuteTokens(0);
-            ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - current_batch_size}, tokens.data() + 1}});
+            ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU,
+                ft::DataType::TYPE_INT32, {tokens.size() - current_batch_size}, tokens.data() + 1}});
             loss = device_->loss({all_logits, *label});
         }
 
-        ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1, (size_t)current_batch_size}, ft::AllocationType::HOST}, {});
+        ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32,
+            {(size_t)1, (size_t)current_batch_size}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
+            memcpy(new_tokens->dataWithOffset<int32_t>(i),
+                    new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        stream->updateOutput(new_tokens, batch_hidden_states, batch_logits, nullptr, all_probs, loss);
+        auto update_info = StreamUpdateInfo{new_tokens, 1, batch_hidden_states,
+                                            batch_logits, batch_softmax_result, nullptr, all_probs, loss};
+        stream->updateOutput(update_info);
         token_offset += token_size;
     }
     FT_LOG_DEBUG("dispatch done");

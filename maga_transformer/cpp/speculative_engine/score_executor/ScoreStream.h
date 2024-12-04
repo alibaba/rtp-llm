@@ -38,30 +38,24 @@ public:
         return ErrorInfo::OkStatus();
     };
 
-    void updateOutput(const ft::BufferPtr& new_tokens,
-                      const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss,
-                      bool                 update_queue = false) override {
-        device_->copy({(*output_buffer_->tokens)[0], (*new_tokens)[0]});
+    void updateOutput(const StreamUpdateInfo& update_info) override {
+        device_->copy({(*output_buffer_->tokens)[0], (*update_info.new_tokens)[0]});
 
         // TODO(xyz): optimize deepclone
-        if (all_probs) {
-            output_buffer_->all_probs = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"score_all_probs"}});
+        if (update_info.all_probs) {
+            output_buffer_->all_probs = device_->clone({*update_info.all_probs, ft::AllocationType::DEVICE, {"score_all_probs"}});
         }
 
         if (generate_input_->generate_config->return_logits) {
-            output_buffer_->logits = device_->clone({*logits, ft::AllocationType::DEVICE, {"score_logits"}});
+            output_buffer_->logits = device_->clone({*update_info.logits, ft::AllocationType::DEVICE, {"score_logits"}});
         }
 
         if (generate_input_->generate_config->return_hidden_states) {
-            output_buffer_->hidden_states = device_->clone({*hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
+            output_buffer_->hidden_states = device_->clone({*update_info.hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
         }
 
-        if (loss) {
-            output_buffer_->loss = device_->clone({*loss, ft::AllocationType::DEVICE, {"score_loss"}});
+        if (update_info.loss) {
+            output_buffer_->loss = device_->clone({*update_info.loss, ft::AllocationType::DEVICE, {"score_loss"}});
         }
     }
 

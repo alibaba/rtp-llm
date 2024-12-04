@@ -647,20 +647,16 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::update(const ft::BufferPtr& new_tokens,
-                            int                  num_new_tokens,
-                            const ft::BufferPtr& hidden_states,
-                            const ft::BufferPtr& logits,
-                            const ft::BufferPtr& cum_log_probs,
-                            const ft::BufferPtr& all_probs,
-                            const ft::BufferPtr& loss,
-                            bool                 update_queue) {
+void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
         return;
     }
+
+    const auto& new_tokens = update_info.new_tokens;
+    auto num_new_tokens = update_info.num_new_tokens;
 
     if (seq_length_ == generate_input_->inputLength()) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -696,15 +692,15 @@ void GenerateStream::update(const ft::BufferPtr& new_tokens,
     setSeqLength(seq_length_ + num_new_tokens);
 
     // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss, update_queue);
+    updateOutput(update_info);
 }
 
 
-void GenerateStream::update(const GptModelOutputs& model_outputs,
-                            SamplerOutput&   sampler_output)
-{
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-}
+// void GenerateStream::update(const GptModelOutputs& model_outputs,
+//                             SamplerOutput&   sampler_output)
+// {
+//     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+// }
 
 
 // beam_idx: [beam_width] int, the element must less than beam_width.

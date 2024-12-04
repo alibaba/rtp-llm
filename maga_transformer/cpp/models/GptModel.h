@@ -279,6 +279,7 @@ struct GptModelOutputs {
     ft::BufferPtr hidden_states;
     ft::BufferPtr all_hidden_states;
     ft::BufferPtr all_logits;
+    ft::BufferPtr softmax_result;
 
     mutable ft::BufferPtr scatter_logits;
     mutable ft::BufferPtr scatter_hidden_states;

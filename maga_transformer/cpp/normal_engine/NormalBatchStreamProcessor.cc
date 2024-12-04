@@ -360,6 +360,8 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto token_size = stream->currentExecuteTokenSize();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->slice(offset, batch);
+        // auto batch_softmax_result = model_output.softmax_result->slice(offset, batch);
+        BufferPtr batch_softmax_result;
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
@@ -378,10 +380,13 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         if (stream->numBeams() > 1 && beam_index != nullptr) {
-            stream->update(new_all_token_ids, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
+            StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
+                    batch_softmax_result, batch_cum_log_probs, all_probs, loss};
+            stream->update(update_info);
             stream->beamSearchKvCacheUpdate(beam_index);
         } else {
-            stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs, loss);
+            stream->update({new_tokens, 1, batch_hidden_states, batch_logits,
+                    batch_softmax_result, batch_cum_log_probs, all_probs, loss});
         }
         offset += batch;
         token_offset += token_size;

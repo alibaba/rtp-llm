@@ -36,24 +36,18 @@ public:
         return ErrorInfo::OkStatus();
     };
 
-    void updateOutput(const ft::BufferPtr& new_tokens,
-                      const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss,
-                      bool                 update_queue = true) override {
+    void updateOutput(const StreamUpdateInfo& update_info) override {
         // TODO(xyz): optimize deepclone
-        if (all_probs) {
+        if (update_info.all_probs) {
             // lazy allocate buffer
             if (!output_buffer_->all_probs) {
-                size_t vocab_size         = all_probs->shape()[1];
+                size_t vocab_size         = update_info.all_probs->shape()[1];
                 output_buffer_->all_probs = device_->allocateBuffer(
                     {ft::DataType::TYPE_FP32, {propose_step_, vocab_size}, ft::AllocationType::DEVICE}, {"vanilla_all_probs"});
             }
-            device_->copy({output_buffer_->all_probs->view(current_step_, 1), *all_probs});
+            device_->copy({output_buffer_->all_probs->view(current_step_, 1), *update_info.all_probs});
         }
-        *((*output_buffer_->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)new_tokens->data())[0];
+        *((*output_buffer_->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)update_info.new_tokens->data())[0];
         current_step_++;
     }
 

@@ -467,13 +467,15 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
+        // TODO(xinfei.sxf) calculate softmax_result
+        ft::BufferPtr softmax_result;
         // logits is too big, tmp not print default
         // printBufferData(*logits, "logits");
         if (inputs.need_all_logits) {
             auto last_logits = device_->select({*logits, *device_->clone({*inputs.lm_output_indexes})});
-            return {std::move(last_logits), std::move(last_hidden), std::move(hidden), std::move(logits)};
+            return {std::move(last_logits), std::move(last_hidden), std::move(hidden), std::move(logits), std::move(softmax_result)};
         }
-        return {std::move(logits), std::move(last_hidden), std::move(hidden), nullptr};
+        return {std::move(logits), std::move(last_hidden), std::move(hidden), nullptr, std::move(softmax_result)};
     } else {
         return {nullptr, nullptr, std::move(hidden)};
     }

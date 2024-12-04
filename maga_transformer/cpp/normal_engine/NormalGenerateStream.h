@@ -25,25 +25,12 @@ public:
         generate_outputs_queue_.wakeup();
     }
 
-    ErrorResult<GenerateOutputs> nextOutput() override;
-
     bool hasOutput() override;
-
-    void updateOutput(const ft::BufferPtr& new_tokens,
-                      const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs,
-                      const ft::BufferPtr& all_probs,
-                      const ft::BufferPtr& loss,
-                      bool                 update_queue = true) override;
+    ErrorResult<GenerateOutputs> nextOutput() override;
+    void updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
-    GenerateOutputs prepareGenerateOutput(const ft::BufferPtr& new_tokens,
-                                          const ft::BufferPtr& hidden_states,
-                                          const ft::BufferPtr& logits,
-                                          const ft::BufferPtr& cum_log_probs,
-                                          const ft::BufferPtr& all_probs,
-                                          const ft::BufferPtr& loss);
+    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs generate_results);
 
     int64_t                                   request_id_{0};

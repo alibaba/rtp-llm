@@ -27,12 +27,7 @@ bool NormalGenerateStream::hasOutput() {
     return !generate_outputs_queue_.isEmpty();
 }
 
-GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr& new_tokens,
-                                                            const ft::BufferPtr& hidden_states,
-                                                            const ft::BufferPtr& logits,
-                                                            const ft::BufferPtr& cum_log_probs,
-                                                            const ft::BufferPtr& all_probs,
-                                                            const ft::BufferPtr& loss) {
+GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seq_length_ - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
@@ -49,12 +44,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr&
         memcpy(generate_output.output_ids->data(),
                complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(last_output_pos_),
                sizeof(int32_t) * output_len);
-        if (generate_input_->generate_config->return_logits && logits) {
+        if (generate_input_->generate_config->return_logits && update_info.logits) {
             ft::BufferPtr host_logits;
-            if (logits->shape()[0] == 1) {
-                host_logits = device_->clone({*logits, ft::AllocationType::HOST});
+            if (update_info.logits->shape()[0] == 1) {
+                host_logits = device_->clone({*update_info.logits, ft::AllocationType::HOST});
             } else {
-                host_logits = device_->clone({logits->view(i, 1), ft::AllocationType::HOST});
+                host_logits = device_->clone({update_info.logits->view(i, 1), ft::AllocationType::HOST});
             }
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
                 auto select_buf        = ft::vector2Buffer(generate_input_->generate_config->select_tokens_id);
@@ -65,11 +60,11 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr&
             }
         }
 
-        if (generate_input_->generate_config->return_hidden_states && hidden_states) {
-            if (hidden_states->shape()[0] == 1) {
-                generate_output.hidden_states = device_->clone({*hidden_states, ft::AllocationType::HOST});
+        if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states) {
+            if (update_info.hidden_states->shape()[0] == 1) {
+                generate_output.hidden_states = device_->clone({*update_info.hidden_states, ft::AllocationType::HOST});
             } else {
-                generate_output.hidden_states = device_->clone({hidden_states->view(i, 1), ft::AllocationType::HOST});
+                generate_output.hidden_states = device_->clone({update_info.hidden_states->view(i, 1), ft::AllocationType::HOST});
             }
         }
         if (loss_) {
@@ -91,22 +86,22 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const ft::BufferPtr&
         generate_output.aux_info.input_len    = generate_input_->promptLength();
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len      = seq_length_ - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len = output_len;
-        generate_output.aux_info.reuse_len = reuse_length_;
-        generate_output.aux_info.pd_sep = queryPdSep();
+        generate_output.aux_info.output_len         = seq_length_ - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len    = output_len;
+        generate_output.aux_info.reuse_len          = reuse_length_;
+        generate_output.aux_info.pd_sep             = queryPdSep();
 
         generate_output.aux_info.cum_log_probs =
             device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
 
-        if (cum_log_probs) {
+        if (update_info.cum_log_probs) {
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
                    cum_log_probs_->dataWithOffset<float>(i),
                    sizeof(float));
         }
 
         if (generate_input_->generate_config->return_all_probs) {
-            if (!all_probs) {
+            if (!update_info.all_probs) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
             generate_output.aux_info.all_probs = device_->clone(
@@ -128,29 +123,23 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs generate_result
     }
 }
 
-void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
-                                        const ft::BufferPtr& hidden_states,
-                                        const ft::BufferPtr& logits,
-                                        const ft::BufferPtr& cum_log_probs,
-                                        const ft::BufferPtr& all_probs,
-                                        const ft::BufferPtr& loss,
-                                        bool                 update_queue) {
+void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
 
-    if (loss) {
-        setLoss(*loss);
+    if (update_info.loss) {
+        setLoss(*update_info.loss);
     }
 
     finished_ = needFinish();
     if (finished_) {
         setFinishedWithoutLock();
     }
-    if (cum_log_probs) {
-        device_->copy({*cum_log_probs_, *cum_log_probs});
+    if (update_info.cum_log_probs) {
+        device_->copy({*cum_log_probs_, *update_info.cum_log_probs});
     }
-    if (all_probs) {
-        all_probs_ = device_->clone({*all_probs, ft::AllocationType::HOST});
+    if (update_info.all_probs) {
+        all_probs_ = device_->clone({*update_info.all_probs, ft::AllocationType::HOST});
     }
 
     //TODO: move it to better position
@@ -161,14 +150,11 @@ void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
     if (!isStreaming() && !finished_) {
         return;
     }
-    if (!update_queue) {
+    if (!update_info.update_queue) {
         return;
     }
 
-    GenerateOutputs generate_results =
-        prepareGenerateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs, loss);
-
-    enqueueGenerateOutput(generate_results);
+    enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (stoppedWithoutLock()) {
         return;

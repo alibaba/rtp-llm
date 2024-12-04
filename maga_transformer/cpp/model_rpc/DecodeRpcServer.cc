@@ -119,7 +119,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto data           = new_tokens->data<int32_t>();
     auto first_token_id = generate_request.first_generate_token_id();
     *data               = first_token_id;
-    generate_stream->update(new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, false);
+    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false});
     generate_stream->incLastOutputPos();
     engine_->enqueue(generate_stream);
     FT_LOG_DEBUG("request:[%s] enqueue success", decode_context.request_key.c_str());
