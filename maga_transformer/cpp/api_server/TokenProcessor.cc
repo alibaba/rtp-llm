@@ -16,6 +16,7 @@ public:
         json.Jsonize("output_len", output_len, output_len);
         json.Jsonize("fallback_tokens", fallback_tokens, fallback_tokens);
         json.Jsonize("fallback_times", fallback_times, fallback_times);
+        json.Jsonize("first_token_cost_time_us", first_token_cost_time_us, first_token_cost_time_us);
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -29,6 +30,7 @@ public:
         output_len      = base.output_len;
         fallback_tokens = base.fallback_tokens;
         fallback_times  = base.fallback_times;
+        first_token_cost_time_us = base.first_token_cost_time_us;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

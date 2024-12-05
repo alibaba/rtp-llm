@@ -123,6 +123,7 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     fallback_tokens=output_pb.aux_info.fallback_tokens,
                                     fallback_times=output_pb.aux_info.fallback_times,
                                     pd_sep=output_pb.aux_info.pd_sep,
+                                    first_token_cost_time_us=output_pb.aux_info.first_token_cost_time_us
                                     )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
         # if output_pb.aux_info.HasField('cum_log_probs'):
