@@ -131,7 +131,8 @@ class ModelWeightsLoader:
             all_results = [self._load_layer_weight(id, device)
                            for id in range(self._num_layers)]
 
-        for results, logs, lora_logs in all_results:
+        while (len(all_results)):
+            results, logs, lora_logs = all_results.pop(0)
             self._weight_log.update(logs)
             if self._merge_lora:
                 self._lora_log.update(lora_logs)
