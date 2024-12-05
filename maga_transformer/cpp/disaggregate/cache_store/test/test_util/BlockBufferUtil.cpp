@@ -1,5 +1,4 @@
-#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/test_util/BlockBufferUtil.h"
 
 #include "maga_transformer/cpp/utils/Logger.h"
 
@@ -11,10 +10,9 @@
 
 namespace rtp_llm {
 
-BlockBufferUtil::BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util)
-    : memory_util_(memory_util)
-    , device_util_(std::make_shared<DeviceUtil>())
-    {}
+BlockBufferUtil::BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util,
+                                 const std::shared_ptr<DeviceUtil>& device_util):
+    memory_util_(memory_util), device_util_(device_util) {}
 
 BlockBufferUtil::~BlockBufferUtil() {}
 

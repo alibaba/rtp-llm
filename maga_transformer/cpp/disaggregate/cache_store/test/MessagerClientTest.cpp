@@ -2,53 +2,30 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 
-class MessagerClientTest: public ::testing::Test {
+class MessagerClientTest: public CacheStoreTestBase {
 
 protected:
-    bool initMemoryUtil(bool mock);
-    bool initMessager(bool mock, bool rdma = false);
+    bool initMessager();
     void verifyBlock(
         const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
 
 protected:
-    MockMemoryUtil*                          mock_memory_util_{nullptr};
-    std::shared_ptr<MemoryUtil>              memory_util_;
-    std::shared_ptr<DeviceUtil>              device_util_;
-    std::shared_ptr<BlockBufferUtil>         block_buffer_util_;
     std::shared_ptr<RequestBlockBufferStore> server_buffer_store_;
 
     std::shared_ptr<MessagerClient> client_;
     std::shared_ptr<MessagerServer> server_;
 };
 
-bool MessagerClientTest::initMemoryUtil(bool mock) {
-    if (mock) {
-        mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-        memory_util_.reset(mock_memory_util_);
-    } else {
-        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-    }
-    device_util_ = std::make_shared<DeviceUtil>();
-
-    block_buffer_util_   = std::make_shared<BlockBufferUtil>(memory_util_);
-    server_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
-    return true;
-}
-
-bool MessagerClientTest::initMessager(bool mock, bool rdma) {
-    if (!initMemoryUtil(mock)) {
-        return false;
-    }
+bool MessagerClientTest::initMessager() {
+    server_buffer_store_ =
+        std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
 
     auto port = autil::NetUtil::randomPort();
 
@@ -57,7 +34,7 @@ bool MessagerClientTest::initMessager(bool mock, bool rdma) {
         return false;
     }
 
-    auto timer_manager_ = std::make_shared<arpc::TimerManager>();
+    auto timer_manager_    = std::make_shared<arpc::TimerManager>();
     auto metrics_reporter_ = std::make_shared<CacheStoreMetricsReporter>();
 
     server_ = std::make_shared<MessagerServer>(memory_util_, server_buffer_store_, metrics_reporter_, timer_manager_);
@@ -92,7 +69,7 @@ void MessagerClientTest::verifyBlock(
 }
 
 TEST_F(MessagerClientTest, testSendLoadRequest_Success) {
-    ASSERT_TRUE(initMessager(false));
+    ASSERT_TRUE(initMessager());
 
     uint32_t    block_size   = 16;
     std::string requestid    = "test-request-id";
@@ -120,7 +97,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_Success) {
 }
 
 TEST_F(MessagerClientTest, testSendLoadRequest_connectFailed) {
-    ASSERT_TRUE(initMessager(false));
+    ASSERT_TRUE(initMessager());
 
     uint32_t    block_size = 16;
     std::string requestid  = "test-request-id";
@@ -143,7 +120,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_connectFailed) {
 }
 
 TEST_F(MessagerClientTest, testSendLoadRequest_sendRequestFailed) {
-    ASSERT_TRUE(initMessager(true));
+    ASSERT_TRUE(initMessager());
 
     uint32_t    block_size = 16;
     std::string requestid  = "test-request-id";

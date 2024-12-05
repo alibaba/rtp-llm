@@ -31,8 +31,6 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
             continue;
         }
 
-        FT_LOG_WARNING("Found unregistered request block for request id %s, this is typically unwanted",
-                        request_block_buffer->getRequestId().c_str());
         auto valid_block = makeValidBlock(block);
         if (!valid_block) {
             FT_LOG_WARNING("set request block buffer failed to make valid block, request id %s",

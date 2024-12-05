@@ -1,42 +1,16 @@
 #include "gtest/gtest.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 #include <cuda_runtime.h>
 
 namespace rtp_llm {
 
-class NormalCacheStoreTest: public ::testing::Test {
-public:
-    void SetUp() override {
-        const auto test_src_dir = getenv("TEST_SRCDIR");
-        const auto test_work_space = getenv("TEST_WORKSPACE");
-        const auto test_binary = getenv("TEST_BINARY");
-        if (!(test_src_dir && test_work_space && test_binary)) {
-            std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
-            abort();
-        }
-
-        std::string test_binary_str = std::string(test_binary);
-        FT_CHECK(*test_binary_str.rbegin() != '/');
-        size_t filePos = test_binary_str.rfind('/');
-        auto test_data_path_ = std::string(test_src_dir) + "/" + std::string(test_work_space) + "/"
-                        + test_binary_str.substr(0, filePos) + "/";
-
-        std::cout << "test_src_dir [" << test_src_dir << "]" << std::endl;
-        std::cout << "test_work_space [" << test_work_space << "]" << std::endl;
-        std::cout << "test_binary [" << test_binary << "]" << std::endl;
-        std::cout << "test using data path [" << test_data_path_ << "]" << std::endl;
-    }
-
+class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:
-    bool initMemoryUtil(bool mock);
-    bool initCacheStores(bool mock);
+    bool initCacheStores();
 
     void verifyBlock(
         const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
@@ -46,28 +20,10 @@ protected:
 protected:
     std::shared_ptr<NormalCacheStore> cache_store1_;
     std::shared_ptr<NormalCacheStore> cache_store2_;
-
-    MockMemoryUtil*                  mock_memory_util_{nullptr};
-    std::shared_ptr<MemoryUtil>      memory_util_;
-    std::shared_ptr<DeviceUtil>      device_util_;
-    std::shared_ptr<BlockBufferUtil> block_buffer_util_;
 };
 
-bool NormalCacheStoreTest::initMemoryUtil(bool mock) {
-    if (mock) {
-        mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-        memory_util_.reset(mock_memory_util_);
-    } else {
-        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-    }
-
-    device_util_ = std::make_shared<DeviceUtil>();
-    block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
-    return true;
-}
-
-bool NormalCacheStoreTest::initCacheStores(bool mock) {
-    if (!initMemoryUtil(mock)) {
+bool NormalCacheStoreTest::initCacheStores() {
+    if (!device_util_ || !memory_util_) {
         return false;
     }
 
@@ -122,7 +78,7 @@ void NormalCacheStoreTest::verifyBlock(
 }
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     uint32_t    block_size  = 16;
     std::string requestid   = "test-request-id";
@@ -161,7 +117,7 @@ TEST_F(NormalCacheStoreTest, testStore_Success) {
 }
 
 TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
@@ -180,7 +136,7 @@ TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
 }
 
 TEST_F(NormalCacheStoreTest, testStore_invalidParams) {
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
@@ -206,7 +162,7 @@ TEST_F(NormalCacheStoreTest, testStore_invalidParams) {
 }
 
 TEST_F(NormalCacheStoreTest, testStore_pushWorkItemFailed) {
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     uint32_t    block_size  = 16;
     std::string requestid   = "test-request-id";
@@ -228,9 +184,39 @@ TEST_F(NormalCacheStoreTest, testStore_pushWorkItemFailed) {
     mutex.unlock();
 }
 
-TEST_F(NormalCacheStoreTest, testLoad_Success) {
+TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
+    ASSERT_TRUE(initMockMemoryUtil());
+    ASSERT_TRUE(initCacheStores());
 
-    ASSERT_TRUE(initCacheStores(false));
+    uint32_t    block_size  = 16;
+    std::string requestid   = "test-request-id";
+    auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(true));
+    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
+    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
+
+    std::mutex mutex;  // for sync test
+    mutex.lock();
+    auto store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
+        mutex.unlock();
+        ASSERT_FALSE(ok);
+        ASSERT_EQ(CacheStoreErrorCode::StoreFailed, ec);
+    };
+
+    // mock call from isMemoryMr, then return false in tcp mode
+    EXPECT_CALL(*mock_memory_util_, isMemoryMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(false));
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+        .WillRepeatedly(::testing::Return(false));
+
+    cache_store1_->store(store_cache, store_callback);
+    mutex.lock();
+    mutex.unlock();
+}
+
+TEST_F(NormalCacheStoreTest, testLoad_Success) {
+    ASSERT_TRUE(initCacheStores());
 
     // store a to cache_store1 for local get
     uint32_t    block_size   = 16;
@@ -282,8 +268,7 @@ TEST_F(NormalCacheStoreTest, testLoad_Success) {
 
 TEST_F(NormalCacheStoreTest, testLoad_loadBeforeStore) {
     uint32_t block_size = 16;
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::string requestid = "test-request-id";
 
@@ -321,8 +306,7 @@ TEST_F(NormalCacheStoreTest, testLoad_loadBeforeStore) {
 
 TEST_F(NormalCacheStoreTest, testLoad_MultiThread) {
     uint32_t block_size = 16;
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::string requestid1 = "test-request-id1";
     std::string requestid2 = "test-request-id2";
@@ -446,7 +430,7 @@ void NormalCacheStoreTest::getThreadFunction(const std::string& requestid, size_
 
 TEST_F(NormalCacheStoreTest, testLoad_MultiThread2) {
     uint32_t block_size = 16;
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::vector<std::thread> set_threads;
     for (int i = 0; i < 10; ++i) {
@@ -473,7 +457,7 @@ TEST_F(NormalCacheStoreTest, testLoad_MultiThread2) {
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_emptyCache) {
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       load_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
@@ -492,8 +476,7 @@ TEST_F(NormalCacheStoreTest, testLoad_emptyCache) {
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_invalidParams) {
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       load_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
@@ -519,8 +502,7 @@ TEST_F(NormalCacheStoreTest, testLoad_invalidParams) {
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_remoteCallPrefillTimeout) {
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::string requestid  = "test-request-id";
     uint32_t    block_size = 16;
@@ -546,8 +528,7 @@ TEST_F(NormalCacheStoreTest, testLoad_remoteCallPrefillTimeout) {
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_remoteBufferExpired) {
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     std::string requestid  = "test-request-id";
     uint32_t    block_size = 16;
@@ -591,8 +572,6 @@ void doReg(
 }
 
 TEST_F(NormalCacheStoreTest, testRdmaMemoryRegCPU) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     uint64_t block_size = 32 * 1024;
     uint64_t block_num  = 24;
 
@@ -605,8 +584,6 @@ TEST_F(NormalCacheStoreTest, testRdmaMemoryRegCPU) {
 }
 
 TEST_F(NormalCacheStoreTest, testRdmaMemoryRegGPU) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     uint64_t block_size = 32 * 1024;
     uint64_t block_num  = 24;
 
@@ -618,8 +595,7 @@ TEST_F(NormalCacheStoreTest, testRdmaMemoryRegGPU) {
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_canceWhileLoad) {
-
-    ASSERT_TRUE(initCacheStores(false));
+    ASSERT_TRUE(initCacheStores());
 
     // store a to cache_store1 for local get
     uint32_t    block_size   = 16;

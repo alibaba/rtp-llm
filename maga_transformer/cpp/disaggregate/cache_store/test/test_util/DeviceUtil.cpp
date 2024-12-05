@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/disaggregate/cache_store/test/DeviceUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/test_util/DeviceUtil.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
@@ -11,9 +11,7 @@ DeviceUtil::DeviceUtil() {
     device_ = DeviceFactory::getDefaultDevice();
 }
 
-DeviceUtil::~DeviceUtil() {
-
-}
+DeviceUtil::~DeviceUtil() {}
 
 void* DeviceUtil::mallocCPU(size_t size) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -49,26 +47,24 @@ void  DeviceUtil::freeGPU(void* ptr) {
     }
 }
 
-void  DeviceUtil::memsetCPU(void* ptr, int value, size_t len) {
+void DeviceUtil::memsetCPU(void* ptr, int value, size_t len) {
     memset(ptr, value, len);
 }
 
-bool  DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
+bool DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
     auto buffer = ft::Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {len}, ptr);
     device_->bufMemset(buffer, value);
     return true;
 }
 
-bool  DeviceUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
+bool DeviceUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
     const auto dst_memory_type = dst_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
     const auto src_memory_type = src_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-    auto dst_buffer = ft::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
-    auto src_buffer = ft::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
+    auto       dst_buffer      = ft::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
+    auto       src_buffer      = ft::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
     device_->copy({dst_buffer, src_buffer});
     device_->syncAndCheck();
     return true;
 }
 
-
 }  // namespace rtp_llm
-

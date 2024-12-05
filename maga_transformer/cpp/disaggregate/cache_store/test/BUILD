@@ -2,29 +2,21 @@ package(default_visibility = ["//maga_transformer/cpp/disaggregate/cache_store:_
 load("//:def.bzl", "copts")
 
 cc_library(
-    name = "cache_store_gmock",
-    hdrs = [
-        "MockMemoryUtil.h",
-    ],
-    deps = [
-        "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-        "@com_google_googletest//:gtest",
-    ]
-)
-
-cc_library(
-    name = "block_buffer_util",
+    name = "cache_store_test_base",
     srcs = [
-        "BlockBufferUtil.cpp",
-        "DeviceUtil.cpp",
+        "test_util/BlockBufferUtil.cpp",
+        "test_util/DeviceUtil.cpp",
     ],
     hdrs = [
-        "BlockBufferUtil.h",
-        "DeviceUtil.h",
+        "CacheStoreTestBase.h",
+        "test_util/MockMemoryUtil.h",
+        "test_util/BlockBufferUtil.h",
+        "test_util/DeviceUtil.h",
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
         "//src/fastertransformer/devices:devices_base",
+        "@com_google_googletest//:gtest",
     ],
     visibility=['//visibility:public'],
 )
@@ -44,13 +36,9 @@ cc_test(
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//src/fastertransformer/devices/cuda_impl/tests:cuda_test_util",
-        "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/devices/base_tests:base_tests",
-        ":block_buffer_util",
+        ":cache_store_test_base",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        ":cache_store_gmock",
     ],
     env = {
         "CACHE_STORE_RDMA_MODE": "0",

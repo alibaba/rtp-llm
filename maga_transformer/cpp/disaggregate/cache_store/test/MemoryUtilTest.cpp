@@ -1,27 +1,13 @@
 #include "gtest/gtest.h"
 
 #include "autil/EnvUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/DeviceUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CommonDefine.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "aios/network/accl-barex/include/accl/barex/barex_types.h"
 
 namespace rtp_llm {
 
-class MemoryUtilTest: public ::testing::Test {
-public:
-    void SetUp() override;
-
-protected:
-    std::unique_ptr<MemoryUtil> memory_util_;
-    std::unique_ptr<DeviceUtil> device_util_;
-};
-
-void MemoryUtilTest::SetUp() {
-    memory_util_ = createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false));
-    device_util_ = std::make_unique<DeviceUtil>();
-}
+class MemoryUtilTest: public CacheStoreTestBase {};
 
 TEST_F(MemoryUtilTest, testMemoryMr_tcpMode) {
     if (memory_util_->isRdmaMode()) {

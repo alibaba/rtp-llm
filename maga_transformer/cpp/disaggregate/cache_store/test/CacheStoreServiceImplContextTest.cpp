@@ -6,10 +6,8 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace rtp_llm {
@@ -31,7 +29,7 @@ public:
     MOCK_METHOD0(Run, void());
 };
 
-class CacheStoreServiceImplContextTest: public ::testing::Test {
+class CacheStoreServiceImplContextTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();
     bool initContext();
@@ -42,27 +40,21 @@ protected:
                               bool                         context_done_run,
                               KvCacheStoreServiceErrorCode error_code);
 
-    void SetUp() override {
-        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-        block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
-    }
-
     void TearDown() override {
-        delete done_;
+        if (done_) {
+            delete done_;
+        }
         cache_store1_.reset();
         cache_store2_.reset();
-        memory_util_.reset();
     }
 
 protected:
     std::shared_ptr<NormalCacheStore>                     cache_store1_;
     std::shared_ptr<NormalCacheStore>                     cache_store2_;
-    std::shared_ptr<MemoryUtil>                           memory_util_;
-    std::shared_ptr<BlockBufferUtil>                      block_buffer_util_;
     CacheLoadRequest*                                     request_;
     CacheLoadResponse*                                    response_;
     std::shared_ptr<CacheStoreServerLoadMetricsCollector> collector_;
-    MockCacheLoadServiceClosure*                          done_;
+    MockCacheLoadServiceClosure*                          done_{nullptr};
     std::shared_ptr<arpc::TimerManager>                   timer_manager_;
 
     std::shared_ptr<CacheStoreServiceImplContext> context_;
@@ -73,7 +65,6 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     auto port2      = autil::NetUtil::randomPort();
     auto rdma_port1 = autil::NetUtil::randomPort();
     auto rdma_port2 = autil::NetUtil::randomPort();
-    fastertransformer::DeviceFactory::initDevices(fastertransformer::GptInitParameter());
 
     CacheStoreInitParams params1;
     params1.listen_port       = port1;
@@ -82,7 +73,7 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     params1.rdma_connect_port = rdma_port2;
     params1.enable_metric     = false;
     params1.memory_util       = memory_util_;
-    params1.device            = fastertransformer::DeviceFactory::getDefaultDevice();
+    params1.device            = device_util_->device_;
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
     if (!cache_store1_) {
@@ -96,7 +87,7 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     params2.rdma_connect_port = rdma_port1;
     params2.enable_metric     = false;
     params2.memory_util       = memory_util_;
-    params2.device            = fastertransformer::DeviceFactory::getDefaultDevice();
+    params2.device            = device_util_->device_;
 
     cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
     return cache_store2_ != nullptr;

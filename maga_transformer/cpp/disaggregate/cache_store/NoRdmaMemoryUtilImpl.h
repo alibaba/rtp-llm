@@ -1,3 +1,4 @@
+#pragma once
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 namespace rtp_llm {

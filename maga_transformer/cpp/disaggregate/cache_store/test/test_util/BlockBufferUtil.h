@@ -2,14 +2,14 @@
 
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/DeviceUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/test_util/DeviceUtil.h"
 
 namespace rtp_llm {
 
 // BlockBufferUtil use for test, mock real alloc memory
 class BlockBufferUtil {
 public:
-    BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util);
+    BlockBufferUtil(const std::shared_ptr<MemoryUtil>& memory_util, const std::shared_ptr<DeviceUtil>& device_util);
     ~BlockBufferUtil();
 
 public:

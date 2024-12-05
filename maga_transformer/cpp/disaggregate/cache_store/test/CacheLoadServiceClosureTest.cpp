@@ -1,38 +1,17 @@
 #include "gtest/gtest.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/BlockBufferUtil.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/Interface.h"
-#include "maga_transformer/cpp/disaggregate/cache_store/test/MockMemoryUtil.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 
-class CacheLoadServiceClosureTest: public ::testing::Test {
+class CacheLoadServiceClosureTest: public CacheStoreTestBase {
 protected:
-    bool initMemoryUtil(bool mock);
     CacheLoadServiceClosure*
     makeClosure(arpc::ErrorCode arpc_ec, KvCacheStoreServiceErrorCode resp_ec, CacheStoreLoadDoneCallback callback);
-
-private:
-    MockMemoryUtil*                  mock_memory_util_{nullptr};
-    std::shared_ptr<MemoryUtil>      memory_util_;
-    std::shared_ptr<BlockBufferUtil> block_buffer_util_;
 };
-
-bool CacheLoadServiceClosureTest::initMemoryUtil(bool mock) {
-    if (mock) {
-        mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-        memory_util_.reset(mock_memory_util_);
-    } else {
-        memory_util_ = (createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
-    }
-
-    block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_);
-    return true;
-}
 
 CacheLoadServiceClosure* CacheLoadServiceClosureTest::makeClosure(arpc::ErrorCode              arpc_ec,
                                                                   KvCacheStoreServiceErrorCode resp_ec,
@@ -53,8 +32,6 @@ CacheLoadServiceClosure* CacheLoadServiceClosureTest::makeClosure(arpc::ErrorCod
 }
 
 TEST_F(CacheLoadServiceClosureTest, testRun_Success) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     std::mutex mutex;
     auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         ASSERT_TRUE(ok);
@@ -71,8 +48,6 @@ TEST_F(CacheLoadServiceClosureTest, testRun_Success) {
 }
 
 TEST_F(CacheLoadServiceClosureTest, testRun_ControllerFailed) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     std::mutex mutex;
     auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         ASSERT_FALSE(ok);
@@ -89,8 +64,6 @@ TEST_F(CacheLoadServiceClosureTest, testRun_ControllerFailed) {
 }
 
 TEST_F(CacheLoadServiceClosureTest, testRun_ResponseFailed) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     std::mutex mutex;
     auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         ASSERT_FALSE(ok);
@@ -107,8 +80,6 @@ TEST_F(CacheLoadServiceClosureTest, testRun_ResponseFailed) {
 }
 
 TEST_F(CacheLoadServiceClosureTest, testRun_BlockSizeError) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     std::mutex mutex;
     auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         ASSERT_FALSE(ok);
@@ -128,8 +99,6 @@ TEST_F(CacheLoadServiceClosureTest, testRun_BlockSizeError) {
 }
 
 TEST_F(CacheLoadServiceClosureTest, testRun_BlockContentError) {
-    ASSERT_TRUE(initMemoryUtil(false));
-
     std::mutex mutex;
     auto       callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         ASSERT_FALSE(ok);

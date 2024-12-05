@@ -14,12 +14,12 @@ bool NoRdmaMemoryUtilImpl::deregUserMr(void* buf, bool gpu) {
 }
 
 bool NoRdmaMemoryUtilImpl::isMemoryMr(void* ptr, uint64_t size, bool gpu, bool adopted) {
-    FT_LOG_INFO("tcp mode, no memory actualy regist mr");
+    FT_LOG_DEBUG("tcp mode, no memory actualy regist mr");
     return false;
 }
 
 bool NoRdmaMemoryUtilImpl::findMemoryMr(void* mem_info, void* buf, uint64_t size, bool gpu, bool adopted) {
-    FT_LOG_INFO("tcp mode, no memory actualy regist mr");
+    FT_LOG_DEBUG("tcp mode, no memory actualy regist mr");
     return false;
 }
 
