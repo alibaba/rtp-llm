@@ -233,8 +233,8 @@ class BaseModel(object):
         )
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str) -> GptInitModelParameters:
+    @classmethod
+    def _create_config(cls, ckpt_path: str) -> GptInitModelParameters:
         raise NotImplementedError()
 
     @staticmethod
