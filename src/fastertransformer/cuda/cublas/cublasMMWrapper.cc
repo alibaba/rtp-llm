@@ -240,6 +240,8 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         cublasLtMatrixLayoutDestroy(Adesc);
         cublasLtMatrixLayoutDestroy(Bdesc);
         cublasLtMatrixLayoutDestroy(Cdesc);
+        cublasLtMatrixLayoutDestroy(Ddesc);
+        cublasLtMatmulPreferenceDestroy(preference);
         sync_check_cuda_error();
     } else {
         int cublasAlgo = info.algoId;
