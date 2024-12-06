@@ -70,6 +70,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
+    if input_py.generate_config.sp_input_lookup:
+        generate_config_pb.sp_input_lookup = input_py.generate_config.sp_input_lookup
     if input_py.generate_config.sp_edit:
         generate_config_pb.sp_edit = input_py.generate_config.sp_edit
     if input_py.generate_config.force_disable_sp_run:

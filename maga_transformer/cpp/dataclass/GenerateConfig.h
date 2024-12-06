@@ -50,6 +50,7 @@ public:
     bool                return_all_probs     = false;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<int>    sp_advice_prompt_token_ids;
+    bool                sp_input_lookup = false;
 
     bool pd_separation  = false;
 
@@ -108,6 +109,7 @@ public:
         JSONIZE(force_disable_sp_run);
         JSONIZE(return_all_probs);
         JSONIZE(sp_advice_prompt_token_ids);
+        JSONIZE(sp_input_lookup);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
