@@ -142,14 +142,14 @@ class LlavaRenderer(CustomChatRenderer):
             conv_mode = "llava_qwen"
         else:
             conv_mode = "llava_v0"
-
         return conv_templates[conv_mode]
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         ckpt_path: str = os.environ['CHECKPOINT_PATH']
         model_name: str = ckpt_path.split('?')[0] # oss style path
         model_name = model_name.strip('/').split('/')[-1]
-        conv_template = self._get_conv_template(model_name)
+        llava_template_env: str = os.environ.get('LLAVA_CHAT_TEMPLATE', '')
+        conv_template = self._get_conv_template(model_name) if llava_template_env == '' else self._get_conv_template(llava_template_env)
 
         return conv_template.render_messages(messages, self.tokenizer)
 

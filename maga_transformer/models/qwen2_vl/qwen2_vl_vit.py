@@ -147,9 +147,8 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
 
         idx = torch.linspace(0, frames - 1, nframes).round().long().tolist()
         height, width = vr[0].shape[:2]
-        video = [torch.tensor(vr[i].asnumpy().transpose(2, 0, 1)) for i in idx]
+        video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
         del vr
-        video = torch.stack(video)
 
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
