@@ -68,7 +68,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
 absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
     FT_LOG_DEBUG("stream [%ld] max block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache", stream_->streamId(), maxBlockSize(), total_seq_len, release_seq_len);
-    size_t last_block_occupied_seq_len = (total_seq_len - 1) % seqSizePerBlock();
+    size_t last_block_occupied_seq_len = seqSizePerBlock() == 1 ? 1 : ((total_seq_len + seqSizePerBlock() - 2) % seqSizePerBlock() + 1);
     if (release_seq_len < last_block_occupied_seq_len) {
         return absl::OkStatus();
     }

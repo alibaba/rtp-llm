@@ -28,7 +28,7 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
     }
 
     for (auto& stream: propose_streams) {
-        FT_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        FT_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     FT_LOG_DEBUG("propose done");
