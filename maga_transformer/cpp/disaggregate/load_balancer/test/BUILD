@@ -8,6 +8,7 @@ cc_binary(
     ],
     linkstatic = True,
 )
+
 cc_test(
     name = "wrr_load_balancer_test",
     srcs = [
@@ -17,6 +18,7 @@ cc_test(
     deps = [
         "//maga_transformer/cpp/disaggregate/load_balancer:load_balancer",
         "//maga_transformer/cpp/http_server:http_server",
+        "@havenask//aios/autil:net",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
