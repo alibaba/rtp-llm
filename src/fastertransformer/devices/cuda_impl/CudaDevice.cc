@@ -404,7 +404,7 @@ void CudaDevice::checkUseMultiBlockMode() {
 }
 
 void CudaDevice::checkUseGroupGemm() {
-    if ((is_sm8x() || is_sm90())) {
+    if (is_sm8x()) {
         use_group_gemm = true;
     } else {
         use_group_gemm = false;
