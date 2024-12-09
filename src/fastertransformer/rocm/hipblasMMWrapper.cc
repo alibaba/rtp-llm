@@ -156,47 +156,54 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
         hipblasOperation_t trans_b = transb;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
-        
-        if(hipblasLtMatmul(hipblaslt_handle_,
-                        matmul,
-                        alpha,
-                        A,
-                        ADesc,
-                        B,
-                        BDesc,
-                        beta,
-                        C,
-                        CDesc,
-                        C,
-                        CDesc,
-                        NULL,
-                        workSpace,
-                        workspaceSize,
-                        stream_) != HIPBLAS_STATUS_SUCCESS)
-        {        
-            printf("[BLAS] blaslt failed, back to blas:\n");
-            printf("[BLAS] trans = %c%c, mnk = [%d,%d,%d], ld = [%d,%d,%d]\n",
-                transa == HIPBLAS_OP_N?'N':'T',transb == HIPBLAS_OP_N?'N':'T',
-                m,n,k, lda,ldb,ldc);
+
+        hipblasStatus_t blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
+                                                        matmul,
+                                                        alpha,
+                                                        A,
+                                                        ADesc,
+                                                        B,
+                                                        BDesc,
+                                                        beta,
+                                                        C,
+                                                        CDesc,
+                                                        C,
+                                                        CDesc,
+                                                        NULL,
+                                                        workSpace,
+                                                        workspaceSize,
+                                                        stream_);
+
+        if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
+            FT_LOG_WARNING("[BLAS] blaslt failed, back to blas.");
+            FT_LOG_WARNING("[BLAS] trans = %c%c, mnk = [%d,%d,%d], ld = [%d,%d,%d]",
+                           transa == HIPBLAS_OP_N ? 'N' : 'T',
+                           transb == HIPBLAS_OP_N ? 'N' : 'T',
+                           m,
+                           n,
+                           k,
+                           lda,
+                           ldb,
+                           ldc);
             ROCM_CHECK(hipblasGemmEx(hipblas_handle_,
-                                        transa,
-                                        transb,
-                                        m,
-                                        n,
-                                        k,
-                                        alpha,
-                                        A,
-                                        Atype_,
-                                        lda,
-                                        B,
-                                        Btype_,
-                                        ldb,
-                                        beta,
-                                        C,
-                                        Ctype_,
-                                        ldc,
-                                        computeType_,
-                                        HIPBLAS_GEMM_DEFAULT));
+                                     transa,
+                                     transb,
+                                     m,
+                                     n,
+                                     k,
+                                     alpha,
+                                     A,
+                                     Atype_,
+                                     lda,
+                                     B,
+                                     Btype_,
+                                     ldb,
+                                     beta,
+                                     C,
+                                     Ctype_,
+                                     ldc,
+                                     computeType_,
+                                     HIPBLAS_GEMM_DEFAULT));
         }
 
         ROCM_CHECK(hipblasLtMatrixLayoutDestroy(ADesc));

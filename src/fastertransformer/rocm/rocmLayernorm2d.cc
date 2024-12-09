@@ -4,18 +4,9 @@
 
 #include <ck_tile/core.hpp>
 #include "rocmLayernorm2d.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace fastertransformer {
-
-static void throwCKError(const char* const file, int const line, std::string const& info = "") {
-    auto error_msg = std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
-    std::printf("%s", error_msg.c_str());
-    fflush(stdout);
-    fflush(stderr);
-    abort();
-    throw std::exception();
-}
-#define CK_FAIL(info, ...) throwCKError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
 
 // Note: this internal API only declare, not define here, otherwise will block `make -j`
 template <typename Traits_>
@@ -108,11 +99,11 @@ float layernorm2d_fwd(layernorm2d_fwd_traits t,
                 r=layernorm2d_fwd_<traits_<ck_tile::fp16_t, ck_tile::fp16_t, float, float,  1, 12,  4,   64,  1, true , false, true , false,    1,    1>>(s, a);
         } else {
 
-            CK_FAIL("layernorm size not supported.");
+            FT_LOG_ERROR("layernorm size not supported.");
         }
     } else {
 
-        CK_FAIL("layernorm type not supported.");
+        FT_LOG_ERROR("layernorm type not supported.");
     }
 
     return r;
