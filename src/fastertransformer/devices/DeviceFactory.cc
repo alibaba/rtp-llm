@@ -70,7 +70,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.cache_store_listen_port = params.cache_store_listen_port_;
     device_params.cache_store_connect_port = params.cache_store_connect_port_;
     int max_batch_size =
-        params.max_context_batch_size_ + params.max_generate_batch_size_;
+        params.max_context_batch_size_ + params.max_generate_batch_size_ + std::max((long)0, params.gen_num_per_circle_) * 32;
     device_params.max_batch_size =
         std::max(1024, max_batch_size * 2);  // set static max batch size to avoid sampler reset memory
 
