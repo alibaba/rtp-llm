@@ -118,7 +118,7 @@ cc_library(
         "rocm/quantization_rocm.cu",
 	    ":mmha1",
         ":mmha2",
-        ":dmmha"
+        ":dmmha",
     ],
     hdrs = [
         "hello_world.h",

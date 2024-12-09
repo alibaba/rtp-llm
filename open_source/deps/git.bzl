@@ -7,6 +7,19 @@ load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 def clean_dep(dep):
     return str(Label(dep))
 
+def amd_ck_dep():
+    new_git_repository(
+        name = "composable_kernel_archive",
+        remote = "https://github.com/ROCm/composable_kernel.git",
+        commit = "e4dfe4d892bfba901204b4975a478d4cce21e5a5", # CommitTag: [CK_TILE] FA bwd kernels optimization (#1397)
+        patches = ["//3rdparty/composable_kernel:ck.patch"],
+        build_file = "//3rdparty/composable_kernel:ck.BUILD",
+        shallow_since = "1719582646 -0700",
+    )
+
+    ck_repo(name = "composable_kernel")
+
+
 def git_deps():
     git_repository(
         name = "rules_cc",
@@ -232,13 +245,4 @@ def git_deps():
         actual = "@zlib_archive//:zlib",
     )
 
-    new_git_repository(
-        name = "composable_kernel_archive",
-        remote = "https://github.com/ROCm/composable_kernel.git",
-        commit = "79a5d9c10c45a4290ba916695dce4625022c89df", # CommitTag: [CK_TILE] FA bwd kernels optimization (#1397)
-        patches = ["//3rdparty/composable_kernel:ck.patch"],
-        build_file = "//3rdparty/composable_kernel:ck.BUILD",
-        shallow_since = "1719582646 -0700",
-    )
-
-    ck_repo(name = "composable_kernel")
+    amd_ck_dep()
