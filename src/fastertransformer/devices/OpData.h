@@ -11,6 +11,7 @@
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/EnumUtils.h"
+#include "maga_transformer/cpp/utils/StackTrace.h"
 
 #include <optional>
 #include <functional>
@@ -49,6 +50,10 @@ class OpException : public std::exception {
 public:
     OpException(const OpStatus& status)
     : status_(status) {
+        std::stringstream ss;
+        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
+        FT_LOG_INFO("%s", ss.str().c_str());
+        fastertransformer::printStackTrace();
         if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
             fflush(stdout);
             fflush(stderr);
