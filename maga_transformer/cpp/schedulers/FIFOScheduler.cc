@@ -45,7 +45,7 @@ void FIFOScheduler::evaluateRunningRemote() {
         if ((*it)->needRemoteGenerate()) {
             (*it)->setRemoteGenerate();
             remote_running_streams_.emplace_back(*it);
-            FT_LOG_DEBUG("evict remote running stream [%ld]", (*it)->streamId());
+            FT_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
             it = running_streams_.erase(it);
         } else {
             ++it;

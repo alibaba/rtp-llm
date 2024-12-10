@@ -60,6 +60,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 }
 
 void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {
+    // TODO(xinfei.sxf) other rank?
     if (metrics_reporter_) {
         RtpLLMExecutorMetricsCollector executor_collector;
         executor_collector.context_batch_size  = stream_groups.totalContextBatchSize();
@@ -73,6 +74,7 @@ void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
         RtpLLMTokenPSMetricsCollector tps_collector;
+        // TODO(xinfei.sxf) fix this
         tps_collector.context_tps = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
         tps_collector.generate_tps = stream_groups.totalDecodeBatchSize();
         tps_collector.total_tps = stream_groups.modelExecuteTokenSize();

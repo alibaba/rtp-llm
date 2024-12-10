@@ -163,6 +163,8 @@ public:
     void reportMetric();
     std::string debugString() const;
 
+    void resetBeginTime(int64_t begin_time_us);
+
     // for test
     void setIsContextStream(bool is_context_stream);
     ft::BufferPtr getLoss();

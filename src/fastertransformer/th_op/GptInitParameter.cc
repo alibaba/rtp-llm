@@ -304,6 +304,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(prefill_retry_timeout_ms, prefill_retry_timeout_ms_)   \
     DEF_PROPERTY(decode_retry_times, decode_retry_times_)               \
     DEF_PROPERTY(decode_retry_timeout_ms, decode_retry_timeout_ms_)     \
+    DEF_PROPERTY(decode_polling_kv_cache_step_ms, decode_polling_kv_cache_step_ms_)     \
+    DEF_PROPERTY(decode_use_async_load_cache, decode_use_async_load_cache_)             \
     DEF_PROPERTY(rdma_connect_retry_times, rdma_connect_retry_times_)   \
     DEF_PROPERTY(pd_sep_enable_fallback, pd_sep_enable_fallback_)       \
     DEF_PROPERTY(load_balance_policy_name, load_balance_policy_name_)   \

@@ -24,6 +24,9 @@ struct DecodeStatInfo {
     int64_t allocate_resource_rt_us         = 0;
     int64_t load_cache_from_prefill_rt_us   = 0;
     int64_t local_generate_rt_us            = 0;
+    int64_t load_cache_min_rt_us            = 0;
+    int64_t load_cache_max_rt_us            = 0;
+    int64_t load_cache_polling_cost_us      = 0;
     ExecuteStage stage                      = start;
     
     ExecuteStage saveStage() const;

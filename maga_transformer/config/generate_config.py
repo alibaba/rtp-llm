@@ -57,6 +57,7 @@ class GenerateConfig(BaseModel):
     sp_edit: bool = False
     force_disable_sp_run: bool = False
     return_all_probs: bool = False
+    can_use_pd_separation: bool = True
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

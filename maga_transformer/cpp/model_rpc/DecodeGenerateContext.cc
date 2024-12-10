@@ -69,6 +69,12 @@ void DecodeGenerateContext::reportTime() {
     collector.allocate_resource_rt_us           = stat_info.allocate_resource_rt_us;
     collector.load_cache_from_prefill_rt_us     = stat_info.load_cache_from_prefill_rt_us;
     collector.local_generate_rt_us              = stat_info.local_generate_rt_us;
+
+    // for tp
+    collector.load_cache_min_rt_us              = stat_info.load_cache_min_rt_us;
+    collector.load_cache_max_rt_us              = stat_info.load_cache_max_rt_us;
+    collector.load_cache_polling_cost_us        = stat_info.load_cache_polling_cost_us;
+
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class
 }

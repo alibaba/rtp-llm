@@ -67,6 +67,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 }
 
+void GenerateStream::resetBeginTime(int64_t begin_time_us) {
+    begin_time_us_ = begin_time_us;
+}
+
 bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_.hasCacheKeys();
 }
@@ -602,7 +606,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_DEBUG("stream [%ld] update", streamId());
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
         return;
@@ -670,6 +674,7 @@ void GenerateStream::reportMetric() {
             collector.query_batch_size       = tileNum();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
+            FT_LOG_DEBUG("stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
             collector.wait_latency_us        = wait_time_us_;
             collector.pause_latency_us       = pause_time_us_;
             collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();

@@ -31,8 +31,9 @@ public:
     int64_t get_rpc_connection_rt_us        = 0;
     int64_t remote_allocate_resource_rt_us  = 0;
     int64_t enqueue_request_rt_us           = 0;
-    int64_t remote_load_cache_rt_us         = 0;
+    int64_t remote_load_cache_start_rt_us   = 0;
     int64_t poll_local_output_rt_us         = 0;
+    int64_t remote_load_cache_end_rt_us     = 0;
     int64_t remote_generate_rt_us           = 0;
     int64_t poll_remote_output_rt_us        = 0;
 
@@ -41,6 +42,11 @@ public:
     int64_t allocate_resource_rt_us         = 0;
     int64_t load_cache_from_prefill_rt_us   = 0;
     int64_t local_generate_rt_us            = 0;
+
+    // for decode tp
+    int64_t load_cache_min_rt_us            = 0;
+    int64_t load_cache_max_rt_us            = 0;
+    int64_t load_cache_polling_cost_us      = 0;
 };
 
 class RpcMetrics: public kmonitor::MetricsGroup {
@@ -61,8 +67,9 @@ public:
     kmonitor::MutableMetric* get_rpc_connection_rt_us_metric            = nullptr;
     kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric      = nullptr;
     kmonitor::MutableMetric* enqueue_request_rt_us_metric               = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_rt_us_metric             = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* poll_local_output_rt_us_metric             = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric         = nullptr;
     kmonitor::MutableMetric* remote_generate_rt_us_metric               = nullptr;
     kmonitor::MutableMetric* poll_remote_output_rt_us_metric            = nullptr;
 
@@ -70,6 +77,10 @@ public:
     kmonitor::MutableMetric* allocate_resource_rt_us_metric             = nullptr;
     kmonitor::MutableMetric* load_cache_from_prefill_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* local_generate_rt_us_metric                = nullptr;
+
+    kmonitor::MutableMetric* load_cache_min_rt_us_metric                = nullptr;
+    kmonitor::MutableMetric* load_cache_max_rt_us_metric                = nullptr;
+    kmonitor::MutableMetric* load_cache_polling_cost_us_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

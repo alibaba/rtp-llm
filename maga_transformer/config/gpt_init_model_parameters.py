@@ -379,6 +379,7 @@ class GptInitModelParameters:
         if self.use_cache_store:
             self.cache_store_rdma_mode = bool(int(os.environ.get('CACHE_STORE_RDMA_MODE', 1)))
             logging.info(f'cache_store_rdma_mode: {self.cache_store_rdma_mode}')
+            
             self.load_cache_timeout_ms = int(os.environ.get('LOAD_CACHE_TIMEOUT_MS', 0))
             logging.info(f'load_cache_timeout_ms: {self.load_cache_timeout_ms}')
 
@@ -389,6 +390,12 @@ class GptInitModelParameters:
 
             self.rdma_connect_retry_times = int(os.environ.get('RDMA_CONNECT_RETRY_TIMES', 0))
             logging.info(f'rdma_connect_retry_times: {self.rdma_connect_retry_times}')
+
+            self.decode_polling_kv_cache_step_ms = int(os.environ.get('DECODE_POLLING_KV_CACHE_STEP_MS', 30))
+            logging.info(f'decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}')
+
+            self.decode_use_async_load_cache = bool(int(os.environ.get('DECODE_USE_ASYNC_LOAD_CACHE', 1)))
+            logging.info(f'decode_use_async_load_cache: {self.decode_use_async_load_cache}')
 
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')

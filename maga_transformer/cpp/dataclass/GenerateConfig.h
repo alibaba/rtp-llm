@@ -59,6 +59,7 @@ public:
     std::string         sp_advice_prompt;
     std::vector<int>    sp_advice_prompt_token_ids;
 
+    bool can_use_pd_separation = true;
     bool pd_separation  = false;
 
     bool top1() {
@@ -94,6 +95,7 @@ public:
                      << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", can_use_pd_separation: " << can_use_pd_separation
                      << ", pd_separation: " << pd_separation
                      << "}";
         return debug_string.str();

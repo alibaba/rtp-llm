@@ -34,8 +34,9 @@ private:
     void getRpcConnection(PrefillGenerateContext& prefill_context);
     void remoteAllocateResource(PrefillGenerateContext& prefill_context);
     void enqueueRequest(PrefillGenerateContext& prefill_context);
-    void remoteLoadCache(PrefillGenerateContext& prefill_context);
+    void remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
     void pollLocalOutput(PrefillGenerateContext& prefill_context);
+    void remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
     void remoteGenerate(PrefillGenerateContext& prefill_context);
     void pollRemoteOutput(PrefillGenerateContext& prefill_context);
 

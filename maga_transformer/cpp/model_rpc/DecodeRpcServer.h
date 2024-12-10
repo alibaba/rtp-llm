@@ -9,7 +9,7 @@ namespace rtp_llm {
 class DecodeRpcServer: public RemoteRpcServer {
 public:
     DecodeRpcServer() {}
-    ~DecodeRpcServer() {}
+    ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
     
@@ -42,6 +42,7 @@ public:
     };
 
 private:
+    void initThreadPool();
     void prepareGenerateContext(DecodeGenerateContext& decode_context);
     void allocateResource(DecodeGenerateContext& decode_context);
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
@@ -51,6 +52,8 @@ private:
 
     ErrorInfo loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo loadCacheForAllRank(DecodeGenerateContext& decode_context);
+    ErrorInfo loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    ErrorInfo loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext& load_context) const;
 
 private:

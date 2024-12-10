@@ -29,16 +29,20 @@ void PrefillStatInfo::nextStage() {
             remote_allocate_resource_rt_us += cost_time_us;
             break;
         }
-        case remoteLoadCache: {
+        case remoteLoadCacheStart: {
             enqueue_request_rt_us += cost_time_us;
             break;
         }
         case pollLocalOutput: {
-            remote_load_cache_rt_us += cost_time_us;
+            remote_load_cache_start_rt_us += cost_time_us;
+            break;
+        }
+        case remoteLoadCacheEnd: {
+            poll_local_output_rt_us += cost_time_us;
             break;
         }
         case RemoteGenerate: {
-            poll_local_output_rt_us += cost_time_us;
+            remote_load_cache_end_rt_us += cost_time_us;
             break;
         }
         case pollRemoteOutput: {
@@ -130,21 +134,13 @@ void PrefillGenerateContext::markRequestEnd() {
 // for debug, will delete in future
 void PrefillGenerateContext::printTime() {
     if (!stream) return;
+
     auto first_token_rt_us = stream->getTimeInfo().first_token_rt_us;
-    auto receive_load_cost_time = response.receive_load_time() - request_begin_time_us;
-    auto start_load_cost_time = response.start_load_time() - response.receive_load_time();
     auto load_cost_time = response.load_done_time() - response.start_load_time();
-    auto receive_generate_cost_time = response.receive_generate_time() - response.receive_load_time();
-    auto begin_compute_cost_time = response.begin_compute_time() - response.receive_generate_time();
     auto compute_cost_time = response.compute_done_time() - response.begin_compute_time();
 
-    FT_LOG_DEBUG("request_id = [%d], first_token_rt_us = %ld", request_id, first_token_rt_us);
-    FT_LOG_DEBUG("request_id = [%d], receive_load_cost_time = %ld, start_load_cost_time = %ld, load_cost_time = %ld",
-                request_id, receive_load_cost_time, start_load_cost_time, load_cost_time);
-    FT_LOG_DEBUG("request_id = [%d], receive_generate_cost_time = %ld, begin_compute_cost_time = %ld, "
-                "compute_cost_time = %ld, remote_cost_time = %ld",
-                request_id, receive_generate_cost_time, begin_compute_cost_time,
-                compute_cost_time, remote_cost_time_us);
+    FT_LOG_DEBUG("request_id = [%d], first_token_rt_us = %ld, load_cost_time = %ld, compute_cost_time = %ld",
+            request_id, first_token_rt_us, load_cost_time, compute_cost_time);
 }
 
 void PrefillGenerateContext::reportTime() {
@@ -155,8 +151,9 @@ void PrefillGenerateContext::reportTime() {
     collector.get_rpc_connection_rt_us          = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us    = stat_info.remote_allocate_resource_rt_us;
     collector.enqueue_request_rt_us             = stat_info.enqueue_request_rt_us;
-    collector.remote_load_cache_rt_us           = stat_info.remote_load_cache_rt_us;
+    collector.remote_load_cache_start_rt_us     = stat_info.remote_load_cache_start_rt_us;
     collector.poll_local_output_rt_us           = stat_info.poll_local_output_rt_us;
+    collector.remote_load_cache_end_rt_us       = stat_info.remote_load_cache_end_rt_us;
     collector.remote_generate_rt_us             = stat_info.remote_generate_rt_us;
     collector.poll_remote_output_rt_us          = stat_info.poll_remote_output_rt_us;
     reportMetrics(collector);

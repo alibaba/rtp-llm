@@ -55,6 +55,8 @@ message GenerateConfigPB {
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
     bool return_all_probs = 27;
+    bool sp_input_lookup = 28;
+    bool can_use_pd_separation = 29;
 }
 
 message MMPreprocessConfigPB {
@@ -175,6 +177,7 @@ message BroadcastLoadRequestPB {
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
+    int64 done_time_us = 2;
 }
 
 message RemoteFinishRequestPB {

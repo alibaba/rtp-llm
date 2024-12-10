@@ -23,6 +23,12 @@ namespace rtp_llm {
         string new_error_msg = "decode addr is " + prefill_context.decode_addr + ", ";                          \
         new_error_msg += "execute time is " + std::to_string(prefill_context.executeTimeMs()) + "ms, ";         \
         new_error_msg += "request timeout is " + std::to_string(prefill_context.request_timeout_ms) + "ms, ";   \
+        if (prefill_context.stream) {                                                                           \
+            auto first_token_rt_ms = prefill_context.stream->getTimeInfo().first_token_rt_us / 1000;            \
+            if (first_token_rt_ms) {                                                                            \
+                new_error_msg += " stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";     \
+            }                                                                                                   \
+        }                                                                                                       \
         auto status = prefill_context.closeGrpcStream();                                                        \
         if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                     \
@@ -129,6 +135,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] get rpc connection", prefill_context.request_id);
     auto host = load_balancer_->chooseHost(docode_cluster_name_);
     if (!host || host->ip.empty()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_HOST_FAILED,
@@ -146,9 +153,11 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
     prefill_context.decode_addr = decode_addr;
     prefill_context.stub = connect_status.value().stub;
+    FT_LOG_DEBUG("request:[%ld] get rpc connection done", prefill_context.request_id);
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
     auto request_timeout_ms = prefill_context.request_timeout_ms;
     auto max_rpc_timeout_ms = maga_init_params_.gpt_init_parameter.max_rpc_timeout_ms_;
@@ -171,9 +180,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, client_stream->Read(&allocate_response),
                             ErrorCode::REMOTE_ALLOCATE_RESOURCE_FAILED);
+    FT_LOG_DEBUG("request:[%ld] remote allocate resource done", prefill_context.request_id);
 }
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] trans query", prefill_context.request_id);
     auto input                               = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation    = true;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
@@ -190,7 +201,8 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] enqueue success", prefill_context.request_id);
 }
 
-void PrefillRpcServer::remoteLoadCache(PrefillGenerateContext& prefill_context) {
+void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] remote load cache", prefill_context.request_id);
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.stream);
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
@@ -203,15 +215,10 @@ void PrefillRpcServer::remoteLoadCache(PrefillGenerateContext& prefill_context) 
     load_request.set_start_time(currentTimeUs());
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Write(load_request),
             ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
-    GenerateOutputsPB load_response;
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Read(&load_response),
-            ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
-    auto error_code = transRPCErrorCode(load_response.error_info().error_code());
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
-    // TODO(xinfei.sxf) first token write to client affected by decode's load kv cache
+    FT_LOG_DEBUG("request:[%ld] start to poll local output", prefill_context.request_id);
     auto first_status = pollStreamOutput(prefill_context.server_context, prefill_context.request_key,
                                          prefill_context.rpc_context.writer, prefill_context.stream);
     if (!first_status.ok()) {
@@ -226,7 +233,17 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
     }
 }
 
+void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
+    GenerateOutputsPB load_response;
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Read(&load_response),
+            ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    auto error_code = transRPCErrorCode(load_response.error_info().error_code());
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+    FT_LOG_DEBUG("request:[%ld] remote load cache done", prefill_context.request_id);
+}
+
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] start to remote generate", prefill_context.request_id);
     auto first_token = prefill_context.stream->currentExecuteTokens()[0];
     GenerateRequestPB generate_request;
     generate_request.set_client_id(process_id_);
@@ -238,6 +255,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 }
 
 void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context) {
+    FT_LOG_DEBUG("request:[%ld] start to poll remote output", prefill_context.request_id);
     auto& request_id = prefill_context.request_id;
     GenerateOutputsPB response;
     while (prefill_context.client_stream->Read(&response)) {
@@ -281,9 +299,11 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    FT_LOG_DEBUG("request:[%ld] start generate stream call", request->request_id());
     auto pd_separation = request->generate_config().max_new_tokens() > 1
                          && request->generate_config().num_beams() <= 1
-                         && request->generate_config().num_return_sequences() <= 1;
+                         && request->generate_config().num_return_sequences() <= 1
+                        && request->generate_config().can_use_pd_separation();
     if (!pd_separation) {
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
@@ -312,8 +332,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             }
         }
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteLoadCache, prefill_context);
+        EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
+        EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
         EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
         prefill_context.stat_info.nextStage();
@@ -326,6 +347,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         return prefill_context.error_status;
     }
+
+    FT_LOG_DEBUG("request:[%ld] all done", prefill_context.request_id);
 
     return grpc::Status::OK;
 }

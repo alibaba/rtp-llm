@@ -1,11 +1,10 @@
 #ifndef HTTP_SERVER_RESTFULPROCESSOR_H
 #define HTTP_SERVER_RESTFULPROCESSOR_H
 
-#include <optional>
-#include <functional>
+#include <mutex>
 #include <shared_mutex>
 #include <optional>
-#include <mutex>
+#include <functional>
 
 #include "autil/Log.h"
 #include "http_server/HttpRequest.h"

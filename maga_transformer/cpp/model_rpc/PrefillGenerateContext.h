@@ -15,19 +15,21 @@ struct PrefillStatInfo {
         getRpcConnection        = 1,
         remoteAllocateResource  = 2,
         enqueueRequest          = 3,
-        remoteLoadCache         = 4,
+        remoteLoadCacheStart    = 4,
         pollLocalOutput         = 5,
-        RemoteGenerate          = 6,
-        pollRemoteOutput        = 7,
-        finish                  = 8
+        remoteLoadCacheEnd      = 6,
+        RemoteGenerate          = 7,
+        pollRemoteOutput        = 8,
+        finish                  = 9
     };
 
     int64_t begin_time                      = 0;
     int64_t get_rpc_connection_rt_us        = 0;
     int64_t remote_allocate_resource_rt_us  = 0;
     int64_t enqueue_request_rt_us           = 0;
-    int64_t remote_load_cache_rt_us         = 0;
+    int64_t remote_load_cache_start_rt_us   = 0;
     int64_t poll_local_output_rt_us         = 0;
+    int64_t remote_load_cache_end_rt_us     = 0;
     int64_t remote_generate_rt_us           = 0;
     int64_t poll_remote_output_rt_us        = 0;
     ExecuteStage stage                      = start;

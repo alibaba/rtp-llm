@@ -152,6 +152,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    FT_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (stoppedWithoutLock()) {
