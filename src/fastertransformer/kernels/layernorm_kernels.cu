@@ -18,6 +18,10 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 
+#if ENABLE_TRITON
+#include "src/fastertransformer/kernels/triton/layernorm_kernels.h"
+#endif 
+
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"
 #endif
@@ -565,6 +569,14 @@ void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* g
     const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale,
     QUANT_OUT_T* out_quant, bool return_normed_output)
 {
+#if ENABLE_TRITON && !defined(ENABLE_FP8)
+    if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr
+      && beta != nullptr && (out == nullptr || return_normed_output == true)) {
+       invokeTritonLayerNorm<T, QUANT_OUT_T, false>(out, normed_output, input, (const T*) nullptr, (const T*) nullptr, gamma, beta, eps, tokens, hidden_dim, stream, use_diff_of_squares, scale, dynamic_scale, out_quant, return_normed_output);
+       return; 
+    }
+#endif
+
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
     // Make sure block.x is multiple of 32 for warp shuffle to work
@@ -599,6 +611,14 @@ void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* inpu
     const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream,
     bool use_diff_of_squares, const float* scale, float* dynamic_scale, QUANT_OUT_T* out_quant, bool return_normed_output)
 {
+#if ENABLE_TRITON && !defined(ENABLE_FP8)
+    if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr
+      && beta != nullptr && (out == nullptr || return_normed_output == true)) {
+       invokeTritonLayerNorm<T, QUANT_OUT_T, true>(out, norm_output, input, bias, residual, gamma, beta, eps, tokens, hidden_dim, stream, use_diff_of_squares, scale, dynamic_scale, out_quant, return_normed_output);
+       return; 
+    }
+#endif
+
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
     // Make sure block.x is multiple of 32 for warp shuffle to work
@@ -647,21 +667,21 @@ INSTANTIATE_GENERAL_LAYERNORM(__nv_bfloat16, __nv_fp8_e4m3);
 #endif
 #endif
 
-#define INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(T, QUANT_OUT_T)                                                      \
+#define INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(T, QUANT_OUT_T)                                                      \
     template void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* input, const T* bias,         \
         const T* residual, const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim,     \
         cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale, QUANT_OUT_T* out_quant, bool return_normed_output);
 
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(float, int8_t);
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(half, int8_t);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(float, int8_t);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(half, int8_t);
 #ifdef ENABLE_BF16
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(__nv_bfloat16, int8_t);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(__nv_bfloat16, int8_t);
 #endif
 #ifdef ENABLE_FP8
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(float, __nv_fp8_e4m3);
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(half, __nv_fp8_e4m3);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(float, __nv_fp8_e4m3);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(half, __nv_fp8_e4m3);
 #ifdef ENABLE_BF16
-INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(__nv_bfloat16, __nv_fp8_e4m3);
+INSTANTIATE_GENERAL_ADD_BIAS_RESIDUAL_LAYERNORM(__nv_bfloat16, __nv_fp8_e4m3);
 #endif
 #endif
 } // namespace fastertransformer

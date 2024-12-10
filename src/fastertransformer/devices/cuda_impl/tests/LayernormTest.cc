@@ -48,6 +48,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         stream
                     );
                 }
+                cudaDeviceSynchronize();
                 sync_check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
@@ -81,6 +82,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         stream
                     );
                 }
+                cudaDeviceSynchronize();
                 sync_check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
@@ -121,3 +123,4 @@ TEST_F(LayerNormTest, testSimpleLayernorm) {
         }
     }
 }
+

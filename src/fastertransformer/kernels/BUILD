@@ -55,7 +55,10 @@ cc_library(
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + select({
+       "//:enable_triton": ["//src/fastertransformer/kernels/triton:triton_kernel"],
+       "//conditions:default": [],
+    }),
     copts = cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

@@ -2,6 +2,11 @@ load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "th_transformer_so")
 
 config_setting(
+    name = "enable_triton",
+    values = {"define": "enable_triton=true"},
+)
+
+config_setting(
     name = "using_cuda",
     values = {"define": "using_cuda=true"},
 )
@@ -181,6 +186,7 @@ cc_library(
 py_runtime(
     name = "python310",
     interpreter_path = "/opt/conda310/bin/python",
+    visibility = ["//visibility:public"],
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python"
 )
