@@ -114,3 +114,29 @@ def throughput_test(model_type,
         tags = ["manual"],
     )
     return test_name
+
+def vit_test(model_type, ckpt_path, image_size):
+    image_size_str = ','.join([str(x) for x in image_size])
+    test_name = model_type + "_vit_test"
+    native.py_test(
+        name = test_name,
+        main =  "vit_test.py",
+        srcs = [
+            "vit_test.py"
+        ],
+        timeout = "eternal",
+        imports = [],
+        deps = [
+            "//maga_transformer:testlib"
+        ],
+        data = [
+            "//maga_transformer:sdk"
+        ],
+        args = [
+            "--model_type", model_type,
+            "--ckpt_path", ckpt_path,
+            "--image_size", image_size_str,
+        ],
+        tags = ["manual"],
+    )
+    return test_name

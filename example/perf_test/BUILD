@@ -1,4 +1,4 @@
-load("//example/perf_test:defs.bzl", "latency_test", "throughput_test")
+load("//example/perf_test:defs.bzl", "latency_test", "throughput_test", "vit_test")
 
 test_input_default = [
     [1, 16],
@@ -109,3 +109,13 @@ test_suite(
     ]
 )
 
+test_image_input = [
+    300, 500, 1000, 2000, 4000
+]
+
+vit_test('qwen2_vl', '/mnt/nas1/hf/Qwen2-VL-7B-Instruct/', test_image_input)
+
+test_suite(
+    name = "vit_test",
+    tests = ['qwen2_vl_vit_test']
+)
