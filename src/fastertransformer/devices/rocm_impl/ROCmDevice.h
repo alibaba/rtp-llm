@@ -102,6 +102,9 @@ private:
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+protected:
+    bool use_multi_block_mode       = true;
 };
 
 }  // namespace fastertransformer

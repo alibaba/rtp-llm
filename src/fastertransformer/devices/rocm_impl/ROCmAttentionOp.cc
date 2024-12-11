@@ -394,53 +394,45 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 }
 
 AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModuleParams& params) {
-    bool use_multi_block_mode = false;
+    auto      datatype         = params.input.type();
+    size_t    max_seq_len_tile = 0;
+    BufferPtr partial_out      = nullptr;
+    BufferPtr partial_sum      = nullptr;
+    BufferPtr partial_max      = nullptr;
+    BufferPtr block_counter    = nullptr;
 
-    auto datatype = params.input.type();
-    size_t max_seq_len_tile = 0;
-    BufferPtr partial_out = nullptr;
-    BufferPtr partial_sum = nullptr;
-    BufferPtr partial_max = nullptr;
-    BufferPtr block_counter = nullptr;
+    size_t batch_size     = params.common.decoder_batch_size;
+    size_t local_head_num = params.configs.head_num;
+    size_t size_per_head  = params.configs.size_per_head;
 
-    size_t batch_size           = params.common.decoder_batch_size;
-    size_t local_head_num       = params.configs.head_num;
-    size_t size_per_head        = params.configs.size_per_head;
+    if (use_multi_block_mode) {
+        const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
+        // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
+        max_seq_len_tile = 256 / threads_per_value;
+        partial_out      = allocateBuffer(
+            {datatype, {batch_size, max_seq_len_tile, local_head_num, size_per_head}, AllocationType::DEVICE},
+            {"partial_out"});
+        partial_sum = allocateBuffer(
+            {DataType::TYPE_FP32, {batch_size, max_seq_len_tile, local_head_num}, AllocationType::DEVICE},
+            {"partial_sum"});
+        partial_max = allocateBuffer(
+            {DataType::TYPE_FP32, {batch_size, max_seq_len_tile, local_head_num}, AllocationType::DEVICE},
+            {"partial_max"});
+        block_counter = allocateBuffer({DataType::TYPE_INT32, {batch_size, local_head_num}, AllocationType::DEVICE},
+                                       {"block_counter"});
+        // TODO(lidongjin) use fill op to set zeros.
+        cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
+    }
+    void*  partial_out_data   = (partial_out == nullptr) ? nullptr : partial_out->data();
+    float* partial_sum_data   = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
+    float* partial_max_data   = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
+    int*   block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
 
-    // if (use_multi_block_mode) {
-    //     const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
-    //     // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
-    //     max_seq_len_tile = 256 / threads_per_value;
-    //     partial_out = allocateBuffer({datatype,
-    //                                  {batch_size, max_seq_len_tile, local_head_num, size_per_head},
-    //                                  AllocationType::DEVICE},
-    //                                  {"partial_out"});
-    //     partial_sum = allocateBuffer({DataType::TYPE_FP32,
-    //                                  {batch_size, max_seq_len_tile, local_head_num},
-    //                                  AllocationType::DEVICE},
-    //                                  {"partial_sum"});
-    //     partial_max = allocateBuffer({DataType::TYPE_FP32,
-    //                                  {batch_size, max_seq_len_tile, local_head_num},
-    //                                  AllocationType::DEVICE},
-    //                                  {"partial_max"});
-    //     block_counter = allocateBuffer({DataType::TYPE_INT32,
-    //                                   {batch_size, local_head_num},
-    //                                   AllocationType::DEVICE},
-    //                                   {"block_counter"});
-    //     // TODO(lidongjin) use fill op to set zeros.
-    //     cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
-    // }
-    void* partial_out_data = (partial_out == nullptr) ? nullptr : partial_out->data();
-    float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
-    float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
-    int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
-
-    RUNTIME_ASSERT_OP_ARG(
-        params.common.kv_cache, "kv cache can not be null for decoder self-attention");
+    RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
     const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
-    auto       kv_cache_block_id      = allocateBuffer(
-        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_block_id"});
-    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, false, stream_);
+    auto       kv_cache_offset      = allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
+    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false, stream_);
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,
