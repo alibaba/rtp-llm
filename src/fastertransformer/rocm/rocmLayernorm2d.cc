@@ -4,6 +4,7 @@
 
 #include <ck_tile/core.hpp>
 #include "rocmLayernorm2d.h"
+#include "hip_utils.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace fastertransformer {
@@ -99,11 +100,11 @@ float layernorm2d_fwd(layernorm2d_fwd_traits t,
                 r=layernorm2d_fwd_<traits_<ck_tile::fp16_t, ck_tile::fp16_t, float, float,  1, 12,  4,   64,  1, true , false, true , false,    1,    1>>(s, a);
         } else {
 
-            FT_LOG_ERROR("layernorm size not supported.");
+            ROCM_FAIL("layernorm size not supported.");
         }
     } else {
 
-        FT_LOG_ERROR("layernorm type not supported.");
+        ROCM_FAIL("layernorm type not supported.");
     }
 
     return r;
