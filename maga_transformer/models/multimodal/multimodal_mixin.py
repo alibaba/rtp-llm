@@ -168,7 +168,9 @@ class MultiModalMixin:
         except ImportError:
             raise RuntimeError("tensorrt library not fonnd")
 
-        nccl_op_ = NcclOp()
+        nccl_op_: Optional[NcclOp] = None
+        if g_parallel_info.tp_size > 1:
+            nccl_op_ = NcclOp()
 
         try:
             # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
@@ -223,9 +225,9 @@ class MultiModalMixin:
         torch.cuda.empty_cache()
 
     def load_mm_weight(self, ctype: str, device: str):
-        # wait rank0 finish loading weight, otherwise gang_server will die
-        nccl_op_ = NcclOp()
+        # wait rank0 finish loading weight, otherwise gang_server will die        
         if g_parallel_info.tp_size > 1:
+            nccl_op_ = NcclOp()
             nccl_op_.barrier(torch.device(device))
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
         # After supporting TP mm network, we will remove the check here.
