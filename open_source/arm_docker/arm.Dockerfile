@@ -43,3 +43,10 @@ RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_torch_cpu.txt -r /tm
 ARG BAZELISK_URL
 RUN wget $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
 
+RUN wget https://developer.arm.com/-/cdn-downloads/permalink/Arm-Performance-Libraries/Version_24.10/arm-performance-libraries_24.10_rpm_gcc.tar \
+    && tar -xvf arm-performance-libraries_24.10_rpm_gcc.tar \
+    && sh ./arm-performance-libraries_24.10_rpm/arm-performance-libraries_24.10_rpm.sh -a \
+    && rm -rf arm-performance-libraries_24.10_rpm arm-performance-libraries_24.10_rpm_gcc.tar
+
+ENV LD_PRELOAD=/opt/arm/armpl_24.10_gcc/lib/libarmpl_mp.so
+

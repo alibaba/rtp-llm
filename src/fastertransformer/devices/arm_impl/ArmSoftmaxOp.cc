@@ -187,6 +187,91 @@ inline void context_mask_float(float *input, float *mask,int n){
     }
 }
 
+void vSoftmaxMask(int n, float* vector, const __fp16* mask_input, float scale) {
+  // set vector based on mask
+
+  int d = 0;
+  for (; d <= n - 16; d += 16) {
+    float32x4_t mask_val = vdupq_n_f32(-100000.0f);
+    float32x4_t one = vdupq_n_f32(1.f);
+    float32x4x4_t regs = vld1q_f32_x4(vector + d);
+    float32x4_t scale_vec = vdupq_n_f32(scale);
+    // float32x4x4_t mask_v = vld1q_f32_x4(mask_input + d);
+    // Load FP16 mask and convert to FP32
+    float16x8x2_t mask_v_half = vld1q_f16_x2(mask_input + d);
+    float32x4x4_t mask_v = {
+      vcvt_f32_f16(vget_low_f16(mask_v_half.val[0])),  // Convert low half of first 8 FP16
+      vcvt_f32_f16(vget_high_f16(mask_v_half.val[0])), // Convert high half of first 8 FP16
+      vcvt_f32_f16(vget_low_f16(mask_v_half.val[1])),  // Convert low half of second 8 FP16
+      vcvt_f32_f16(vget_high_f16(mask_v_half.val[1]))  // Convert high half of second 8 FP16
+    };
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      mask_v.val[i] = vsubq_f32(one, mask_v.val[i]);
+      mask_v.val[i] = vmulq_f32(mask_val, mask_v.val[i]);
+      regs.val[i] = vaddq_f32(mask_v.val[i], regs.val[i]);
+      regs.val[i] = vmulq_f32(scale_vec, regs.val[i]);
+    }
+    vst1q_f32_x4(vector + d, regs);
+  }
+  for (; d < n; ++d) {
+    vector[d] = (vector[d] + (1.0f - (float)mask_input[d]) * (-100000.f) ) * scale ;
+  }
+
+  // Find Max
+  const float max_val = vMax(n, vector);
+  const float32x4_t max_v = vdupq_n_f32(max_val);
+  float reduce_sum = 0.0f;
+  float32x4_t reduce_sum_v[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    reduce_sum_v[i] = vdupq_n_f32(0.0f);
+  }
+
+  // Sub Max and Exp and ReduceSum
+  d = 0;
+  for (; d <= n - 16; d += 16) {
+    float32x4x4_t regs = vld1q_f32_x4(vector + d);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      regs.val[i] = vexpq_f32(vsubq_f32(regs.val[i], max_v));
+      reduce_sum_v[i] = vaddq_f32(reduce_sum_v[i], regs.val[i]);
+    }
+    vst1q_f32_x4(vector + d, regs);
+  }
+  for (; d < n; ++d) {
+    float val = vector[d];
+    val = std::exp(val - max_val);
+    reduce_sum += val;
+    vector[d] = val;
+  }
+  reduce_sum_v[0] = vaddq_f32(reduce_sum_v[0], reduce_sum_v[1]);
+  reduce_sum_v[2] = vaddq_f32(reduce_sum_v[2], reduce_sum_v[3]);
+  reduce_sum_v[0] = vaddq_f32(reduce_sum_v[0], reduce_sum_v[2]);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    reduce_sum += reduce_sum_v[0][i];
+  }
+
+  // Div ReduceSum
+  const float reduce_sum_mul = 1.0f / (reduce_sum + 1e-12f);
+  const float32x4_t reduce_sum_mul_v = vdupq_n_f32(reduce_sum_mul);
+  d = 0;
+  for (; d <= n - 16; d += 16) {
+    float32x4x4_t regs = vld1q_f32_x4(vector + d);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      regs.val[i] = vmulq_f32(regs.val[i], reduce_sum_mul_v);
+    }
+    vst1q_f32_x4(vector + d, regs);
+  }
+  for (; d < n; ++d) {
+    vector[d] = vector[d] * reduce_sum_mul;
+  }
+
+}
+
 /* Fallback path to support inconsistent input type and mask type */
 template<typename T, typename T_mask>
 void context_mask(BufferPtr input, const Buffer& mask) {
@@ -234,7 +319,28 @@ BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
                 }
             }
         } else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
-            context_mask<float, __fp16>(params.input, params.mask.value().get());
+            //context_mask<float, __fp16>(params.input, params.mask.value().get());
+            auto batch_size = input->shape()[0];
+            auto num_heads = input->shape()[1];
+            auto q_length = input->shape()[2];
+            auto k_length = input->shape()[3];
+
+            float* score = (float*)input->data();
+            float16_t* mask = (float16_t*)params.mask.value().get().data();
+
+            parallel_for(batch_size * num_heads, [&](int idx) {
+                int m = idx / num_heads;       // Batch index
+                int n = idx % num_heads;       // Head index
+
+                parallel_for(q_length, [&](int j) {
+                    size_t score_offset = m * q_length * num_heads * k_length + n * q_length * k_length + j * k_length;
+                    size_t mask_offset = (m * k_length + j) * k_length;
+
+                    vSoftmaxMask(k_length, score + score_offset, mask + mask_offset, params.scale);
+                });
+            });
+
+            return input;
         } else if (type == DataType::TYPE_FP16) {
             context_mask<__fp16, __fp16>(params.input, params.mask.value().get());
         } else {
