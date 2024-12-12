@@ -36,9 +36,9 @@ class MMProcessEngine:
         if self.run_batch:
             res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
             return MMEmbeddingRes(res, pos)
-        if types is None:
+        if types is None or len(types) == 0:
             types = [MMUrlType.DEFAULT] * len(urls)
-        if preprocess_configs is None:
+        if preprocess_configs is None or len(preprocess_configs) == 0:
             configs = [MMPreprocessConfig()] * len(urls)
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]

@@ -336,7 +336,7 @@ cc_library(
         "multimodal_processor/*.cc",
     ]),
     deps = [
-        ":utils",
+        ":dataclass",
         "//src/fastertransformer/devices:devices_base",
     ],
     visibility = ["//visibility:public"]

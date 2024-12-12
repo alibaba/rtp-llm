@@ -39,6 +39,11 @@ struct MultimodalInput {
         url(url), tensor(torch::empty(0)) {}
 };
 
+struct MultimodalOutput {
+    std::vector<torch::Tensor> mm_features = {};
+    std::optional<std::vector<torch::Tensor>> mm_position_ids = std::nullopt;
+};
+
 class MultimodalFeature {
 public:
     std::vector<torch::Tensor>   features;

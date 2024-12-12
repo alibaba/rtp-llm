@@ -31,10 +31,15 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
         FT_LOG_INFO("init normal engine");
         engine_.reset(new NormalEngine(maga_init_params));
         if (!mm_process_engine.is_none()) {
-            mm_processor_.reset(new MultimodalProcessor(mm_process_engine,
-                maga_init_params.gpt_init_parameter.mm_sep_tokens_,
-                maga_init_params.gpt_init_parameter.include_sep_tokens_,
-                maga_init_params.gpt_init_parameter.max_seq_len_));
+            auto vit_separation = maga_init_params.gpt_init_parameter.vit_separation_;
+            if (vit_separation == 2) {
+                mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
+            } else if (vit_separation == 0) {
+                mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
+            } else {
+                return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
+            }
+                
         }
     }
 

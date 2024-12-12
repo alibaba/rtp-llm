@@ -13,7 +13,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import MulitmodalInputPB
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import MultimodalInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputsPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
@@ -21,19 +21,12 @@ from maga_transformer.distribute.worker_info import g_master_info, WorkerInfo
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 
 request_counter = AtomicCounter()
 
 MAX_GRPC_TIMEOUT_SECONDS = 60 * 3
-
-def trans_option(pb_object, py_object, name):
-    if getattr(py_object, name):
-        getattr(pb_object, name).value = getattr(py_object, name)
-
-def trans_option_cast(pb_object, py_object, name, func):
-    if getattr(py_object, name):
-        getattr(pb_object, name).value = func(getattr(py_object, name))
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
@@ -82,7 +75,7 @@ def trans_input(input_py: GenerateInput):
 
 def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB):
     for mm_input in input_py.mm_inputs:
-        mm_input_pb = MulitmodalInputPB()
+        mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
@@ -94,18 +87,6 @@ def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB):
         mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
         mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
         input_pb.multimodal_inputs.append(mm_input_pb)
-
-def trans_tensor(t: TensorPB):
-    if t.data_type == TensorPB.DataType.FP32:
-        return torch.frombuffer(t.fp32_data, dtype=torch.float32).reshape(list(t.shape))
-    elif t.data_type == TensorPB.DataType.INT32:
-        return torch.frombuffer(t.int32_data, dtype=torch.int32).reshape(list(t.shape))
-    elif t.data_type == TensorPB.DataType.FP16:
-        return torch.frombuffer(t.fp16_data, dtype=torch.float16).reshape(list(t.shape))
-    elif t.data_type == TensorPB.DataType.BF16:
-        return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(list(t.shape))
-    else:
-        raise Exception("unkown error type")
 
 
 def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> GenerateOutputs:

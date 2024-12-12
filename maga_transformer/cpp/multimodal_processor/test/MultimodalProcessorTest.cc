@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -16,11 +17,18 @@ namespace rtp_llm {
 
 class FakeMultimodalProcessor: public MultimodalProcessor {
 public:
-    FakeMultimodalProcessor(std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int max_seq_len): 
-        MultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len) {}
+    using MultimodalProcessor::MultimodalProcessor;
 
-    ErrorResult<MMEmbeddingRes> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
-        MMEmbeddingRes res = MMEmbeddingRes();
+    static FakeMultimodalProcessor createFakeMultimodalProcessor(std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int max_seq_len) {
+        GptInitParameter params;
+        params.mm_sep_tokens_ = sep_token_ids;
+        params.include_sep_tokens_ = include_sep_tokens;
+        params.max_seq_len_ = max_seq_len;
+        return FakeMultimodalProcessor(py::none(), params);
+    }
+
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+        MultimodalOutput res = MultimodalOutput();
         for (auto& mm_input: mm_inputs) {
             res.mm_features.push_back(torch::randn({std::stoi(mm_input.url), 2}));
         }
@@ -31,7 +39,7 @@ public:
 class MultimodalProcessorTest: public DeviceTestBase {};
 
 TEST_F(MultimodalProcessorTest, testSimple) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor({{1}}, false, 10);
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids = createBuffer<int32_t>({4}, {0, 1, 2, 3}, AllocationType::HOST);
     auto mm_inputs = std::vector<MultimodalInput>();
@@ -67,7 +75,7 @@ TEST_F(MultimodalProcessorTest, testSimple) {
 
 
 TEST_F(MultimodalProcessorTest, testMultiInput) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor({{1}, {2, 3}}, false, 10);
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}, {2, 3}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids = createBuffer<int32_t>({4}, {0, 1, 2, 3}, AllocationType::HOST);
     auto mm_inputs = std::vector<MultimodalInput>();
@@ -97,7 +105,7 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
 }
 
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor({{2, 3, 4}}, false, 10);
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{2, 3, 4}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids = createBuffer<int32_t>({5}, {0, 1, 2, 3, 4}, AllocationType::HOST);
     auto mm_inputs = std::vector<MultimodalInput>();
@@ -116,7 +124,7 @@ TEST_F(MultimodalProcessorTest, testWrongMMTag) {
 }
 
 TEST_F(MultimodalProcessorTest, testTooLongInput) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor({{1, 2}}, false, 10);
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids = createBuffer<int32_t>({4}, {0, 1, 2, 3}, AllocationType::HOST);
     auto mm_inputs = std::vector<MultimodalInput>();
@@ -129,13 +137,13 @@ TEST_F(MultimodalProcessorTest, testTooLongInput) {
 }
 
 TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor({{1, 2}}, false, 10);
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids = createBuffer<int32_t>({4}, {0, 1, 2, 3}, AllocationType::HOST);
     auto mm_inputs = std::vector<MultimodalInput>();
     mm_inputs.emplace_back("2");
     input->multimodal_inputs = mm_inputs;
-    auto res = processor.getMultimodallFeatures(input->input_ids, mm_inputs).value();
+    auto res = processor.getMultimodalFeatures(input->input_ids, mm_inputs).value();
     EXPECT_EQ(res.features.size(), 1);
     EXPECT_EQ(res.text_tokens_mask->size(), 6);
     EXPECT_EQ(res.locs->size(), 1);

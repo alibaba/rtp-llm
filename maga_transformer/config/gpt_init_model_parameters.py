@@ -341,6 +341,9 @@ class GptInitModelParameters:
         self.warm_up_with_loss = bool(int(os.environ.get('WARM_UP_WITH_LOSS', 0)))
         logging.info(f'warm_up_with_loss: {self.warm_up_with_loss}')
 
+        self.vit_separation = int(os.environ.get('VIT_SEPARATION', 0))
+        logging.info(f'vit_separation: {self.vit_separation}')
+
         self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
         logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
 

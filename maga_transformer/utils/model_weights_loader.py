@@ -80,6 +80,7 @@ class ModelWeightsLoader:
         self._use_expert_attention = weights_info.use_expert_attention
         self._exported_device = get_current_device()
         self._is_ft_style_weight = weights_info.is_ft_style_weight
+        self._vit_separation = weights_info.vit_separation
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -154,7 +155,7 @@ class ModelWeightsLoader:
         for (layer_id, name, tensor) in self.prepare_weights_from_scratch(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
-            if layer_id is not None:
+            if layer_id is not None and self._vit_separation != 1:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)

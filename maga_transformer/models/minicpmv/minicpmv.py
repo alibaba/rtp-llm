@@ -17,6 +17,7 @@ from maga_transformer.models.minicpmv.modeling_navit_siglip import SiglipVisionT
 from maga_transformer.models.minicpmv.resampler import Resampler
 from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 from maga_transformer.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_bytes_io_from_url
+from maga_transformer.utils.model_weight import ModelWeightInfo
 
 try:
     from decord import VideoReader, cpu
@@ -196,8 +197,9 @@ class MiniCPMVWeightInfo(QWenV2Weight, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
 
     def _get_weight_info(self):
-        qwen_vl_weight = super()._get_weight_info()
-        self._get_vit_info(qwen_vl_weight)
+        qwen_vl_weight = super()._get_weight_info() if self.vit_separation != 1 else ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
+        if self.vit_separation != 2:
+            self._get_vit_info(qwen_vl_weight)
         return qwen_vl_weight
 
 

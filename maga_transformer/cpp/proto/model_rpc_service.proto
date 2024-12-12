@@ -71,16 +71,30 @@ message MMPreprocessConfigPB {
     int32 max_frames = 7;
 }
 
-message MulitmodalInputPB {
+message MultimodalInputPB {
     string multimodal_url = 1;
     int32 multimodal_type = 2;
-    MMPreprocessConfigPB mm_preprocess_config = 3;
+    TensorPB multimodal_tensor = 3;
+    MMPreprocessConfigPB mm_preprocess_config = 4;
+}
+
+message MultimodalInputsPB {
+    repeated MultimodalInputPB multimodal_inputs = 1;
+}
+
+message MultimodalOutputPB {
+    TensorPB multimodal_embedding = 1;
+    TensorPB multimodal_pos_id = 2;
+}
+
+message MultimodalOutputsPB {
+    repeated MultimodalOutputPB multimodal_outputs = 1;
 }
 
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
-    repeated MulitmodalInputPB multimodal_inputs = 3;
+    repeated MultimodalInputPB multimodal_inputs = 3;
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
@@ -193,4 +207,8 @@ service RpcService {
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
+}
+
+service MultimodalRpcService {
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
 }

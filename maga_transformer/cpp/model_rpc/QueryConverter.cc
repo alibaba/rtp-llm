@@ -83,7 +83,84 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     return generate_input;
 }
 
-void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
+std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputsPB* mm_inputs) {
+    std::vector<MultimodalInput> inputs_vec;
+    for (int i = 0;i < mm_inputs->multimodal_inputs_size();i++) {
+        auto mm_input = &mm_inputs->multimodal_inputs(i);
+        auto mm_preprocess_config = &mm_input->mm_preprocess_config();
+        // tensor should also converted from input pb, however it is only used in some embedding model, so just empty for now
+        inputs_vec.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(), 
+            mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps());
+    } 
+    return inputs_vec;
+}
+
+MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs) {
+    MultimodalInputsPB mm_inputs_pb;
+    for (auto& mm_input: mm_inputs) {
+        auto now_input = mm_inputs_pb.add_multimodal_inputs();
+        now_input->set_multimodal_url(mm_input.url);
+        now_input->set_multimodal_type(mm_input.mm_type);
+        transTensorPB(now_input->mutable_multimodal_tensor(), ft::torchTensor2Buffer(mm_input.tensor).get());
+        transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);
+    }
+    return mm_inputs_pb;
+}
+
+void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config) {
+    config_pb->set_width(config.width);
+    config_pb->set_height(config.height);
+    config_pb->set_min_pixels(config.min_pixels);
+    config_pb->set_max_pixels(config.max_pixels);
+    config_pb->set_fps(config.fps);
+}
+
+MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
+    MultimodalOutput mm_output;
+    for (int i = 0;i < outputs_pb->multimodal_outputs_size();i++) {
+        auto output_pb = outputs_pb->multimodal_outputs(i);
+        mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
+        if (output_pb.has_multimodal_pos_id()) {
+            if (mm_output.mm_position_ids == std::nullopt) {
+                mm_output.mm_position_ids = std::vector<torch::Tensor>();
+            }
+            mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
+        }
+    }
+    return mm_output;
+}
+
+torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
+    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+    void* data_ptr = nullptr;
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32: {
+            data_ptr = const_cast<char*>(tensor_pb.fp32_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kFloat32);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::INT32: {
+            data_ptr = const_cast<char*>(tensor_pb.int32_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kInt32);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::FP16: {
+            data_ptr = const_cast<char*>(tensor_pb.fp16_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kFloat16);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        case TensorPB::BF16: {
+            data_ptr = const_cast<char*>(tensor_pb.bf16_data().data());
+            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
+            return torch::from_blob(data_ptr, shape, options).clone();
+        }
+        default:
+            throw std::runtime_error("Unsupported data type.");
+    }
+}
+
+
+void QueryConverter::transTensorPB(TensorPB* t, const ft::Buffer* buffer) {
     FT_CHECK(t != nullptr);
     auto shape       = t->mutable_shape();
     auto shape_array = buffer->shape();
@@ -136,23 +213,23 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_step_output_len(response.aux_info.step_output_len);
         aux_info->set_pd_sep(response.aux_info.pd_sep);
         if (response.aux_info.cum_log_probs.has_value()) {
-            transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
+            transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }
         if (response.aux_info.softmax_probs.has_value()) {
-            transTensor(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
+            transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
         }
         if (response.aux_info.all_probs.has_value()) {
-            transTensor(output->mutable_all_probs(), response.aux_info.all_probs.value().get());
+            transTensorPB(output->mutable_all_probs(), response.aux_info.all_probs.value().get());
         }
-        transTensor(output->mutable_output_ids(), response.output_ids.get());
+        transTensorPB(output->mutable_output_ids(), response.output_ids.get());
         if (response.hidden_states.has_value()) {
-            transTensor(output->mutable_hidden_states(), response.hidden_states.value().get());
+            transTensorPB(output->mutable_hidden_states(), response.hidden_states.value().get());
         }
         if (response.loss.has_value()) {
-            transTensor(output->mutable_loss(), response.loss.value().get());
+            transTensorPB(output->mutable_loss(), response.loss.value().get());
         }
         if (response.logits.has_value()) {
-            transTensor(output->mutable_logits(), response.logits.value().get());
+            transTensorPB(output->mutable_logits(), response.logits.value().get());
         }
     }
     FT_LOG_DEBUG("transResponse done");

@@ -92,7 +92,7 @@ class ModelFactory:
     @staticmethod
     def from_model_config(model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None) -> AsyncModel:
         model = ModelFactory._create_model(model_config)
-        if model_config.model_type == 'fake_model':
+        if model_config.model_type == 'fake_model' or model.config.vit_separation == 1:
             return model
         propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(model.config, propose_model_config)
         model = AsyncModel(model, propose_model)

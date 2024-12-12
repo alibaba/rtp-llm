@@ -17,6 +17,7 @@ class ChatGlmV4VisionWeightInfo(GlmV2WeightInfo, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
 
     def _get_weight_info(self):
-        glm_4v_weight = super()._get_weight_info()
-        self._get_vit_info(glm_4v_weight)
+        glm_4v_weight = super()._get_weight_info() if self.vit_separation != 1 else ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
+        if self.vit_separation != 2:
+            self._get_vit_info(glm_4v_weight)
         return glm_4v_weight

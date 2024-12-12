@@ -59,6 +59,7 @@ class BaseVitWeights:
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):
         self.vit_weights: Optional[BaseVitWeights] = config.mm_related_params.vit_weights
+        self.vit_separation: int = config.vit_separation
 
     def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
@@ -81,11 +82,12 @@ class MultiModalMixin:
         return get_vit_compute_dtype(self.config.data_type)
 
     def init_multimodal(self, config: GptInitModelParameters) -> None:
-        with torch.device(g_parallel_info.device):
-            torch_default_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(self.vit_data_type)
-            self._init_multimodal(config)
-            torch.set_default_dtype(torch_default_dtype)
+        if config.vit_separation != 2:
+            with torch.device(g_parallel_info.device):
+                torch_default_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(self.vit_data_type)
+                self._init_multimodal(config)
+                torch.set_default_dtype(torch_default_dtype)
 
     def _init_multimodal(self, config: GptInitModelParameters) -> None:
         raise NotImplementedError

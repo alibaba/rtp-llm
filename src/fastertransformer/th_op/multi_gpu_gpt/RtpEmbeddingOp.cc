@@ -32,10 +32,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         }
         embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
-            mm_processor_.reset(new rtp_llm::MultimodalProcessor(mm_process_engine,
-                params.gpt_init_parameter.mm_sep_tokens_,
-                params.gpt_init_parameter.include_sep_tokens_,
-                params.gpt_init_parameter.max_seq_len_));
+            mm_processor_.reset(new rtp_llm::LocalMultimodalProcessor(mm_process_engine, params.gpt_init_parameter));
         }
         startRpcServer(gpt_init_params, py_render, params.metrics_reporter, mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
@@ -95,7 +92,7 @@ py::object RtpEmbeddingOp::decode(th::Tensor token_ids,
     }
     std::optional<rtp_llm::MultimodalFeature> multimodal_features = std::nullopt;
     if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
-        auto mm_res = mm_processor_->getMultimodallFeatures(ft::torchTensor2Buffer(token_ids), multimodal_inputs);
+        auto mm_res = mm_processor_->getMultimodalFeatures(ft::torchTensor2Buffer(token_ids), multimodal_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.status().ToString());
         }

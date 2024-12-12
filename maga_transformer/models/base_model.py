@@ -359,40 +359,41 @@ class BaseModel(object):
     def _initialize_weights(self):
         assert (self.weight is not None)
 
-        if self.is_multimodal():
+        if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
 
-        if self.task_type == TaskType.LANGUAGE_MODEL:
-            lm_head_w = self.weight.steal_global_weight(W.lm_head)
-            if lm_head_w == None:
-                lm_head_w = self.weight.global_weights[W.embedding]
-            if self.config.normalize_lm_head_weight:
-                lm_head_w = F.normalize(lm_head_w)
-            if self.config.logit_scale != 1.0:
-                lm_head_w = self.config.scale_logit * lm_head_w
-            self.weight.set_global_weight(W.lm_head, lm_head_w)
-        else:
-            # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
-            self.weight.steal_global_weight(W.lm_head)
+        if self.config.vit_separation != 1:
+            if self.task_type == TaskType.LANGUAGE_MODEL:
+                lm_head_w = self.weight.steal_global_weight(W.lm_head)
+                if lm_head_w == None:
+                    lm_head_w = self.weight.global_weights[W.embedding]
+                if self.config.normalize_lm_head_weight:
+                    lm_head_w = F.normalize(lm_head_w)
+                if self.config.logit_scale != 1.0:
+                    lm_head_w = self.config.scale_logit * lm_head_w
+                self.weight.set_global_weight(W.lm_head, lm_head_w)
+            else:
+                # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
+                self.weight.steal_global_weight(W.lm_head)
 
-        pos_weight = self.weight.global_weights.get(W.positional_embedding, None)
-        if pos_weight != None:
-            if pos_weight.shape[0] < self.config.max_seq_len:
-                raise Exception(f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {self.config.max_seq_len} > {pos_weight.shape[0]}")
-            pos_weight = pos_weight[:self.config.max_seq_len].to(self.device)
-            self.weight.set_global_weight(W.positional_embedding, pos_weight)
+            pos_weight = self.weight.global_weights.get(W.positional_embedding, None)
+            if pos_weight != None:
+                if pos_weight.shape[0] < self.config.max_seq_len:
+                    raise Exception(f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {self.config.max_seq_len} > {pos_weight.shape[0]}")
+                pos_weight = pos_weight[:self.config.max_seq_len].to(self.device)
+                self.weight.set_global_weight(W.positional_embedding, pos_weight)
 
-        if self.config.use_attention_linear_bias:
-            slopes = torch.Tensor(get_slopes(self.config.head_num))
-            slopes = self.split_slopes_tp(slopes)
-            self.linear_bias_slopes = slopes.to(torch.float).to(self.device)
-            self.weight.set_global_weight(W.linear_bias_slopes, self.linear_bias_slopes)
+            if self.config.use_attention_linear_bias:
+                slopes = torch.Tensor(get_slopes(self.config.head_num))
+                slopes = self.split_slopes_tp(slopes)
+                self.linear_bias_slopes = slopes.to(torch.float).to(self.device)
+                self.weight.set_global_weight(W.linear_bias_slopes, self.linear_bias_slopes)
 
-        if self.config.quant_algo.isPerTensorQuant() and \
-            (self.weight.global_weights.get(W.pre_decoder_ln_static_quant, None) == None or \
-            self.weight.global_weights.get(W.pre_decoder_ln_static_quant_reciprocal, None) == None):
-                raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
-                                are quired for per tensor quantization")
+            if self.config.quant_algo.isPerTensorQuant() and \
+                (self.weight.global_weights.get(W.pre_decoder_ln_static_quant, None) == None or \
+                self.weight.global_weights.get(W.pre_decoder_ln_static_quant_reciprocal, None) == None):
+                    raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
+                                    are quired for per tensor quantization")
 
         torch.cuda.empty_cache()
 

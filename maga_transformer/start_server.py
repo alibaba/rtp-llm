@@ -18,6 +18,7 @@ sys.path.append(os.path.join(str(CUR_PATH), '..'))
 from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.server.inference_app import InferenceApp
+from maga_transformer.server.vit_rpc_server import vit_start_server
 
 def local_rank_start():
     app = None
@@ -108,6 +109,10 @@ def load_gpu_nic_affinity():
 def main():
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
+
+    if int(os.environ.get('VIT_SEPARATION', 0)) == 1:
+        return vit_start_server()
+
     if not torch.cuda.is_available():
         return local_rank_start()
 

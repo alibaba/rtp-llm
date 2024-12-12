@@ -3,6 +3,7 @@ from maga_transformer.utils.model_weight import W
 from maga_transformer.models.llama_weight import LlamaWeightInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+from maga_transformer.utils.model_weight import ModelWeightInfo
 
 class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
@@ -10,13 +11,17 @@ class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
     
     def _get_weight_info(self):
-        llava_weight = super()._get_weight_info()
-        
-        # for llava-next
-        for weight in llava_weight.layer_weights:
-            if weight.name == W.attn_o_b:
-                llava_weight.layer_weights.remove(weight)
-                break
+        llava_weight = ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
+        if self.vit_separation != 1:
+            llava_weight = super()._get_weight_info()
+            
+            # for llava-next
+            for weight in llava_weight.layer_weights:
+                if weight.name == W.attn_o_b:
+                    llava_weight.layer_weights.remove(weight)
+                    break
 
-        self._get_vit_info(llava_weight)
+        if self.vit_separation != 2:
+            self._get_vit_info(llava_weight)
+
         return llava_weight

@@ -926,8 +926,10 @@ class ModelWeightInfo:
                  lora_weights: Optional[List[WeightInfo]] = None,
                  medusa_weights: List[WeightInfo] = []) -> None:
         self.weights = weights
-        self.layer_weights = layer_weights
         self.tp_strategy = tp_strategy
+        self.layer_weights = layer_weights
+        if len(self.layer_weights) == 0:
+            return
         if lora_weights == None :
             self.lora_weights = self.convert_lora()
         else:
@@ -1063,6 +1065,28 @@ class ModelDeployWeightInfo:
         self.v_head_dim = config.v_head_dim
         self.routed_scaling_factor = config.routed_scaling_factor
         self.is_ft_style_weight = config.is_ft_style_weight
+
+        # for vit sep
+        self.vit_separation = config.vit_separation
+
+
+    def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
+        # auto create weight info based on exist tensor names
+        weights: List[WeightInfo] = []
+        layer_weights: List[WeightInfo] = []
+        for name in W.weights_list:
+            if name in all_names:
+                weights.append(WeightInfo(name, [CkptWeightInfo(name, identity)], identity))
+
+        for name in W.layer_weights_list:
+            check_name = f'layer.0.{name}'
+            int8_check_name = f'layer.0.{name}.int8_weight'
+            if check_name in all_names or int8_check_name in all_names:
+                layer_weights.append(WeightInfo(name, [CkptWeightInfo('layer.{i}.' + name, identity)], identity))
+
+        return ModelWeightInfo(layer_weights=layer_weights,
+                               weights=weights,
+                               tp_strategy=self._get_gpt_style_tp_strategy())
 
     def get_weight_info(self) -> ModelWeightInfo:
         # if self.is_ft_style_weight:

@@ -8,6 +8,7 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights, BaseMultiModalWeightInfo
 from maga_transformer.models.qwen_v2_audio.processor import Processor
+from maga_transformer.utils.model_weight import ModelWeightInfo
 
 class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
@@ -15,8 +16,9 @@ class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
 
     def _get_weight_info(self):
-        qwen_weight = super()._get_weight_info()
-        self._get_vit_info(qwen_weight)
+        qwen_weight = super()._get_weight_info() if self.vit_separation != 1 else ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
+        if self.vit_separation != 2:
+            self._get_vit_info(qwen_weight)
         return qwen_weight
 
 class QWenV2Audio(QWenV2, MultiModalMixin):

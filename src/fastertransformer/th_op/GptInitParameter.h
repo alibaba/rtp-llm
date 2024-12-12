@@ -216,6 +216,9 @@ public:
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 
+    // 0 for no sep, 1 for server, 2 for client
+    int64_t     vit_separation_                     = 0;
+
     GptInitParameter();
 
     GptInitParameter(

@@ -14,8 +14,9 @@
 #include "maga_transformer/cpp/model_rpc/GenerateContext.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "maga_transformer/cpp/dataclass/EngineScheduleInfo.h"
+#include "maga_transformer/cpp/multimodal_processor/LocalMultimodalProcessor.h"
+#include "maga_transformer/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 
 namespace rtp_llm {
 
