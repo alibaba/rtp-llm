@@ -6,6 +6,7 @@ import math
 from typing import Any, Dict, List
 
 from transformers.models.llama.tokenization_llama import LlamaTokenizer as LlamaTokenizerOrigin
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
 from maga_transformer.models.base_model import BaseModel
@@ -167,11 +168,11 @@ class Baichuan2(Baichuan):
         return config
 
 class Gemma(Llama):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
         if os.environ.get("ENABLE_OPENSOURCE_FMHA", None) != "OFF":
             logging.warn("opensource fmha does not support head dim 256, thus disabled for gemma model")
             os.environ["ENABLE_OPENSOURCE_FMHA"] = "OFF"
-        super().__init__(config)
+        super().__init__(config, g_parallel_info)
 
     @staticmethod
     def get_weight_cls():

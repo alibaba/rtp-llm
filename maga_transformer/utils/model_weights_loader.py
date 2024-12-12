@@ -13,6 +13,7 @@ from maga_transformer.device import get_current_device
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights
 from maga_transformer.lora.lora_weights import LoRAWeights
+from maga_transformer.utils.time_util import timer_wrapper
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, LoraConfig, ModuleDatabase, CkptDatabase, DictDatabase
 
@@ -68,7 +69,6 @@ class ModelWeightsLoader:
         self._ep_rank = weights_info.ep_rank
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
-        self._database: BaseDatabase = database
         self._weight_log: WeightLog = WeightLog()
         self._lora_log: WeightLog = WeightLog()
         self._database: BaseDatabase = database
@@ -76,6 +76,7 @@ class ModelWeightsLoader:
         self._static_lora_adapter_name = None
         self._use_expert_attention = weights_info.use_expert_attention
         self._exported_device = get_current_device()
+        self._is_ft_style_weight = weights_info.is_ft_style_weight
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -119,7 +120,36 @@ class ModelWeightsLoader:
                 set(self._database.get_lora_tensor_names(lora_name)))
             self._lora_log.dump()
 
+    def load_from_ft_style_weight(self, device):
+        model_weights = ModelWeights(self._num_layers, device, self._data_type)
+        layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank)
+        global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank)
+        # 清空现有的权重
+        weights = [ {} for id in range(self._num_layers)]
+        global_weights = {}
+        # 重新构建权重
+        all_tensor_name = self._database.get_pretrain_tensor_names()
+        for key in all_tensor_name:
+            if key.startswith(layer_weight_prefix):
+                # 解析键名，例如 "layers.0.weight"
+                parts = key[len(layer_weight_prefix):].split(".")
+                layer_id = int(parts[0])
+                name = ".".join(parts[1:])
+                tensor = self.load_tensor(key, None)[0]
+                # 将张量移动到设备，并设置到对应的层
+                weights[layer_id][name] = tensor.to(device)
+            elif key.startswith(global_weight_prefix):
+                name = key[len(global_weight_prefix):]
+                tensor = self.load_tensor(key, None)[0]
+                global_weights[name] = tensor.to(device)
+        model_weights.weights = weights
+        model_weights.global_weights = global_weights
+        return model_weights
+
+    @timer_wrapper(description="load_weights_from_scratch")
     def load_weights_from_scratch(self, device: str, num_process=1):
+        if self._is_ft_style_weight:
+            return self.load_from_ft_style_weight(device)
         weights = ModelWeights(self._num_layers, device, self._data_type)
         if num_process > 1:
             with multiprocessing.pool.ThreadPool(num_process) as pool:

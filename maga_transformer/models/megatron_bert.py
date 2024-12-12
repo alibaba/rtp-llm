@@ -16,9 +16,6 @@ from maga_transformer.model_factory_register import register_model
 from transformers import AutoTokenizer
 
 class MegatronBert(Bert):
-    def __init__(self, config: GptInitModelParameters):
-        super().__init__(config)
-
     @staticmethod
     def get_weight_cls():
         return MegatronBertWeightInfo

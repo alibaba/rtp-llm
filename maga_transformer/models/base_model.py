@@ -14,7 +14,7 @@ from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.utils import create_custom_module
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
@@ -191,7 +191,7 @@ class BaseModel(object):
     vocab_size_padded: int
     device: str
 
-    def __init__(self, config: GptInitModelParameters) -> None:
+    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info) -> None:
         self.config = config
         self.weight = None
 
@@ -204,7 +204,8 @@ class BaseModel(object):
         self.custom_module: Optional[CustomModule] = None
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
-        self.device = g_parallel_info.device
+        self.parallel_info = parallel_info
+        self.device = self.parallel_info.device
 
         self.load_tokenizer()
         self.may_init_multimodal()
@@ -212,7 +213,7 @@ class BaseModel(object):
         self.load(self.device)
 
     @classmethod
-    def create_config(cls, model_config: ModelConfig) -> GptInitModelParameters:
+    def create_config(cls, model_config: ModelConfig, parallel_info:ParallelInfo=g_parallel_info) -> GptInitModelParameters:
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         cls._load_quant_config(model_config.ckpt_path, config)
         if config.hidden_size == 0:
@@ -224,13 +225,13 @@ class BaseModel(object):
             data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,
-            tp_size=g_parallel_info.tp_size,
-            ep_size=g_parallel_info.ep_size,
+            tp_size=parallel_info.tp_size,
+            ep_size=parallel_info.ep_size,
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
             ref_module=model_config.ref_module,
-            ref_dict=model_config.ref_dict
+            ref_dict=model_config.ref_dict,
         )
         return config
 
@@ -256,12 +257,13 @@ class BaseModel(object):
                 config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config.get("group_size", 0))
 
     @classmethod
-    def from_config(cls, config: Any) -> 'BaseModel':
-        return cls(config)
+    def from_config(cls, config: Any, parallel_info:ParallelInfo=g_parallel_info) -> 'BaseModel':
+        return cls(config, parallel_info)
 
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
+
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
@@ -272,7 +274,7 @@ class BaseModel(object):
         if self.is_multimodal():
             assert isinstance(self, MultiModalMixin) # for syntax check
             self.config.is_multimodal = True
-            if g_parallel_info.tp_rank == 0:
+            if self.parallel_info.tp_rank == 0:
                 self.init_multimodal(self.config)
 
     def init_misc(self):
@@ -281,8 +283,8 @@ class BaseModel(object):
         self.compute_dtype = to_torch_dtype(self.config.data_type)
 
     def split_slopes_tp(self, slopes: torch.Tensor):
-        local_head_num = 1 if self.config.head_num == 1 else self.config.head_num // g_parallel_info.tp_size
-        start_pos = local_head_num * g_parallel_info.tp_rank
+        local_head_num = 1 if self.config.head_num == 1 else self.config.head_num // self.parallel_info.tp_size
+        start_pos = local_head_num * self.parallel_info.tp_rank
         return slopes[start_pos: start_pos + local_head_num]
 
     @classmethod
@@ -318,8 +320,8 @@ class BaseModel(object):
 
     def load_model_weight(self):
         load_parallel_num = estimate_load_parallel_num(
-            self.config, g_parallel_info.tp_size)
-        weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
+            self.config, self.parallel_info.tp_size)
+        weights_info = self.get_weight_cls()(self.config, self.parallel_info.tp_size, self.parallel_info.tp_rank)
         self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
         self.weight = self.model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num, device=self.device)
         self._load_custom_module_weights(self.model_weights_loader)
@@ -328,7 +330,7 @@ class BaseModel(object):
             self.model_weights_loader.show_warns(lora_name=lora_name)
         else:
             self.model_weights_loader.show_warns()
-
+    
     def _load_weights(self,
                       ref_dict: Dict[str, torch.Tensor] = {}):
         with Timer() as timer:
@@ -423,6 +425,10 @@ class BaseModel(object):
             if not self.config.is_causal:
                 attention_mask[b, :, input_length: ]= 0
         return attention_mask
+    
+    def dump_weights(self, output_dir: str):
+        output_file = os.path.join(output_dir, f"model-{self.parallel_info.tp_rank:02d}-{self.parallel_info.tp_size:02d}.safetensors")
+        self.weight.dump_to_safetensors(self.parallel_info.tp_rank, output_file)
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):

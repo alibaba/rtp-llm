@@ -8,7 +8,7 @@ from PIL import Image
 from transformers import AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
-from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface, mm_lock
@@ -247,8 +247,8 @@ class MiniCPMVWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
 
 class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters):
-        Llama.__init__(self, config)
+    def __init__(self, config: GptInitModelParameters, parallel_info:ParallelInfo=g_parallel_info):
+        Llama.__init__(self, config, parallel_info)
         self.im_start = "<image>"
         self.im_end = "</image>"
         self.slice_start = "<slice>"

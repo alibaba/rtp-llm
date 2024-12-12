@@ -8,7 +8,7 @@ from einops import rearrange
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
-from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
@@ -20,11 +20,11 @@ LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
 
 class CogVLM2(Llama, MultiModalMixin):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
         quant_algo = config.quant_algo
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
-        super().__init__(config)
+        super().__init__(config, parallel_info)
         
     def _init_multimodal(self, config: GptInitModelParameters):        
         self.mm_part = EVA2CLIPImageEmbedding(config)

@@ -157,7 +157,7 @@ class WeightsQuantizer:
             logging.exception(e)
             ret_code = -1
         finally:
-            self.release_temp_resouce()
+            self.release_temp_resource()
             return ret_code
 
     @staticmethod
@@ -232,7 +232,7 @@ class WeightsQuantizer:
             return self._encode_text(dataset)
 
     @timer_wrapper('release resource')
-    def release_temp_resouce(self):
+    def release_temp_resource(self):
         def rm_path(directory):
             if os.path.exists(directory):
                 shutil.rmtree(directory)

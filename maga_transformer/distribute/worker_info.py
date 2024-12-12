@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import socket
 import torch
-from typing import Any
+from typing import Any, Dict
 from dataclasses import dataclass
 
 
@@ -48,13 +48,17 @@ class ParallelInfo(object):
 
     @staticmethod
     def from_env() -> ParallelInfo:
+        return ParallelInfo.from_params(dict(os.environ))
+
+    @staticmethod
+    def from_params(params: Dict[str, str]) -> ParallelInfo:
         info = ParallelInfo(
-                tp_size=int(os.environ.get('TP_SIZE', '1')),
-                ep_size=int(os.environ.get('EP_SIZE', '1')),
-                pp_size=int(os.environ.get('PP_SIZE', '1')),
-                world_size=int(os.environ.get('WORLD_SIZE', '1')),
-                world_rank=int(os.environ.get('WORLD_RANK', '0')),
-                local_world_size=int(os.environ.get('LOCAL_WORLD_SIZE', '1')))
+                tp_size=int(params.get('TP_SIZE', '1')),
+                ep_size=int(params.get('EP_SIZE', '1')),
+                pp_size=int(params.get('PP_SIZE', '1')),
+                world_size=int(params.get('WORLD_SIZE', '1')),
+                world_rank=int(params.get('WORLD_RANK', '0')),
+                local_world_size=int(params.get('LOCAL_WORLD_SIZE', '1')))
         if (info.tp_size * info.pp_size != info.world_size or
             info.world_rank >= info.world_size):
             raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
@@ -65,7 +69,7 @@ class ParallelInfo(object):
         if torch.cuda.is_available():
             torch.cuda.set_device(info.local_rank)
 
-        return info
+        return info        
 
     # used for ut
     def reload(self):

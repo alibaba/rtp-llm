@@ -120,6 +120,7 @@ class GptInitModelParameters:
         "template_type",
         "build_position_ids",
         "routed_scaling_factor",
+        "is_ft_style_weight",
         "vit_run_batch"
     }
 
@@ -178,6 +179,7 @@ class GptInitModelParameters:
         self.local_rank = g_parallel_info.local_rank
         self.routed_scaling_factor = 1.0
         self.vit_run_batch = False
+        self.is_ft_style_weight = False
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -274,6 +276,14 @@ class GptInitModelParameters:
         self.use_kvcache = (self.task_type == TaskType.LANGUAGE_MODEL)
         logging.info(f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}")
 
+    def update_weight_style(self, ckpt_path: str):
+        if os.path.exists(os.path.join(ckpt_path, "model.safetensors.index.json")):
+            meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
+            logging.info(f"read weight style from: {meta_file}")
+            with open(meta_file, 'r') as reader:
+                meta_json = json.loads(reader.read())
+                self.is_ft_style_weight = meta_json.get("is_ft_style_weight", None)
+
     def update_common(self,
                       ckpt_path: str,
                       lora_infos: Optional[Dict[str, str]],
@@ -308,6 +318,7 @@ class GptInitModelParameters:
         self.update_inter_padding_size(tp_size, ep_size)
         self.update_task_prompt_config()
         self.update_task_type_use_kvcache()
+        self.update_weight_style(ckpt_path)
 
         load_cutlass_gemm_config(self.quant_algo)
 

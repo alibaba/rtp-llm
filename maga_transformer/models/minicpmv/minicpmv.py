@@ -7,7 +7,7 @@ from PIL import Image
 from transformers import AutoTokenizer, AutoProcessor
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
-from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
@@ -203,8 +203,8 @@ class MiniCPMVWeightInfo(QWenV2Weight, BaseMultiModalWeightInfo):
 
 class MiniCPMV(QWenV2, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters):
-        QWenV2.__init__(self, config)
+    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
+        QWenV2.__init__(self, config, parallel_info)
         self.config.mm_sep_tokens = [
             [self.tokenizer.im_start_id, self.tokenizer.im_end_id],
             [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id]

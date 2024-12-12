@@ -18,9 +18,6 @@ class FakeConfig(object):
         self.eos_token_id = 1
 
 class FakeModel(BaseModel):
-    def __init__(self, config: GptInitModelParameters):
-        super().__init__(config)
-
     def load_tokenizer(self):
         self.tokenizer = FakeTokenizer()
 

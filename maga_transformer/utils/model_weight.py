@@ -6,6 +6,8 @@ from functools import reduce
 import threading
 import torch
 import torch.serialization
+import safetensors.torch
+from collections import OrderedDict
 import functools
 import copy
 from enum import Enum
@@ -1021,28 +1023,13 @@ class ModelDeployWeightInfo:
         self.rope_head_dim = config.rope_head_dim
         self.v_head_dim = config.v_head_dim
         self.routed_scaling_factor = config.routed_scaling_factor
-
-
-    def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
-        # auto create weight info based on exist tensor names
-        weights: List[WeightInfo] = []
-        layer_weights: List[WeightInfo] = []
-        for name in W.weights_list:
-            if name in all_names:
-                weights.append(WeightInfo(name, [CkptWeightInfo(name, identity)], identity))
-
-        for name in W.layer_weights_list:
-            check_name = f'layer.0.{name}'
-            int8_check_name = f'layer.0.{name}.int8_weight'
-            if check_name in all_names or int8_check_name in all_names:
-                layer_weights.append(WeightInfo(name, [CkptWeightInfo('layer.{i}.' + name, identity)], identity))
-
-        return ModelWeightInfo(layer_weights=layer_weights,
-                               weights=weights,
-                               tp_strategy=self._get_gpt_style_tp_strategy())
+        self.is_ft_style_weight = config.is_ft_style_weight
 
     def get_weight_info(self) -> ModelWeightInfo:
+        # if self.is_ft_style_weight:
+        #     return ModelWeightInfo([], [])
         weight_info = self._get_weight_info()
+
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
@@ -1206,3 +1193,38 @@ class ModelWeights:
     @property
     def dtype(self):
         return self._dtype
+
+    @staticmethod
+    def layer_weight_prefix(tp_rank:int):
+        return f"rank_{tp_rank:02d}.layers."
+    
+    @staticmethod
+    def global_weight_prefix(tp_rank:int):
+        return f"rank_{tp_rank:02d}.global."
+
+    def dump_to_safetensors(self, tp_rank:int, filename: str):
+        # 使用 OrderedDict 确保保存顺序，优化读取速度
+        tensor_dict = OrderedDict()
+        layer_weight_prefix = self.layer_weight_prefix(tp_rank)
+        global_weight_prefix = self.global_weight_prefix(tp_rank)
+        # 保存每一层的权重
+        for layer_id, layer_dict in enumerate(self.weights):
+            logging.info(f"layer_id:{layer_id}, layer_dict:{list(layer_dict.keys())}")
+            for name, tensor in layer_dict.items():
+                # 将张量移动到 CPU，确保文件大小最小化
+                tensor_name = f"{layer_weight_prefix}{layer_id}.{name}"
+                logging.debug(f"layer_id:{layer_id}, layer_weight_name:{name}, tensor_name:{tensor_name}, tensor_shape:{tensor.shape}")
+                tensor_dict[tensor_name] = tensor.cpu()
+        # 保存全局权重
+        for name, tensor in self.global_weights.items():
+            logging.debug(f"global_weight_name:{name}, tensor_shape:{tensor.shape}")
+            tensor_name = f"{global_weight_prefix}{name}"
+            tensor_dict[tensor_name] = tensor.cpu()
+        # Ensure the directory exists before saving
+        dirname = os.path.dirname(filename)
+        if dirname and not os.path.exists(dirname):
+            logging.info(f"Created directory: {dirname}")
+            os.makedirs(dirname, exist_ok=True)
+
+        # 使用 safetensors 库保存张量
+        safetensors.torch.save_file(tensor_dict, filename)

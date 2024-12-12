@@ -18,7 +18,7 @@ class BaseDatabase:
     def get_lora_tensor_names(self, name: str) -> List[str]:
         raise NotImplementedError
 
-    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: Optional[torch.dtype] = torch.float16) -> List[torch.Tensor]:
         raise NotImplementedError
 
 class ModuleDatabase(BaseDatabase):
@@ -27,11 +27,14 @@ class ModuleDatabase(BaseDatabase):
     def __init__(self, ref_module: torch.nn.Module):
         self.ref_module = ref_module
 
-    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: Optional[torch.dtype] = torch.float16) -> List[torch.Tensor]:
         #TODO(xinfei.sxf) add comment for this regex
         weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', name)
         try:
-            return [eval('self.ref_module.' + weight_name).to(dtype = datatype)]
+            if datatype is not None:
+                return [eval('self.ref_module.' + weight_name).to(dtype = datatype)]
+            else:
+                return [eval('self.ref_module.' + weight_name)]
         except AttributeError:
             raise Exception(f'No weight named {weight_name} in reference module')
 
@@ -44,9 +47,12 @@ class DictDatabase(BaseDatabase):
     def __init__(self, ref_dict: Dict[str, torch.Tensor]):
         self.ref_dict = ref_dict
 
-    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: Optional[torch.dtype] = torch.float16) -> List[torch.Tensor]:
         try:
-            return [self.ref_dict[name].to(dtype = datatype)]
+            if datatype is not None:
+                return [self.ref_dict[name].to(dtype = datatype)]
+            else:
+                return [self.ref_dict[name]]
         except KeyError:
             raise Exception(f'No weight named {name} in dict')
 
@@ -148,7 +154,7 @@ class CkptDatabase(BaseDatabase):
 
         return tensor_names
 
-    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: Optional[torch.dtype] = torch.float16) -> List[torch.Tensor]:
         tensors = []
         for ckpt_file in self.PretrainFileList:
             if name in ckpt_file.get_tensor_names():
