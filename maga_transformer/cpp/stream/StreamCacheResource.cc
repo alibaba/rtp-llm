@@ -206,7 +206,7 @@ void StreamCacheResource::constructCacheKey() {
         return;
     }
     for (size_t i = 0; i < stream_->tileNum(); i++) {
-        batch_resource_.cache_keys.reserve(singleBatchNeedBlocks(stream_->max_seq_len_));
+        batch_resource_.cache_keys[i].reserve(singleBatchNeedBlocks(stream_->max_seq_len_));
     }
     auto seq_size_per_block = seqSizePerBlock();
     auto token_ids = stream_->generate_input_->input_ids->data<int32_t>();
