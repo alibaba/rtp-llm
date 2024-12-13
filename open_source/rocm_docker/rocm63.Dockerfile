@@ -3,10 +3,7 @@ FROM $BASE_OS_IMAGE
 
 MAINTAINER wangyin.yx
 
-ADD functions /etc/rc.d/init.d/functions
-
-RUN echo "ALL ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
-    groupadd sdev && touch /root/.bashrc
+ARG AMD_BKC_URL
 
 RUN dnf install -y \
         unzip wget which findutils rsync tar \
@@ -16,7 +13,9 @@ RUN dnf install -y \
         gcc-toolset-12 gcc-toolset-12-gcc-c++ libappstream-glib* \
         https://mirrors.aliyun.com/docker-ce/linux/centos/8/x86_64/stable/Packages/docker-ce-cli-26.1.3-1.el8.x86_64.rpm
 
-ARG AMD_BKC_URL
+RUN echo "ALL ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+    groupadd sdev && touch /root/.bashrc
+
 RUN wget $AMD_BKC_URL -O /tmp/bkc.tar.gz && \
     mkdir -p /tmp/bkc && \
     tar -xzvf /tmp/bkc.tar.gz -C /tmp/bkc && \
@@ -41,12 +40,6 @@ ARG CONDA_URL
 RUN wget $CONDA_URL -O /tmp/conda.sh && \
     sh /tmp/conda.sh -b -p /opt/conda310/ && \
     rm /tmp/conda.sh -f
-
-ARG PYPI_URL
-ADD deps /tmp/deps
-
-RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
-    rm -rf /tmp/deps && /opt/conda310/bin/pip cache purge
 
 ARG BAZELISK_URL
 RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
