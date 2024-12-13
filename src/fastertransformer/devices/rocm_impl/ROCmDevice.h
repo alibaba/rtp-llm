@@ -35,6 +35,7 @@ public:
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return hostAllocator_.get(); }
     void copy(const CopyParams& params) override;
+    void noBlockCopy(const CopyParams& params) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     void syncAndCheck() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
@@ -77,7 +78,8 @@ private:
     std::unique_ptr<IAllocator> hostAllocator_;
     c10::hip::HIPCachingAllocator::HIPAllocator *origin_torch_hip_allocator_;
 
-    hipStream_t                 stream_ = nullptr;
+    hipStream_t stream_ = nullptr;
+    hipStream_t no_block_copy_stream_;
     hipDeviceProp_t device_prop_;
 
     BufferPtr curandstate_buf_; // for sampler use.

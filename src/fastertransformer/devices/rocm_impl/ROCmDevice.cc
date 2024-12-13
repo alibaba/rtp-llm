@@ -24,7 +24,8 @@ using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipSetDevice(params.device_id));
-    ROCM_CHECK(hipStreamCreate(&stream_));
+    stream_ = at::hip::getCurrentHIPStream().stream();
+    ROCM_CHECK(hipStreamCreateWithFlags(&no_block_copy_stream_, hipStreamNonBlocking));
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
@@ -64,6 +65,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     auto hostAllocator_ptr = new Allocator<AllocatorType::ROCM_HOST>();
 
     if (params.device_reserve_memory_bytes) {
+        syncAndCheck();
         size_t free_bytes, total_bytes;
         ROCM_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
@@ -126,6 +128,7 @@ ROCmDevice::~ROCmDevice() {
     }
     hipblas_mm_wrapper_.reset();
     ROCM_CHECK(hipStreamDestroy(stream_));
+    ROCM_CHECK(hipStreamDestroy(no_block_copy_stream_));
     ROCM_CHECK(hipblasDestroy(hipblas_handle_));
     ROCM_CHECK(hipblasLtDestroy(hipblaslt_handle_));
     curandstate_buf_.reset();
@@ -198,9 +201,24 @@ void ROCmDevice::copy(const CopyParams& params) {
         copyType = hipMemcpyHostToHost;
     }
 
-    ROCM_CHECK(hipMemcpy(dst.data(), src.data(), src.sizeBytes(), copyType));
-    //(void)hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
-    //(void)hipStreamSynchronize(stream_);
+    // ROCM_CHECK(hipMemcpy(dst.data(), src.data(), src.sizeBytes(), copyType));
+    if (copyType == hipMemcpyHostToHost) {
+        std::memcpy(dst.data(), src.data(), src.sizeBytes());
+    } else {
+        ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+    }
+
+    if (copyType == hipMemcpyDeviceToHost) {
+        ROCM_CHECK(hipStreamSynchronize(stream_));
+    }
+}
+
+void ROCmDevice::noBlockCopy(const CopyParams& params) {
+    params.check();
+    const auto& src = params.src;
+    const auto& dst = params.dst;
+    ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), hipMemcpyDefault, no_block_copy_stream_));
+    ROCM_CHECK(hipStreamSynchronize(no_block_copy_stream_));
 }
 
 TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
