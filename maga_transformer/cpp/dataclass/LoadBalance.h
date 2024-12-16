@@ -84,6 +84,27 @@ struct LoadBalanceInfo {
     int64_t total_kv_cache = 0;
 };
 
+struct Host {
+    std::string ip;
+    uint32_t    rpc_port;
+    uint32_t    http_port = 0;
+
+    Host(const std::string& ip_, uint32_t rpc_port_, uint32_t http_port_):
+        ip(ip_), rpc_port(rpc_port_), http_port(http_port_) {}
+    Host(const std::string& ip_, uint32_t rpc_port_): ip(ip_), rpc_port(rpc_port_) {}
+};
+
+struct BizHosts {
+    std::string                              biz;
+    std::shared_ptr<std::atomic_uint32_t>    index{0};
+    std::vector<std::shared_ptr<const Host>> hosts;
+    BizHosts() {}
+    BizHosts(const std::string&                       biz_,
+                std::shared_ptr<std::atomic_uint32_t>    index_,
+                std::vector<std::shared_ptr<const Host>> hosts_):
+        biz(biz_), index(index_), hosts(hosts_) {}
+};
+
 void registerLoadBalanceInfo(const pybind11::module& m);
 
 }  // namespace rtp_llm

@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "maga_transformer/cpp/http_server/http_client/SimpleHttpClient.h"
 #include "aios/network/anet/connection.h"
-#include "http_server/HttpServer.h"
+#include "maga_transformer/cpp/http_server/http_server/HttpServer.h"
 #include "autil/NetUtil.h"
 #include "autil/StringUtil.h"
 
@@ -84,11 +84,11 @@ TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
         ASSERT_EQ(load_balancer_->host_load_balance_info_map_.size(), 30);
         for (int i = 0; i < 10; i++) {
             auto server_info = http_servers_[i];
-            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address] == 200);
+            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache == 200);
         }
         for (int i = 10; i < 30; i++) {
             auto server_info = http_servers_[i];
-            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address] == 400);
+            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache == 400);
         }
     }
 }
@@ -100,10 +100,10 @@ TEST_F(WRRLoadBalancerTest, testChooseHost) {
         auto ret_host = load_balancer_->chooseHost("test-biz");
         ASSERT_TRUE(ret_host != nullptr);
         auto address = "tcp:" + ret_host->ip + ":" + std::to_string(ret_host->http_port);
-        if (load_balancer_->host_load_balance_info_map_[address] == 200) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 200) {
             count_200++;
         }
-        if (load_balancer_->host_load_balance_info_map_[address] == 400) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 400) {
             count_400++;
         }
     }
@@ -120,10 +120,10 @@ TEST_F(WRRLoadBalancerTest, testChangeWeight) {
         auto ret_host = load_balancer_->chooseHost("test-biz");
         ASSERT_TRUE(ret_host != nullptr);
         auto address = "tcp:" + ret_host->ip + ":" + std::to_string(ret_host->http_port);
-        if (load_balancer_->host_load_balance_info_map_[address] == 200) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 200) {
             count_200++;
         }
-        if (load_balancer_->host_load_balance_info_map_[address] == 400) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 400) {
             count_400++;
         }
     }
@@ -144,7 +144,7 @@ TEST_F(WRRLoadBalancerTest, testChangeWeight) {
         auto ret_host = load_balancer_->chooseHost("test-biz");
         ASSERT_TRUE(ret_host != nullptr);
         auto address = "tcp:" + ret_host->ip + ":" + std::to_string(ret_host->http_port);
-        if (load_balancer_->host_load_balance_info_map_[address] == 200) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 200) {
             count_200++;
         }
     }
@@ -163,10 +163,10 @@ TEST_F(WRRLoadBalancerTest, testChangeWeight) {
         auto ret_host = load_balancer_->chooseHost("test-biz");
         ASSERT_TRUE(ret_host != nullptr);
         auto address = "tcp:" + ret_host->ip + ":" + std::to_string(ret_host->http_port);
-        if (load_balancer_->host_load_balance_info_map_[address] == 200) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 200) {
             count_200++;
         }
-        if (load_balancer_->host_load_balance_info_map_[address] == 300) {
+        if (load_balancer_->host_load_balance_info_map_[address].load_balance_info.available_kv_cache == 300) {
             count_300++;
         }
     }
