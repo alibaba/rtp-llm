@@ -1,6 +1,7 @@
 // Adapted from src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.cu
 // remove all moeGemm part, and minor modified
 
+#include <float.h>
 #include "moe_topKSoftmax_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
