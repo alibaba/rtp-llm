@@ -23,7 +23,8 @@ public:
 public:
     ft::DeviceBase* device_;
     std::unordered_map<void*, ft::BufferPtr> buffer_map_;
-
+private:
+    std::mutex mutex_;
 };
 
 }  // namespace rtp_llm

@@ -16,12 +16,14 @@ DeviceUtil::~DeviceUtil() {
 }
 
 void* DeviceUtil::mallocCPU(size_t size) {
+    std::unique_lock<std::mutex> lock(mutex_);
     auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
     buffer_map_.insert({buffer->data(), buffer});
     return buffer->data();
 }
 
 void  DeviceUtil::freeCPU(void* ptr) {
+    std::unique_lock<std::mutex> lock(mutex_);
     auto iter = buffer_map_.find(ptr);
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
@@ -31,12 +33,14 @@ void  DeviceUtil::freeCPU(void* ptr) {
 }
 
 void* DeviceUtil::mallocGPU(size_t size) {
+    std::unique_lock<std::mutex> lock(mutex_);
     auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::DEVICE});
     buffer_map_.insert({buffer->data(), buffer});
     return buffer->data();
 }
 
 void  DeviceUtil::freeGPU(void* ptr) {
+    std::unique_lock<std::mutex> lock(mutex_);
     auto iter = buffer_map_.find(ptr);
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
