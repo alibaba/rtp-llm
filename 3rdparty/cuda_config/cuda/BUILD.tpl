@@ -200,8 +200,6 @@ cc_library(
         ":cublasLt",
         ":cuda_headers",
         ":cudart",
-        ":cudnn",
-        ":cufft",
         ":curand",
         ":nvml",
     ],
