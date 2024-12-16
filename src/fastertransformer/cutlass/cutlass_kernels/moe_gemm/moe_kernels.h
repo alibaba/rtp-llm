@@ -16,12 +16,12 @@
  */
 
 #pragma once
+#include <cuda_runtime_api.h>
 #include "cutlass/gemm/gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
-#include <cuda_runtime_api.h>
 #include <optional>
 #include <random>
 

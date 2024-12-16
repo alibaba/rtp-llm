@@ -44,7 +44,7 @@ cc_library(
         "csrc/flash_attn/src/*.cuh",
     ], exclude=["csrc/flash_attn/src/flash.h"]),
     deps = [
-        "@cutlass//:cutlass",
+        "@cutlass_fa//:cutlass",
         ":flash_attention2_header",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -61,7 +61,7 @@ cc_library(
         "csrc/flash_attn/src/*.cuh",
     ], exclude=["csrc/flash_attn/src/flash.h"]),
     deps = torch_deps() + [
-        "@cutlass//:cutlass",
+        "@cutlass_fa//:cutlass",
         ":flash_attention2_header",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -74,7 +74,7 @@ cc_shared_library(
     name = "fa",
     roots = [":flash_attention2_impl"],
     preloaded_deps = torch_deps() + [
-        "@cutlass//:cutlass",
+        "@cutlass_fa//:cutlass",
         ":flash_attention2_header",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
