@@ -21,7 +21,8 @@ public:
     // otherwise it will be executed in default cudaDevice 0) so we provide a preRun() to do this.
     virtual void preRun() {}
     virtual DeviceProperties getDeviceProperties() = 0;
-    virtual DeviceStatus getDeviceStatus();
+    virtual MemoryStatus getDeviceMemoryStatus();
+    DeviceStatus getDeviceStatus();
     virtual torch::Device getTorchDevice() {
         throw std::runtime_error("getTorchDevice() is not implemented");
     }

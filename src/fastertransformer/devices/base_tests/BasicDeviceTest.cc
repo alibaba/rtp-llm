@@ -21,5 +21,4 @@ TEST_F(BasicDeviceTest, testQueryStatus) {
     printf("device memory status: used_bytes=%zu, free_bytes=%zu, allocated_bytes=%zu, preserved_bytes=%zu\n",
            status.device_memory_status.used_bytes, status.device_memory_status.free_bytes,
            status.device_memory_status.allocated_bytes, status.device_memory_status.preserved_bytes);
-    printf("device util: %.2f%%\n", status.device_utilization);
 }

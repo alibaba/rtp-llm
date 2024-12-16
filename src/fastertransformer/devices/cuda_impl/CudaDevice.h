@@ -50,7 +50,7 @@ public:
 public:
     void init() override;
     DeviceProperties getDeviceProperties() override;
-    DeviceStatus getDeviceStatus() override;
+    MemoryStatus getDeviceMemoryStatus() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 

@@ -76,7 +76,6 @@ struct MemoryStatus {
 struct DeviceStatus {
     MemoryStatus device_memory_status;
     MemoryStatus host_memory_status;
-    float device_utilization = 0.0f; // percentage of device utilization, 0.0f ~ 100.0f
 };
 
 }; // namespace fastertransformer

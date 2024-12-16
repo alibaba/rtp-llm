@@ -32,8 +32,22 @@ std::shared_ptr<rtp_llm::CacheStore> DeviceBase::cacheStore() {
     return cache_store_;
 }
 
+MemoryStatus DeviceBase::getDeviceMemoryStatus() {
+    return MemoryStatus();
+}
+
 DeviceStatus DeviceBase::getDeviceStatus() {
-    return DeviceStatus();
+    DeviceStatus status;
+
+    status.device_memory_status = getDeviceMemoryStatus();
+
+    const auto buffer_status = queryBufferStatus();
+    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
+    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
+    status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
+    status.device_memory_status.max_consumed_bytes = buffer_status.device_max_consumed_bytes;
+    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
+    return status;
 }
 
 void DeviceBase::traceMemoryUsage() {

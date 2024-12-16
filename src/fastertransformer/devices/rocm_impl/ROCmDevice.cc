@@ -311,24 +311,12 @@ BufferPtr ROCmDevice::testVecAdd(const BufferPtr a, const BufferPtr b) {
     return output;
 }
 
-DeviceStatus ROCmDevice::getDeviceStatus() {
-    DeviceStatus status;
-
+MemoryStatus ROCmDevice::getDeviceMemoryStatus() {
+    MemoryStatus status;
     size_t total_bytes;
-    auto   error                           = hipMemGetInfo(&status.device_memory_status.free_bytes, &total_bytes);
-    status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
-
-    const auto buffer_status                    = queryBufferStatus();
-    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
-    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
-    status.host_memory_status.allocated_bytes   = buffer_status.host_allocated_bytes;
-    status.device_memory_status.available_bytes =
-        status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
-
-    FT_LOG_INFO("[ROCM] allocated = %.2f(GB), preserved = %.2f(GB), available = %.2f(GB)\n",
-                status.device_memory_status.allocated_bytes / 1024.0 / 1024.0 / 1024.0,
-                status.device_memory_status.preserved_bytes / 1024.0 / 1024.0 / 1024.0,
-                status.device_memory_status.available_bytes / 1024.0 / 1024.0 / 1024.0);
+    auto   error = hipMemGetInfo(&status.free_bytes, &total_bytes);
+    FT_CHECK(error == hipSuccess);
+    status.used_bytes = total_bytes - status.free_bytes;
     return status;
 }
 

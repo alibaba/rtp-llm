@@ -411,22 +411,12 @@ void CudaDevice::checkUseGroupGemm() {
     }
 }
 
-// TODO(wangyin.yx): fill all memory status.
-DeviceStatus CudaDevice::getDeviceStatus() {
-    DeviceStatus status;
-
+MemoryStatus CudaDevice::getDeviceMemoryStatus() {
+    MemoryStatus status;
     size_t total_bytes;
-    auto error = cudaMemGetInfo(&status.device_memory_status.free_bytes, &total_bytes);
+    auto error = cudaMemGetInfo(&status.free_bytes, &total_bytes);
     FT_CHECK(error == cudaSuccess);
-    status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
-
-    const auto buffer_status = queryBufferStatus();
-    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
-    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
-    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
-    status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
-    status.device_memory_status.max_consumed_bytes = buffer_status.device_max_consumed_bytes;
-
+    status.used_bytes = total_bytes - status.free_bytes;
     return status;
 }
 

@@ -99,19 +99,12 @@ void ArmCpuDevice::allReduceSum(const AllReduceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-DeviceStatus ArmCpuDevice::getDeviceStatus() {
-    DeviceStatus status;
-
+MemoryStatus ArmCpuDevice::getDeviceMemoryStatus() {
+    MemoryStatus status;
     size_t total_bytes;
-    auto error = getMemoryInfo(&status.device_memory_status.free_bytes, &total_bytes);
+    auto error = getMemoryInfo(&status.free_bytes, &total_bytes);
     FT_CHECK(error == 0);
-    status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
-
-    const auto buffer_status = queryBufferStatus();
-    status.device_memory_status.allocated_bytes = status.device_memory_status.used_bytes;
-    status.device_memory_status.preserved_bytes = status.device_memory_status.free_bytes;
-    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
-    status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
+    status.used_bytes = total_bytes - status.free_bytes;
     return status;
 }
 

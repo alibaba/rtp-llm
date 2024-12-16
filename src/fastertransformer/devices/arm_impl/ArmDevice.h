@@ -38,7 +38,7 @@ public:
     void allReduceSum(const AllReduceParams& params);
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     void printStat();
-    DeviceStatus getDeviceStatus();
+    MemoryStatus getDeviceMemoryStatus() override;
 #ifdef GEMM_DEBUG
     static void print_time();
 #endif

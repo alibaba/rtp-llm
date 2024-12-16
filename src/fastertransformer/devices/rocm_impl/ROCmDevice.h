@@ -49,7 +49,7 @@ public:
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params) override;
-    DeviceStatus getDeviceStatus() override;
+    MemoryStatus getDeviceMemoryStatus() override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     void syncCommunication(bool timeout = true) override;
     void broadcast(const BroadcastParams& params) override;
@@ -99,7 +99,7 @@ private:
 
     //moe
     std::unique_ptr<rocmMoeWrapper> moe_runner_;
-    
+
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
 };
