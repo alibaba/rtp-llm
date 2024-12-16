@@ -149,7 +149,7 @@ void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stre
             {ft::DataType::TYPE_FP32, {propose_step, (size_t)stream->vocabSize()}, ft::AllocationType::HOST}, {""});
         device_->bufMemset(*all_probs, 0);
         for (size_t i = 0; i < propose_step; i++) {
-            *all_probs->view(0, i).dataWithOffset<float>(stream_output->tokens->data<int32_t>()[i]) = 1.0;
+            *all_probs->view(i, 0).dataWithOffset<float>(stream_output->tokens->data<int32_t>()[i]) = 1.0;
         }
 
         stream_output->all_probs = device_->clone({*all_probs, AllocationType::DEVICE, {"determinisitic_all_probs"}});

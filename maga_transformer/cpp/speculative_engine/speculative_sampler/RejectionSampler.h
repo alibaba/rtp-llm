@@ -13,10 +13,10 @@ public:
                                                     const ScoreOutput&                  scorer_output) const override;
 
 private:
-    size_t top1Sample(size_t                                    propose_step,
+    absl::StatusOr<size_t> top1Sample(size_t                                    propose_step,
                       const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
                       const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
-    size_t stochasticSample(size_t                                    propose_step,
+    absl::StatusOr<size_t> stochasticSample(size_t                                    propose_step,
                             const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
                             const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
 };

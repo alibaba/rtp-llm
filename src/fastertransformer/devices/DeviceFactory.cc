@@ -62,10 +62,18 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.master_ip   = params.nccl_ip_;
     device_params.master_port = params.nccl_port_;
     device_params.tokens_per_block = params.seq_size_per_block_;
-    int max_batch_size =
+    // rdma params
+    device_params.use_cache_store = params.use_cache_store_;
+    device_params.cache_store_rdma_mode = params.cache_store_rdma_mode_;
+    device_params.cache_store_rdma_listen_port = params.cache_store_rdma_listen_port_;
+    device_params.cache_store_rdma_connect_port = params.cache_store_rdma_connect_port_;
+    device_params.cache_store_listen_port = params.cache_store_listen_port_;
+    device_params.cache_store_connect_port = params.cache_store_connect_port_;
+    size_t max_batch_size =
         params.max_context_batch_size_ + params.max_generate_batch_size_ + std::max((long)0, params.gen_num_per_circle_) * 32;
+
     device_params.max_batch_size =
-        std::max(1024, max_batch_size * 2);  // set static max batch size to avoid sampler reset memory
+        std::max((size_t)autil::EnvUtil::getEnv("MAX_BATCH_SIZE", 0L), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 
     const auto device_mem_reserve_env = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0L);
     FT_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);

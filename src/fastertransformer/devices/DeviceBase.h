@@ -39,6 +39,9 @@ public:
     virtual DeviceEventPtr createEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
     void writeCacheStore(const AttentionModuleParams& params);
+    DeviceInitParams initParams() {
+        return init_params_;
+    }
 
 public:
     // device-independence op implementations

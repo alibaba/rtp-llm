@@ -74,9 +74,9 @@ private:
     }
 
     void allocateOutputBuffer() {
-        if (scoreLen() > 0) {
-            output_buffer_->tokens = device_->allocateBuffer(
+        output_buffer_->tokens = device_->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {1, scoreLen()}, ft::AllocationType::HOST}, {"score_tokens"});
+        if (scoreLen() > 1) {
             setIsContextStream(true);
         }
     }

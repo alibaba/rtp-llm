@@ -22,7 +22,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
 {
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
-    SamplerInitParams sampler_params{device_, eos_id, 1024}; // set static max batch size to avoid sampler reset memory
+    SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
     model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
