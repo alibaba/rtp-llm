@@ -203,8 +203,8 @@ class MiniCPMVWeightInfo(QWenV2Weight, BaseMultiModalWeightInfo):
 
 class MiniCPMV(QWenV2, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
-        QWenV2.__init__(self, config, parallel_info)
+    def __init__(self, config: GptInitModelParameters):
+        QWenV2.__init__(self, config)
         self.config.mm_sep_tokens = [
             [self.tokenizer.im_start_id, self.tokenizer.im_end_id],
             [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id]

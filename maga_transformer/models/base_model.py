@@ -191,7 +191,7 @@ class BaseModel(object):
     vocab_size_padded: int
     device: str
 
-    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info) -> None:
+    def __init__(self, config: GptInitModelParameters) -> None:
         self.config = config
         self.weight = None
 
@@ -204,10 +204,12 @@ class BaseModel(object):
         self.custom_module: Optional[CustomModule] = None
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
+        self.load_tokenizer()
+    
+    def _load_to_device(self, parallel_info: ParallelInfo=g_parallel_info):
         self.parallel_info = parallel_info
         self.device = self.parallel_info.device
 
-        self.load_tokenizer()
         self.may_init_multimodal()
         self.init_misc()
         self.load(self.device)
@@ -258,7 +260,9 @@ class BaseModel(object):
 
     @classmethod
     def from_config(cls, config: Any, parallel_info:ParallelInfo=g_parallel_info) -> 'BaseModel':
-        return cls(config, parallel_info)
+        model = cls(config)
+        model._load_to_device(parallel_info)
+        return model
 
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:

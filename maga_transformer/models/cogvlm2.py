@@ -20,11 +20,11 @@ LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
 
 class CogVLM2(Llama, MultiModalMixin):
-    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
+    def __init__(self, config: GptInitModelParameters):
         quant_algo = config.quant_algo
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
-        super().__init__(config, parallel_info)
+        super().__init__(config)
         
     def _init_multimodal(self, config: GptInitModelParameters):        
         self.mm_part = EVA2CLIPImageEmbedding(config)

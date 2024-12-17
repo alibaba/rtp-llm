@@ -247,8 +247,8 @@ class MiniCPMVWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
 
 class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters, parallel_info:ParallelInfo=g_parallel_info):
-        Llama.__init__(self, config, parallel_info)
+    def __init__(self, config: GptInitModelParameters):
+        Llama.__init__(self, config)
         self.im_start = "<image>"
         self.im_end = "</image>"
         self.slice_start = "<slice>"

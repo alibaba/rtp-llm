@@ -168,11 +168,11 @@ class Baichuan2(Baichuan):
         return config
 
 class Gemma(Llama):
-    def __init__(self, config: GptInitModelParameters, parallel_info: ParallelInfo=g_parallel_info):
+    def __init__(self, config: GptInitModelParameters):
         if os.environ.get("ENABLE_OPENSOURCE_FMHA", None) != "OFF":
             logging.warn("opensource fmha does not support head dim 256, thus disabled for gemma model")
             os.environ["ENABLE_OPENSOURCE_FMHA"] = "OFF"
-        super().__init__(config, g_parallel_info)
+        super().__init__(config)
 
     @staticmethod
     def get_weight_cls():
