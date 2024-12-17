@@ -36,8 +36,8 @@ BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints&
         return buffer;
     } catch (std::exception& e) {
         FT_STACKTRACE_LOG_INFO(
-            "allocate buffer failed: %s current allocation records:\n%s \n stack traces: ",
-            e.what(), printAllocationRecords(device_allocator_).c_str());
+            "allocate buffer failed: size %lu, exception: %s, current allocation records:\n%s \n stack traces: ",
+            params.sizeInBytes(), e.what(), printAllocationRecords(device_allocator_).c_str());
         printStackTrace();
         throw;
     }

@@ -66,6 +66,7 @@ void check(T result, const char* const file, int const line) {
         FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
                      + std::to_string(line) + " \n");
         fflush(stdout);
+        fflush(stderr);
         throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
                                  + file + ":" + std::to_string(line) + " \n");
     }

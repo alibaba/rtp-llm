@@ -3,6 +3,8 @@
 #include "src/fastertransformer/core/Buffer.h"
 
 #include <string>
+#include <numeric>
+#include <functional>
 #include <shared_mutex>
 
 namespace fastertransformer {
@@ -19,6 +21,14 @@ struct BufferParams {
     BufferParams(const size_t size_bytes,
                  AllocationType allocation = AllocationType::DEVICE)
     : type(DataType::TYPE_UINT8), dims({size_bytes}), allocation(allocation) {}
+
+    size_t sizeInBytes() const {
+        if (dims.empty()) {
+            return 0;
+        }
+        auto size = std::accumulate(dims.begin(), dims.end(), (size_t)1, std::multiplies<size_t>());
+        return size * getTypeSize(type);
+    }
 
     DataType type;
     std::vector<size_t> dims;

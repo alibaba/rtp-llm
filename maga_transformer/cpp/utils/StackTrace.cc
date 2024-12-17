@@ -33,6 +33,8 @@ std::string getStackTrace() {
 
 void printStackTrace() {
     FT_STACKTRACE_LOG_INFO("%s", getStackTrace().c_str());
+    fflush(stdout);
+    fflush(stderr);
 }
 
 }
