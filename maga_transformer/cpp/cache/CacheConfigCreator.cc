@@ -112,9 +112,15 @@ CacheConfig CacheConfigCreator::createConfig(
                        "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                        block_nums, config.block_size / 1024 / 1024);
 
+    const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
     config.block_nums = block_nums;
     config.reserve_runtime_mem_mb = param.reserve_runtime_mem_mb_;
-    FT_LOG_INFO("kv cache block nums is %u", block_nums);
+    FT_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_nums, kv_cache_seq_len);
+    if (kv_cache_seq_len < param.max_seq_len_) {
+        FT_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+                       "this is dangerous, consider decrease max_seq_len",
+                       block_nums, kv_cache_seq_len, param.max_seq_len_);
+    }
     return config;
 }
 
