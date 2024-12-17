@@ -45,6 +45,8 @@ BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val,
             FT_LOG_WARNING("block buffer memset gpu failed");
             return nullptr;
         }
+        // memsetGPU sync
+        device_util_->device_->syncAndCheck();
     } else {
         device_util_->memsetCPU(buffer, val, len);
     }

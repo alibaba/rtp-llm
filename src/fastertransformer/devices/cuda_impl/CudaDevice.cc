@@ -289,7 +289,7 @@ void CudaDevice::bufMemset(Buffer& buf, int val) {
     if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
         std::memset(buf.data(), val, buf.sizeBytes());
     } else {
-        cudaMemset(buf.data(), val, buf.sizeBytes());
+        check_cuda_error(cudaMemset(buf.data(), val, buf.sizeBytes()));
     }
 }
 

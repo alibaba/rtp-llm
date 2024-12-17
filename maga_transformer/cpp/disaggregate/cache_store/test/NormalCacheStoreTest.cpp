@@ -12,6 +12,27 @@
 namespace rtp_llm {
 
 class NormalCacheStoreTest: public ::testing::Test {
+public:
+    void SetUp() override {
+        const auto test_src_dir = getenv("TEST_SRCDIR");
+        const auto test_work_space = getenv("TEST_WORKSPACE");
+        const auto test_binary = getenv("TEST_BINARY");
+        if (!(test_src_dir && test_work_space && test_binary)) {
+            std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
+            abort();
+        }
+
+        std::string test_binary_str = std::string(test_binary);
+        FT_CHECK(*test_binary_str.rbegin() != '/');
+        size_t filePos = test_binary_str.rfind('/');
+        auto test_data_path_ = std::string(test_src_dir) + "/" + std::string(test_work_space) + "/"
+                        + test_binary_str.substr(0, filePos) + "/";
+
+        std::cout << "test_src_dir [" << test_src_dir << "]" << std::endl;
+        std::cout << "test_work_space [" << test_work_space << "]" << std::endl;
+        std::cout << "test_binary [" << test_binary << "]" << std::endl;
+        std::cout << "test using data path [" << test_data_path_ << "]" << std::endl;
+    }
 
 protected:
     bool initMemoryUtil(bool mock);
