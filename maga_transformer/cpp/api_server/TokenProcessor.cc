@@ -1,54 +1,19 @@
 #include "maga_transformer/cpp/api_server/TokenProcessor.h"
 
+#include <algorithm>
+
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/api_server/Exception.h"
+
 namespace rtp_llm {
 
-using namespace autil::legacy;
-using namespace autil::legacy::json;
-
-class AuxInfoAdapter: public Jsonizable, public AuxInfo {
-public:
-    void Jsonize(Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("cost_time_ms", cost_time_ms, cost_time_ms);
-        json.Jsonize("iter_count", iter_count, iter_count);
-        json.Jsonize("input_len", input_len, input_len);
-        json.Jsonize("prefix_len", prefix_len, prefix_len);
-        json.Jsonize("reuse_len", reuse_len, reuse_len);
-        json.Jsonize("output_len", output_len, output_len);
-        json.Jsonize("fallback_tokens", fallback_tokens, fallback_tokens);
-        json.Jsonize("fallback_times", fallback_times, fallback_times);
-        json.Jsonize("first_token_cost_time_us", first_token_cost_time_us, first_token_cost_time_us);
-    }
-    AuxInfoAdapter() {
-        AuxInfo();
-    }
-    AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us    = base.cost_time_us;
-        iter_count      = base.iter_count;
-        input_len       = base.input_len;
-        prefix_len      = base.prefix_len;
-        reuse_len       = base.reuse_len;
-        output_len      = base.output_len;
-        fallback_tokens = base.fallback_tokens;
-        fallback_times  = base.fallback_times;
-        first_token_cost_time_us = base.first_token_cost_time_us;
-
-        cost_time_ms = cost_time_us / 1000.0;
-    }
-    float cost_time_ms;
-};
-
-struct TokenProcessorResponse: public Jsonizable {
-    void Jsonize(Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("response", response, response);
-        json.Jsonize("finished", finished, finished);
-        json.Jsonize("aux_info", aux_info, aux_info);
-    }
-    std::string    response;
-    bool           finished;
-    AuxInfoAdapter aux_info;
-};
+namespace ft = fastertransformer;
 
 TokenProcessor::TokenProcessor(py::object token_processor): token_processor_(token_processor) {}
+
+py::object TokenProcessor::getPyObject() const {
+    return token_processor_;
+}
 
 std::string TokenProcessor::decode(const std::vector<int>& token_ids) {
     py::gil_scoped_acquire acquire;
@@ -61,21 +26,14 @@ std::vector<int> TokenProcessor::encode(const std::string& prompt) {
     auto                   res = token_processor_.attr("encode")(prompt);
     std::vector<int>       vecInt;
     if (!py::isinstance<py::list>(res)) {
-        throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(res)));
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                "Expected a list, but get " + py::cast<std::string>(py::str(res)));
     }
     py::list py_list = py::reinterpret_borrow<py::list>(res);
     for (auto item : py_list) {
         vecInt.push_back(py::cast<int>(item));
     }
     return vecInt;
-}
-
-std::string TokenProcessor::formatResponse(const std::string& generate_texts, const GenerateOutputs* generate_outputs) {
-    TokenProcessorResponse res;
-    res.response = generate_texts;
-    res.finished = generate_outputs->generate_outputs[0].finished;
-    res.aux_info = AuxInfoAdapter(generate_outputs->generate_outputs[0].aux_info);
-    return ToJsonString(res, /*isCompact=*/true);
 }
 
 std::shared_ptr<TokenizerEncodeResponse> TokenProcessor::tokenizer(const std::string& prompt) {
@@ -127,6 +85,49 @@ std::shared_ptr<TokenizerEncodeResponse> TokenProcessor::tokenizer(const std::st
     }
 
     return response;
+}
+
+std::vector<std::string> TokenProcessor::decodeTokens(std::shared_ptr<TokenProcessorPerStream> ctx,
+                                                      GenerateOutputs& responses,
+                                                      std::vector<int>& output_lens,
+                                                      std::shared_ptr<GenerateConfig> config) {
+    return ctx->decodeTokens(responses, output_lens, config);
+}
+
+std::shared_ptr<TokenProcessorPerStream> TokenProcessor::getTokenProcessorCtx(int num_beams, int size,
+        const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
+    auto ctx = std::make_shared<TokenProcessorPerStream>();
+    ctx->init(num_beams, size, token_processor_cpp);
+    return ctx;
+}
+
+void TokenProcessorPerStream::init(int num_beams, int size,
+        const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
+    py::gil_scoped_acquire acquire;
+    py::module token_processor = py::module::import("maga_transformer.utils.token_processor");
+    py::object cls = token_processor.attr("TokenProcessorPerStream");
+    token_processor_stream_ = cls(num_beams, size, token_processor_cpp->getPyObject());
+}
+
+std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& responses,
+        std::vector<int>& output_lens, std::shared_ptr<GenerateConfig> config) {
+    py::gil_scoped_acquire acquire;
+    std::vector<std::string> texts;
+    for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
+        auto& response = responses.generate_outputs[i];
+        auto token_ids = ft::Buffer2torchTensor(response.output_ids, true);
+        py::tuple result = token_processor_stream_.attr("decode_tokens")(i, token_ids, response.finished,
+                config->print_stop_words, config->stop_words_str, config->stop_words_list, config->return_incremental);
+        if (result.size() != 2) {
+            FT_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
+            continue;
+        }
+        int len = result[0].cast<int>();
+        std::string text = result[1].cast<std::string>();
+        output_lens.push_back(len);
+        texts.push_back(text);
+    }
+    return texts;
 }
 
 }  // namespace rtp_llm
