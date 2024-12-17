@@ -11,7 +11,6 @@
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "maga_transformer/cpp/utils/KVCacheUtils.h"
 #include "maga_transformer/cpp/utils/RpcErrorCode.h"
 
 using namespace std;
@@ -82,79 +81,6 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     kv_cache_buffer.cache_type = cache_type;
     sync_check_cuda_error();
     return kv_cache_buffer;
-}
-
-void CudaDevice::writeCacheStore(DeviceBase* device, const AttentionModuleParams& params,
-                     rtp_llm::CacheStore* cache_store, cudaStream_t stream) {
-    auto& param = params.common;
-    if (param.warmup) {
-        return;
-    }
-    if (!param.pd_separation || param.context_batch_size == 0) {
-        return;
-    }
-
-    FT_CHECK_WITH_INFO(param.cache_store_inputs.has_value()
-                        && param.cache_store_inputs->host_kv_cache_offset, "failed to get host_kv_cache_offset");
-    const auto max_blocks_per_batch = param.cache_store_inputs->host_kv_cache_offset->shape()[1];
-    const auto seq_size_per_block  = params.configs.tokens_per_block;
-    auto offset_addr = param.cache_store_inputs->host_kv_cache_offset->data<int32_t>();
-    auto k_cache_data = (uint64_t*)param.kv_cache->k_cache_buffer->data();
-    auto v_cache_data = (uint64_t*)param.kv_cache->v_cache_buffer->data();
-    auto k_scale_data = (uint64_t*)(param.kv_cache->k_scale_buffer ? param.kv_cache->k_scale_buffer->data() : nullptr);
-    auto v_scale_data = (uint64_t*)(param.kv_cache->v_scale_buffer ? param.kv_cache->v_scale_buffer->data() : nullptr);
-
-    // auto event_ptr = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(),
-    //                     [](cudaEvent_t* event) { cudaEventDestroy(*event); delete event;});
-    // cudaEventCreate(event_ptr.get());
-    // cudaEventRecord(*event_ptr, stream);
-
-    FT_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
-    FT_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
-                        "context batch size and request id size is not same");
-
-    for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
-        if (*(param.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
-            continue;
-        }
-        FT_CHECK_WITH_INFO(param.cache_store_inputs.has_value()
-                            && param.cache_store_inputs->prefix_lengths_host
-                            && param.cache_store_inputs->input_lengths_host,
-                            "failed to get prefix_length_host and input_length_host for cache store");
-        FT_CHECK_WITH_INFO(param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] % seq_size_per_block == 0,
-                            "prefix_length \% seq_size_per_block != 0");
-        int reuse_block_num = param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] / seq_size_per_block;
-        int block_num = (param.cache_store_inputs->input_lengths_host->data<int>()[param.decoder_batch_size + batch_id]
-                            + seq_size_per_block - 1) / seq_size_per_block;
-        auto request_id = *(param.request_id->dataWithOffset<int64_t>(batch_id));
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
-        for (size_t index = 0; index < block_num + reuse_block_num; index++) {
-            auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
-            auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.block_size);
-            void* v_addr = (void*)((int8_t*)v_cache_data + block_id * param.block_size);
-            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) { });
-            std::shared_ptr<void> v_block_addr(v_addr, [](void* p) { });
-            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.block_size, true, true);
-            request_blocks->addBlock("v_" + cache_key, v_block_addr, param.block_size, true, true);
-            if (k_scale_data) {
-                void* k_scale_addr = (void*)((int8_t*)k_scale_data + block_id * param.scale_block_size);
-                void* v_scale_addr = (void*)((int8_t*)v_scale_data + block_id * param.scale_block_size);
-                std::shared_ptr<void> k_scale_block_addr(k_scale_addr, [](void* p) { });
-                std::shared_ptr<void> v_scale_block_addr(v_scale_addr, [](void* p) { });
-                request_blocks->addBlock("k_scale" + cache_key, k_scale_block_addr, param.scale_block_size, true, true);
-                request_blocks->addBlock("v_scale" + cache_key, v_scale_block_addr, param.scale_block_size, true, true);
-            }
-        }
-        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
-            if (!success) {
-                FT_LOG_WARNING("query [%ld], layer id [%d], "
-                               "call store kv cache failed, ec is %d, error msg is [%s]",
-                               request_id, layer_id, ec, ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
-            }
-        };
-        cache_store->store(request_blocks, storeCallback);
-    }
 }
 
 void MHA(const AttentionModuleParams& params,
@@ -492,7 +418,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         }
         sync_check_cuda_error();
 
-        writeCacheStore(this, params, cache_store_.get(), stream_);
+        writeCacheStore(params);
 
         // printBufferData(params.input, "after invoke transpse");
         printBufferData(*q_output, "Q after invoke transpose");

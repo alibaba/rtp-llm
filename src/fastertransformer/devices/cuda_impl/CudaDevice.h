@@ -123,9 +123,6 @@ protected:
                            BufferPtr               output);
     void selectCuFMHARunner(const DevicePrepParams& params);
 
-    // for pd seperation
-    void writeCacheStore(DeviceBase* device, const AttentionModuleParams& params, rtp_llm::CacheStore* cache_store, cudaStream_t stream);
-
 protected:
     cudaStream_t stream_;
     cudaStream_t no_block_copy_stream_;

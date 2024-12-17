@@ -37,6 +37,7 @@ public:
     virtual void syncCommunication(bool timeout = true);
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
+    void writeCacheStore(const AttentionModuleParams& params);
 
 public:
     // device-independence op implementations
