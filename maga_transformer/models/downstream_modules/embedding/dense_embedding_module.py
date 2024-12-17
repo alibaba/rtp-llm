@@ -32,7 +32,7 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(*args, ** kwargs)
         self.embedding_type = EmbeddingResponseType.DENSE
 
-    async def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
+    def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
         if 'left' in request_json:
             return SimilarityRequest(**request_json)
         else:

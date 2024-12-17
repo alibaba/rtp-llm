@@ -29,7 +29,7 @@ class RerankerRenderer(CustomRenderer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 
-    async def render_request(self, request: Dict[str, Any]):
+    def render_request(self, request: Dict[str, Any]):
         return VoyageRerankerRequest(**request)
     
     @staticmethod

@@ -22,7 +22,7 @@ class ColbertEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.COLBERT
 
-    async def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, ColbertEmbeddingRequest]:
+    def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, ColbertEmbeddingRequest]:
         if 'left' in request_json:
             return SimilarityRequest(**request_json)
         else:

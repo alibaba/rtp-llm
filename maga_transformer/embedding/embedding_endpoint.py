@@ -17,7 +17,7 @@ class EmbeddingEndpoint(object):
             request = json.loads(request)
         renderer = self.custom_model_.get_renderer(request)        
         handler = self.custom_model_.get_handler()
-        formated_request = await renderer.render_request(request)
+        formated_request = renderer.render_request(request)
         batch_input = renderer.create_input(formated_request)
         batch_output = await self.decoder_engine_.decode(batch_input)
         batch_output = handler.post_process(formated_request, batch_output)

@@ -28,7 +28,7 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
                                   self.tokenizer_.pad_token_id,
                                   self.tokenizer_.unk_token_id])
         
-    async def render_request(self, request_json: Dict[str, Any]):
+    def render_request(self, request_json: Dict[str, Any]):
         if 'left' in request_json:
             return SimilarityRequest(**request_json)
         else:

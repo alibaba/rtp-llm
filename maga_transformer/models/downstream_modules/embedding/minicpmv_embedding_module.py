@@ -332,7 +332,7 @@ class MiniCPMVRenderer(EmbeddingRendererBase):
         return float(
             torch.tensor(left.embedding) @ torch.tensor(right.embedding).T)
     
-    async def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
+    def render_request(self, request_json: Dict[str, Any]) -> Union[SimilarityRequest, OpenAIEmbeddingRequest]:
         if 'left' in request_json:
             return SimilarityRequest(**request_json)
         else:

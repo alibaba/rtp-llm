@@ -57,7 +57,7 @@ class CustomRenderer(object):
         self.config_ = config
         self.tokenizer_ = tokenizer
         
-    async def render_request(self, request_json: Dict[str, Any]) -> BaseModel:
+    def render_request(self, request_json: Dict[str, Any]) -> BaseModel:
         raise NotImplementedError
         
     def create_input(self, request: BaseModel) -> EngineInputs:
