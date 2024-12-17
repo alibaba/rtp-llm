@@ -23,7 +23,7 @@ public:
 
 class TokenizerService {
 public:
-    TokenizerService(const std::shared_ptr<TokenProcessor>& token_rocessor);
+    TokenizerService(const std::shared_ptr<TokenProcessor>& token_processor);
     ~TokenizerService() = default;
 
 public:
@@ -31,7 +31,7 @@ public:
                          const http_server::HttpRequest&                         request);
 
 private:
-    std::shared_ptr<TokenProcessor> token_rocessor_;
+    std::shared_ptr<TokenProcessor> token_processor_;
 };
 
 }  // namespace rtp_llm

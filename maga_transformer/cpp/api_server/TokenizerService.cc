@@ -24,7 +24,7 @@ void TokenizerEncodeRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(return_offsets_mapping);
 }
 
-TokenizerService::TokenizerService(const std::shared_ptr<TokenProcessor>& token_rocessor): token_rocessor_(token_rocessor) {}
+TokenizerService::TokenizerService(const std::shared_ptr<TokenProcessor>& token_processor): token_processor_(token_processor) {}
 
 void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                        const http_server::HttpRequest&                         request) {
@@ -45,7 +45,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         if (req.prompt.has_value() == false) {
             FT_LOG_WARNING("tokenizer encode failed, request has no prompt, request body: %s", body.c_str());
             writer->SetStatus(500, "Internal Server Error");
-            auto msg = ErrorResponse::CreateErrorResponseJsonString(500,
+            auto msg = ErrorResponse::CreateErrorResponseJsonString(514,
                     "tokenizer encode failed, request has no prompt");
             writer->Write(msg);
             return;
@@ -57,12 +57,12 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         }
         std::shared_ptr<TokenizerEncodeResponse> tokenizer_response;
         if (offset_mapping) {
-            tokenizer_response = token_rocessor_->tokenizer(prompt);
+            tokenizer_response = token_processor_->tokenizer(prompt);
         } else {
-            auto                     token_ids = token_rocessor_->encode(prompt);
+            auto                     token_ids = token_processor_->encode(prompt);
             std::vector<std::string> tokens;
             for (auto id : token_ids) {
-                tokens.push_back(token_rocessor_->decode(std::vector<int>{id}));
+                tokens.push_back(token_processor_->decode(std::vector<int>{id}));
             }
             tokenizer_response            = std::make_shared<TokenizerEncodeResponse>();
             tokenizer_response->token_ids = token_ids;
@@ -73,7 +73,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
             FT_LOG_WARNING("tokenizer encode failed, response is null, request body: %s", body.c_str());
             writer->SetStatus(500, "Internal Server Error");
             auto msg =
-                ErrorResponse::CreateErrorResponseJsonString(500, "tokenizer encode failed, maybe tokenizer failed");
+                ErrorResponse::CreateErrorResponseJsonString(514, "tokenizer encode failed, maybe tokenizer failed");
             writer->Write(msg);
             return;
         }
@@ -86,7 +86,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         FT_LOG_WARNING(
             "tokenizer encode failed, found exception. request body: %s, exception: [%s]", body.c_str(), e.what());
         writer->SetStatus(500, "Internal Server Error");
-        auto msg = ErrorResponse::CreateErrorResponseJsonString(500, "tokenizer encode failed, exception occurred");
+        auto msg = ErrorResponse::CreateErrorResponseJsonString(514, "tokenizer encode failed, exception occurred");
         writer->Write(msg);
         return;
     }

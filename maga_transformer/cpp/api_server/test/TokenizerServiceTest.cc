@@ -19,9 +19,9 @@ public:
 protected:
     void SetUp() override {
         mock_writer_       = std::make_unique<http_server::MockHttpResponseWriter>();
-        mock_token_rocessor_     = std::make_shared<MockTokenProcessor>();
-        auto token_rocessor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_rocessor_);
-        tokenizer_service_ = std::make_shared<TokenizerService>(token_rocessor);
+        mock_token_processor_     = std::make_shared<MockTokenProcessor>();
+        auto token_processor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
+        tokenizer_service_ = std::make_shared<TokenizerService>(token_processor);
     }
     void TearDown() override {}
 
@@ -32,23 +32,41 @@ protected:
         return std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>>(
             packet, [](::anet::HTTPPacket* packet) { packet->free(); });
     }
+    
+    void SetToMaster() {
+        autil::EnvGuard tp_size_env("TP_SIZE", "1");
+        autil::EnvGuard pp_size_env("PP_SIZE", "1");
+        autil::EnvGuard world_rank_env("WORLD_RANK", "0");
+        autil::EnvGuard world_size_env("WORLD_SIZE", "1");
+        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
+        auto&           parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.reload();
+    }
+    void SetToWorker() {
+        autil::EnvGuard tp_size_env("TP_SIZE", "1");
+        autil::EnvGuard pp_size_env("PP_SIZE", "2");
+        autil::EnvGuard world_rank_env("WORLD_RANK", "1");
+        autil::EnvGuard world_size_env("WORLD_SIZE", "2");
+        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
+        auto&           parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.reload();
+    }
 
 protected:
     std::unique_ptr<http_server::MockHttpResponseWriter> mock_writer_;
-    std::shared_ptr<MockTokenProcessor>                        mock_token_rocessor_;
+    std::shared_ptr<MockTokenProcessor>                        mock_token_processor_;
     std::shared_ptr<TokenizerService>                    tokenizer_service_;
 };
 
 TEST_F(TokenizerServiceTest, Constructor) {
     EXPECT_NE(tokenizer_service_, nullptr);
-    EXPECT_NE(tokenizer_service_->token_rocessor_, nullptr);
+    EXPECT_NE(tokenizer_service_->token_processor_, nullptr);
 }
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_IsNotMaster) {
     // 模拟不是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "1");
-    parallel_info.reload();
+    SetToWorker();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_FALSE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -74,9 +92,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_IsNotMaster) {
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_ParseRequestBodyFailed) {
     // 模拟是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "0");
-    parallel_info.reload();
+    SetToMaster();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_TRUE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -89,7 +106,7 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_ParseRequestBodyFailed) {
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         ErrorResponse error_response;
         autil::legacy::FromJsonString(error_response, data);
-        EXPECT_EQ(error_response.error_code, 500);
+        EXPECT_EQ(error_response.error_code, 514);
         return true;
     }));
 
@@ -106,9 +123,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_ParseRequestBodyFailed) {
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_RequestBodyHasNoPrompt) {
     // 模拟是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "0");
-    parallel_info.reload();
+    SetToMaster();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_TRUE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -128,7 +144,7 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_RequestBodyHasNoPrompt) {
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         ErrorResponse error_response;
         autil::legacy::FromJsonString(error_response, data);
-        EXPECT_EQ(error_response.error_code, 500);
+        EXPECT_EQ(error_response.error_code, 514);
         return true;
     }));
 
@@ -145,9 +161,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_RequestBodyHasNoPrompt) {
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMappingButTokenizerResponseIsNull) {
     // 模拟是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "0");
-    parallel_info.reload();
+    SetToMaster();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_TRUE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -164,13 +179,13 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMappingButTokenizerRespons
 })del";
     request._request              = CreateHttpPacket(body);
 
-    // 模拟 token_rocessor tokenizer 失败
-    EXPECT_CALL(*mock_token_rocessor_, tokenizer("hello, what is your age")).WillOnce(Return(nullptr));
+    // 模拟 token_processor tokenizer 失败
+    EXPECT_CALL(*mock_token_processor_, tokenizer("hello, what is your age")).WillOnce(Return(nullptr));
 
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         ErrorResponse error_response;
         autil::legacy::FromJsonString(error_response, data);
-        EXPECT_EQ(error_response.error_code, 500);
+        EXPECT_EQ(error_response.error_code, 514);
         return true;
     }));
 
@@ -187,9 +202,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMappingButTokenizerRespons
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMapping) {
     // 模拟是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "0");
-    parallel_info.reload();
+    SetToMaster();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_TRUE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -206,13 +220,13 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMapping) {
 })del";
     request._request              = CreateHttpPacket(body);
 
-    // 模拟 token_rocessor tokenizer 的返回值
+    // 模拟 token_processor tokenizer 的返回值
     auto tokenizer_response            = std::make_shared<TokenizerEncodeResponse>();
     tokenizer_response->offset_mapping = {{1, 2, 3}, {4, 5, 6}};
     tokenizer_response->tokens         = {"hello", "what", "is", "your", "age"};
     tokenizer_response->token_ids      = {1, 2, 3, 4, 5};
     tokenizer_response->error          = "none";
-    EXPECT_CALL(*mock_token_rocessor_, tokenizer("hello, what is your age")).WillOnce(Return(tokenizer_response));
+    EXPECT_CALL(*mock_token_processor_, tokenizer("hello, what is your age")).WillOnce(Return(tokenizer_response));
 
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([tokenizer_response](const std::string& data) {
         TokenizerEncodeResponse response;
@@ -221,12 +235,10 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMapping) {
         EXPECT_EQ(response.tokens, tokenizer_response->tokens);
         EXPECT_EQ(response.token_ids, tokenizer_response->token_ids);
         EXPECT_EQ(response.error, tokenizer_response->error);
-        EXPECT_FALSE(response.return_offset_mapping);
         return true;
     }));
 
     tokenizer_service_->tokenizerEncode(writer_ptr, request);
-    EXPECT_TRUE(tokenizer_response->return_offset_mapping);
     EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
     EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
     EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
@@ -238,9 +250,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_HasOffsetMapping) {
 
 TEST_F(TokenizerServiceTest, TokenizerEncode_WithoutOffsetMapping) {
     // 模拟是 master 的情况
-    auto&           parallel_info = ParallelInfo::globalParallelInfo();
-    autil::EnvGuard word_rank_env("WORLD_RANK", "0");
-    parallel_info.reload();
+    SetToMaster();
+    auto& parallel_info = ParallelInfo::globalParallelInfo();
     EXPECT_TRUE(parallel_info.isMaster());
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -256,16 +267,16 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_WithoutOffsetMapping) {
 })del";
     request._request              = CreateHttpPacket(body);
 
-    // 没有 return_offsets_mapping 字段所以不会调用 token_rocessor tokenizer
-    EXPECT_CALL(*mock_token_rocessor_, tokenizer(_)).Times(0);
+    // 没有 return_offsets_mapping 字段所以不会调用 token_processor tokenizer
+    EXPECT_CALL(*mock_token_processor_, tokenizer(_)).Times(0);
 
     std::vector<int>         token_ids = {1, 2, 3, 4, 5};
     std::vector<std::string> tokens    = {"hello", "what", "is", "your", "age"};
     EXPECT_EQ(token_ids.size(), tokens.size());
-    EXPECT_CALL(*mock_token_rocessor_, encode("hello, what is your age")).WillOnce(Return(token_ids));
+    EXPECT_CALL(*mock_token_processor_, encode("hello, what is your age")).WillOnce(Return(token_ids));
     for (int i = 0; i < token_ids.size(); ++i) {
         auto id = token_ids[i];
-        EXPECT_CALL(*mock_token_rocessor_, decode(std::vector<int>{id})).WillOnce(Return(tokens[i]));
+        EXPECT_CALL(*mock_token_processor_, decode(std::vector<int>{id})).WillOnce(Return(tokens[i]));
     }
 
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([tokens, token_ids](const std::string& data) {
@@ -275,7 +286,6 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_WithoutOffsetMapping) {
         EXPECT_EQ(response.token_ids, token_ids);
         EXPECT_TRUE(response.offset_mapping.empty());
         EXPECT_TRUE(response.error.empty());
-        EXPECT_FALSE(response.return_offset_mapping);
         return true;
     }));
 
