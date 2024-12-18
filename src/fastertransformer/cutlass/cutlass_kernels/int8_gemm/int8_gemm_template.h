@@ -481,7 +481,7 @@ size_t CutlassInt8GemmRunner<T>::getWorkspaceSize(const int m, const int n, cons
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     // These are the min tile sizes for each config, which would launch the maximum number of blocks
     const int maxGridM = cutlass::ceil_div(m, MIN_M_TILE);
-    const int maxGridN = cutlass::ceil_div(m, MIN_N_TILE);
+    const int maxGridN = cutlass::ceil_div(n, MIN_N_TILE);
     // We need 4 bytes per block in the worst case. We launch SPLIT_K_LIMIT in z dim.
     return static_cast<size_t>(maxGridM * maxGridN * SPLIT_K_LIMIT * 4);
 }
