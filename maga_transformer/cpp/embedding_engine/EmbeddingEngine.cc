@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object handler):
     params_(params.gpt_init_parameter), metrics_reporter_(params.metrics_reporter) {
-    EngineBase::initDevices(params);
+    ft::DeviceFactory::initDevices(params.gpt_init_parameter);
     executor_.reset(new EmbeddingExecutor(params, ft::DeviceFactory::getDefaultDevice(), handler));
     scheduler_.reset(new EmbeddingScheduler(params_, metrics_reporter_));
 

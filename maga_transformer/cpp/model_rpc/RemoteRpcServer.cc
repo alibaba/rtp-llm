@@ -16,7 +16,7 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore();
+    initCacheStore(maga_init_params.gpt_init_parameter);
     return grpc::Status::OK;
 }
 
@@ -53,12 +53,33 @@ void RemoteRpcServer::initLocalPeerInfo() {
     FT_LOG_INFO(worker_info);
 }
 
-void RemoteRpcServer::initCacheStore() {
-    resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(engine_->getDevice()->cacheStore());
-    if (!resource_.cache_store) {
-        FT_FAIL("cache store is nullptr");
+void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
+    FT_LOG_INFO("init_params.use_cache_store = %d, init_params.pd_separation = %d",
+                init_params.use_cache_store_, init_params.pd_separation_);
+
+    if (!init_params.use_cache_store_) {
+        FT_FAIL("cache store not used in RemoteRpcServer is unexpected");
     }
     const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
+    auto device = engine_->getDevice();
+
+    CacheStoreInitParams params;
+    params.listen_port = init_params.cache_store_listen_port_;
+    params.connect_port = init_params.cache_store_connect_port_;
+    params.rdma_listen_port = init_params.cache_store_rdma_listen_port_;
+    params.rdma_connect_port = init_params.cache_store_rdma_connect_port_;
+    params.rdma_mode = init_params.cache_store_rdma_mode_;
+    params.thread_count = 4;
+    params.queue_size = 500;
+    params.device = device;
+    FT_LOG_INFO("cache store listen port is [%ld], connect port is [%d], rdma_mode is [%d]",
+        params.listen_port, params.connect_port, params.rdma_mode);
+    cache_store_ = NormalCacheStore::createNormalCacheStore(params);
+    FT_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
+    FT_LOG_INFO("cache store init success");
+    device->setCacheStore(cache_store_);
+
+    resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }
 
 }  // namespace rtp_llm

@@ -9,8 +9,7 @@ using namespace autil;
 namespace rtp_llm {
 
 EngineBase::EngineBase(const EngineInitParams& params) {
-    EngineBase::initDevices(params);
-    device_       = ft::DeviceFactory::getDefaultDevice();
+    initDevices(params);
     lora_manager_ = std::make_shared<lora::LoraManager>();
 }
 
@@ -24,6 +23,7 @@ void EngineBase::initDevices(const EngineInitParams& params) {
     Logger::getEngineLogger().setRank(params.gpt_init_parameter.tp_rank_);
     Logger::getEngineLogger().flush();
     ft::DeviceFactory::initDevices(params.gpt_init_parameter);
+    device_       = ft::DeviceFactory::getDefaultDevice();
 }
 
 void EngineBase::addLora(const std::string&            adapter_name,

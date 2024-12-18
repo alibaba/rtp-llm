@@ -71,7 +71,6 @@ private:
     void checkUseGroupGemm();
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
-    void initCacheStore(const DeviceInitParams& device_params);
 
 public:
     cudaStream_t getStream() {return stream_;}

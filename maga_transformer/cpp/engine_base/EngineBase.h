@@ -6,6 +6,7 @@
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "maga_transformer/cpp/lora/LoraManager.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace ft = fastertransformer;
 
@@ -21,7 +22,7 @@ public:
     EngineBase(const EngineInitParams& params);
     virtual ~EngineBase();
 
-    static void initDevices(const EngineInitParams& params);
+    void initDevices(const EngineInitParams& params);
     ft::DeviceBase* getDevice() {
         return device_;
     }
@@ -51,9 +52,9 @@ public:
     }
 
 protected:
-    ft::DeviceBase* device_;
-    ResourceContext                    resource_context_;
-    std::shared_ptr<lora::LoraManager> lora_manager_;
+    ft::DeviceBase*                      device_;
+    ResourceContext                      resource_context_;
+    std::shared_ptr<lora::LoraManager>   lora_manager_;
 };
 
 }  // namespace rtp_llm

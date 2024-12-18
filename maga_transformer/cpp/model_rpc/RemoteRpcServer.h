@@ -20,12 +20,13 @@ public:
 private:
     void initLocalHostInfo();
     void initLocalPeerInfo();
-    void initCacheStore();
+    void initCacheStore(const fastertransformer::GptInitParameter& params);
 
 protected:
     std::string process_id_;
     RemoteServerResource resource_;
     std::atomic<size_t> loading_cache_requests_{0};
+    std::shared_ptr<CacheStore> cache_store_;
 };
 
 }

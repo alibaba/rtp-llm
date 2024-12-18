@@ -37,6 +37,7 @@ public:
     virtual void syncCommunication(bool timeout = true);
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
+    void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
     void writeCacheStore(const AttentionModuleParams& params);
 
 public:

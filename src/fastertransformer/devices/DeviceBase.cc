@@ -108,6 +108,10 @@ DeviceEventPtr DeviceBase::createEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store) {
+    cache_store_ = cache_store;
+}
+
 void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
     auto& param = params.common;
     if (param.warmup) {
