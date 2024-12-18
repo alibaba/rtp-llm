@@ -29,10 +29,6 @@ struct DeviceInitParams {
     // they are only needed when tp_size > 1.
     std::string master_ip  = "";
     int64_t master_port    = 0;
-    int64_t cache_store_listen_port = 0;
-    int64_t cache_store_connect_port = 0;
-    int64_t cache_store_rdma_listen_port = 0;
-    int64_t cache_store_rdma_connect_port = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.
@@ -40,10 +36,6 @@ struct DeviceInitParams {
     int64_t device_reserve_memory_bytes = 0;
     int64_t host_reserve_memory_bytes   = 0;
     size_t tokens_per_block = 0;
-
-    bool use_cache_store = false;
-    bool cache_store_rdma_mode = true;
-    bool pd_separation = false;
 };
 
 // immutable device properties. Can not change since device is initialized.
