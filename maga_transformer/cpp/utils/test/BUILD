@@ -32,16 +32,6 @@ cc_test(
 )
 
 cc_test(
-    name = "concurrency_controller_test",
-    srcs = [
-        "ConcurrencyControllerTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-)
-
-cc_test(
     name = "cm2_config_test",
     srcs = [
         "Cm2ConfigTest.cc",

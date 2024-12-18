@@ -46,6 +46,10 @@ public:
         return local_server_->getEngine();
     };
 
+    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const { 
+        return local_server_->getMultimodalProcessor();
+    };
+
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }

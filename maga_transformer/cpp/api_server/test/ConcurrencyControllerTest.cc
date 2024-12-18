@@ -1,7 +1,7 @@
 #include <chrono>
 
 #include "gtest/gtest.h"
-#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
+#include "maga_transformer/cpp/api_server/ConcurrencyControllerUtil.h"
 
 namespace rtp_llm {
 

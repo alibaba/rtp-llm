@@ -14,6 +14,7 @@ public:
 
 public:
     MOCK_METHOD0(WriteDone, bool());
+    MOCK_METHOD0(isConnected, bool());
     MOCK_METHOD1(Write, bool(const std::string&));
 };
 

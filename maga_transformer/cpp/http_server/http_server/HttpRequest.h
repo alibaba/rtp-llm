@@ -22,7 +22,8 @@ public:
 public:
     HttpError Parse(std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> request);
     std::string GetMethod() const { return _request ? _request->getMethodString() : ""; }
-    std::string GetBody() const { return _request ? std::string(_request->getBody(), _request->getBodyLen()) : ""; }
+    std::string GetBody() const { return (_request && (_request->getBodyLen() > 0)) ?
+        std::string(_request->getBody(), _request->getBodyLen()) : ""; }
     std::string GetUri() const { return _request ? _request->getURI() : ""; }
     const std::string &GetEndpoint() const { return _endpoint; }
     const std::map<std::string, std::string> &GetUriParams() const { return _uriParams; }

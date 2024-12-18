@@ -39,7 +39,7 @@ public:
 
 public:
     // Exported to python world.
-    void                                cancel();
+    virtual void cancel();
 
     virtual ErrorResult<GenerateOutputs>     nextOutput() = 0;
     virtual bool hasOutput() {return false;}
@@ -136,10 +136,10 @@ public:
     void setPaused();
     bool setRunning();
     bool stoppedWithoutLock();
-    bool stopped();
+    virtual bool stopped();
     bool paused();
     std::string stopReason();
-    bool finished();
+    virtual bool finished();
     bool running();
     bool waiting();
     bool finishedWithoutLock();

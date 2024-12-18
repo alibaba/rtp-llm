@@ -45,4 +45,22 @@ private:
     std::condition_variable cv_;
 };
 
+class ConcurrencyControllerGuard {
+public:
+    ConcurrencyControllerGuard(std::shared_ptr<ConcurrencyController> controller): controller_(controller) {
+        passed_ = controller_->increment();
+    }
+    ~ConcurrencyControllerGuard() {
+        if (passed_) {
+            controller_->decrement();
+        }
+    }
+    bool isPassed() {
+        return passed_;
+    }
+private:
+    bool passed_;
+    std::shared_ptr<ConcurrencyController> controller_;
+};
+
 } // namespace rtp_llm

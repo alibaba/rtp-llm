@@ -55,6 +55,11 @@ public:
         return access_logger_;
     }
 
+    static Logger& getQueryAccessLogger() {
+        static Logger query_access_logger_("query_access");
+        return query_access_logger_;
+    }
+
     static Logger& getStackTraceLogger() {
         static Logger stack_trace_logger_("stack_trace");
         return stack_trace_logger_;
@@ -193,6 +198,18 @@ private:
 #define FT_ACCESS_LOG_WARNING(...) FT_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define FT_ACCESS_LOG_ERROR(...) FT_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define FT_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
+
+#define FT_QUERY_ACCESS_LOG(level, ...)                                                                                \
+    do {                                                                                                               \
+        auto& logger = rtp_llm::Logger::getQueryAccessLogger();                                              \
+        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
+    } while (0)
+#define FT_QUERY_ACCESS_LOG_TRACE(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define FT_QUERY_ACCESS_LOG_DEBUG(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define FT_QUERY_ACCESS_LOG_INFO(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define FT_QUERY_ACCESS_LOG_WARNING(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define FT_QUERY_ACCESS_LOG_ERROR(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define FT_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryAccessLogger().log(ex, ##__VA_ARGS__)
 
 #define FT_STACKTRACE_LOG(level, ...)                                                                                  \
     do {                                                                                                               \

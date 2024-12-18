@@ -2,12 +2,15 @@
 #include <gtest/gtest.h>
 
 #include "autil/EnvUtil.h"
+
 #include "maga_transformer/cpp/api_server/WorkerStatusService.h"
+#include "maga_transformer/cpp/api_server/ConcurrencyControllerUtil.h"
+
 #include "maga_transformer/cpp/api_server/test/mock/MockEngineBase.h"
 #include "maga_transformer/cpp/api_server/test/mock/MockHttpResponseWriter.h"
-#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
 
 using namespace ::testing;
+
 namespace rtp_llm {
 
 class WorkerStatusServiceTest: public ::testing::Test {

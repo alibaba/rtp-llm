@@ -15,7 +15,7 @@ protected:
         const auto           port    = autil::NetUtil::randomPort();
         const std::string    address = "tcp:0.0.0.0:" + std::to_string(port);
         ft::GptInitParameter params;
-        server_ = std::make_shared<HttpApiServer>(nullptr, address, params, py::none());
+        server_ = std::make_shared<HttpApiServer>(nullptr, nullptr, address, params, py::none());
         EXPECT_TRUE(server_->start());
     }
     void TearDown() override {
@@ -26,15 +26,32 @@ private:
     std::shared_ptr<HttpApiServer> server_;
 };
 
-TEST_F(HttpApiServerTest, testStart) {
+TEST_F(HttpApiServerTest, testApiServerStart) {
     ft::GptInitParameter params;
     py::object           token_processor;
-    HttpApiServer        server(nullptr, "tcp:0.0.0.0:9999", params, token_processor);
+    HttpApiServer        server(nullptr, nullptr, "tcp:0.0.0.0:9999", params, token_processor);
     ASSERT_TRUE(server.start());
     ASSERT_FALSE(server.isStoped());
     ASSERT_EQ(server.getListenAddr(), "tcp:0.0.0.0:9999");
     server.stop();
     ASSERT_TRUE(server.isStoped());
+}
+
+TEST_F(HttpApiServerTest, testApiServerStop) {
+    const auto           port = autil::NetUtil::randomPort();
+    const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
+    ft::GptInitParameter params;
+    auto                 server = std::make_shared<HttpApiServer>(nullptr, nullptr, addr, params, py::none());
+    EXPECT_TRUE(server->start());
+    server->active_request_count_->inc();
+    auto runnable = [server]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        server->active_request_count_->dec();
+    };
+    std::thread t(runnable);
+    server->stop();
+    EXPECT_TRUE(server->isStoped());
+    t.join();
 }
 
 // -------------------------- HealthService Test --------------------------

@@ -168,7 +168,7 @@ template<typename T>
 class ErrorResult {
 public:
     ErrorResult(ErrorCode code, std::string message)
-        : status_(code, message), value_(value) {}
+        : status_(code, message) {}
 
     ErrorResult(ErrorInfo status)
         : status_(status) {}

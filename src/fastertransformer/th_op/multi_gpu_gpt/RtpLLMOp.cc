@@ -123,6 +123,7 @@ void RtpLLMOp::initRPCServer(
 
     std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
     http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_service_->getEngine(),
+                                                  model_rpc_service_->getMultimodalProcessor(),
                                                   http_server_address,
                                                   maga_init_params.gpt_init_parameter,
                                                   token_processor));

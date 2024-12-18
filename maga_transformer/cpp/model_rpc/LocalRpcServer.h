@@ -37,6 +37,7 @@ public:
     void removeLora(const std::string& adapter_name);
     
     std::shared_ptr<EngineBase> getEngine() const { return engine_; }
+    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const { return mm_processor_; }
 
     int64_t tpSize() const {
         return maga_init_params_.gpt_init_parameter.tp_size_;
@@ -60,7 +61,7 @@ protected:
 
 protected:
     std::shared_ptr<EngineBase>             engine_;
-    std::unique_ptr<MultimodalProcessor>    mm_processor_;
+    std::shared_ptr<MultimodalProcessor>    mm_processor_;
     EngineInitParams                        maga_init_params_;
     kmonitor::MetricsReporterPtr            metrics_reporter_;
     std::atomic<size_t>                     onflight_requests_{0};

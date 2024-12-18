@@ -21,7 +21,15 @@ void HttpApiServer::init_controller(const ft::GptInitParameter& params) {
 }
 
 bool HttpApiServer::start(const std::string& address) {
-    http_server_.reset(new http_server::HttpServer());
+    // TODO: queueSize may interleave with controller :(
+    http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr,
+                                                   /*threadNum=*/controller_->get_available_concurrency(),
+                                                   /*queueSize=*/controller_->get_available_concurrency()));
+    metric_reporter_.reset(new ApiServerMetricReporter());
+    if (!metric_reporter_->init()) {
+        FT_LOG_WARNING("HttpApiServer start init metric reporter failed.");
+        return false;
+    }
 
     if (!registerServices()) {
         FT_LOG_ERROR("HttpApiServer start failed, register services failed, address is %s.", address.c_str());
@@ -74,6 +82,13 @@ bool HttpApiServer::registerServices() {
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
         FT_LOG_WARNING("HttpApiServer register tokenizer service failed.");
+        return false;
+    }
+
+    // add uri:
+    // POST: /
+    if (!registerInferenceService()) {
+        FT_LOG_WARNING("HttpApiServer register inference service failed.");
         return false;
     }
 
@@ -162,7 +177,7 @@ bool HttpApiServer::registerTokenizerService() {
         return false;
     }
 
-    tokenizer_service_.reset(new TokenizerService(token_rocessor_));
+    tokenizer_service_.reset(new TokenizerService(token_processor_));
     auto tokenizer_encode_callback = [tokenizer_service =
                                           tokenizer_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                               const http_server::HttpRequest& request) -> void {
@@ -171,15 +186,54 @@ bool HttpApiServer::registerTokenizerService() {
     return http_server_->RegisterRoute("POST", "/tokenizer/encode", tokenizer_encode_callback);
 }
 
+bool HttpApiServer::registerInferenceService() {
+    if (!http_server_) {
+        FT_LOG_WARNING("register inference service failed, http server is null");
+        return false;
+    }
+    inference_service_.reset(new InferenceService(engine_,
+                                                  mm_processor_,
+                                                  request_counter_,
+                                                  token_processor_,
+                                                  controller_,
+                                                  params_,
+                                                  metric_reporter_));
+    auto inference_internal_callback =
+        [active_request_count = active_request_count_, inference_service = inference_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        inference_service->inference(writer, request, /*isInternal=*/true);
+    };
+    auto inference_callback =
+        [active_request_count = active_request_count_, inference_service = inference_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        inference_service->inference(writer, request, /*isInternal=*/false);
+    };
+
+    return http_server_->RegisterRoute("POST", "/",                   inference_callback) &&
+           http_server_->RegisterRoute("POST", "/inference_internal", inference_internal_callback);
+}
+
 void HttpApiServer::stop() {
+    FT_LOG_WARNING("http api server stopped");
     is_stopped_.store(true);
 
     if (health_service_) {
         health_service_->stop();
     }
 
-    // stop http server
-    // TODO: maybe wait all request finished
+    if (worker_status_service_) {
+        worker_status_service_->stop();
+    }
+
+    // wait all active request finished
+    if (active_request_count_) {
+        while (active_request_count_->getValue() > 0) {
+            FT_LOG_DEBUG("wait active request processed. active request count: %d", active_request_count_->getValue());
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
 
     if (http_server_) {
         http_server_->Stop();

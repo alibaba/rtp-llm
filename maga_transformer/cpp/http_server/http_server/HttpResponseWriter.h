@@ -26,6 +26,7 @@ public:
     // not thread safe. `virtual` for test.
     virtual bool Write(const std::string &data);
     virtual bool WriteDone();
+    virtual bool isConnected();
 
     void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
     void SetStatus(int code, const std::string message) {

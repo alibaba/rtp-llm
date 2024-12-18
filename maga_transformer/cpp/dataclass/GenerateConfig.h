@@ -6,7 +6,10 @@
 #include <vector>
 
 #include "maga_transformer/cpp/utils/StringUtil.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
+
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
@@ -43,12 +46,17 @@ public:
     bool                return_logits        = false;
     bool                return_incremental   = false;
     bool                return_hidden_states = false;
+    bool                return_output_ids    = false;
+    bool                return_input_ids    = false;
     bool                is_streaming         = false;
     int                 timeout_ms           = -1;
     bool                sp_edit              = false;
     bool                force_disable_sp_run = false;
     bool                return_all_probs     = false;
     std::vector<std::vector<int>> stop_words_list;
+    std::vector<std::string>      stop_words_str;
+    bool                          print_stop_words = false;
+    std::string         sp_advice_prompt;
     std::vector<int>    sp_advice_prompt_token_ids;
     bool                sp_input_lookup = false;
 
@@ -56,6 +64,18 @@ public:
 
     bool top1() {
         return top_k == 1;
+    }
+
+    void addSpecialTokens(const ft::SpecialTokens& special_tokens) {
+        for (const auto& vec : special_tokens.stop_words_id_list_) {
+            std::vector<int> tmpVec;
+            for (int64_t val: vec) {
+                tmpVec.push_back(static_cast<int>(val));
+            }
+            stop_words_list.push_back(tmpVec);
+        }
+        const auto& vec = special_tokens.stop_words_str_list_;
+        stop_words_str.insert(stop_words_str.begin(), vec.begin(), vec.end());
     }
 
     std::string debugString() const {
@@ -66,6 +86,8 @@ public:
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
+                     << ", return_output_ids:" << return_output_ids
+                     << ", return_input_ids:" << return_input_ids
                      << ", is_streaming:" << is_streaming
                      << ", timeout_ms:" << timeout_ms
                      << ", top_k:" << top_k
@@ -80,7 +102,17 @@ public:
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
 #define JSONIZE(field) json.Jsonize(#field, field, field)
-#define JSONIZE_OPTIONAL(field) if (field.has_value()) json.Jsonize(#field, field.value(), field.value())
+// used for de-serialization
+#define JSONIZE_OPTIONAL(field) try { \
+                                    using Type = decltype(field)::value_type; \
+                                    Type field##Tmp; \
+                                    json.Jsonize(#field, field##Tmp); \
+                                    field = field##Tmp; \
+                                } catch (autil::legacy::ExceptionBase &e) { \
+                                    if (field.has_value() == false) { \
+                                        field = std::nullopt; \
+                                    } \
+                                }
         JSONIZE(max_new_tokens);
         JSONIZE(min_new_tokens);
         JSONIZE(num_validate_token);
@@ -102,12 +134,17 @@ public:
         JSONIZE(return_logits);
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
+        JSONIZE(return_output_ids);
+        JSONIZE(return_input_ids);
         JSONIZE(is_streaming);
         JSONIZE(timeout_ms);
         JSONIZE(stop_words_list);
+        JSONIZE(stop_words_str);
+        JSONIZE(print_stop_words);
         JSONIZE(sp_edit);
         JSONIZE(force_disable_sp_run);
         JSONIZE(return_all_probs);
+        JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(sp_input_lookup);
 #undef JSONIZE

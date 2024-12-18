@@ -1,11 +1,13 @@
 #pragma once
 
 #include <atomic>
+
+#include "maga_transformer/cpp/engine_base/EngineBase.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
+
 #include "maga_transformer/cpp/http_server/http_server/HttpResponseWriter.h"
 #include "maga_transformer/cpp/http_server/http_server/HttpRequest.h"
-#include "maga_transformer/cpp/engine_base/EngineBase.h"
-#include "maga_transformer/cpp/utils/ConcurrencyControllerUtil.h"
-#include "maga_transformer/cpp/dataclass/LoadBalance.h"
+#include "maga_transformer/cpp/api_server/ConcurrencyControllerUtil.h"
 
 namespace rtp_llm {
 

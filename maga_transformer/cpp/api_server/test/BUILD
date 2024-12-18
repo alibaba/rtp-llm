@@ -75,10 +75,13 @@ cc_binary(
 
 cc_library(
     name = "api_server_unittest_lib",
-    srcs = [
+    srcs = [ # TODO: use glob
         "mock/MockEngineBase.h",
         "mock/MockHttpResponseWriter.h",
         "mock/MockTokenProcessor.h",
+        "mock/MockApiServerMetricReporter.h",
+        "mock/MockGenerateStream.h",
+        "mock/MockGenerateStreamWrapper.h",
         "ErrorResponseTest.cc",
         "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
@@ -88,7 +91,11 @@ cc_library(
         "SysCmdServiceTest.cc",
         "TokenizerEncodeResponseTest.cc",
         "TokenizerServiceTest.cc",
-        "TestBinding.cc",
+        "GenerateStreamWrapperTest.cc",
+        "InferenceServiceTest.cc",
+        "InferenceDataTypeTest.cc",
+        "ConcurrencyControllerTest.cc",
+        "TestMain.cc",
     ],
     deps = test_deps + [
         "//maga_transformer/cpp:http_api_server",

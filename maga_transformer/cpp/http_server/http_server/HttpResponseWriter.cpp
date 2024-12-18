@@ -40,6 +40,10 @@ bool HttpResponseWriter::WriteDone() {
     return true;
 }
 
+bool HttpResponseWriter::isConnected() {
+    return _connection->isConnected();
+}
+
 bool HttpResponseWriter::WriteNormal(const std::string &data) {
     if (_alreadyWrite) {
         AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
