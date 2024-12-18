@@ -11,22 +11,23 @@ namespace http_server {
 
 SimpleHttpClient::SimpleHttpClient() {
     connection_pool_ = std::make_shared<ConnectionPool>();
+    handler_         = std::make_shared<HandleHttpPacket>();
 }
 
 SimpleHttpClient::~SimpleHttpClient() {}
 
-bool SimpleHttpClient::get(const std::string&                     address,
-                           const std::string&                     route,
-                           const std::string&                     body,
-                           const HandleHttpPacket::HttpCallBack&& http_call_back) {
+bool SimpleHttpClient::get(const std::string&   address,
+                           const std::string&   route,
+                           const std::string&   body,
+                           const HttpCallBack&& http_call_back) {
     return send(address, route, body, HttpMethodType::GET, http_call_back);
 }
 
-bool SimpleHttpClient::send(const std::string&                    address,
-                            const std::string&                    route,
-                            const std::string&                    body,
-                            const HttpMethodType&                 methodType,
-                            const HandleHttpPacket::HttpCallBack& http_call_back) {
+bool SimpleHttpClient::send(const std::string&    address,
+                            const std::string&    route,
+                            const std::string&    body,
+                            const HttpMethodType& methodType,
+                            const HttpCallBack&   http_call_back) {
     ::anet::HTTPPacket* requestPacket = new ::anet::HTTPPacket();
     requestPacket->setURI(route.c_str());
     requestPacket->setBody(body.c_str(), body.size());
@@ -53,9 +54,9 @@ bool SimpleHttpClient::send(const std::string&                    address,
     return sendPacketAsync(address, requestPacket, http_call_back);
 }
 
-bool SimpleHttpClient::sendPacketAsync(const std::string&                    address,
-                                       ::anet::Packet*                       packet,
-                                       const HandleHttpPacket::HttpCallBack& http_call_back) {
+bool SimpleHttpClient::sendPacketAsync(const std::string&  address,
+                                       ::anet::Packet*     packet,
+                                       const HttpCallBack& http_call_back) {
     auto conn = connection_pool_->makeHttpConnection(address);
     if (!conn) {
         FT_LOG_WARNING("send packet failed, connection is null, address: %s", address.c_str());
@@ -66,13 +67,14 @@ bool SimpleHttpClient::sendPacketAsync(const std::string&                    add
         connection_pool_->recycleHttpConnection(address, conn, true);
         return false;
     }
-    auto handler = new HandleHttpPacket(http_call_back);
-    if (!conn->postPacket(packet, handler)) {
+    HandlePacketInfo* handle_packet_info = new HandlePacketInfo(address, connection_pool_, conn, http_call_back);
+    if (!conn->postPacket(packet, handler_.get(), (void*)(handle_packet_info))) {
         FT_LOG_WARNING("post packet failed, address: %s", address.c_str());
         packet->free();
+        delete handle_packet_info;
+        connection_pool_->recycleHttpConnection(address, conn, true);
         return false;
     }
-    connection_pool_->recycleHttpConnection(address, conn, false);
     return true;
 }
 

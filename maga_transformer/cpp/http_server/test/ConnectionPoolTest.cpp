@@ -74,8 +74,8 @@ TEST_F(ConnectionPoolTest, testMakeAndRecyleConnection) {
 
 TEST_F(ConnectionPoolTest, testMakeAndRecyleMultiConnection) {
     std::vector<std::shared_ptr<anet::Connection>> conns;
-    std::string                    address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
-    auto                           server  = initServer(address);
+    std::string address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
+    auto        server  = initServer(address);
 
     for (int i = 0; i < 10; i++) {
         auto conn = connection_pool_->makeHttpConnection(address);
@@ -135,8 +135,8 @@ TEST_F(ConnectionPoolTest, testRecyleErrorAdressConnection) {
 
 TEST_F(ConnectionPoolTest, testMakeConnectionAfterClosed) {
     std::vector<std::shared_ptr<anet::Connection>> conns;
-    std::string                    address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
-    auto                           server  = initServer(address);
+    std::string address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
+    auto        server  = initServer(address);
 
     for (int i = 0; i < 10; i++) {
         auto conn = connection_pool_->makeHttpConnection(address);

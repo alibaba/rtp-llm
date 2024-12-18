@@ -25,7 +25,7 @@ void HeartbeatSynchronizer::getStatusFromHost(
     int                                                                     total_count,
     std::shared_ptr<std::shared_mutex>&                                     mutex,
     std::shared_ptr<std::unordered_map<std::string, WorkerStatusResponse>>& result) {
-    http_server::HandleHttpPacket::HttpCallBack http_call_back =
+    http_server::HttpCallBack http_call_back =
         [this, spec, sync_cnt, total_count, mutex, result](bool ok, const std::string& response_body) {
             if (!ok) {
                 FT_LOG_WARNING("http get request failed in callback, address:%s", spec.c_str());

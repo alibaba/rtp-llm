@@ -6,8 +6,9 @@ namespace http_server {
 typedef std::list<std::shared_ptr<anet::Connection>>           ConnectionList;
 typedef std::list<std::shared_ptr<anet::Connection>>::iterator ConnectionListItr;
 
-typedef std::map<std::string, std::shared_ptr<std::list<std::shared_ptr<anet::Connection>>>>           ConnectionListMap;
-typedef std::map<std::string, std::shared_ptr<std::list<std::shared_ptr<anet::Connection>>>>::iterator ConnectionListMapItr;
+typedef std::map<std::string, std::shared_ptr<std::list<std::shared_ptr<anet::Connection>>>> ConnectionListMap;
+typedef std::map<std::string, std::shared_ptr<std::list<std::shared_ptr<anet::Connection>>>>::iterator
+    ConnectionListMapItr;
 
 class ConnectionPool {
 public:

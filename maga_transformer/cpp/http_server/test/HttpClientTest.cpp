@@ -85,15 +85,21 @@ TEST_F(HttpClientTest, testRequestSuccess) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    HandleHttpPacket::HttpCallBack http_call_back = [](bool ok, const std::string& response_body) {
-        ASSERT_TRUE(ok);
-        processResponse(response_body);
-    };
-
+    std::atomic_int finish_cnt       = 0;
+    int             http_request_num = 5;
     for (auto& it : http_servers_) {
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < http_request_num; i++) {
+            HttpCallBack http_call_back = [&finish_cnt](bool ok, const std::string& response_body) {
+                ASSERT_TRUE(ok);
+                processResponse(response_body);
+                ++finish_cnt;
+            };
             ASSERT_TRUE(http_client_->get(it.first, "/worker_status", "", std::move(http_call_back)));
-            usleep(1000);
+        }
+    }
+    while (true) {
+        if (finish_cnt == http_servers_.size() * http_request_num) {
+            break;
         }
     }
 }
@@ -102,13 +108,18 @@ TEST_F(HttpClientTest, testRequestInvalidAddress) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    HandleHttpPacket::HttpCallBack http_call_back = [](bool ok, const std::string& response_body) {
+    std::mutex mutex;
+    mutex.lock();
+    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
         ASSERT_FALSE(ok);
         ASSERT_TRUE(response_body == "");
+        mutex.unlock();
     };
 
     std::string address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());  // invalid address
     ASSERT_TRUE(http_client_->get(address, "/worker_status", "", std::move(http_call_back)));
+    mutex.lock();
+    mutex.unlock();
 }
 
 TEST_F(HttpClientTest, testRequestInvalidRoute) {
@@ -119,12 +130,40 @@ TEST_F(HttpClientTest, testRequestInvalidRoute) {
     auto server  = initServer(address);
     ASSERT_TRUE(server != nullptr);
 
-    HandleHttpPacket::HttpCallBack http_call_back = [](bool ok, const std::string& response_body) {
+    std::mutex mutex;
+    mutex.lock();
+    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
         ASSERT_FALSE(ok);
         ASSERT_TRUE(response_body == "");
+        mutex.unlock();
     };
 
     ASSERT_TRUE(http_client_->get(address, "/worker_status_invalid", "", std::move(http_call_back)));
+    mutex.lock();
+    mutex.unlock();
+}
+
+TEST_F(HttpClientTest, testRecycleConnectionInHandlePacket) {
+    auto http_client_ = std::make_shared<SimpleHttpClient>();
+    ASSERT_TRUE(http_client_ != nullptr);
+
+    auto address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
+    auto server  = initServer(address);
+    ASSERT_TRUE(server != nullptr);
+    std::mutex mutex;
+    mutex.lock();
+    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
+        ASSERT_TRUE(ok);
+        processResponse(response_body);
+        mutex.unlock();
+    };
+    ASSERT_TRUE(http_client_->get(address, "/worker_status", "", std::move(http_call_back)));
+    ASSERT_TRUE(http_client_->connection_pool_->busy_connection_pool_[address]->size() == 1);
+    ASSERT_TRUE(http_client_->connection_pool_->idle_connection_pool_[address]->size() == 0);
+    mutex.lock();
+    mutex.unlock();
+    ASSERT_TRUE(http_client_->connection_pool_->busy_connection_pool_[address]->size() == 0);
+    ASSERT_TRUE(http_client_->connection_pool_->idle_connection_pool_[address]->size() == 1);
 }
 
 }  // namespace http_server

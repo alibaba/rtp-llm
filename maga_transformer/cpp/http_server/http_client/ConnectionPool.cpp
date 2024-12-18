@@ -10,10 +10,10 @@ ConnectionPool::ConnectionPool() {
 }
 
 ConnectionPool::~ConnectionPool() {
-    auto                        clearConnectionPool = [](ConnectionListMap& connection_pool) {
+    auto clearConnectionPool = [](ConnectionListMap& connection_pool) {
         ConnectionListMapItr iter;
         for (iter = connection_pool.begin(); iter != connection_pool.end(); ++iter) {
-            auto   tmp_list = iter->second;
+            auto              tmp_list = iter->second;
             ConnectionListItr tmp_iter;
             for (tmp_iter = tmp_list->begin(); tmp_iter != tmp_list->end(); ++tmp_iter) {
                 (*tmp_iter).reset();
@@ -73,7 +73,7 @@ std::shared_ptr<anet::Connection> ConnectionPool::getAndRemoveIdleConnection(con
         return nullptr;
     }
     // have idle connection
-    auto idle_conn      = idle_conn_list->front();
+    auto idle_conn = idle_conn_list->front();
     idle_conn_list->pop_front();
     if (idle_conn && !idle_conn->isClosed()) {
         insertBusyConnection(idle_conn, address);
