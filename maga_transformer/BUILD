@@ -342,6 +342,7 @@ py_library(
         ":lora",
         ":sdk",
         "//maga_transformer/tools:model_assistant",
+        "//maga_transformer/tools/convert:convert",
         "//maga_transformer/distribute:distribute",
         ":tokenizer",
         "//maga_transformer/aios/kmonitor:kmonitor_py",
