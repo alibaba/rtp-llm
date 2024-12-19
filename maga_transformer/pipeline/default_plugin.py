@@ -37,6 +37,9 @@ class DefaultPlugin(object):
                              decoding_state: Optional[DecodingState] = None, return_incremental: bool = False, **kwargs: Any) -> str:
         if decoding_state is None:
             all_text = tokenizer.decode(tokens)
+            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+            if len(all_text) > 0 and u'\uFFFD' == all_text[-1]:
+                all_text = all_text[:-1]
             return all_text, all_text
 
         if isinstance(tokenizer, PreTrainedTokenizerBase):

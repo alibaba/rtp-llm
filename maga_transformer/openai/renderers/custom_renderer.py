@@ -201,8 +201,6 @@ class CustomChatRenderer():
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
-
-        generate_config.is_streaming = True
         output_generator: AsyncGenerator[GenerateOutput, None] = model.enqueue(
             GenerateInput(
                 request_id=request_id,
@@ -265,7 +263,7 @@ class CustomChatRenderer():
 
         return chat_logprob
 
-    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
@@ -273,12 +271,15 @@ class CustomChatRenderer():
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
-            return await self._create_empty_delta(output.aux_info)
+            if is_streaming:
+                return await self._create_empty_delta(output.aux_info)
+            else:
+                decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token):]
-        if is_truncated(status.delta_output_string, stop_words_str):
+        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
-        if not is_truncated(status.delta_output_string, stop_word_slice_list):
+        if not is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -327,13 +328,13 @@ class CustomChatRenderer():
                 )
         )
 
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str]):
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:
             if buffer.output is None:
                 raise Exception("last output should not be None")
             aux_info = buffer.output.aux_info
-            trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str)
+            trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str, is_streaming)
             output_items.append(OutputDelta(
                 trunc_string,
                 await self._generate_log_probs(buffer, buffer.output),
@@ -395,12 +396,12 @@ class CustomChatRenderer():
                 raise Exception("output num != num_return_sequences")
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
-                delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list))
+                delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list, generate_config.is_streaming))
             yield await self._generate_stream_response(delta_list)
             if self._check_all_finished(status_list):
                 break
         if index != 0:
-            yield await self._flush_buffer(status_list, generate_config.stop_words_str)
+            yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming)
             yield await self._generate_final(status_list)
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1) -> Optional[FinisheReason]:

@@ -181,17 +181,17 @@ class Pipeline(object):
         if not generate_config.print_stop_words:
             if not generate_config.return_incremental:
                 if not generate_output.finished:
-                    text = truncate_response_with_stop_words(text, stop_word_str_slices)
+                    text = truncate_response_with_stop_words(text, stop_word_str_slices, generate_config.is_streaming)
                 else:
-                    text = truncate_response_with_stop_words(text, stop_word_str_list)
+                    text = truncate_response_with_stop_words(text, stop_word_str_list, generate_config.is_streaming)
             else:
                 if not generate_output.finished:
                     text = token_buffer + text
-                    trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices)
+                    trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, generate_config.is_streaming)
                     token_buffer = text[len(trunc_text):]
                     text = trunc_text
                 else:
-                    text = truncate_response_with_stop_words(token_buffer + text, stop_word_str_list)
+                    text = truncate_response_with_stop_words(token_buffer + text, stop_word_str_list, generate_config.is_streaming)
         return text, token_buffer
 
     def decode_tokens(self,
@@ -209,7 +209,7 @@ class Pipeline(object):
         all_texts = []
         output_lens = []
         if len(decoding_states) == 0:
-            if generate_config.num_beams == 1:
+            if generate_config.num_beams == 1 and generate_config.is_streaming:
                 decoding_states = [DecodingState() for _ in range(len(generate_outputs.generate_outputs))]
             else:
                 # num_beams不等于1的情况下，不能进行增量decode，因为过去的token id会变化
@@ -270,9 +270,6 @@ class Pipeline(object):
                               generate_config=generate_config,
                               tokenizer=self.tokenizer,
                               token_type_ids=token_type_ids)
-
-        if generate_config.stop_words_str:
-            generate_config.is_streaming = True
         stop_word_strs = generate_config.stop_words_str
         stop_word_str_slices = get_stop_word_slices(stop_word_strs)
         stop_word_ids = generate_config.stop_words_list

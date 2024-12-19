@@ -62,7 +62,9 @@ class RequestExtractor:
         update_optional('return_logits', ['return_logits', 'output_logits'])
         update_optional('return_input_ids', ['return_input_ids', 'output_input_ids'])
         update_optional('max_new_tokens', ['gen_length', 'max_new_tokens'])
-        generate_config.is_streaming = self.is_streaming(kwargs) or kwargs.get('stream', False)
+        pd_separation = bool(int(os.environ.get('PD_SEPARATION', 0)))
+        if self.is_streaming(kwargs) or (kwargs.get('stream', False) == True) or pd_separation:
+            generate_config.is_streaming = True
         return generate_config, remain_kwargs
 
     def _format_request(self, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:

@@ -325,10 +325,10 @@ class QwenRenderer(CustomChatRenderer):
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
 
-    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str]) -> OutputDelta:
+    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
         # function call is disabled when logprobs is required.
         if not isinstance(status, QwenStreamStatus):
-            return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list)
+            return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
@@ -341,12 +341,12 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(output.aux_info)
         if (status.generating_function_call):
             return await self._create_empty_delta(output.aux_info)
-        if is_truncated(status.total_output_string, stop_words_str):
+        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
         if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
             status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
-            if is_truncated(status.delta_output_string, stop_word_slice_list):
+            if is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
                 return await self._create_empty_delta(output.aux_info)
             else:
                 status.update_result()
@@ -366,9 +366,9 @@ class QwenRenderer(CustomChatRenderer):
             return [QwenStreamStatus(request) for _ in range(n)]
 
     #override
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str]):
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
         if (not isinstance(buffer_list[0], QwenStreamStatus)):
-            return await super()._flush_buffer(buffer_list, stop_words_str)
+            return await super()._flush_buffer(buffer_list, stop_words_str, is_streaming)
         output_items: List[OutputDelta] = []
         for status in buffer_list:
             if status.generating_function_call:
@@ -386,7 +386,7 @@ class QwenRenderer(CustomChatRenderer):
                     status.output_token_length,
                     status.reuse_length))
             else:
-                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str)
+                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str, is_streaming)
                 output_items.append(OutputDelta(
                     trunc_string,
                     await self._generate_log_probs(status, status.output),

@@ -178,7 +178,7 @@ class QwenAgentRenderer(CustomChatRenderer):
 
             if (output_length > responded_length + len('✿FUNCTION✿:')):
                 delta_string = output_string[responded_length : output_length - len('✿FUNCTION✿:')]
-                trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list)
+                trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list, generate_config.is_streaming)
                 if trunc_string != delta_string:
                     continue
                 responded_string = output_string[: output_length - len('✿FUNCTION✿:')]
@@ -230,7 +230,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                 choices=[ChatCompletionResponseStreamChoice(
                     index=index,
                     delta=DeltaMessage(
-                        content=truncate_response_with_stop_words(output_string[responded_length:], generate_config.stop_words_str),
+                        content=truncate_response_with_stop_words(output_string[responded_length:], generate_config.stop_words_str, generate_config.is_streaming),
                     ),
                 )],
                 usage=UsageInfo(

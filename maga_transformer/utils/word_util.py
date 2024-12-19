@@ -65,16 +65,26 @@ def get_stop_word_slices(stop_word_list: List[Union[str, List[int]]]) -> List[Un
             result.append(stop_word[:-i])
     return result
 
-def is_truncated(input_str: str, trunc_strs: List[str]):
-    if len(input_str) > 0 and len(truncate_response_with_stop_words(input_str, trunc_strs)) != len(input_str):
+def is_truncated(input_str: str, trunc_strs: List[str], is_streaming: bool):
+    if len(input_str) > 0 and len(truncate_response_with_stop_words(input_str, trunc_strs, is_streaming)) != len(input_str):
         return True
     return False
 
-def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
-    for stop_word in stop_word_strs:
-        if stop_word and response.endswith(stop_word):
-            response = response[:(-len(stop_word))]
-            break
+def truncate_response_with_stop_words(response: str, stop_word_strs: List[str], is_streaming: bool = True):
+    if is_streaming:
+        for stop_word in stop_word_strs:
+            if stop_word and response.endswith(stop_word):
+                response = response[:(-len(stop_word))]
+                break
+    else:
+        min_index = len(response)
+        for stop_word in stop_word_strs:
+            if stop_word:
+                index = response.find(stop_word)
+                if index != -1 and index < min_index:
+                    min_index = index
+        if min_index != len(response):
+            response = response[:min_index]
     return response
 
 def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
