@@ -90,23 +90,6 @@ InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string&
     return pr;
 }
 
-inline void WriteExceptionResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                   const std::exception& e) {
-    if (writer->isConnected() == false) {
-        return;
-    }
-    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-    writer->AddHeader("Content-Type", "application/json");
-
-    int status_code = 500;
-    if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-        status_code = he->getType();
-    }
-    writer->SetStatus(status_code, "Internal Server Error");
-
-    writer->Write(HttpApiServerException::formatException(e));
-}
-
 InferenceService::InferenceService(const std::shared_ptr<EngineBase>&              engine,
                                    const std::shared_ptr<MultimodalProcessor>&     mm_processor,
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
@@ -139,60 +122,29 @@ void checkMasterWorker(bool isInternal) {
     }
 }
 
-std::string getSource(const std::string& raw_request) {
-    std::string source = "unknown";
-    try {
-        auto body    = ParseJson(raw_request);
-        auto bodyMap = AnyCast<JsonMap>(body);
-        auto it      = bodyMap.find("source");
-        if (it == bodyMap.end()) {
-            return source;
-        }
-        FromJson(source, it->second);
-        return source;
-    } catch (const std::exception& e) {
-        FT_LOG_DEBUG("getSource failed, error: %s", e.what());
-    }
-    return source;
-}
-
-void InferenceService::handleException(const std::exception& e,
-                                       int64_t request_id,
-                                       const http_server::HttpRequest& request,
-                                       const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
-    const auto body = request.GetBody();
-    if (metric_reporter_) {
-        std::string source = getSource(body);
-        int error_code = -1;
-        if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-            FT_LOG_WARNING("dynamic_cast succ");
-            error_code = he->getType();
-        }
-        metric_reporter_->reportErrorQpsMetric(source, error_code);
-    }
-    FT_LOG_WARNING("inference failed, found exception: [%s]", e.what());
-    AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
-    WriteExceptionResponse(writer, e);
-}
-
 void InferenceService::inference(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                  const http_server::HttpRequest&                         request,
                                  bool                                                    isInternal) {
-    int64_t request_id = request_counter_->incAndReturn();
+    int64_t request_id = -1;
+    if (request_counter_ == nullptr) {
+        FT_LOG_WARNING("inference failed, request_counter is null");
+        return;
+    }
+    request_id = request_counter_->incAndReturn();
     try {
         checkMasterWorker(isInternal);
         inferResponse(request_id, writer, request);
     } catch (const std::exception& e) {
-        handleException(e, request_id, request, writer);
+        HttpApiServerException::handleException(e, request_id, metric_reporter_, request, writer);
     }
 }
 
 void InferenceService::inferResponse(int64_t                                                 request_id,
                                      const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                      const http_server::HttpRequest&                         request) {
-    if (!controller_ || !request_counter_) {
+    if (!controller_) {
         throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "infer response failed, concurrency controller or request counter is null");
+                "infer response failed, concurrency controller is null");
     }
     autil::StageTime iterate_stage_timer;
     auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();

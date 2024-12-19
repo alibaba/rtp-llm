@@ -87,8 +87,15 @@ bool HttpApiServer::registerServices() {
 
     // add uri:
     // POST: /
-    if (!registerInferenceService()) {
+    if (!is_embedding_ && !registerInferenceService()) {
         FT_LOG_WARNING("HttpApiServer register inference service failed.");
+        return false;
+    }
+
+    // add uri
+    // POST / /v1/embeddings /v1/embeddings/similarity /v1/classifier /v1/rerank
+    if (is_embedding_ && !registerEmbedingService()) {
+        FT_LOG_WARNING("HttpApiServer register embeding service failed.");
         return false;
     }
 
@@ -213,6 +220,42 @@ bool HttpApiServer::registerInferenceService() {
 
     return http_server_->RegisterRoute("POST", "/",                   inference_callback) &&
            http_server_->RegisterRoute("POST", "/inference_internal", inference_internal_callback);
+}
+
+bool HttpApiServer::registerEmbedingService() {
+    embedding_service_.reset(new EmbeddingService(embedding_endpoint_,
+                                                  request_counter_,
+                                                  controller_,
+                                                  metric_reporter_));
+    auto callback = [active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        embedding_service->embedding(writer, request);
+    };
+    auto callback_dense = [active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        embedding_service->embedding(writer, request, EmbeddingEndpoint::DENSE);
+    };
+    auto callback_sparse = [active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        embedding_service->embedding(writer, request, EmbeddingEndpoint::SPARSE);
+    };
+    auto callback_colbert = [active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        embedding_service->embedding(writer, request, EmbeddingEndpoint::COLBERT);
+    };
+
+    return http_server_->RegisterRoute("POST", "/v1/embeddings",            callback) &&
+           http_server_->RegisterRoute("POST", "/v1/embeddings/similarity", callback) &&
+           http_server_->RegisterRoute("POST", "/v1/embeddings/dense",      callback_dense) &&
+           http_server_->RegisterRoute("POST", "/v1/embeddings/sparse",     callback_sparse) &&
+           http_server_->RegisterRoute("POST", "/v1/embeddings/colbert",    callback_colbert) &&
+           http_server_->RegisterRoute("POST", "/v1/classifier",            callback) &&
+           http_server_->RegisterRoute("POST", "/v1/reranker",              callback) &&
+           http_server_->RegisterRoute("POST", "/",                         callback);
 }
 
 void HttpApiServer::stop() {

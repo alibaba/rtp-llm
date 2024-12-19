@@ -16,7 +16,7 @@ public:
     MOCK_METHOD1(reportQpsMetric, void(const std::string&));
     MOCK_METHOD1(reportCancelQpsMetric, void(const std::string&));
     MOCK_METHOD1(reportSuccessQpsMetric, void(const std::string&));
-    MOCK_METHOD2(reportErrorQpsMetric, void(const std::string&, const std::string&));
+    MOCK_METHOD2(reportErrorQpsMetric, void(const std::string&, int));
     MOCK_METHOD0(reportConflictQpsMetric, void());
     MOCK_METHOD0(reportResponseIterateQpsMetric, void());
 

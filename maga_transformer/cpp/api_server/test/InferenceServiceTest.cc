@@ -173,29 +173,7 @@ TEST_F(InferenceServiceTest, InferResponseFailed_ControllerIsNull) {
         FAIL() << "should throw HttpApiServerException::UNKNOWN_ERROR";
     } catch (const HttpApiServerException& e) {
         EXPECT_EQ(e.getType(), HttpApiServerException::UNKNOWN_ERROR);
-        EXPECT_EQ(e.getMessage(), "infer response failed, concurrency controller or request counter is null");
-    } catch (const std::exception& e) {
-        FAIL() << "should throw HttpApiServerException::UNKNOWN_ERROR instead of std::exception";
-    }
-
-    // 需要手动释放 unique_ptr 的所有权, 避免 double free
-    writer_ptr.release();
-}
-
-TEST_F(InferenceServiceTest, InferResponseFailed_RequestCounterIsNull) {
-    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
-    ASSERT_TRUE(writer != nullptr);
-    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
-    http_server::HttpRequest                         request;
-
-    // 模拟 request counter 为空
-    inference_service_->request_counter_ = nullptr;
-    try {
-        inference_service_->inferResponse(10086, writer_ptr, request);
-        FAIL() << "should throw HttpApiServerException::UNKNOWN_ERROR";
-    } catch (const HttpApiServerException& e) {
-        EXPECT_EQ(e.getType(), HttpApiServerException::UNKNOWN_ERROR);
-        EXPECT_EQ(e.getMessage(), "infer response failed, concurrency controller or request counter is null");
+        EXPECT_EQ(e.getMessage(), "infer response failed, concurrency controller is null");
     } catch (const std::exception& e) {
         FAIL() << "should throw HttpApiServerException::UNKNOWN_ERROR instead of std::exception";
     }

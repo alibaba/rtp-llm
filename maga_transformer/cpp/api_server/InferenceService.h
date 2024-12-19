@@ -50,11 +50,6 @@ public:
                    const http_server::HttpRequest&                         request,
                    bool                                                    isInternal = false);
 private:
-    void handleException(const std::exception& e,
-                         int64_t request_id,
-                         const http_server::HttpRequest& request,
-                         const std::unique_ptr<http_server::HttpResponseWriter>& writer);
-
     void inferResponse(int64_t                                                 request_id,
                        const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                        const http_server::HttpRequest&                         request);

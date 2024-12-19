@@ -85,6 +85,15 @@ public:
         tryFlush(level);
     }
 
+    template<typename... Args>
+    void log(uint32_t          level,
+             const std::string format,
+             const Args&...     args)  {
+        std::string logstr = rtp_llm::fmtstr(format, args...);
+        logger_->log(level, "%s", logstr.c_str());
+        tryFlush(level);
+    }
+
     void log(std::exception const& ex, uint32_t level = alog::LOG_LEVEL_ERROR) {
         log(level,
             __FILE__,
@@ -185,11 +194,11 @@ private:
 
 #define FT_ACCESS_LOG(level, ...)                                                                                      \
     do {                                                                                                               \
-        auto& logger = rtp_llm::Logger::getAccessLogger();                                                   \
+        auto& logger = rtp_llm::Logger::getAccessLogger();                                                             \
         if (!logger.isLevelEnabled(level)) {                                                                           \
             break;                                                                                                     \
         }                                                                                                              \
-        logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
+        logger.log(level, __VA_ARGS__);                                                                                \
     } while (0)
 
 #define FT_ACCESS_LOG_TRACE(...) FT_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)

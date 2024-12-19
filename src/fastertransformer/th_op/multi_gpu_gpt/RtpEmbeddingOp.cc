@@ -1,7 +1,9 @@
 #include <optional>
 #include <pybind11/pytypes.h>
+
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
+
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
@@ -18,8 +20,9 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
         rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
-        py::object py_render = model.attr("custom_module").attr("renderer");
-        py::object py_handler = model.attr("custom_module").attr("handler");
+        py::object custom_module = model.attr("custom_module");
+        py::object py_render     = model.attr("custom_module").attr("renderer");
+        py::object py_handler    = model.attr("custom_module").attr("handler");
 
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
@@ -35,7 +38,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
                 params.gpt_init_parameter.max_seq_len_));
         }
         startRpcServer(gpt_init_params, py_render, params.metrics_reporter, mm_processor_);
-        startHttpServer(embedding_engine_, mm_processor_, gpt_init_params, py_render);
+        startHttpServer(embedding_engine_, mm_processor_, gpt_init_params, custom_module);
     } catch (const std::exception& e) {
         FT_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
@@ -57,8 +60,8 @@ void RtpEmbeddingOp::stop() {
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,
                                      std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
                                      const ft::GptInitParameter&                   gpt_init_params,
-                                     py::object                                    py_render) {
-    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, mm_processor, gpt_init_params, py_render));
+                                     py::object                                    custom_module) {
+    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, mm_processor, gpt_init_params, custom_module));
     std::string http_server_address("tcp:0.0.0.0:" + std::to_string(gpt_init_params.http_port_));
     if (http_server_->start(http_server_address)) {
         FT_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());

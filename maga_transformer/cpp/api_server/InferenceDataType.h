@@ -22,6 +22,16 @@ namespace rtp_llm {
                                     } \
                                 }
 
+class EmbeddingRequest: public autil::legacy::Jsonizable {
+public:
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("source", source, "unknown");
+        json.Jsonize("private_request", private_request, false);
+    }
+    std::string source;
+    bool private_request;
+};
+
 class RawRequest: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {

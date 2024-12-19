@@ -13,7 +13,7 @@ public:
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("request_str", request_, request_);
+        json.Jsonize("request_json", request_, request_);
     }
 
     void clearRequest() {
@@ -27,7 +27,7 @@ private:
 class ResponseLogInfo: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("response", response_list_, response_list_);
+        json.Jsonize("responses", response_list_, response_list_);
         json.Jsonize("exception_traceback", exception_traceback_, exception_traceback_);
     }
 
@@ -60,7 +60,7 @@ public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("request", request_, request_);
         json.Jsonize("response", response_, response_);
-        json.Jsonize("request_id", request_id_, request_id_);
+        json.Jsonize("id", request_id_, request_id_);
         json.Jsonize("log_time", log_time_, log_time_);
     }
 
@@ -90,6 +90,84 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request,
     }
 }
 
+bool AccessLogWrapper::logResponse() {
+    static bool checked = false;
+    static bool log_response = false;
+    if (!checked) {
+        if (autil::EnvUtil::getEnv("PY_INFERENCE_LOG_RESPONSE", 0) == 1) {
+            log_response = true;
+        } else {
+            log_response = false;
+        }
+        checked = true;
+    }
+    return log_response;
+}
+
+std::string decodeUnicode(const std::string& input) {
+    std::string result;
+    size_t i = 0;
+    while (i < input.size()) {
+        if (input[i] == '\\' && i + 5 < input.size() && input[i + 1] == 'u') {
+            // 提取 \uXXXX 中的 XXXX
+            std::string hexStr = input.substr(i + 2, 4);
+            unsigned int codePoint;
+            std::stringstream ss;
+            ss << std::hex << hexStr;
+            ss >> codePoint;
+
+            // 转换为 UTF-8 编码
+            if (codePoint <= 0x7F) {
+                result += static_cast<char>(codePoint);
+            } else if (codePoint <= 0x7FF) {
+                result += static_cast<char>((codePoint >> 6) | 0xC0);
+                result += static_cast<char>((codePoint & 0x3F) | 0x80);
+            } else if (codePoint <= 0xFFFF) {
+                result += static_cast<char>((codePoint >> 12) | 0xE0);
+                result += static_cast<char>(((codePoint >> 6) & 0x3F) | 0x80);
+                result += static_cast<char>((codePoint & 0x3F) | 0x80);
+            }
+            i += 6; // 跳过 \uXXXX
+        } else {
+            result += input[i];
+            ++i;
+        }
+    }
+    return result;
+}
+
+std::string removeEscapedQuotes(const std::string& jsonString) {
+    std::string result = jsonString;
+    std::string escapedQuote = "\\\"";
+    std::string quote = "\"";
+    // Remove escaped quotes
+    size_t pos = 0;
+    while ((pos = result.find(escapedQuote, pos)) != std::string::npos) {
+        result.replace(pos, escapedQuote.length(), quote);
+        pos += quote.length();
+    }
+    return result;
+}
+
+std::string removeQuotesAroundBraces(const std::string& input) {
+    std::string result;
+    for (size_t i = 0; i < input.length(); ++i) {
+        if (input[i] == '"') {
+            if (i > 0 && input[i - 1] == '}') {
+                // Skip this quote as it's right after '}'
+                continue;
+            }
+            if (i < input.length() - 1 && input[i + 1] == '{') {
+                // Skip this quote as it's right before '{'
+                continue;
+            }
+        }
+        result += input[i];
+    }
+    return result;
+}
+
+// for embedding model
 void AccessLogWrapper::logSuccessAccess(const std::string&                raw_request,
                                         int64_t                           request_id,
                                         const std::optional<std::string>& logable_response,
@@ -97,22 +175,26 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
     if (private_request) {
         return;
     }
+    if (logable_response.has_value() == false) {
+        return;
+    }
 
     try {
-        RequestLogInfo  request(raw_request);
+        RequestLogInfo  request(decodeUnicode(raw_request));
         ResponseLogInfo response;
-        if (logable_response.has_value()) {
+        if (logResponse()) {
             response.addResponse(logable_response.value());
         }
         AccessLogInfo access_log_info(request, response, request_id);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        FT_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
+        FT_ACCESS_LOG_INFO("%s", removeQuotesAroundBraces(removeEscapedQuotes(access_log_info_str)).c_str());
     } catch (const std::exception& e) {
         FT_LOG_ERROR("AccessLogWrapper logSuccessAccess failed, error: %s", e.what());
     }
 }
 
+// for normal model
 void AccessLogWrapper::logSuccessAccess(const std::string&              raw_request,
                                         int64_t                         request_id,
                                         const std::vector<std::string>& complete_response,

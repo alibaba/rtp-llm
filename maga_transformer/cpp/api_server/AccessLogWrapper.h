@@ -8,6 +8,8 @@
 namespace rtp_llm {
 
 class AccessLogWrapper {
+private:
+    static bool logResponse();
 public:
     static void logQueryAccess(const std::string& raw_request,
                                int64_t            request_id,

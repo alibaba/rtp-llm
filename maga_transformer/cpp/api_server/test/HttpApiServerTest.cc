@@ -27,12 +27,14 @@ private:
 };
 
 TEST_F(HttpApiServerTest, testApiServerStart) {
+    const auto           port = autil::NetUtil::randomPort();
+    const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
     ft::GptInitParameter params;
     py::object           token_processor;
-    HttpApiServer        server(nullptr, nullptr, "tcp:0.0.0.0:9999", params, token_processor);
+    HttpApiServer        server(nullptr, nullptr, addr, params, token_processor);
     ASSERT_TRUE(server.start());
     ASSERT_FALSE(server.isStoped());
-    ASSERT_EQ(server.getListenAddr(), "tcp:0.0.0.0:9999");
+    ASSERT_EQ(server.getListenAddr(), addr);
     server.stop();
     ASSERT_TRUE(server.isStoped());
 }
@@ -52,6 +54,30 @@ TEST_F(HttpApiServerTest, testApiServerStop) {
     server->stop();
     EXPECT_TRUE(server->isStoped());
     t.join();
+}
+
+TEST_F(HttpApiServerTest, IsEmbedding_InferenceService) {
+    const auto           port = autil::NetUtil::randomPort();
+    const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
+    ft::GptInitParameter params;
+    py::object           token_processor;
+    HttpApiServer        server(nullptr, nullptr, addr, params, token_processor);
+    ASSERT_TRUE(server.start());
+    ASSERT_NE(server.inference_service_, nullptr);
+    ASSERT_EQ(server.embedding_service_, nullptr);
+    server.stop();
+}
+
+TEST_F(HttpApiServerTest, IsEmbedding_EmbeddingService) {
+    const auto           port = autil::NetUtil::randomPort();
+    const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
+    ft::GptInitParameter params;
+    py::object           py_render;
+    HttpApiServer        server(nullptr, nullptr, params, py_render);
+    ASSERT_TRUE(server.start(addr));
+    ASSERT_EQ(server.inference_service_, nullptr);
+    ASSERT_NE(server.embedding_service_, nullptr);
+    server.stop();
 }
 
 // -------------------------- HealthService Test --------------------------

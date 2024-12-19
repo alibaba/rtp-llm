@@ -3,6 +3,11 @@
 #include <exception>
 #include <string>
 
+#include "maga_transformer/cpp/http_server/http_server/HttpResponseWriter.h"
+#include "maga_transformer/cpp/http_server/http_server/HttpRequest.h"
+
+#include "maga_transformer/cpp/api_server/ApiServerMetrics.h"
+
 namespace rtp_llm {
 
 class HttpApiServerException: public std::exception {
@@ -32,23 +37,22 @@ public:
         REMOTE_LOAD_KV_CACHE_ERROR = 609,
         REMOTE_GENERATE_ERROR = 610,
     };
-
     HttpApiServerException(Type type, const std::string& message) : type_(type), message_(message) {}
 
     virtual const char* what() const noexcept override {
         return message_.c_str();
     }
-
     Type getType() const {
         return type_;
     }
-
     std::string getMessage() const {
         return message_;
     }
-
-    static std::string formatException(const std::exception& e);
-
+    static void handleException(const std::exception& e,
+                                int64_t request_id,
+                                std::shared_ptr<ApiServerMetricReporter> metric_reporter,
+                                const http_server::HttpRequest& request,
+                                const std::unique_ptr<http_server::HttpResponseWriter>& writer);
 private:
     Type type_;
     std::string message_;

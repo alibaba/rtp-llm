@@ -14,6 +14,7 @@
 #include "maga_transformer/cpp/api_server/TokenProcessor.h"
 #include "maga_transformer/cpp/api_server/EmbeddingEndpoint.h"
 #include "maga_transformer/cpp/api_server/InferenceService.h"
+#include "maga_transformer/cpp/api_server/EmbeddingService.h"
 
 namespace rtp_llm {
 
@@ -37,6 +38,7 @@ public:
         params_(params),
         token_processor_(new TokenProcessor(token_processor)) {
 
+        is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
         init_controller(params);
@@ -46,9 +48,10 @@ public:
     HttpApiServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   const ft::GptInitParameter&          params,
-                  py::object                           py_render):
-        params_(params), embedding_endpoint_(EmbeddingEndpoint(embedding_engine, mm_processor, py_render)) {
+                  py::object                           custom_module): params_(params) {
 
+        is_embedding_ = true;
+        embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
         init_controller(params);
@@ -76,8 +79,10 @@ private:
     bool registerSysCmdService();
     bool registerTokenizerService();
     bool registerInferenceService();
+    bool registerEmbedingService();
 
 private:
+    bool                                  is_embedding_;
     std::atomic_bool                      is_stopped_{true};
     std::shared_ptr<autil::AtomicCounter> active_request_count_;
     std::shared_ptr<autil::AtomicCounter> request_counter_;
@@ -89,7 +94,7 @@ private:
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>              token_processor_;
 
-    std::optional<EmbeddingEndpoint> embedding_endpoint_;
+    std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
 
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
@@ -100,6 +105,7 @@ private:
     std::shared_ptr<SysCmdService>           sys_cmd_service_;
     std::shared_ptr<TokenizerService>        tokenizer_service_;
     std::shared_ptr<InferenceService>        inference_service_;
+    std::shared_ptr<EmbeddingService>        embedding_service_;
 };
 
 class CounterGuard {
