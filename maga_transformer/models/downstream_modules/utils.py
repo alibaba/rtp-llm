@@ -7,7 +7,7 @@ from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.downstream_modules.plugin_loader import UserModuleLoader
 from maga_transformer.models.downstream_modules import SparseEmbeddingModule, DenseEmbeddingModule, \
-    ALLEmbeddingModule, ColBertEmbeddingModule, ClassifierModule, BgeM3EmbeddingModule
+    ALLEmbeddingModule, ColBertEmbeddingModule, ClassifierModule, BgeM3EmbeddingModule, RerankerModule
 
 def create_custom_module(task_type: TaskType, config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
     # try import internal module
@@ -34,4 +34,6 @@ def create_custom_module(task_type: TaskType, config: GptInitModelParameters, to
         return ClassifierModule(config, tokenizer)
     elif task_type == TaskType.BGE_M3:
         return BgeM3EmbeddingModule(config, tokenizer)
+    elif task_type == TaskType.RERANKER:
+        return RerankerModule(config, tokenizer)
     raise Exception(f"unknown task_type: {task_type}")

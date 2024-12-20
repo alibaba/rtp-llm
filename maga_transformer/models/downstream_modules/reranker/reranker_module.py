@@ -10,6 +10,7 @@ from maga_transformer.async_decoder_engine.embedding.interface import EngineInpu
 from maga_transformer.models.downstream_modules.reranker.api_datatype import VoyageRerankerRequest, VoyageRerankerResponse, RankingItem
 from maga_transformer.models.downstream_modules.classifier.classifier import ClassifierHandler
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierHandler
+from maga_transformer.models.downstream_modules.classifier.bert_classifier import BertClassifierHandler
 
 
 class RerankerModule(CustomModule):
@@ -17,6 +18,12 @@ class RerankerModule(CustomModule):
         super().__init__(config, tokenizer)
         self.renderer = RerankerRenderer(self.config_, self.tokenizer_)
         self.handler = ClassifierHandler(self.config_)
+
+class BertRerankerModule(CustomModule):
+    def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):    
+        super().__init__(config, tokenizer)
+        self.renderer = RerankerRenderer(self.config_, self.tokenizer_)
+        self.handler = BertClassifierHandler(self.config_)
         
 class RobertaRerankerModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
