@@ -270,10 +270,11 @@ class CustomChatRenderer():
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
-            if is_streaming:
+        if is_streaming:
+            if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
                 return await self._create_empty_delta(output.aux_info)
-            else:
+        else:
+            while (len(decoded_string) > 0) and (u'\uFFFD' == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token):]
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
