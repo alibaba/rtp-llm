@@ -19,6 +19,7 @@ cc_library(
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
         "//src/fastertransformer/devices:devices_base",
         "@com_google_googletest//:gtest",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
     visibility=['//visibility:public'],
 )
