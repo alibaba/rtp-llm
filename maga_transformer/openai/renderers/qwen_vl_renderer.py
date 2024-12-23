@@ -66,7 +66,9 @@ class Qwen2VLRenderer(CustomChatRenderer):
                                       height=config.resized_height or -1,
                                       min_pixels=config.min_pixels or -1,
                                       max_pixels=config.max_pixels or -1,
-                                      fps=config.fps or -1)
+                                      fps=config.fps or -1,
+                                      min_frames=config.min_frames or -1,
+                                      max_frames=config.max_frames or -1)
         for message in messages:
             if isinstance(message.content, str):
                 final_messages.append({"role": message.role.value, "content": message.content})

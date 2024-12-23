@@ -138,10 +138,10 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         size_factor = FRAME_FACTOR
         nframes = frames / vr.get_avg_fps() * fps
         nframes = round_by_factor(nframes, size_factor)
-        min_frames = FPS_MIN_FRAMES
+        min_frames = FPS_MIN_FRAMES if configs.min_frames == -1 else configs.min_frames
         if nframes < min_frames:
             nframes = ceil_by_factor(min_frames, size_factor)
-        max_frames = FPS_MAX_FRAMES
+        max_frames = FPS_MAX_FRAMES if configs.max_frames == -1 else configs.max_frames
         if nframes > max_frames:
             nframes = floor_by_factor(max_frames, size_factor)
 

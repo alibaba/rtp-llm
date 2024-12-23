@@ -73,7 +73,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             auto mm_input = &input->multimodal_inputs(i);
             auto mm_preprocess_config = &mm_input->mm_preprocess_config();
             mm_inputs.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(), 
-                mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps());
+                mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps(),
+                mm_preprocess_config->min_frames(), mm_preprocess_config->max_frames());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }

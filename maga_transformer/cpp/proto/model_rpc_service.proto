@@ -64,6 +64,8 @@ message MMPreprocessConfigPB {
     int32 min_pixels = 3;
     int32 max_pixels = 4;
     int32 fps = 5;
+    int32 min_frames = 6;
+    int32 max_frames = 7;
 }
 
 message MulitmodalInputPB {

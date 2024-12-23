@@ -78,7 +78,9 @@ private:
                                                  mm_input.mm_preprocess_config.height,
                                                  mm_input.mm_preprocess_config.min_pixels,
                                                  mm_input.mm_preprocess_config.max_pixels,
-                                                 mm_input.mm_preprocess_config.fps});
+                                                 mm_input.mm_preprocess_config.fps,
+                                                 mm_input.mm_preprocess_config.min_frames,
+                                                 mm_input.mm_preprocess_config.max_frames});
             }
             try {
                 py::gil_scoped_acquire acquire;

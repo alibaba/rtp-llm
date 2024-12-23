@@ -34,6 +34,8 @@ class MMPreprocessConfig:
     min_pixels: int = -1
     max_pixels: int = -1
     fps: int = -1
+    min_frames: int = -1
+    max_frames: int = -1
 
 class MultimodalInput:
     url: str

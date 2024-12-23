@@ -53,6 +53,8 @@ class MMPreprocessConfig(BaseModel):
     min_pixels: Optional[int] = None
     max_pixels: Optional[int] = None
     fps: Optional[int] = None
+    min_frames: Optional[int] = None
+    max_frames: Optional[int] = None
 
 class ImageURL(BaseModel):
     url: str
