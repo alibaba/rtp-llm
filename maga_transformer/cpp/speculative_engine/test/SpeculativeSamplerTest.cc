@@ -28,7 +28,7 @@ TEST_F(SpeculativeSamplerTest, top1Sample) {
 
 
 TEST_F(SpeculativeSamplerTest, stochasticSample) {
-        std::unique_ptr<RejectionSampler> sampler = std::make_unique<RejectionSampler>(device_);
+    std::unique_ptr<RejectionSampler> sampler = std::make_unique<RejectionSampler>(device_);
     size_t propose_step = 5;
     SpeculativeExecutorStreamOutputPtr propose_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
     SpeculativeExecutorStreamOutputPtr score_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -40,14 +40,14 @@ TEST_F(SpeculativeSamplerTest, stochasticSample) {
         0.1, 0.1, 0.2, 0.3, 0.1, 0.2,
         0.1, 0.1, 0.3, 0.0, 0.5, 0.0,
         0.1, 0.1, 0.2, 0.3, 0.1, 0.2,
-    }, ft::AllocationType::HOST);
+    }, ft::AllocationType::DEVICE);
     score_stream_output->all_probs = createBuffer<float>({5, 6}, {
         0.1, 0.2, 0.1, 0.1, 0.3, 0.2,
         0, 0, 1, 0, 0, 0, 
         1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.1, 0.1, 0.3, 0.1, 0.2, 0.2,
         0.1, 0.1, 0.3, 0.0, 0.5, 0.0,
-    }, ft::AllocationType::HOST);
+    }, ft::AllocationType::DEVICE);
     size_t accepted_len = sampler->stochasticSample(propose_step, propose_stream_output, score_stream_output).value();
     ASSERT_EQ(accepted_len, 3);
 }
@@ -65,14 +65,14 @@ TEST_F(SpeculativeSamplerTest, stochasticSampleError) {
         0.1, 0.1, 0.2, 0.3, 0.1, 0.2,
         0.1, 0.1, 0.3, 0.0, 0.5, 0.0,
         0.1, 0.1, 0.2, 0.3, 0.1, 0.2,
-    }, ft::AllocationType::HOST);
+    }, ft::AllocationType::DEVICE);
     score_stream_output->all_probs = createBuffer<float>({5, 6}, {
         0, 0, 0, 0, 0, 0,
         0, 0, 1, 0, 0, 0, 
         1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.1, 0.1, 0.3, 0.1, 0.2, 0.2,
         0.1, 0.1, 0.3, 0.0, 0.5, 0.0,
-    }, ft::AllocationType::HOST);
-    EXPECT_EQ(sampler->stochasticSample(propose_step, propose_stream_output, score_stream_output).status(), absl::StatusCode::kInvalidArgument);
+    }, ft::AllocationType::DEVICE);
+    EXPECT_EQ(sampler->stochasticSample(propose_step, propose_stream_output, score_stream_output).status().code(), absl::StatusCode::kInvalidArgument);
 }
 

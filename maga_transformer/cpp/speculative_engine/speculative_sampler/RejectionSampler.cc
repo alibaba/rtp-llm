@@ -126,7 +126,7 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
             auto norm_p                                                          = new_p.div(new_p.sum(0));
             const float threshold = 0.01f;
             auto check_sum = norm_p.sum(0).item<float>();
-            if (std::fabs(check_sum - 1.0f) > threshold) {
+            if (std::isnan(check_sum) || std::isinf(check_sum) || (std::fabs(check_sum - 1.0f) > threshold)) {
                 return absl::StatusOr<float>(absl::InvalidArgumentError("Multinomial sum deviates too much from 1.0, there maybe exist nan in model output"));
             }
 
