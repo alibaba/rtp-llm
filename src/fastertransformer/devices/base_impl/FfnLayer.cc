@@ -42,7 +42,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             printBufferData(*up_output, "ffn_up");
             auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
             auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input));
-
+            printBufferData(*gate_output.output, "ffn_gate");
             activation({params.configs.activation_type,
                         up_output,
                         mayGetRef(params.weights.up_weight->bias),

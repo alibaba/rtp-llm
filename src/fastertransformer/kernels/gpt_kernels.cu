@@ -44,10 +44,10 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                         const int             token_num,
                                         const int64_t         hidden_units)
 {
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < token_num * hidden_units;
+    for (int64_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (int64_t)(token_num * hidden_units);
          index += blockDim.x * gridDim.x) {
-        const int token_index     = index / hidden_units;
-        const int col_index       = index % hidden_units;
+        const int64_t token_index     = index / hidden_units;
+        const int64_t col_index       = index % hidden_units;
         const int input_id        = input_ids[token_index];
         T         embedding       = (T)0.0f;
         T         pos_embed       = (T)0.0f;

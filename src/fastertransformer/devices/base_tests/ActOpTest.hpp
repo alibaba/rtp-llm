@@ -50,7 +50,7 @@ public:
                              *gate,
                              *gate_bias,
                              std::nullopt});
-        
+
         auto output = bufferToTensor(*input);
 
        return ActOpTestOutput({output});
@@ -59,7 +59,7 @@ public:
 
     ActOpTestOutput ActTorchRefRun(ActOpTestInput& params,
                                    ActivationType atype)
-    {   
+    {
         auto input = params.input;
         if (atype == ActivationType::Silu) {
             return ActOpTestOutput({torch::silu(input)});
@@ -73,7 +73,7 @@ public:
 
     ActOpTestOutput GateActTorchRefRun(ActOpTestInput& params,
                                        ActivationType atype)
-    {   
+    {
         if (atype == ActivationType::Silu) {
             return ActOpTestOutput({torch::silu(params.gate) * params.input});
         } else if (atype == ActivationType::Gelu) {

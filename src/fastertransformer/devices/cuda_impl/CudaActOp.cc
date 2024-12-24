@@ -92,6 +92,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
         act_scale,
         stream_
     );
+    sync_check_cuda_error();
     return states;
 }
 

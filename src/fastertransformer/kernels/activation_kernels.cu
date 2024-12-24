@@ -80,7 +80,7 @@ struct GeluActivation<half2> {
 
         tmp.x = 0.5f * (1.0f + tanh_opt((0.7978845608028654f * (tmp.x + 0.044715f * tmp_pow.x))));
         tmp.y = 0.5f * (1.0f + tanh_opt((0.7978845608028654f * (tmp.y + 0.044715f * tmp_pow.y))));
- 
+
         return __hmul2(val, __float22half2_rn(tmp));
     }
 };
@@ -93,10 +93,10 @@ struct GeluActivationNoneApproximate<half2> {
         half2  val_pow3 = __hmul2(val, __hmul2(val, val));
         float2 tmp_pow  = __half22float2(val_pow3);
         float2 tmp      = __half22float2(val);
- 
+
         tmp.x = 0.5f * (1.0f + std::erf(tmp.x * M_SQRT1_2));
         tmp.y = 0.5f * (1.0f + std::erf(tmp.y * M_SQRT1_2));
- 
+
         return __hmul2(val, __float22half2_rn(tmp));
     }
 };
@@ -128,7 +128,7 @@ struct GeluActivationNoneApproximate<__nv_bfloat162> {
 
         tmp.x = 0.5f * (1.0f + std::erf(tmp.x * M_SQRT1_2));;
         tmp.y = 0.5f * (1.0f + std::erf(tmp.y * M_SQRT1_2));
-        
+
         return bf16hmul2(val, __floats2bfloat162_rn(tmp.x, tmp.y));
     }
 };
@@ -239,7 +239,7 @@ __global__ void generic_activation(T*                      up_out,
     using Float_T       = typename packed_as<float, packed_elems>::type;
     using Packed_Int8_t = typename packed_as<int8_t, packed_elems>::type;
 
-    for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < total; id += blockDim.x * gridDim.x) {
+    for (int64_t id = blockIdx.x * blockDim.x + threadIdx.x; id < total; id += blockDim.x * gridDim.x) {
         T val;
         if (int8_mode == 2) {
             val = cuda_cast<T>(cuda_cast<Float_T>(reinterpret_cast<Packed_Int8_t*>(up_out)[id]) * activation_in[0]);
@@ -726,7 +726,7 @@ template<typename T>
 __global__ void scaledot_kernel(T* out, const T* in, const T* scale, const int m, const int n)
 {
     const int size = m * n;
-    const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;    
+    const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
     const int scale_index = index / n;
     if (index < size) {
         float val   = cuda_cast<float>(in[index]);
