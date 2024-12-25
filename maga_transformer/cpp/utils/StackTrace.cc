@@ -13,7 +13,7 @@ namespace fastertransformer {
 
 static constexpr int kMaxStackDepth = 64;
 
-void printStackTrace() {
+std::string getStackTrace() {
     std::stringstream stack_ss;
     void*             addrs[kMaxStackDepth];
 
@@ -28,9 +28,11 @@ void printStackTrace() {
         }
         stack_ss << std::string(line);
     }
-    FT_STACKTRACE_LOG_INFO("%s", stack_ss.str().c_str());
-
+    return stack_ss.str();
 }
 
+void printStackTrace() {
+    FT_STACKTRACE_LOG_INFO("%s", getStackTrace().c_str());
+}
 
 }

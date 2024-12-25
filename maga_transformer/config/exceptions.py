@@ -15,6 +15,7 @@ class ExceptionType(IntEnum):
     GENERATE_TIMEOUT = 603
     ERROR_GENERATE_CONFIG_FORMAT = 604
     INVALID_PARAMS = 605
+    EXECUTION_EXCEPTION = 606
 
     # Error codes starting from 8000 can be retried
     CANCELLED = 8100

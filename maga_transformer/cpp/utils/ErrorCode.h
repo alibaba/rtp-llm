@@ -10,6 +10,7 @@ enum class ErrorCode {
     GENERATE_TIMEOUT = 603,
     ERROR_GENERATE_CONFIG_FORMAT = 604,
     INVALID_PARAMS = 605,
+    EXECUTION_EXCEPTION = 606,
 
     // Error codes starting from 8000 can be retried
     CANCELLED = 8100,
@@ -86,7 +87,7 @@ inline std::string ErrorCodeToString(ErrorCode code) {
         case ErrorCode::RPC_FINISH_FAILED:
             return "RPC_FINISH_FAILED";
         case ErrorCode::DECODE_MALLOC_FAILED:
-            return "DECODE_MALLOC_FAILED";    
+            return "DECODE_MALLOC_FAILED";
         case ErrorCode::LOAD_KV_CACHE_FAILED:
             return "LOAD_KV_CACHE_FAILED";
         case ErrorCode::LOAD_CACHE_TIMEOUT:

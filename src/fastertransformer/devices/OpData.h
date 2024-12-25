@@ -51,9 +51,12 @@ public:
     OpException(const OpStatus& status)
     : status_(status) {
         std::stringstream ss;
-        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
+        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message << std::endl;
         FT_LOG_INFO("%s", ss.str().c_str());
-        fastertransformer::printStackTrace();
+        const auto stack = fastertransformer::getStackTrace();
+        FT_STACKTRACE_LOG_INFO("%s", stack.c_str());
+        ss << stack;
+        detail_str_ = ss.str();
         if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
             fflush(stdout);
             fflush(stderr);
@@ -62,16 +65,14 @@ public:
     }
 
     const char* what() const noexcept override {
-        std::stringstream ss;
-        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
-        s_ = ss.str();
-        return s_.c_str();
+        return detail_str_.c_str();
     }
 
     const OpStatus& status() const { return status_; }
+
 private:
     OpStatus status_;
-    mutable std::string s_;
+    mutable std::string detail_str_;
 };
 
 using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buffer>>;
