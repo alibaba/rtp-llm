@@ -58,7 +58,7 @@ public:
     bool                          print_stop_words = false;
     std::string         sp_advice_prompt;
     std::vector<int>    sp_advice_prompt_token_ids;
-    bool                sp_input_lookup = false;
+    bool                sp_input_lookup = true;
 
     bool pd_separation  = false;
 

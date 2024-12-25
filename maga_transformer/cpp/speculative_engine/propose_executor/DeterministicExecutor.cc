@@ -33,7 +33,7 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
     auto&        config                  = stream->generateConfig();
     size_t advice_token_num = 0;
     int* advice_token_ids = nullptr;
-    if (config->sp_input_lookup) {
+    if (config->sp_input_lookup && config->sp_advice_prompt_token_ids.size() == 0) {
         advice_token_num = stream->seqLength();
         advice_token_ids = stream->completeTokenIds()->data<int>();
     } else {
@@ -89,7 +89,7 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
     auto& config                  = stream->generateConfig();
     size_t advice_token_num = 0;
     int* advice_token_ids = nullptr;
-    if (config->sp_input_lookup) {
+    if (config->sp_input_lookup && config->sp_advice_prompt_token_ids.size() == 0) {
         advice_token_num = stream->seqLength();
         advice_token_ids = stream->completeTokenIds()->data<int>();
     } else {
