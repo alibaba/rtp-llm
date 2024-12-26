@@ -28,6 +28,10 @@ public:
     TrackerStatus getTrackerStatus() const;
 
 private:
+    std::vector<MemoryChunk *> getChunks() const;
+    friend class DeviceBase;
+
+private:
     IAllocator* real_allocator_;
     std::unique_ptr<MemoryTracker> memory_tracker_;
 };

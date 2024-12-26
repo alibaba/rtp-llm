@@ -12,7 +12,7 @@
 
 namespace rtp_llm {
 
-class NormalCacheStore : public CacheStore{
+class NormalCacheStore : public CacheStore {
 private:
     NormalCacheStore() = default;
 

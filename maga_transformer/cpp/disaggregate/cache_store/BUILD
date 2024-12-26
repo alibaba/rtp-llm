@@ -34,6 +34,7 @@ cc_library(
     hdrs = [
         "CommonDefine.h",
         "CacheStore.h",
+        "MemoryUtil.h",
         "RequestBlockBuffer.h",
     ],
     srcs = [
@@ -66,7 +67,6 @@ cc_library(
     hdrs = [
         "NoRdmaMemoryUtilImpl.h",
         "Interface.h",
-        "MemoryUtil.h",
         "RequestBlockBufferStore.h",
         "InitParams.h",
         "CacheStoreServiceImpl.h",

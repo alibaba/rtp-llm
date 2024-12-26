@@ -1,6 +1,7 @@
 #pragma once
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CommonDefine.h"
+#include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 #include <memory>
 
@@ -18,6 +19,8 @@ public:
               CacheStoreLoadDoneCallback                 callback,
               const std::string&                         ip         = "",
               uint32_t                                   timeout_ms = 1000) = 0;
+
+    virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
     virtual void debugInfo() = 0;
 };

@@ -37,9 +37,8 @@ public:
     void deallocate(void* ptr);
 
     bool isTracking(void* ptr) const;
-    void* getBasePtr() const;
-    size_t getTotalSize() const;
     TrackerStatus getStatus() const;
+    std::vector<MemoryChunk *> getAllChunks() const;
 
 private:
     size_t align(const size_t size) const;

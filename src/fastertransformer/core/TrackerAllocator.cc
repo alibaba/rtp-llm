@@ -45,8 +45,14 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params)
 
 TrackerAllocator::~TrackerAllocator() {
     if (memory_tracker_) {
-        auto ptr = memory_tracker_->getBasePtr();
-        real_allocator_->free(&ptr);
+        auto chunks = memory_tracker_->getAllChunks();
+        for (auto chunk : chunks) {
+            if (chunk->used) {
+                FT_LOG_WARNING("TrackerAllocator is destroyed with %lu bytes of memory [%d] still in use!",
+                               chunk->size, real_allocator_->memoryType());
+                real_allocator_->free(&chunk->ptr);
+            }
+        }
         memory_tracker_.reset();
     }
     delete real_allocator_;
@@ -122,6 +128,13 @@ TrackerStatus TrackerAllocator::getTrackerStatus() const {
         return memory_tracker_->getStatus();
     }
     return TrackerStatus();
+}
+
+std::vector<MemoryChunk *> TrackerAllocator::getChunks() const {
+    if (memory_tracker_) {
+        return memory_tracker_->getAllChunks();
+    }
+    return {};
 }
 
 } // namespace fastertransformer

@@ -103,12 +103,13 @@ void MemoryTracker::deallocate(void* ptr) {
     }
 }
 
-void* MemoryTracker::getBasePtr() const {
-    return chunk_map_.begin()->second->ptr;
-}
-
-size_t MemoryTracker::getTotalSize() const {
-    return total_size_;
+vector<MemoryChunk *> MemoryTracker::getAllChunks() const {
+    ReadLock lock(mutex_);
+    vector<MemoryChunk *> chunks;
+    for (auto& pair : chunk_map_) {
+        chunks.push_back(pair.second);
+    }
+    return chunks;
 }
 
 TrackerStatus MemoryTracker::getStatus() const {
