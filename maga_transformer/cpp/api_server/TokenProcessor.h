@@ -41,7 +41,7 @@ private:
 class TokenProcessorPerStream {
 public:
     TokenProcessorPerStream() = default;
-    virtual ~TokenProcessorPerStream() = default;
+    virtual ~TokenProcessorPerStream();
     void init(int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
     std::vector<std::string> decodeTokens(GenerateOutputs& responses,
                                           std::vector<int>& output_lens,

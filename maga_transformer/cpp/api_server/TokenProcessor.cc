@@ -130,4 +130,9 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
     return texts;
 }
 
+TokenProcessorPerStream::~TokenProcessorPerStream() {
+    py::gil_scoped_acquire acquire;
+    token_processor_stream_.dec_ref();
+}
+
 }  // namespace rtp_llm

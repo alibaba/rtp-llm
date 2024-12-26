@@ -36,7 +36,7 @@ class TokenProcessorPerStream:
         self.tokenizer = token_processor.tokenizer
         self.special_tokens = token_processor.special_tokens
         if num_beams == 1:
-            self.decoding_states = [DecodingState() for _ in range(len(generate_outputs.generate_outputs))]
+            self.decoding_states = [DecodingState() for _ in range(size)]
         else:
             # num_beams不等于1的情况下，不能进行增量decode，因为过去的token id会变化
             self.decoding_states = [None] * size
