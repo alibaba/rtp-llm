@@ -111,7 +111,11 @@ public:
 class MultiSeqsResponse: public Jsonizable {
 public:
     void Jsonize(Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("response", response, response);
+        if (response.size() == 1) {
+            json.Jsonize("response", response[0], response[0]);
+        } else {
+            json.Jsonize("response", response, response);
+        }
         json.Jsonize("finished", finished, finished);
         json.Jsonize("aux_info", aux_info, aux_info);
         if (logits.has_value()) json.Jsonize("logits", logits.value(), logits.value());
