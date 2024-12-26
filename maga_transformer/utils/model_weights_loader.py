@@ -15,7 +15,7 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeig
 from maga_transformer.lora.lora_weights import LoRAWeights
 from maga_transformer.utils.time_util import timer_wrapper
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, LoraConfig, ModuleDatabase, CkptDatabase, DictDatabase
+from maga_transformer.utils.database import BaseDatabase, LoraConfig, CkptDatabase
 
 class WeightLog:
     """
@@ -86,12 +86,6 @@ class ModelWeightsLoader:
             if self._merge_lora:
                 static_lora_config: LoraConfig = list(self._database.LoraCkpt.LoraFileList.keys())[0]
                 self._static_lora_adapter_name = static_lora_config.name if self._merge_lora else None
-        elif isinstance(self._database, ModuleDatabase):
-            self._weights_info.process_meta_from_dict(dict(self._database.ref_module.state_dict()))
-            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
-        elif isinstance(self._database, DictDatabase):
-            self._weights_info.process_meta_from_dict(self._database.ref_dict)
-            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
         else:
             raise Exception("Unknown database class")
         logging.info(f"merge lora is enable ? : {self._merge_lora}")
@@ -107,8 +101,6 @@ class ModelWeightsLoader:
         self._data_type = data_type
 
     def show_warns(self, lora_name: str = "", only_dump_lora: bool = False):
-        if isinstance(self._database, ModuleDatabase):
-            return
 
         if not only_dump_lora:
             self._weight_log.record_missed_tensor(

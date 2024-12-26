@@ -23,7 +23,7 @@ from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput
-from maga_transformer.utils.database import CkptDatabase, ModuleDatabase, DictDatabase
+from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 
@@ -205,7 +205,7 @@ class BaseModel(object):
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
-    
+
     def _load_to_device(self, parallel_info: ParallelInfo=g_parallel_info):
         self.parallel_info = parallel_info
         self.device = self.parallel_info.device
@@ -307,12 +307,7 @@ class BaseModel(object):
         return isinstance(self, MultiModalMixin)
 
     def init_database(self):
-        if self.config.ref_module is not None:
-            self.database = ModuleDatabase(self.config.ref_module)
-        elif len(self.config.ref_dict) != 0:
-            self.database = DictDatabase(self.config.ref_dict)
-        else:
-            self.database = CkptDatabase(self.config.ckpt_path, self.config.ptuning_path)
+        self.database = CkptDatabase(self.config.ckpt_path, self.config.ptuning_path)
 
     def load_static_lora(self):
         # static lora load
@@ -334,7 +329,7 @@ class BaseModel(object):
             self.model_weights_loader.show_warns(lora_name=lora_name)
         else:
             self.model_weights_loader.show_warns()
-    
+
     def _load_weights(self,
                       ref_dict: Dict[str, torch.Tensor] = {}):
         with Timer() as timer:
@@ -429,7 +424,7 @@ class BaseModel(object):
             if not self.config.is_causal:
                 attention_mask[b, :, input_length: ]= 0
         return attention_mask
-    
+
     def dump_weights(self, output_dir: str):
         output_file = os.path.join(output_dir, f"model-{self.parallel_info.tp_rank:02d}-{self.parallel_info.tp_size:02d}.safetensors")
         self.weight.dump_to_safetensors(self.parallel_info.tp_rank, output_file)

@@ -8,24 +8,6 @@ filegroup(
 )
 
 py_test(
-    name = "model_weights_loader_test",
-    srcs = [
-        "model_weights_loader_test.py",
-    ],
-    data = [
-        "//maga_transformer/utils/test:testdata",
-    ],
-    deps = [
-        "//maga_transformer:utils",
-        "//maga_transformer:config",
-        "//maga_transformer:models",
-        "//maga_transformer:testlib",
-        "//maga_transformer:_ft_pickler",
-    ],
-    exec_properties = {'gpu':'A10'},
-)
-
-py_test(
     name = "incremental_decode_test",
     srcs = [
         "incremental_decode_test.py",
