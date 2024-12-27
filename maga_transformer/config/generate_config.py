@@ -59,7 +59,7 @@ class GenerateConfig(BaseModel):
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
-    is_streaming: bool = True
+    is_streaming: bool = False
 
     def gen_hash_value(self):
         cp = copy.copy(self)
