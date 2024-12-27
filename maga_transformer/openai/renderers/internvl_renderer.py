@@ -1,4 +1,5 @@
 import copy
+import functools
 import json
 import re
 import logging
@@ -9,10 +10,11 @@ from transformers import PreTrainedTokenizerBase
 
 from dataclasses import dataclass
 
+from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
-from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs
+from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, OutputDelta, RendererParams, \
+    StreamResponseObject, RenderedInputs, StreamStatus
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
@@ -25,6 +27,8 @@ from maga_transformer.utils.multimodal_util import MMUrlType
 import dataclasses
 from enum import IntEnum, auto
 from typing import Any, Dict, List, Tuple, Union
+
+from maga_transformer.utils.word_util import is_truncated
 
 class InternVLConversation(Conversation):
     def render_messages(self, messages: List[ChatMessage], video_frame_num: int = 8) -> PromptWithMMInput:
@@ -111,6 +115,41 @@ class InternVLRenderer(CustomChatRenderer):
                 return res
         else:
             raise Exception("no config.json found")
+    
+    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
+        if status.finish_reason != None:
+            return await self._create_empty_delta(status.output.aux_info)
+        status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
+        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
+        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+        if is_streaming:
+            if len(decoded_string) > 0 and u'\uFFFD' == decoded_string[-1]:
+                return await self._create_empty_delta(output.aux_info)
+        else:
+            while (len(decoded_string) > 0) and (u'\uFFFD' == decoded_string[-1]):
+                decoded_string = decoded_string[:-1]
+        if len(decoded_prev_token) == 0 and len(decoded_string) > 0 and decoded_string[0] == ' ':
+            status.delta_output_string = decoded_string[1:]
+        elif len(decoded_prev_token) > 0 and len(decoded_string) > 0 and decoded_string[0] == ' ' and decoded_prev_token[0] != ' ':
+            status.delta_output_string = decoded_string[len(decoded_prev_token) + 1: ]
+        else: 
+            status.delta_output_string = decoded_string[len(decoded_prev_token):]
+        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
+            status.finish_reason = FinisheReason.stop
+            return await self._create_empty_delta(output.aux_info)
+        if not is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
+            status.update_result()
+            delta = OutputDelta(
+                output_str=status.delta_output_string,
+                logprobs=await self._generate_log_probs(status, output),
+                input_length=output.aux_info.input_len,
+                output_length=output.aux_info.output_len,
+                reuse_length=output.aux_info.reuse_len)
+            status.delta_output_string = ""
+            return delta
+        else:
+            return await self._create_empty_delta(output.aux_info)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         messages = copy.deepcopy(request.messages)
