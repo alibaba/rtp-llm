@@ -83,10 +83,19 @@ conv_phi3 = InternVLConversation(
     connector=["", ""]
 )
 
+conv_internvl2_5 = InternVLConversation(
+    system_content="你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。",
+    roles={RoleEnum.user: "<|im_start|>user\n", RoleEnum.assistant: "<|im_start|>assistant\n", RoleEnum.system: "<|im_start|>system\n"},
+    sep_style=SeparatorStyle.SINGLE,
+    seps=["<|im_end|>\n"],
+    connector=["", ""]
+)
+
 conv_templates = {
     "Hermes-2": conv_internlm2,
     "internlm2-chat": conv_internlm2,
-    "phi3-chat": conv_phi3
+    "phi3-chat": conv_phi3,
+    "internvl2_5": conv_internvl2_5
 }
 
 class InternVLRenderer(CustomChatRenderer):
