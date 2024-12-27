@@ -121,7 +121,7 @@ def run_latency_test(model_args: Dict[str, Any], test_args: Dict[str, Any],
         generate_config = {
             'max_new_tokens': 10,
             'min_new_tokens': 10,
-            'yield_generator': True,
+            'is_streaming': True,
             'num_return_sequences': bs
         }
         # dynamic lora
