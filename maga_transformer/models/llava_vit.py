@@ -1,9 +1,12 @@
 from typing import Dict, List, Any
 import os
 import re
+import math
 
 import torch
 import torch.nn as nn
+
+import logging
 
 import copy
 from PIL import Image
@@ -117,18 +120,49 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         elif mm_patch_merge_type.startswith("spatial"):
             image_sizes = [image.size for image in images]
             new_image_features = []
+            a = []
+            b = []
             for image_idx, image_feature in enumerate(image_features):
+                a.append(image_feature.shape)
                 if image_feature.shape[0] > 1:
                     base_image_feature = image_feature[0]
                     image_feature = image_feature[1:]
                     height = width = self.vision_tower.num_patches_per_side
                     assert height * width == base_image_feature.shape[0]
-                    if "anyres" in image_aspect_ratio:
-                        num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], config["image_grid_pinpoints"], self.vision_tower.config.image_size)
+
+                    if "anyres_max" in image_aspect_ratio:
+                            matched_anyres_max_num_patches = re.match(r"anyres_max_(\d+)", image_aspect_ratio)
+                            if matched_anyres_max_num_patches:
+                                max_num_patches = int(matched_anyres_max_num_patches.group(1))
+
+                    if image_aspect_ratio == "anyres" or "anyres_max" in image_aspect_ratio:
+                        try:
+                            num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], config["image_grid_pinpoints"], self.vision_tower.config.image_size)
+                        except Exception as e:
+                            logging.error(f"exception {str(e)}, set num_path_width and num_patch_height to 2")
+                            num_patch_width, num_patch_height = 2, 2
                         image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
                     else:
-                        raise NotImplementedError
-                    if 'unpad' in mm_patch_merge_type:
+                        image_feature = image_feature.view(2, 2, height, width, -1)
+
+                    if "maxpool2x2" in mm_patch_merge_type:
+                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                        image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                        image_feature = nn.functional.max_pool2d(image_feature, 2)
+                        image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                    elif "unpad" in mm_patch_merge_type and "anyres_max" in image_aspect_ratio and matched_anyres_max_num_patches:
+                        unit = image_feature.shape[2]
+                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                        image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                        image_feature = unpad_image(image_feature, image_sizes[image_idx])
+                        c, h, w = image_feature.shape
+                        times = math.sqrt(h * w / (max_num_patches * unit**2))
+                        if times > 1.1:
+                            image_feature = image_feature[None]
+                            image_feature = nn.functional.interpolate(image_feature, [int(h // times), int(w // times)], mode="bilinear")[0]
+                        image_feature = torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+                        image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                    elif 'unpad' in mm_patch_merge_type:
                         image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
                         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
                         image_feature = unpad_image(image_feature, image_sizes[image_idx])
@@ -140,7 +174,11 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     else:
                         image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
                         image_feature = image_feature.flatten(0, 3)
-                    image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+
+                    if "nobase" in mm_patch_merge_type:
+                        pass
+                    else:
+                        image_feature = torch.cat((base_image_feature, image_feature), dim=0)
                 else:
                     image_feature = image_feature[0]
                     if 'unpad' in mm_patch_merge_type:
@@ -149,6 +187,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                             self.image_newline[None].to(image_feature.device)
                         ), dim=0)
                 new_image_features.append(image_feature)
+                b.append(image_feature.shape)
             image_features = new_image_features
 
         return image_features
