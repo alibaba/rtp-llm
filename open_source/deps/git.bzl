@@ -38,9 +38,16 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "cutlass",
+        name = "cutlass_fa",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
+        build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    new_git_repository(
+        name = "cutlass",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
         build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
     )
 
