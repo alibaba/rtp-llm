@@ -7,7 +7,7 @@ import functools
 import logging
 import torch
 import grpc
-from grpc import StatusCode 
+from grpc import StatusCode
 
 from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
@@ -129,8 +129,8 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     first_token_cost_time=output_pb.aux_info.first_token_cost_time_us / 1000.0
                                     )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
-        # if output_pb.aux_info.HasField('cum_log_probs'):
-        #     output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
+        if output_pb.aux_info.HasField('cum_log_probs'):
+            output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
         output_py.output_ids = trans_tensor(output_pb.output_ids)
         output_py.input_ids = input_py.token_ids.reshape(1, -1)
         if output_pb.HasField('hidden_states'):
