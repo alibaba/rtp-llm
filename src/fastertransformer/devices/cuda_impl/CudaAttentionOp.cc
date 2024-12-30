@@ -387,7 +387,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             &prefix_prompt_param,
             params.input.data(),
             qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
-            params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
+            params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size * params.configs.rope_config.index_factor): nullptr,
             params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
             params.common.padding_offset->data<int>(),
             params.common.cu_seqlens->data<int>(),
