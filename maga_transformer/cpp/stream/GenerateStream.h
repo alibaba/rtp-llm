@@ -275,7 +275,6 @@ protected:
     int                                 fallback_prefix_length_ = 0;
     // TOOD(xinfei.sxf) fix state
     bool                                done_                   = false;
-    bool                                cancelled_              = false;
     bool                                released_               = false;
     bool                                need_release_resource_  = true;
 

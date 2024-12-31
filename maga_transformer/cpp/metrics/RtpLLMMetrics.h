@@ -89,6 +89,9 @@ public:
     int64_t reuse_length           = 0;
     int64_t input_token_length     = 0;
     int64_t output_token_length    = 0;
+    // for timeout
+    int64_t timeout_latency_us         = 0;
+
     int64_t query_batch_size       = 0;
 
     int64_t fallback_tokens        = 0;
@@ -116,6 +119,8 @@ public:
 
     kmonitor::MutableMetric* fallback_tokens_metric        = nullptr;
     kmonitor::MutableMetric* fallback_times_metric         = nullptr;
+
+    kmonitor::MutableMetric* timeout_latency_us_metric         = nullptr;    
 
 private:
     AUTIL_LOG_DECLARE();

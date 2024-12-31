@@ -109,7 +109,6 @@ absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
 }
 
 void GenerateStream::cancel() {
-    cancelled_ = true;
     setStop(ErrorCode::CANCELLED, "cancel stream");
 }
 
@@ -202,7 +201,7 @@ bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         if (!prefix_param.prompt_tokens.empty()) {
             auto total_input_len = inputLength() + prefix_param.prompt_tokens.size();
             if (total_input_len >= max_seq_len_) {
-                setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len) 
+                setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len)
                     + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
@@ -417,7 +416,7 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        stopAndRelease(ErrorCode::GENERATE_TIMEOUT, 
+        stopAndRelease(ErrorCode::GENERATE_TIMEOUT,
                        "query has been running " + std::to_string(running_time_ms) + " ms, "
                        + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
@@ -676,8 +675,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!checkTokenId(current_token_id)) {
-                setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE, 
-                        "output token id:" + to_string(current_token_id) + 
+                setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
+                        "output token id:" + to_string(current_token_id) +
                         " out of vocab size: " + to_string(vocab_size_));
                 return;
             }
@@ -727,12 +726,14 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
     metrics_reporter_ = metrics_reporter;
 }
 void GenerateStream::reportMetric() {
+    bool cancelled = statusInfo().code() == ErrorCode::CANCELLED;
+    bool timeout = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
     if (metrics_reporter_) {
         RtpLLMStreamMetricsCollector collector;
         collector.qps        = true;
-        collector.cancel_qps = cancelled_;
-        collector.error_qps  = stopped() && !cancelled_;
-        if (finished() || cancelled_) {
+        collector.cancel_qps = cancelled;
+        collector.error_qps  = stopped() && !cancelled;
+        if (finished() || cancelled || timeout) {
             collector.reuse_length           = reuse_length_;
             collector.input_token_length     = inputLength();
             collector.output_token_length    = outputTokenLen();
@@ -744,8 +745,14 @@ void GenerateStream::reportMetric() {
             collector.pause_latency_us       = pause_time_us_;
             collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
             collector.fallback_times         = fallback_times_;
+            if (timeout) {
+                collector.timeout_latency_us = getTimeoutMs() * 1000;
+            }
         }
-        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &collector);
+        // pass tag will cause default tags deep copy
+        static kmonitor::MetricsTags timeout_tag("timeout", "true");
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
+                                                                                     &collector);
     }
 }
 
