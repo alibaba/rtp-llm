@@ -1,9 +1,13 @@
-from typing import Dict, List, Any
+from typing import Optional, Tuple, Union, Dict, List, Any
 import os
 import re
 import math
+from dataclasses import dataclass
+from functools import partial, reduce
+import numpy as np
 
 import torch
+import torch.utils.checkpoint
 import torch.nn as nn
 
 import logging
@@ -22,6 +26,25 @@ try:
     from decord import VideoReader, cpu
 except ImportError:
     print("Please install pyav to use video processing functions.")
+
+from transformers.image_processing_utils import BatchFeature, get_size_dict
+from transformers.image_transforms import (
+    convert_to_rgb,
+    normalize,
+    rescale,
+    resize,
+    to_channel_dimension_format,
+)
+from transformers.image_utils import (
+    ChannelDimension,
+    PILImageResampling,
+    to_numpy_array,
+)
+from transformers.activations import ACT2FN
+from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
+from transformers.modeling_utils import PreTrainedModel
+from transformers import PretrainedConfig
+from transformers.utils import ModelOutput
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, config: GptInitModelParameters):
@@ -51,7 +74,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         elif mm_type == MMUrlType.VIDEO:
             if not isinstance(mm_input, list):
                 raise Exception("expect video input, but get a single image")
-            return torch.cat(self.image_embedding(mm_input))
+            return torch.cat(self.image_embedding(mm_input, MMUrlType.VIDEO))
         else:
             raise Exception("unknown mm url type")
 
@@ -60,10 +83,10 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         if mm_type == MMUrlType.DEFAULT:
             origin_data = copy.copy(data)
             try:
-                return self.load_image(data)
+                return self.load_image(data, **kwargs)
             except Exception as e:
                 try:
-                    return self.load_video(origin_data)
+                    return self.load_video(origin_data, **kwargs)
                 except Exception as e:
                     raise Exception(str(e))
         elif mm_type == MMUrlType.IMAGE:
@@ -76,17 +99,22 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
     def load_image(self, data, **kwargs):
         return Image.open(data).convert("RGB")
 
-    def load_video(self, data, **kwargs):
+    def load_video(self, data, configs, **kwargs):
+        fps = 1 if configs.fps == -1 else configs.fps
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
         total_frame_num = len(vr)
         video_time = total_frame_num / vr.get_avg_fps()
-        # frame num set to 10 for now
-        avg_fps = round(total_frame_num / 10)
-        frame_idx = [i for i in range(0, total_frame_num, avg_fps)]
-        frame_time = [i/avg_fps for i in frame_idx]
+        frame_num = round(video_time * fps)
+        # set frame num between 1 and 100
+        max_frame_num = configs.max_frames if configs.max_frames != -1 else 100
+        min_frame_num = configs.min_frames if configs.min_frames != -1 else 1
+        
+        frame_num = max(min_frame_num, min(max_frame_num, frame_num))
+        
+        frame_idx = np.linspace(0, total_frame_num - 1, frame_num).tolist()
+        frame_idx = [int(idx) for idx in frame_idx]
         
         video = vr.get_batch(frame_idx).asnumpy()
-        frame_time = ",".join([f"{i:.2f}s" for i in frame_time])
 
         num_frames_to_sample = num_frames = len(frame_idx)
         vr.seek(0)
@@ -97,16 +125,18 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         return self.vision_tower.device
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image]):
+    def image_embedding(self, images: List[Image.Image], mm_type = MMUrlType.IMAGE):
         config = self.config.mm_related_params.config
         image_aspect_ratio = config["image_aspect_ratio"]
         mm_patch_merge_type = config.get("mm_patch_merge_type", "flat")
+        mm_newline_position = config.get("mm_newline_position", "one_token")
 
         processed_images = process_images(images, 
                                           image_aspect_ratio, 
                                           self.vision_tower.image_processor, 
                                           self._device,
                                           self._data_type,
+                                          mm_type,
                                           image_grid_pinpoints = config.get("image_grid_pinpoints", []))
         
         processed_images = [image.unsqueeze(0) if image.ndim == 3 else image for image in processed_images]
@@ -115,16 +145,48 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_features = self.encode_images(processed_images)
         image_features = list(torch.split(image_features, split_sizes, dim=0))
 
+        if mm_type == MMUrlType.VIDEO:
+            image_features = [self.get_2dPool(feature) for feature in image_features]
+
         if mm_patch_merge_type == "flat":
             image_features = [x.flatten(0, 1) for x in image_features]
         elif mm_patch_merge_type.startswith("spatial"):
             image_sizes = [image.size for image in images]
             new_image_features = []
-            a = []
-            b = []
             for image_idx, image_feature in enumerate(image_features):
-                a.append(image_feature.shape)
-                if image_feature.shape[0] > 1:
+                if mm_type == MMUrlType.VIDEO:  # video operations
+                    if mm_newline_position == "grid":
+                        image_feature = self.add_token_per_grid(image_feature)
+                        if self.config.mm_related_params.config["add_faster_video"]:
+                            raise Exception("add_faster_video is not implemented")
+                            # faster_video_feature = self.add_token_per_grid(all_faster_video_features[image_idx])
+                            # concat_slow_fater_token = []
+                            # for _ in range(image_feature.shape[0]):
+                            #     if _ % self.config.faster_token_stride == 0:
+                            #         concat_slow_fater_token.append(torch.cat((image_feature[_], self.model.faster_token[None].to(image_feature.device)), dim=0))
+                            #     else:
+                            #         concat_slow_fater_token.append(torch.cat((faster_video_feature[_], self.model.faster_token[None].to(image_feature.device)), dim=0))
+                            # image_feature = torch.cat(concat_slow_fater_token)
+                        new_image_features.append(image_feature)
+                    elif mm_newline_position == "frame":
+                        image_feature = self.add_token_per_frame(image_feature)
+                        new_image_features.append(image_feature.flatten(0, 1))
+                        
+                    elif mm_newline_position == "one_token":
+                        # one-token
+                        image_feature = image_feature.flatten(0, 1)
+                        if 'unpad' in mm_patch_merge_type:
+                            image_feature = torch.cat((
+                                image_feature,
+                                self.image_newline[None].to(image_feature.device)
+                            ), dim=0)
+                        new_image_features.append(image_feature)      
+                    elif mm_newline_position == "no_token":
+                        new_image_features.append(image_feature.flatten(0, 1))
+                    else:
+                        raise ValueError(f"Unexpected mm_newline_position: {mm_newline_position}")
+
+                elif image_feature.shape[0] > 1:
                     base_image_feature = image_feature[0]
                     image_feature = image_feature[1:]
                     height = width = self.vision_tower.num_patches_per_side
@@ -187,7 +249,6 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                             self.image_newline[None].to(image_feature.device)
                         ), dim=0)
                 new_image_features.append(image_feature)
-                b.append(image_feature.shape)
             image_features = new_image_features
 
         return image_features
@@ -198,6 +259,46 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_features = self.vision_tower(images)
         image_features = self.mm_projector(image_features)
         return image_features
+    
+    def add_token_per_grid(self, image_feature):
+        resize_h = int(math.sqrt(image_feature.shape[1]))
+        num_frames = image_feature.shape[0]
+        feature_dim = image_feature.shape[-1]
+
+        image_feature = image_feature.view(num_frames, 1, resize_h, resize_h, -1)
+        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+        image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+        image_feature = torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+        if self.config.mm_related_params.config["add_faster_video"]:
+            image_feature = image_feature.view(feature_dim, num_frames,resize_h, -1)
+            image_feature = image_feature.permute(1, 2, 3, 0).contiguous()
+            image_feature = image_feature.flatten(1, 2)
+            return image_feature
+        image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+        return image_feature
+    
+    def get_2dPool(self, image_feature, stride=2):
+        height = width = self.vision_tower.num_patches_per_side
+        num_frames, num_tokens, num_dim = image_feature.shape
+        image_feature = image_feature.view(num_frames, height, width, -1)
+        image_feature = image_feature.permute(0, 3, 1, 2).contiguous()
+        # image_feature = nn.functional.max_pool2d(image_feature, self.config.mm_spatial_pool_stride)
+        mm_spatial_pool_mode = self.config.mm_related_params.config["mm_spatial_pool_mode"]
+        if mm_spatial_pool_mode == "average":
+            image_feature = nn.functional.avg_pool2d(image_feature, stride)
+        elif mm_spatial_pool_mode == "max":
+            image_feature = nn.functional.max_pool2d(image_feature, stride)
+        elif mm_spatial_pool_mode == "bilinear":
+            height, width = image_feature.shape[2:]
+            scaled_shape = [math.ceil(height / stride), math.ceil(width / stride)]
+            image_feature = nn.functional.interpolate(image_feature, size=scaled_shape, mode='bilinear')
+
+        else:
+            raise ValueError(f"Unexpected mm_spatial_pool_mode: {self.config.mm_spatial_pool_mode}")
+        image_feature = image_feature.permute(0, 2, 3, 1)
+        image_feature = image_feature.view(num_frames, -1, num_dim)
+        return image_feature
+
     
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
         vision_tower_name = os.environ.get('EXTRA_DATA_PATH', '')
@@ -214,6 +315,12 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     **kwargs)
             
         raise ValueError(f'Unknown vision tower: {vision_tower}')
+    
+    def add_token_per_frame(self, image_feature):
+        image_feature = image_feature.permute(2, 0, 1).contiguous()
+        image_feature =  torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+        image_feature = image_feature.permute(1, 2, 0).contiguous()
+        return image_feature
     
     def build_vision_projector(self, config, delay_load=False, **kwargs):
         projector_type = config.get('mm_projector_type', 'linear')
@@ -324,7 +431,10 @@ class IdentityMap(torch.nn.Module):
     def config(self):
         return {"mm_projector_type": 'identity'}
 
-def process_images(images, image_aspect_ratio, image_processor, device, data_type, **kwargs):
+def process_images(images, image_aspect_ratio, image_processor, device, data_type, mm_type = MMUrlType.IMAGE, **kwargs):
+    if mm_type == MMUrlType.VIDEO:
+        return image_processor.preprocess(images, return_tensors='pt')['pixel_values'].to(device, dtype=data_type)
+
     new_images = []
     if image_aspect_ratio == "pad":
         for image in images:
@@ -336,7 +446,7 @@ def process_images(images, image_aspect_ratio, image_processor, device, data_typ
             image = process_anyres_image(image, image_processor, kwargs.get('image_grid_pinpoints', []))
             new_images.append(image)
     else:
-        return image_processor(images, return_tensors='pt')['pixel_values']
+        return image_processor.preprocess(images, return_tensors='pt')['pixel_values'].to(device, dtype=data_type)
 
     if type(new_images) is list:
         new_images = [image.to(device, dtype=data_type) for image in new_images]
@@ -344,37 +454,6 @@ def process_images(images, image_aspect_ratio, image_processor, device, data_typ
         new_images = new_images.to(device, dtype=data_type)
 
     return new_images
-
-"""
-# Adapted from https://huggingface.co/MILVLG/imp-v1-3b/blob/main/vision_encoder.py
-"""
-
-from typing import Optional, Tuple, Union, Dict
-from dataclasses import dataclass
-from functools import partial, reduce
-from PIL import Image
-import torch
-import torch.utils.checkpoint
-from torch import nn
-import os
-from transformers.image_processing_utils import BatchFeature, get_size_dict
-from transformers.image_transforms import (
-    convert_to_rgb,
-    normalize,
-    rescale,
-    resize,
-    to_channel_dimension_format,
-)
-from transformers.image_utils import (
-    ChannelDimension,
-    PILImageResampling,
-    to_numpy_array,
-)
-from transformers.activations import ACT2FN
-from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
-from transformers.modeling_utils import PreTrainedModel
-from transformers import PretrainedConfig
-from transformers.utils import ModelOutput
 
 class SigLipImageProcessor:
     def __init__(self, image_mean=(0.5, 0.5, 0.5), image_std=(0.5, 0.5, 0.5), size=(384, 384), crop_size: Dict[str, int] = None, resample=PILImageResampling.BICUBIC, rescale_factor=1 / 255, data_format=ChannelDimension.FIRST):
@@ -953,7 +1032,6 @@ class SigLipVisionTower(nn.Module):
     @property
     def num_patches_per_side(self):
         return self.config.image_size // self.config.patch_size
-        # return self.model_config["vision_cfg"]["image_size"] // self.model_config["vision_cfg"]["patch_size"]
 
     @property
     def image_size(self):

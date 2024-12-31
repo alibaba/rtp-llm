@@ -18,7 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.multimodal_util import MMUrlType
+from maga_transformer.utils.multimodal_util import MMUrlType, MMPreprocessConfig
 
 class SeparatorStyle(Enum):
     SINGLE = auto()
@@ -37,6 +37,7 @@ class Conversation:
         prompt: str = ""
         images: List[str] = []
         mm_types: List[MMUrlType] = []
+        preprocess_configs: List[MMPreprocessConfig] = []
 
         if self.sep_style == SeparatorStyle.LLAMA_3:
             chat_template_messages = [{"role": "system", "content": self.system_content}]
@@ -54,11 +55,17 @@ class Conversation:
                         elif content_part.type == ContentPartTypeEnum.image_url:
                             assert (content_part.image_url != None)
                             images.append(content_part.image_url.url)
+                            mm_types.append(MMUrlType.IMAGE)
                             now_prompt = f"<image>\n" + now_prompt
                     chat_template_messages.append({"role": role, "content": now_prompt})
 
             return PromptWithMMInput(tokenizer.apply_chat_template(chat_template_messages, tokenize=False, add_generation_prompt=True),
-                                    images)
+                                    images, mm_types)
+        
+        def get_preprocess_config(config):
+            return MMPreprocessConfig(fps=config.fps or -1,
+                                      min_frames=config.min_frames or -1,
+                                      max_frames=config.max_frames or -1)
 
         if messages[0].role != RoleEnum.system:
             prompt = self.system_content + prompt + self.seps[0]
@@ -81,6 +88,8 @@ class Conversation:
                         assert (content_part.video_url != None)
                         images.append(content_part.video_url.url)
                         mm_types.append(MMUrlType.VIDEO)
+                        if content_part.preprocess_config:
+                            preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
                         now_prompt = now_prompt + "<image>\n"
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
@@ -157,6 +166,6 @@ class LlavaRenderer(CustomChatRenderer):
         messages = copy.deepcopy(request.messages)
         prompt_and_mm_input = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
-        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt)
+        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt, input_urls_type=prompt_and_mm_input.mm_types, preprocess_configs=prompt_and_mm_input.preprocess_configs)
 
 register_renderer('llava', LlavaRenderer)

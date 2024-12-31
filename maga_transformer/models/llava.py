@@ -148,7 +148,10 @@ class Llava(Llama, MultiModalMixin):
                 ("mm_vision_select_layer", None),
                 ("mm_vision_select_feature", "patch"),
                 ("unfreeze_mm_vision_tower", False),
-                ("mm_tunable_parts", "")
+                ("mm_tunable_parts", ""),
+                ("add_faster_video", False),
+                ("mm_newline_position", "grid"),
+                ("mm_spatial_pool_mode", "bilinear")
             ]
 
             for param_name, default_value in mm_related_params_list:
