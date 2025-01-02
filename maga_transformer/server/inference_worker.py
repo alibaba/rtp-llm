@@ -13,6 +13,7 @@ sys.path.append(str(current_file_path.parent.absolute()))
 
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.utils.util import copy_gemm_config
+from maga_transformer.utils.fuser import _nfs_manager
 from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
@@ -56,7 +57,7 @@ class InferenceWorker():
         self.model: AsyncModel = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
-        
+
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(prompt, return_offsets_mapping=True, return_attention_mask=False)
 
@@ -95,6 +96,8 @@ class InferenceWorker():
     def stop(self) -> None:
         if isinstance(self.model, AsyncModel):
             logging.info("stoping InferenceWorker")
+            _nfs_manager.unmount_all()
+            logging.info("all nfs paths unmounted")
             self.model.stop()
 
     def ready(self) -> bool:
