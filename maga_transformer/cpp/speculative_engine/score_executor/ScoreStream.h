@@ -69,8 +69,7 @@ private:
             return;
         }
         auto& propose_tokens = stream_input->tokens;
-        device_->copy({((*complete_token_ids_)[0]).view(seq_length_, propose_tokens->size()), *propose_tokens});
-        setSeqLength(seqLength() + propose_tokens->size());
+        complete_token_ids_->appendTokens(0, propose_tokens->size(), *propose_tokens);
     }
 
     void allocateOutputBuffer() {

@@ -28,7 +28,7 @@ bool NormalGenerateStream::hasOutput() {
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
-    size_t          output_len = seq_length_ - last_output_pos_;
+    size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
@@ -41,9 +41,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.output_ids =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
-        memcpy(generate_output.output_ids->data(),
-               complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(last_output_pos_),
-               sizeof(int32_t) * output_len);
+        complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
         if (generate_input_->generate_config->return_logits && update_info.logits) {
             ft::BufferPtr host_logits;
             if (update_info.logits->shape()[0] == 1) {
@@ -82,11 +80,11 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         generate_output.finished              = sub_generate_status_[i].status == GenerateState::FINISHED;
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-        generate_output.aux_info.first_token_cost_time_us = first_token_latency_us_;
+        generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
         generate_output.aux_info.input_len    = generate_input_->promptLength();
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len         = seq_length_ - generate_input_->inputLength();
+        generate_output.aux_info.output_len         = seqLength() - generate_input_->inputLength();
         generate_output.aux_info.step_output_len    = output_len;
         generate_output.aux_info.reuse_len          = reuse_length_;
         generate_output.aux_info.pd_sep             = queryPdSep();
@@ -160,6 +158,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    last_output_pos_ = seq_length_;
+    last_output_pos_ = seqLength();
 }
 };  // namespace rtp_llm

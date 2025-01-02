@@ -7,6 +7,7 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
+#include "maga_transformer/cpp/stream/CompleteTokenIds.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
@@ -89,9 +90,7 @@ public:
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
     void setSeqLength(int seq_length);
-    int commonLen() const;
     int adjustedCommonLen() const;
-    void resetCommonLen();
     int seqSizePerBlock() const;
     int contextLength() const;
     int prefixLength() const;
@@ -115,7 +114,6 @@ public:
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
     std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int currentExecuteTokenSize();
-    std::vector<int> contextTokens(int batch_idx = 0) const;
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
@@ -127,7 +125,6 @@ public:
 
     int64_t getTimeoutMs() const;
     void checkTimeout();
-    bool checkTokenId(int token_id);
     void setStop(ErrorCode error_code, const std::string& error_msg);
     void setStopWithoutLock(ErrorCode error_code, const std::string& error_msg);
     void stopAndRelease(ErrorCode error_code, const std::string& error_msg);
@@ -253,17 +250,13 @@ protected:
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
     int                                 max_seq_len_;
-    int                                 seq_length_;
-    int                                 start_check_seq_length_ = 0;
     bool                                acceped_bouns_token_ = false;
     int64_t                             vocab_size_;
-    ft::BufferPtr                       complete_token_ids_;
+    std::shared_ptr<CompleteTokenIds>   complete_token_ids_;
     int64_t                             begin_time_us_;
     int64_t                             last_pause_us_ = 0;
     int64_t                             pause_time_us_ = 0;
     int64_t                             wait_time_us_ = 0;
-    int64_t                             first_token_time_us_ = 0;
-    int64_t                             first_token_latency_us_ = 0;
     StreamCacheResource                 stream_cache_resource_;
     bool                                is_context_stream_      = true;
     size_t                              iter_count_             = 0;
@@ -284,7 +277,6 @@ protected:
     int                                 last_chunk_len_         = 0;
     int                                 max_chunk_len_          = 0;
 
-    int                                 common_len_             = 0;
     int                                 sp_edit_search_index_   = 0;
     bool                                sp_edit_first_time_     = true;
 

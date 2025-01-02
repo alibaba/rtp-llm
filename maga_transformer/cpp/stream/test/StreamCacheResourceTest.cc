@@ -289,10 +289,10 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
 
-    auto batch_tokens_1 = stream_->complete_token_ids_->view(0, 1).data<int32_t>();
+    auto batch_tokens_1 = stream_->complete_token_ids_->data(0);
     batch_tokens_1[stream_->seqLength() - 3] = 7;
     batch_tokens_1[stream_->seqLength() - 2] = 8;
-    auto batch_tokens_2 = stream_->complete_token_ids_->view(1, 1).data<int32_t>();
+    auto batch_tokens_2 = stream_->complete_token_ids_->data(1);
     batch_tokens_2[stream_->seqLength() - 3] = 9;
     batch_tokens_2[stream_->seqLength() - 2] = 10;
 
@@ -342,10 +342,10 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 0);
 
-    auto tokens_1 = stream_->complete_token_ids_->view(0, 1).data<int32_t>();
+    auto tokens_1 = stream_->complete_token_ids_->data(0);
     tokens_1[stream_->seqLength() - 2] = 12;
     tokens_1[stream_->seqLength() - 1] = 13;
-    auto tokens_2 = stream_->complete_token_ids_->view(1, 1).data<int32_t>();
+    auto tokens_2 = stream_->complete_token_ids_->data(1);
     tokens_2[stream_->seqLength() - 2] = 14;
     tokens_2[stream_->seqLength() - 1] = 15;
 
@@ -491,9 +491,9 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     ASSERT_EQ(resource.maxBlockSize(), 1);
 
     resource.resource_context_.reuse_cache = true;
-    auto tokens_1 = stream_->complete_token_ids_->view(0, 1).data<int32_t>();
+    auto tokens_1 = stream_->complete_token_ids_->data(0);
     tokens_1[0] = 1;
-    auto tokens_2 = stream_->complete_token_ids_->view(1, 1).data<int32_t>();
+    auto tokens_2 = stream_->complete_token_ids_->data(1);
     tokens_2[0] = 2;
 
     resource.tryReleaseKVBlock(1);

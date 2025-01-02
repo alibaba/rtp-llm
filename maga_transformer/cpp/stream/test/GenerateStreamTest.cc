@@ -97,9 +97,9 @@ TEST_F(GenerateStreamTest, testConstructCacheKey) {
     ASSERT_EQ(cache_key2.size(), 2);
 
     stream1->setSeqLength(6);
-    auto batch_tokens_1 = stream1->complete_token_ids_->view(0, 1).data<int32_t>();
+    auto batch_tokens_1 = stream1->complete_token_ids_->data(0);
     batch_tokens_1[stream1->seqLength() - 1] = 8;
-    auto batch_tokens_2 = stream1->complete_token_ids_->view(1, 1).data<int32_t>();
+    auto batch_tokens_2 = stream1->complete_token_ids_->data(0);
     batch_tokens_2[stream1->seqLength() - 1] = 9;
     stream1->reConstructCacheKeys();
     ASSERT_EQ(cache_key1.size(), 3);

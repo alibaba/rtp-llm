@@ -211,11 +211,11 @@ void StreamCacheResource::constructCacheKey() {
     auto seq_size_per_block = seqSizePerBlock();
     auto token_ids = stream_->generate_input_->input_ids->data<int32_t>();
     int64_t hash = 0;
-    last_block_aligned_ = stream_->seq_length_ % seq_size_per_block == 0 ? true : false;
-    int32_t end_block_index = singleBatchNeedBlocks(stream_->seq_length_);
+    last_block_aligned_ = stream_->seqLength() % seq_size_per_block == 0 ? true : false;
+    int32_t end_block_index = singleBatchNeedBlocks(stream_->seqLength());
     for (int index = 0; index < end_block_index; index++) {
         auto pos = index * seq_size_per_block;
-        hash = hashInt64Array(hash, token_ids + pos, token_ids + std::min(pos + seq_size_per_block, stream_->seq_length_));
+        hash = hashInt64Array(hash, token_ids + pos, token_ids + std::min(pos + seq_size_per_block, stream_->seqLength()));
         batch_resource_.cache_keys[0].push_back(hash);
     }
     for (size_t i = 1; i < stream_->tileNum(); i++) {
@@ -231,12 +231,12 @@ void StreamCacheResource::reConstructCacheKeys() {
         return;
     }
     auto seq_size_per_block = seqSizePerBlock();
-    auto total_blocks = stream_->seq_length_ / seq_size_per_block;
+    auto total_blocks = stream_->seqLength() / seq_size_per_block;
     for (size_t i = 0; i < stream_->tileNum(); ++i) {
         if (!last_block_aligned_ && !batch_resource_.cache_keys[i].empty()) {
             batch_resource_.cache_keys[i].pop_back();
         }
-        auto token_ids = (*stream_->complete_token_ids_)[i].data<int32_t>();
+        auto token_ids = stream_->complete_token_ids_->data(i);
         int64_t hash = batch_resource_.cache_keys[i].empty() ? 0 : batch_resource_.cache_keys[i].back();
         for (int index = batch_resource_.cache_keys[i].size(); index < total_blocks; index++) {
             auto pos = index * seq_size_per_block;
