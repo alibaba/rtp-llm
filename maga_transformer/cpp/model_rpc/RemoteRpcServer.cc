@@ -62,6 +62,7 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
     }
     const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
     auto device = engine_->getDevice();
+    auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
     params.listen_port = init_params.cache_store_listen_port_;
@@ -77,7 +78,9 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
     FT_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     FT_LOG_INFO("cache store init success");
+
     device->setCacheStore(cache_store_);
+    cache_manager->regUserMr();
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

@@ -40,7 +40,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
 }
 
 void CacheManager::regUserMr() {
-    if (device_->cacheStore()) {
+    if (device_->cacheStore() && !kvcache_reg_mr_) {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         auto start_time_us = currentTimeUs();
@@ -50,11 +50,12 @@ void CacheManager::regUserMr() {
         auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
         FT_LOG_INFO("register user mr success: cost %ld ms, cache base address %p, len %lu, end address %p",
             cost_time_ms, cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
+        kvcache_reg_mr_ = true;
     }
 }
 
 void CacheManager::deregUserMr() {
-    if (device_->cacheStore()) {
+    if (device_->cacheStore() && kvcache_reg_mr_) {
         FT_LOG_INFO("start to deregUserMr user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         if (!memory_util->deregUserMr(cache_base_ptr_, true)) {

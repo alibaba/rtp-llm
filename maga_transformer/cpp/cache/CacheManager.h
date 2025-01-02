@@ -118,6 +118,8 @@ public:
     void beamSearchKvUpdate(ft::BufferPtr src_block_offset,
                             ft::BufferPtr target_block_offset);
 
+    void                                    regUserMr();
+
 private:
     const BlockCache&                       blockCache() const;
     size_t                                  cacheItemNum() const;
@@ -127,7 +129,6 @@ private:
     void                                    allocateAndTpSync();
     void                                    initKvCache();
     MatchInfo                               matchImpl(const MallocInfo& malloc_info);
-    void                                    regUserMr();
     void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(int64_t request_id, int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int64_t request_id, int nums);
@@ -165,6 +166,8 @@ private:
     bool            stop_ = false;
     std::thread     metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+
+    bool kvcache_reg_mr_ = false;
 
     std::mutex mutex_;
 };
