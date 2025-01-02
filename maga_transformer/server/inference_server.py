@@ -194,7 +194,7 @@ class InferenceServer(object):
                     self._access_logger.log_success_access(request, logable_result)
                 end_time = time.time()
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
-                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
+                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
                 usage = result.get('usage', {})
                 if not isinstance(usage, dict):
                     usage = {}

@@ -30,7 +30,7 @@ def format_exception(e: BaseException):
         return _format(error_code, error_code_str, e.message)
 
     if isinstance(e, FtRuntimeException):
-        return _format_ft_exception(e)        
+        return _format_ft_exception(e)
     elif isinstance(e, ConcurrencyException):
         return _format_ft_exception(FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e)))
     elif isinstance(e, asyncio.CancelledError):
@@ -38,7 +38,7 @@ def format_exception(e: BaseException):
     elif isinstance(e, LoraCountException):
         return _format_ft_exception(FtRuntimeException(ExceptionType.UPDATE_ERROR, str(e)))
     elif isinstance(e, Exception):
-        error_msg = f'ErrorMsg: {str(e)} \n Traceback: {traceback.format_exc()}'
+        error_msg = f'ErrorMsg: {str(e)} \n Traceback: {"".join(traceback.format_tb(e.__traceback__))}'
         return _format_ft_exception(FtRuntimeException(ExceptionType.UNKNOWN_ERROR, error_msg))
     else:
         return _format_ft_exception(FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e)))

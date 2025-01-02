@@ -39,7 +39,7 @@ BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints&
             "allocate buffer failed: %s current allocation records:\n%s \n stack traces: ",
             e.what(), printAllocationRecords(device_allocator_).c_str());
         printStackTrace();
-        throw e;
+        throw;
     }
 }
 

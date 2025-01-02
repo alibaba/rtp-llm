@@ -3,6 +3,7 @@ import logging
 from typing import Dict, AsyncGenerator
 from typing_extensions import override
 from maga_transformer.models.base_model import BaseModel
+from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from maga_transformer.async_decoder_engine.base_engine import BaseEngine
 from maga_transformer.ops import RtpEmbeddingOp, LoadBalanceInfo, MultimodalInputCpp
@@ -29,18 +30,15 @@ class EmbeddingCppEngine(BaseEngine):
         self.cpp_engine.init(self.model, self.mm_engine)
         self.model.custom_module.handler.init_cpp_handler()
 
-    def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
-        try:
-            multimodal_inputs = [MultimodalInputCpp(i.url, i.tensor, int(i.mm_type)) for i in inputs.multimodal_inputs]
-            results = self.cpp_engine.decode(inputs.token_ids,
+    def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):    
+        multimodal_inputs = [MultimodalInputCpp(i.url, i.tensor, int(i.mm_type)) for i in inputs.multimodal_inputs]
+        results = self.cpp_engine.decode(inputs.token_ids,
                                              inputs.token_type_ids,
                                              inputs.input_lengths,
                                              0,
                                              multimodal_inputs)
-            outputs.outputs = results
-            outputs.input_length = inputs.input_length
-        except Exception as e:
-            raise Exception("failed to run query, error: ", e)
+        outputs.outputs = results
+        outputs.input_length = inputs.input_length
 
     @override
     async def decode(self, input: EngineInputs) -> EngineOutputs:
