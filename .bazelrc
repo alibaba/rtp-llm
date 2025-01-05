@@ -2,7 +2,7 @@ build --python_top=//:python310 --incompatible_use_python_toolchains=false # for
 
 build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
-build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11" --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
+build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11" --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build -c opt
 build --copt -O2
 build --copt -g --strip=never
@@ -143,13 +143,13 @@ build:asan --copt -fPIC # for "fix relocation truncated to fit: R_X86_64_32 agai
 build:asan --copt -fdebug-types-section # for "fix relocation truncated to fit: R_X86_64_32 against `.debug_info'" collect2 error
 build:asan --linkopt -fsanitize=address
 
-test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"
+test --test_env LD_LIBRARY_PATH="/opt/rocm-6.3.0.2/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64"
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
 test --test_env TZ=Asia/Shanghai
 
 # compat for low driver < 535
-test:compat --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"
+test:compat --test_env LD_LIBRARY_PATH="/opt/rocm-6.3.0.2/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64"
 
 try-import %workspace%/internal_source/.internal_bazelrc

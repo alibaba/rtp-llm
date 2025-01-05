@@ -29,7 +29,7 @@ public:
 
     void free(void** ptr);
 
-    void setMemoryFraction(double fraction, int device) override {}
+    void setMemoryFraction(double fraction, c10::DeviceIndex device) override {}
 
     void recordHistory(bool                                          enabled,
                        at::hip::HIPCachingAllocator::CreateContextFn context_recorder,
@@ -42,7 +42,7 @@ public:
 
     bool checkPoolLiveAllocations(int                              device,
                                   at::hip::MempoolId_t             mempool_id,
-                                  const std::unordered_set<void*>& expected_live_allocations) override {
+                                  const std::unordered_set<void*>& expected_live_allocations) {
         return true;
     }
 
@@ -61,7 +61,7 @@ public:
         return result;
     }
 
-    std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> getCheckpointState(int                  device,
+    std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> getCheckpointState(c10::DeviceIndex device,
                                                                                      at::hip::MempoolId_t id) override {
         return nullptr;
     }
@@ -79,38 +79,40 @@ public:
      * functions for all allocated blocks in the new checkpoint state.
      */
     at::hip::HIPCachingAllocator::CheckpointDelta
-    setCheckpointPoolState(int device, std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> as) override {
+    setCheckpointPoolState(c10::DeviceIndex device, std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> pps) override {
         at::hip::HIPCachingAllocator::CheckpointDelta cpd;
         return cpd;
     }
 
-    at::DataPtr allocate(size_t size) const override;
+    at::DataPtr allocate(size_t size) override;
 
     at::DeleterFnPtr raw_deleter() const override;
 
-    void cacheInfo(int dev_id, size_t* largestBlock) override {}
+    void cacheInfo(c10::DeviceIndex device, size_t* largestBlock) override {}
 
     void assertValidDevice(int device) {}
 
-    at::hip::HIPCachingAllocator::DeviceStats getDeviceStats(int device) override {
+    at::hip::HIPCachingAllocator::DeviceStats getDeviceStats(c10::DeviceIndex device) override {
         return stats;
     }
 
-    void resetAccumulatedStats(int device) override {}
+    void resetAccumulatedStats(c10::DeviceIndex device) override {}
 
-    void resetPeakStats(int device) override {}
+    void resetPeakStats(c10::DeviceIndex device) override {}
     // HIPGraph interactions
-    void beginAllocateStreamToPool(int device, hipStream_t stream, at::hip::MempoolId_t mempool_id) override {}
+    void beginAllocateStreamToPool(int device, hipStream_t stream, at::hip::MempoolId_t mempool_id) {}
 
-    void endAllocateStreamToPool(int device, hipStream_t stream) override {}
+    void endAllocateStreamToPool(int device, hipStream_t stream) {}
 
-    void releasePool(int device, at::hip::MempoolId_t mempool_id) override {}
+    void releasePool(c10::DeviceIndex device, c10::hip::MempoolId_t mempool_id) override {}
 
     void* raw_alloc(size_t nbytes) override;
 
     void* raw_alloc_with_stream(size_t nbytes, hipStream_t stream) override;
 
-    void enablePeerAccess(int dev, int dev_to_access) override {}
+    void enablePeerAccess(
+      c10::DeviceIndex dev,
+      c10::DeviceIndex dev_to_access) override {}
 
     hipError_t memcpyAsync(void*       dst,
                            int         dstDevice,
@@ -143,6 +145,20 @@ public:
     std::string name() override {
         return "torch_hip_allocator";
     }
+
+    void copy_data(void* dest, const void* src, std::size_t count) const override {}
+
+    void beginAllocateToPool(
+      c10::DeviceIndex device,
+      c10::hip::MempoolId_t mempool_id,
+      std::function<bool(hipStream_t)> filter) override {};
+    
+    virtual void endAllocateToPool(
+      c10::DeviceIndex device,
+      c10::hip::MempoolId_t mempool_id) override {}
+
+    void attachAllocatorTraceTracker(c10::hip::HIPCachingAllocator::AllocatorTraceTracker tracker) override {};
+
 #endif
 };
 

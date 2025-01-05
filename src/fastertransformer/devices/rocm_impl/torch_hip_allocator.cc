@@ -19,7 +19,7 @@ void TorchHipAllocator::free(void** ptr) {
     }
 }
 
-at::DataPtr TorchHipAllocator::allocate(size_t size) const {
+at::DataPtr TorchHipAllocator::allocate(size_t size) {
     auto  device = c10::Device(at::DeviceType::HIP, device_id_);
     void* ptr    = allocator_->malloc(size);
     return {ptr, ptr, &local_raw_delete, device};

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/opt/conda310/bin/python
 """Crosstool wrapper for compiling ROCm programs.
 
 SYNOPSIS:
