@@ -54,6 +54,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "ck_layernorm2d_example_headers",
+    hdrs = glob([
+        "example/ck_tile/02_layernorm2d/*.hpp",
+    ]),
+    deps = [
+        ":ck_headers",
+    ],
+    strip_include_prefix = "example/ck_tile/02_layernorm2d",
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "config_h",
     srcs = [
@@ -81,3 +93,4 @@ genrule(
 )
 
 exports_files(["example/ck_tile/01_fmha/generate.py"])
+exports_files(["example/ck_tile/02_layernorm2d/generate.py"])

@@ -1,4 +1,4 @@
-#include "src/fastertransformer/rocm/rocmLayernorm2d.h"
+#include "layernorm2d_fwd.hpp"
 #include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
 #include "src/fastertransformer/devices/rocm_impl/ROCmAllocator.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
