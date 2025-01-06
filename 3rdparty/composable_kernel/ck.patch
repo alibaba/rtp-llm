@@ -1,38 +1,41 @@
---- example/ck_tile/01_fmha/codegen/cpp_symbol_map.py	2024-07-15 05:21:03.583380865 +0000
-+++ example/ck_tile/01_fmha/codegen/cpp_symbol_map.py	2024-07-15 05:11:37.089034571 +0000
-@@ -4,8 +4,8 @@
- 
- DTYPE_MAP = {
-     "fp16": "ck_tile::fp16_t",
--    "bf16": "ck_tile::bf16_t",
--    "fp8" : "ck_tile::fp8_t"
-+    "bf16": "ck_tile::bf16_t", # enable bf16
-+    # "fp8" : "ck_tile::fp8_t"
+--- example/ck_tile/01_fmha/codegen/cpp_symbol_map.py
++++ example/ck_tile/01_fmha/codegen/cpp_symbol_map.py
+@@ -5,9 +5,9 @@
+ FWD_DTYPE_MAP = {
+     "fp16"   : "FmhaFwdFp16",
+     "bf16"   : "FmhaFwdBf16",
+-    "fp8"    : "FmhaFwdFp8",
+-    "fp8fp16": "FmhaFwdFp8Fp16",
+-    "fp8bf16": "FmhaFwdFp8Bf16"
++    #"fp8"    : "FmhaFwdFp8",
++    #"fp8fp16": "FmhaFwdFp8Fp16",
++    #"fp8bf16": "FmhaFwdFp8Bf16"
  }
  
- MASK_IMPL = {
-@@ -55,13 +55,13 @@
+ BWD_DTYPE_MAP = {
+@@ -62,14 +62,14 @@ def get_mask_check_map(mask : str):
  
  BIAS_MAP = {
      "no" : "ck_tile::BlockAttentionBiasEnum::NO_BIAS",
 -    "bias"  : "ck_tile::BlockAttentionBiasEnum::ELEMENTWISE_BIAS",
--    "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
-+    # "bias"  : "ck_tile::BlockAttentionBiasEnum::ELEMENTWISE_BIAS",
-+     "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
++    #"bias"  : "ck_tile::BlockAttentionBiasEnum::ELEMENTWISE_BIAS",
+     "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
  }
  
  # TODO: this is ugly
  BIAS_CHECK_MAP = {
      "no" : "bias_enum::no_bias",
 -    "bias"  : "bias_enum::elementwise_bias",
--    "alibi" : "bias_enum::alibi"
-+    # "bias"  : "bias_enum::elementwise_bias",
-+     "alibi" : "bias_enum::alibi"
++    #"bias"  : "bias_enum::elementwise_bias",
+     "alibi" : "bias_enum::alibi"
  }
-@@ -84,5 +84,5 @@
-
+ 
+@@ -102,7 +102,7 @@ ROPE_CHECK_MAP = {
+ }
+ 
  MODE_MAP = {
 -    "batch" : "false",
-+    # "batch" : "false",
++    #"batch" : "false",
      "group" : "true"
  }
+ 
