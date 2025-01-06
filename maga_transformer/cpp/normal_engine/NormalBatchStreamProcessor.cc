@@ -85,6 +85,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int*      merged_text_mask = has_multimodal_input ? (int*)model_input.text_tokens_mask->data() : nullptr;
     int*      mm_features_locs = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
     int       batch_idx        = 0;
+    int       input_vocab_size = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
     if (merged_text_mask) {
         std::fill(merged_text_mask, merged_text_mask + current_tokens_size, 1);
@@ -98,9 +99,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         FT_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         for (auto i = 0; i < current_batch_size; ++i) {
             auto currentTokens      = stream->currentExecuteTokens(i);
-            if (currentTokens[0] >= vocab_size_) {
+            if (currentTokens[0] >= input_vocab_size) {
                 std::ostringstream error_msg;
-                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0] << " exceed vocab_size " << vocab_size_;
+                error_msg << "stream [" << stream->streamId() << "] token_id " << currentTokens[0] << " exceed vocab_size " << input_vocab_size;
                 return absl::InvalidArgumentError(error_msg.str());
             }
             merged_tokens[batch_idx] = currentTokens[0];
@@ -143,9 +144,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             cum_output_seq_len += input_tokens.size();
 
             for (int index = 0; index < input_tokens.size(); ++index) {
-                if (input_tokens[index] >= vocab_size_ && (index >= input_masks.size() || input_masks[index])) {
+                if (input_tokens[index] >= input_vocab_size && (index >= input_masks.size() || input_masks[index])) {
                     std::ostringstream error_msg;
-                    error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index] << " exceed vocab_size " << vocab_size_;
+                    error_msg << "stream [" << stream->streamId() << "] token_id " << input_tokens[index] << " exceed vocab_size " << input_vocab_size;
                     return absl::InvalidArgumentError(error_msg.str());
                 }
             }

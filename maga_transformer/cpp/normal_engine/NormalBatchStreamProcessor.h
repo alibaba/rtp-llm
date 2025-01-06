@@ -24,6 +24,7 @@ public:
                                const CacheConfig& cache_config, bool warm_up):
         num_layers_(params.num_layers_),
         vocab_size_(params.vocab_size_),
+        input_vocab_size_(params.input_vocab_size_),
         use_int8_kv_cache_(params.kv_cache_data_type_ == ft::DataType::TYPE_INT8),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
@@ -49,6 +50,7 @@ protected:
 protected:
     size_t           num_layers_;
     size_t           vocab_size_;
+    size_t           input_vocab_size_;
     bool             use_int8_kv_cache_;
     bool             has_positional_encoding_;
     bool             is_multimodal_;

@@ -15,6 +15,7 @@ from .falcon import Falcon
 from .mpt import Mpt
 from .phi import Phi
 from .deepseek_v2 import DeepSeekV2
+from .cosyvoice_qwen import CosyVoiceQwen
 
 import platform
 if platform.processor() != 'aarch64':
