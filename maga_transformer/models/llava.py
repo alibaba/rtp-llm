@@ -126,8 +126,8 @@ class Llava(Llama, MultiModalMixin):
     def from_huggingface(config: GptInitModelParameters, config_json: Dict[str, Any]):
         if "text_config" in config_json:
             text_config = config_json["text_config"]
-            if text_config.get("_name_or_path", "") != "":
-                text_config = AutoConfig.from_pretrained(text_config["_name_or_path"]).to_dict()
+            # if text_config.get("_name_or_path", "") != "":
+            #     text_config = AutoConfig.from_pretrained(text_config["_name_or_path"]).to_dict()
             Llama.from_huggingface(config, text_config)
 
             vision_config = config_json["vision_config"]
