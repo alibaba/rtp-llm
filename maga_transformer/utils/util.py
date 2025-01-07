@@ -13,6 +13,7 @@ from pathlib import Path
 
 class AtomicCounter:
     def __init__(self, initial: int=0):
+        self.initial = initial
         self.value = initial
         self._lock = threading.Lock()
 
@@ -36,6 +37,10 @@ class AtomicCounter:
     def get(self):
         with self._lock:
             return self.value
+    
+    def reset(self):
+        with self._lock:
+            self.value = self.initial
 
 PathLike = Union[str, Path]
 
