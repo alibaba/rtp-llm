@@ -281,6 +281,10 @@ absl::Status SpeculativeEngine::step() {
         update_begin_time_us = sampler_begin_time_us;
         total_propose_token_num = 0;
         total_accepted_token_num = streams.size();
+        for (auto& stream : streams) {
+            stream->setReuseLength(stream->seqLength() - 1);
+            stream->setFallbackPrefixLength(stream->reuseLength());
+        }
     } else {
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
@@ -340,6 +344,8 @@ void SpeculativeEngine::reportMetrics(int64_t                         propose_be
     int64_t                                 sampler_time    = update_begin_time_us - sampler_begin_time_us;
     int64_t                                 update_time     = current_time - update_begin_time_us;
     int64_t                                 total_step_time = current_time - propose_begin_time_us;
+    FT_LOG_DEBUG("total_step_time: %ld, propose_time: %ld, score_time: %ld, sampler_time: %ld, update_time: %ld",
+                total_step_time, propose_time, score_time, sampler_time, update_time);
     RtpLLMSpeculativeEngineMetricsCollector collector{total_step_time,
                                                       propose_time,
                                                       score_time,

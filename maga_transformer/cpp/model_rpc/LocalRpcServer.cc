@@ -21,6 +21,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Multimodal processing is not supported for speculative engine");
         }
+        EngineInitParams* non_const_maga_init_params = const_cast<EngineInitParams*>(&maga_init_params);
+        if (non_const_maga_init_params->gpt_init_parameter.reserve_runtime_mem_mb_ < 1024) {
+            non_const_maga_init_params->gpt_init_parameter.reserve_runtime_mem_mb_ = 1024;
+        }
         std::unique_ptr<SpeculativeEngine> sp_engine = std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
         auto status = sp_engine->init();
         if (!status.ok()) {
