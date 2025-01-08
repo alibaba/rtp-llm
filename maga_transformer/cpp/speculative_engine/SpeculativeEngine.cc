@@ -286,6 +286,11 @@ absl::Status SpeculativeEngine::step() {
         for (auto& stream : streams) {
             stream->setReuseLength(stream->seqLength() - 1);
             stream->setFallbackPrefixLength(stream->reuseLength());
+            stream->setSpEditRun(false);
+            FT_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_tokens = 0, accept_tokens = 1",
+                    stream->streamId(),
+                    stream->generateConfig()->top_k,
+                    stream->generateConfig()->top_p);
         }
     } else {
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

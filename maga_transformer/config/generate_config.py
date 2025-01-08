@@ -52,7 +52,6 @@ class GenerateConfig(BaseModel):
     custom_prop: str = "{}"
     sp_advice_prompt: str = ""
     sp_advice_prompt_token_ids: List[int] = []
-    sp_input_lookup: bool = True
     sp_edit: bool = False
     force_disable_sp_run: bool = False
     return_all_probs: bool = False

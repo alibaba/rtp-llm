@@ -51,6 +51,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.top_k = input_py.generate_config.top_k
     generate_config_pb.top_p = input_py.generate_config.top_p
     generate_config_pb.temperature = input_py.generate_config.temperature
+    generate_config_pb.sp_edit = input_py.generate_config.sp_edit
+    generate_config_pb.force_disable_sp_run = input_py.generate_config.force_disable_sp_run
     generate_config_pb.repetition_penalty = input_py.generate_config.repetition_penalty
     trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
@@ -69,12 +71,6 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
-    if input_py.generate_config.sp_input_lookup:
-        generate_config_pb.sp_input_lookup = input_py.generate_config.sp_input_lookup
-    if input_py.generate_config.sp_edit:
-        generate_config_pb.sp_edit = input_py.generate_config.sp_edit
-    if input_py.generate_config.force_disable_sp_run:
-        generate_config_pb.force_disable_sp_run = input_py.generate_config.force_disable_sp_run
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()

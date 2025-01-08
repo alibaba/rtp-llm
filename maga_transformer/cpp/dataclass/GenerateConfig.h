@@ -58,7 +58,6 @@ public:
     bool                          print_stop_words = false;
     std::string         sp_advice_prompt;
     std::vector<int>    sp_advice_prompt_token_ids;
-    bool                sp_input_lookup = true;
 
     bool pd_separation  = false;
 
@@ -146,7 +145,6 @@ public:
         JSONIZE(return_all_probs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
-        JSONIZE(sp_input_lookup);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

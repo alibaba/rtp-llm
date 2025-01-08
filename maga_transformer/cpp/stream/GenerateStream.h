@@ -210,11 +210,13 @@ public:
     }
 
     void incSpEditSearchIndex(size_t accepted_num) {
-        sp_edit_search_index_ += accepted_num;
+        if (sp_edit_run_) {
+            sp_edit_search_index_ += accepted_num;
+        }
     }
-
-    void setSpEditSearchIndex(size_t sp_edit_search_index) {
-        sp_edit_search_index_ = sp_edit_search_index;
+    
+    void setSpEditRun(bool is_sp_edit_run) {
+        sp_edit_run_ = is_sp_edit_run;
     }
 
     bool spEditFirstTime() const {
@@ -279,6 +281,7 @@ protected:
 
     int                                 sp_edit_search_index_   = 0;
     bool                                sp_edit_first_time_     = true;
+    bool                                sp_edit_run_            = false;
 
     bool                                last_block_aligned_     = false;
     bool                                need_remote_generate_   = false;

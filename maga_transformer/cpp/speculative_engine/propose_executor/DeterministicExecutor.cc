@@ -13,22 +13,23 @@ absl::StatusOr<ProposeOutput> DeterministicExecutor::propose(const std::list<Gen
         ruleBasedTokenSelector(stream, output.outputs[stream_index]);
         stream_index++;
     }
+
     return output;
 }
 
 void DeterministicExecutor::ruleBasedTokenSelector(const GenerateStreamPtr&            stream,
                                                    SpeculativeExecutorStreamOutputPtr& stream_output) {
     auto& config = stream->generateConfig();
-    if (config->sp_input_lookup || config->sp_advice_prompt_token_ids.size() > 0) {
-        bool use_sp_advice_prompt = config->sp_advice_prompt_token_ids.size() > 0;
-        if (config->sp_edit) {
-            SpEditTokenSelector(stream, stream_output, use_sp_advice_prompt);
-            if (stream_output->tokens == nullptr) {
-                PromptLookUpTokenSelector(stream, stream_output, false);
-            }
-        } else {
-            PromptLookUpTokenSelector(stream, stream_output, use_sp_advice_prompt);
-        }
+    bool use_sp_advice_prompt = config->sp_advice_prompt_token_ids.size() > 0;
+    if (config->sp_edit) {
+        SpEditTokenSelector(stream, stream_output, use_sp_advice_prompt);
+    } else {
+        PromptLookUpTokenSelector(stream, stream_output, use_sp_advice_prompt);
+    }
+
+    // backup prompt lookup
+    if (stream_output->tokens == nullptr && use_sp_advice_prompt) {
+        PromptLookUpTokenSelector(stream, stream_output, false);
     }
 }
 
@@ -56,6 +57,7 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                                                                             std::vector{1, propose_len},
                                                                             advice_token_ids);
         stream->setSpEditFirstTime(false);
+        stream->setSpEditRun(true);
         postProcess(stream, stream_output);
     } else if (min_token_match_len_ <= output_token_len) {
         size_t begin_match_len = std::min(max_token_match_len_, output_token_len);
@@ -81,6 +83,7 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                         ft::DataType::TYPE_INT32,
                         std::vector{1, propose_len},
                         advice_token_ids + start_propose_index);
+                    stream->setSpEditRun(true);
                     postProcess(stream, stream_output);
                     return;
                 }
@@ -124,7 +127,6 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
                     size_t propose_len =
                         std::min(max_new_tokens,
                                  std::min(propose_step_, advice_token_num - start_propose_index));
-                    stream->setSpEditSearchIndex(start_propose_index);
                     stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
                         fastertransformer::MemoryType::MEMORY_CPU,
                         ft::DataType::TYPE_INT32,
