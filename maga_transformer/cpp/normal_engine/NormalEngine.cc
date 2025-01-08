@@ -110,14 +110,17 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 absl::Status NormalEngine::initSystemPrompt() {
     if (device_->getDeviceProperties().tp_rank == 0) {
         resource_context_.reuse_cache = params_.reuse_cache_;
-    if (!params_.multi_task_prompt_tokens_.empty()) {
-        resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
-        resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
-    } else {
-        std::list<GenerateStreamPtr> streams;
-        THROW_IF_STATUS_ERROR(executor_->process(streams));
+
+    if (!params_.multi_task_prompt_tokens_.empty()) {
+        if (device_->getDeviceProperties().tp_rank == 0) {
+            resource_context_.reuse_cache = true;
+            CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
+            resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
+        } else {
+            std::list<GenerateStreamPtr> streams;
+            THROW_IF_STATUS_ERROR(executor_->process(streams));
+        }
     }
     
     return absl::OkStatus();
@@ -135,12 +138,12 @@ LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
 }
 
 absl::Status NormalEngine::startLoop() {
+    FT_LOG_INFO("start init system prompt");
+    THROW_IF_STATUS_ERROR(initSystemPrompt());
+    FT_LOG_INFO("init system prompt done");
     FT_LOG_INFO("start normal engine loop");
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
-    FT_LOG_INFO("start init system prompt");
-    THROW_IF_STATUS_ERROR(initSystemPrompt()); // system prompt constructor depends on engine startup
-    FT_LOG_INFO("init system prompt done");
     return absl::OkStatus();
 }
 

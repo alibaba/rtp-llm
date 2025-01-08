@@ -153,16 +153,22 @@ WarmUpResult SpeculativeEngine::warmUp() {
 absl::Status SpeculativeEngine::initSystemPrompt() {
     if (device_->getDeviceProperties().tp_rank == 0) {
         resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
-        if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
+    }
+
+    if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
+        if (device_->getDeviceProperties().tp_rank == 0) {
             resource_context_.reuse_cache = true;
             CHECK_AND_RETURN_REF(system_prompt_param,
                             SystemPromptConstructor::construct(
                                 score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
             resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
+        } else {
+            std::list<GenerateStreamPtr> streams;
+            THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
+            if (propose_model_params_->gpt_model()) {
+                THROW_IF_STATUS_ERROR(propose_executor_->normalProcess(streams));
+            }
         }
-    } else {
-        std::list<GenerateStreamPtr> streams;
-        THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
     }
     return absl::OkStatus();
 }
@@ -177,12 +183,12 @@ LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo() {
 }
 
 absl::Status SpeculativeEngine::startLoop() {
+    FT_LOG_INFO("start init system prompt");
+    THROW_IF_STATUS_ERROR(initSystemPrompt());
+    FT_LOG_INFO("init system prompt done");
     FT_LOG_INFO("start speculative engine loop");
     running_     = true;
     loop_thread_ = std::thread(&SpeculativeEngine::loop, this);
-    FT_LOG_INFO("start init system prompt");
-    THROW_IF_STATUS_ERROR(initSystemPrompt());  // system prompt constructor depends on engine startup
-    FT_LOG_INFO("init system prompt done");
     return absl::OkStatus();
 }
 
