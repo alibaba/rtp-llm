@@ -165,6 +165,7 @@ cc_library(
     deps = torch_deps() + [
         ":dataclass",
         ":utils",
+        ":cache",
         "//src/fastertransformer/devices:devices_base",
     ] + select({
         "//:using_cuda": [],

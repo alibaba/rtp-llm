@@ -33,7 +33,6 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.rope_config.dim = 64;
     attention_conf.rope_config.base = 1000000;
     attention_conf.mask_type = AttentionMaskType::causalMask;
-    auto model = createGptModel({device_, *weights, description});
 
     const auto cache_block_num = 128;
     CacheConfig cache_config(
@@ -54,6 +53,7 @@ TEST_F(GptModelTest, testSimple) {
     auto kv_cache_block_id = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf = tensorToBuffer(mask_tensor);
+    auto model = createGptModel({device_, *weights, description, cache_manager_->kvCacheBuffer()});
 
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
@@ -62,9 +62,6 @@ TEST_F(GptModelTest, testSimple) {
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
     inputs.kv_cache_block_id = kv_cache_block_id;
-    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-    inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
-    inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
     device_->syncAndCheck();
 
     // temporarily disable test for cpu device
@@ -163,8 +160,8 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);
     AttentionCommonInputs attention_inputs({
-            *inputs.input_lengths,
-            *inputs.sequence_lengths
+            inputs.input_lengths,
+            inputs.sequence_lengths
         });
 
     {

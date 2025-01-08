@@ -626,14 +626,14 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
 
     if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
+            size_t context_len = *static_cast<int*>(params.common.input_lengths->dataWithOffset(decoder_batch + batch));
             runOneBatchStride(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
     } else if (params.input.type() == DataType::TYPE_FP16) {
         FT_LOG_WARNING("Attention performance could be suboptimal with FP16 input. Try FP32 input.");
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
+            size_t context_len = *static_cast<int*>(params.common.input_lengths->dataWithOffset(decoder_batch + batch));
             runOneBatch(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
@@ -647,12 +647,12 @@ AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModulePa
 
     if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
+            size_t step = *static_cast<int*>(params.common.sequence_lengths->dataWithOffset(batch));
             runOneBatchStride(params, batch, batch, 1, step);
         }
     } else if (params.input.type() == DataType::TYPE_FP16) {
         for (int batch = 0; batch < batch_size; batch++) {
-            size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
+            size_t step = *static_cast<int*>(params.common.sequence_lengths->dataWithOffset(batch));
             runOneBatch(params, batch, batch, 1, step);
         }
     } else {

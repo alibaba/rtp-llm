@@ -9,8 +9,8 @@ using namespace std;
 namespace fastertransformer {
 AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
     const auto &input = params.input;
-    const auto &input_lengths = params.common.input_lengths;
-    const auto &sequence_lengths = params.common.sequence_lengths;
+    const auto &input_lengths = *params.common.input_lengths;
+    const auto &sequence_lengths = *params.common.sequence_lengths;
 
     const auto &output_weight = params.weights.output_weight;
 
@@ -87,7 +87,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
 #else
     qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
-#endif     
+#endif
     }
 
     auto kv_cache_block_id = layer_kv_cache ? layer_kv_cache->kv_cache_block_id : nullptr;
@@ -107,6 +107,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         }
         contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs, params.qscheme});
     }
+    params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
     printBufferData(*qkv_output, "qkv_output");
 
     if(params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTensor) {

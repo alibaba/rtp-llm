@@ -354,11 +354,12 @@ struct CacheStoreInputs {
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
-    const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
-    const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
+    ConstBufferPtr input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
+    ConstBufferPtr sequence_lengths;   // int32_t, [decoder_batch_size]
 
-    std::optional<KvCacheInfo> kv_cache;
+    std::optional<KvCacheInfo>      kv_cache;
     std::optional<CacheStoreInputs> cache_store_inputs;
+
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr padding_offset;

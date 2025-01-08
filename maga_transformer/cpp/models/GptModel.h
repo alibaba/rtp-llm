@@ -4,6 +4,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
+#include "maga_transformer/cpp/cache/CacheManager.h"
 #include <string>
 #include <utility>
 
@@ -24,9 +25,10 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    ft::DeviceBase*           device;
-    const ft::Weights         weights;
-    const GptModelDescription description;
+    ft::DeviceBase*                                  device;
+    const ft::Weights                                weights;
+    const GptModelDescription                        description;
+    const std::optional<CacheManager::KVCacheBuffer> kv_cache_buffer;
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -56,10 +58,6 @@ struct GptModelInputs {
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
     ft::BufferPtr kv_cache_block_id;    // [batch_size, block_nums], kv cache block block id
-    ft::BufferPtr k_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr v_cache_buffer;       // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    ft::BufferPtr k_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
-    ft::BufferPtr v_scale_buffer;       // [layer_num, block_nums, head, seq_size_per_block]
 
     std::optional<std::vector<ft::BufferPtr>> multimodal_features; // all features in gathered stream stored here
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
@@ -76,45 +74,7 @@ struct GptModelInputs {
     bool                                      warmup          = false;
 
 public:
-    std::string debugString() const {
-        if (!Logger::getEngineLogger().isDebugMode()) {
-            return "";
-        }
-        std::stringstream debug_string;
-        debug_string << "GptModelInputs { "
-                     << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
-                     << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
-                     << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
-                     << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
-        if (combo_position_ids) {
-            debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
-        }
-        if (lora_ids) {
-            debug_string << ", lora_ids: " << lora_ids->debugStringWithData<int32_t>();
-        }
-        if (lora_input_lengths) {
-            debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
-        }
-        if (kv_cache_block_id) {
-            debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugString();
-        }
-        if (attention_mask) {
-            debug_string << ", attention_mask: " << attention_mask->debugString();
-        }
-        if (request_id) {
-            debug_string << ", request_id: " << request_id->debugString();
-        }
-        if (request_pd_separation) {
-            debug_string << ", request_pd_separation: " << request_pd_separation->debugString();
-        }
-        if (cache_keys) {
-            debug_string << ", cache_keys: " << cache_keys->debugString();
-        }
-        debug_string << ", block_size: " << block_size;
-        debug_string << ", pd_separation: " << pd_separation;
-        debug_string << "}";
-        return debug_string.str();
-    }
+    std::string debugString() const;
 };
 
 enum GptModelInputIndex : size_t{
@@ -136,143 +96,7 @@ enum GptModelInputIndex : size_t{
     gptModelInputLength
 };
 
-inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
-    if (device->getDeviceProperties().tp_size <= 1) {
-        return;
-    }
-    const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto shape_hints = device->allocateBuffer({ft::DataType::TYPE_INT32, {shape_hints_size}, ft::AllocationType::HOST});
-    auto shape_hints_ptr = shape_hints->data<int32_t>();
-    shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::inputLengths] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::sequenceLengths] = inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::prefixLengths] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[1] : 0;
-    shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::comboPositionIds] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::loraIds] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::loraInputLengths] = inputs.lora_input_lengths.get() ? inputs.lora_input_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::textTokensMask] = inputs.text_tokens_mask.get() ? inputs.text_tokens_mask->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs] = inputs.mm_features_locs.get() ? inputs.mm_features_locs->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value().size() : 0;
-    shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
-    shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
-    shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
-
-    device->broadcast({{shape_hints}, 0});
-    device->syncCommunication(false);
-    device->syncAndCheck();
-
-    // multimodal features shape broadcast
-    ft::BufferPtr mm_features_shape;
-    int32_t* mm_features_shape_ptr = nullptr;
-    inputs.need_all_logits = shape_hints_ptr[GptModelInputIndex::needAllLogits];
-    const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
-    if (mm_features_num) {
-        mm_features_shape =
-            device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]}, ft::AllocationType::HOST});
-        mm_features_shape_ptr = mm_features_shape->data<int32_t>();
-        for (auto i = 0; i < mm_features_num; ++i) {
-            mm_features_shape_ptr[i] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i]->shape()[0] : 0;
-        }
-        device->broadcast({{mm_features_shape}, 0});
-        device->syncCommunication(false);
-        device->syncAndCheck();
-    }
-
-    auto max_blocks = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
-    auto combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto text_tokens_mask_size = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto mm_features_locs_size = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-
-    if (device->getDeviceProperties().tp_rank) {
-        auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
-        
-        inputs.combo_tokens = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]}, ft::AllocationType::HOST});
-        inputs.input_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]}, ft::AllocationType::HOST});
-        inputs.sequence_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, ft::AllocationType::HOST});
-        inputs.prefix_lengths = device->allocateBuffer(
-             {ft::DataType::TYPE_INT32, {context_batch_size}, ft::AllocationType::HOST});
-        if (max_blocks != 0) {
-            inputs.kv_cache_block_id = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT32,
-                    {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, ft::AllocationType::HOST});
-            inputs.cache_keys = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT64, {context_batch_size, max_blocks}, ft::AllocationType::HOST});
-        }
-        inputs.request_id = device->allocateBuffer(
-            {ft::DataType::TYPE_INT64, {context_batch_size}, ft::AllocationType::HOST});
-        inputs.request_pd_separation = device->allocateBuffer(
-            {ft::DataType::TYPE_BOOL, {context_batch_size}, ft::AllocationType::HOST});
-        inputs.lm_output_indexes = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
-        if (combo_position_ids_size) {
-            inputs.combo_position_ids = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)combo_position_ids_size}, ft::AllocationType::HOST});
-        }
-        if (shape_hints_ptr[GptModelInputIndex::loraIds]) {
-            inputs.lora_ids = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraIds]}, ft::AllocationType::HOST});
-        }
-        if (shape_hints_ptr[GptModelInputIndex::loraInputLengths]) {
-            inputs.lora_input_lengths = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, ft::AllocationType::HOST});
-        }
-        if (text_tokens_mask_size) {
-            inputs.text_tokens_mask = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size}, ft::AllocationType::HOST});
-        }
-        if (mm_features_locs_size) {
-            inputs.mm_features_locs = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)mm_features_locs_size}, ft::AllocationType::HOST});
-        }
-        if (mm_features_num) {
-            std::vector<ft::BufferPtr> mm_features;
-            for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
-                mm_features.emplace_back(
-                    device->allocateBuffer(
-                        {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
-                         {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                         ft::AllocationType::HOST}));
-            }
-            inputs.multimodal_features = std::move(mm_features);
-        }
-    }
-
-    std::vector<ft::BufferPtr> buffers;
-    buffers.emplace_back(inputs.combo_tokens);
-    buffers.emplace_back(inputs.input_lengths);
-    buffers.emplace_back(inputs.sequence_lengths);
-    buffers.emplace_back(inputs.prefix_lengths);
-    if (max_blocks) {
-        buffers.emplace_back(inputs.kv_cache_block_id);
-        buffers.emplace_back(inputs.cache_keys);
-    }
-    buffers.emplace_back(inputs.request_id);
-    buffers.emplace_back(inputs.request_pd_separation);
-    buffers.emplace_back(inputs.lm_output_indexes);
-    if (combo_position_ids_size) {
-        buffers.emplace_back(inputs.combo_position_ids);
-    }
-    buffers.emplace_back(inputs.lora_ids);
-    buffers.emplace_back(inputs.lora_input_lengths);
-    if (text_tokens_mask_size) {
-        buffers.emplace_back(inputs.text_tokens_mask);
-    }
-    if (mm_features_locs_size) {
-        buffers.emplace_back(inputs.mm_features_locs);
-    }
-    if (mm_features_num) {
-        for (auto& mm_feature: inputs.multimodal_features.value()) {
-            buffers.emplace_back(mm_feature);
-        }
-    }
-    device->broadcast({buffers, 0});
-    device->syncAndCheck();
-}
+void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device);
 
 struct GptModelOutputs {
     ft::BufferPtr logits;
@@ -284,7 +108,21 @@ struct GptModelOutputs {
     mutable ft::BufferPtr scatter_logits;
     mutable ft::BufferPtr scatter_hidden_states;
 };
+
 using LoraMap = std::unordered_map<std::string, ft::ConstBufferPtr>;
+
+struct GptLayerOutputs {
+    ft::BufferPtr hidden;
+    ft::BufferPtr pre_decoder_residual;
+};
+
+struct GptLayerInputs {
+    ft::BufferPtr hidden;
+    ft::BufferPtr pre_decoder_residual;
+    ft::AttentionCommonInputs attention_common_inputs;
+    const ft::DataType dtype;
+};
+
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
@@ -294,16 +132,37 @@ public:
 
 private:
     void prepareAttentionInputs(
-            const GptModelInputs& inputs,
-            ft::DataType dtype,
-            ft::AttentionCommonInputs& attention_inputs);
+        const GptModelInputs& inputs,
+        ft::DataType dtype,
+        ft::AttentionCommonInputs& attention_inputs);
+
     ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
+
+    GptLayerInputs forwardPreLayers(const GptModelInputs& inputs);
+
+    GptLayerOutputs forwardGptLayer(
+        GptLayerInputs inputs,
+        const int32_t layer_id,
+        ft::lora::LoraModelInputPtr lora_model_input);
+
+    GptModelOutputs forwardPostLayers(
+        const ft::BufferPtr hidden,
+        const bool has_context_request,
+        const bool need_all_logits,
+        const ft::BufferPtr lm_output_indexes);
 
 private:
     ft::DeviceBase* device_;
     const ft::DeviceProperties device_props_;
     const ft::Weights          weights_;
+    const size_t               layer_num_;
     const GptModelDescription  description_;
+    ft::BufferPtr              k_cache_buffer_;
+    ft::BufferPtr              v_cache_buffer_;
+    ft::BufferPtr              k_scale_buffer_;
+    ft::BufferPtr              v_scale_buffer_;
+    ft::BufferPtr              residual_scale_fp32_;
+    ft::BufferPtr              residual_scale_;
 };
 
 }  // namespace rtp_llm

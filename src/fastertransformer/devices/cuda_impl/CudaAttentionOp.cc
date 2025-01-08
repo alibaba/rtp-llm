@@ -468,8 +468,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     // prefix prompt
 
-    const auto* input_lengths = params.common.input_lengths.data<int>();
-    const auto* sequence_lengths = params.common.sequence_lengths.data<int>();
+    const auto* input_lengths = params.common.input_lengths->data<int>();
+    const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
 
     float q_scaling = params.configs.q_scaling;
     int relative_attention_bias_stride = 0;

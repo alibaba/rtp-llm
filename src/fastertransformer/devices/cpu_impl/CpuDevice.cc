@@ -174,12 +174,12 @@ AttentionLayerOutput CpuDevice::attentionLayer(const AttentionLayerParams& param
     const auto& output_weight    = params.weights.output_weight->kernel;
     const auto& attention_conf   = params.configs;
 
-    int batch_size      = input_lengths.shape()[0];
+    int batch_size      = input_lengths->shape()[0];
     int past_seq_len    = 0;
     int current_seq_len = 0;
     int next_token_num  = 0;
-    int step            = sequence_lengths.size();
-    int input_seq_len   = input_lengths.data<int>()[0];
+    int step            = sequence_lengths->size();
+    int input_seq_len   = input_lengths->data<int>()[0];
 
     if (step == 0) {
         current_seq_len = input_seq_len;

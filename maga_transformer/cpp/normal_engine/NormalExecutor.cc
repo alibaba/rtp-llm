@@ -25,7 +25,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
-    model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
+    model_.reset(new GptModel({
+        device_,
+        params.gpt_weights,
+        genModelDescription(params.gpt_init_parameter),
+        cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt
+    }));
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
@@ -41,13 +46,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (lora_manager_) {
         model_input.lora_model_input = lora_manager_->makeLoraModelInput(model_input.lora_ids,
                                                                          model_input.lora_input_lengths);
-    }
-    if (!warm_up_) {
-        auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-        model_input.k_cache_buffer = kv_cache_buffer.k_blocks;
-        model_input.v_cache_buffer = kv_cache_buffer.v_blocks;
-        model_input.k_scale_buffer = kv_cache_buffer.k_scale;
-        model_input.v_scale_buffer = kv_cache_buffer.v_scale;
     }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     GptModelOutputs model_output = std::move(model_->forward(model_input));

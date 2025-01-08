@@ -68,8 +68,8 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         FT_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
-    } 
-    kv_cache_buffer.cache_type = cache_type;    
+    }
+    kv_cache_buffer.cache_type = cache_type;
     sync_check_cuda_error();
     return kv_cache_buffer;
 }
@@ -121,7 +121,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.count_length             = 1;
         }
     }
-    printBufferData(params.common.input_lengths, "input_lengths");
+    printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
         printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
@@ -156,7 +156,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
     bool skip_add_bias_transpose = (params.configs.rope_config.style == RopeStyle::No &&
-     !params.common.kv_cache && 
+     !params.common.kv_cache &&
      !params.configs.fuse_qkv_add_bias);
     FT_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose)
@@ -262,7 +262,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         // TODO(lidongjin): Only support float32(in)\float16(output).
         auto softmax_type = qk_output->type();
         auto lengths_host = clone({
-            params.common.input_lengths.view(decoder_batch_size, batch_size),
+            params.common.input_lengths->view(decoder_batch_size, batch_size),
             AllocationType::HOST
         });
         auto prefix_lengths_host = params.common.prefix_prompt_lengths
@@ -334,8 +334,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     auto prefix_lengths = params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
     auto max_prefix_length = params.common.max_prefix_length;
 
-    const auto* input_lengths = params.common.input_lengths.data<int>();
-    const auto* sequence_lengths = params.common.sequence_lengths.data<int>();
+    const auto* input_lengths = params.common.input_lengths->data<int>();
+    const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
 
     float q_scaling = params.configs.q_scaling;
     int relative_attention_bias_stride = 0;

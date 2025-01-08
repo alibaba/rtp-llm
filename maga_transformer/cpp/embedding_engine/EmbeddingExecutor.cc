@@ -27,9 +27,9 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
     metrics_reporter_(params.metrics_reporter),
     params_(params.gpt_init_parameter)
 {
-    model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
+    model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_), nullopt}));
     init_position_ids(params_.max_seq_len_);
-    py::gil_scoped_acquire acquire; 
+    py::gil_scoped_acquire acquire;
     torch_type_ = py::module::import("torch").attr("Tensor");
 }
 
@@ -234,7 +234,7 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto total_batch_size = model_request.context_batch_size;
     model_output = std::move(model_->forward(model_input));
     py::gil_scoped_acquire acquire;
-    // for py::list, handler should ensure object to cpu in the python impl, 
+    // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
     CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
     return updateStreams(post, streams, total_batch_size);

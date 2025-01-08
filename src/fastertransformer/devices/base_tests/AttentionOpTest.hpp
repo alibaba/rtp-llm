@@ -144,7 +144,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto scale_device           = createDeviceBuffer<float>(scale_host);
     auto rope_config            = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
-    auto common_inputs      = AttentionCommonInputs({*input_lengths, *sequence_lengths});
+    auto common_inputs      = AttentionCommonInputs({input_lengths, sequence_lengths});
     common_inputs.cu_seqlens = move(cu_seqlens_device);
     common_inputs.cu_kv_seqlens = common_inputs.cu_seqlens;
     common_inputs.padding_offset = move(padding_offset_device);
@@ -266,7 +266,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     cache_manager_ = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-    auto common_inputs = AttentionCommonInputs({*input_lengths_device, *sequence_lengths_device});
+    auto common_inputs = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
     common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});

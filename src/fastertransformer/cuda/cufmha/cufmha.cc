@@ -10,13 +10,11 @@ tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
 {
     switch (dtype) {
         case DataType::TYPE_FP16: return tensorrt_llm::kernels::DATA_TYPE_FP16;
-#ifdef ENABLE_BF16
         case DataType::TYPE_BF16: return tensorrt_llm::kernels::DATA_TYPE_BF16;
-#endif
 #ifdef ENABLE_FP8
     case DataType::TYPE_FP8_E4M3: return tensorrt_llm::kernels::DATA_TYPE_E4M3;
- #endif
-        default: throw std::runtime_error("not support dtype");
+#endif
+        default: throw std::runtime_error("cufmha not support dtype: " + std::to_string(static_cast<int>(dtype)));
     }
 
 }

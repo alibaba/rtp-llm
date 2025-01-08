@@ -88,7 +88,7 @@ void MlaQKVGemmOP::forward(torch::Tensor input,
 
     auto                      t1 = Buffer::emptyBuffer();
     auto                      t2 = Buffer::emptyBuffer();
-    AttentionCommonInputs attention_common_inputs{t1, t2};
+    AttentionCommonInputs attention_common_inputs{device->clone({t1}), device->clone({t2}), };
 
     // create Attention
     AttentionLayerParams params{-1,

@@ -92,22 +92,22 @@ void AttentionLayerTest<T>::testAttentionLayer(
     auto kv_cache = torch::empty(0);
     model_inputs.kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-    model_inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
-    model_inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
+    // model_inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
+    // model_inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
 
     auto input_lengths_device = device_->clone({*model_inputs.input_lengths});
     auto sequence_lengths_device = device_->clone({*model_inputs.sequence_lengths});
     AttentionCommonInputs common_inputs({
-            *input_lengths_device,
-            *sequence_lengths_device
+            input_lengths_device,
+            sequence_lengths_device
         });
 
     model.prepareAttentionInputs(model_inputs, dtype, common_inputs);
 
-    auto layer_k_cache_buffer = model_inputs.k_cache_buffer->index(0);
-    auto layer_v_cache_buffer = model_inputs.v_cache_buffer->index(0);
+    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
+    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
     common_inputs.kv_cache = KvCacheInfo({
-        (int)model_inputs.k_cache_buffer->shape()[0],
+        (int)kv_cache_buffer.k_blocks->shape()[0],
         model_inputs.kv_cache_block_id,
         layer_k_cache_buffer,
         layer_v_cache_buffer,
