@@ -151,16 +151,18 @@ WarmUpResult SpeculativeEngine::warmUp() {
 }
 
 absl::Status SpeculativeEngine::initSystemPrompt() {
-    if (device_->getDeviceProperties().tp_rank != 0) {
-        return absl::OkStatus();
-    }
-    resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
-    if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
-        resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(system_prompt_param,
-                         SystemPromptConstructor::construct(
-                             score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
-        resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
+        if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
+            resource_context_.reuse_cache = true;
+            CHECK_AND_RETURN_REF(system_prompt_param,
+                            SystemPromptConstructor::construct(
+                                score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
+            resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
+        }
+    } else {
+        std::list<GenerateStreamPtr> streams;
+        THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
     }
     return absl::OkStatus();
 }
