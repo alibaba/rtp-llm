@@ -45,9 +45,9 @@ public:
 private:
     void ruleBasedTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
 
-    void SpEditTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
+    void SpEditTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output, bool use_sp_advice_prompt);
 
-    void PromptLookUpTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
+    void PromptLookUpTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output, bool use_sp_advice_prompt);
 
     void postProcess(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
 

@@ -20,25 +20,30 @@ void DeterministicExecutor::ruleBasedTokenSelector(const GenerateStreamPtr&     
                                                    SpeculativeExecutorStreamOutputPtr& stream_output) {
     auto& config = stream->generateConfig();
     if (config->sp_input_lookup || config->sp_advice_prompt_token_ids.size() > 0) {
+        bool use_sp_advice_prompt = config->sp_advice_prompt_token_ids.size() > 0;
         if (config->sp_edit) {
-            SpEditTokenSelector(stream, stream_output);
+            SpEditTokenSelector(stream, stream_output, use_sp_advice_prompt);
+            if (stream_output->tokens == nullptr) {
+                PromptLookUpTokenSelector(stream, stream_output, false);
+            }
         } else {
-            PromptLookUpTokenSelector(stream, stream_output);
+            PromptLookUpTokenSelector(stream, stream_output, use_sp_advice_prompt);
         }
     }
 }
 
 void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&            stream,
-                                                SpeculativeExecutorStreamOutputPtr& stream_output) {
+                                                SpeculativeExecutorStreamOutputPtr& stream_output,
+                                                bool use_sp_advice_prompt) {
     auto&        config                  = stream->generateConfig();
     size_t advice_token_num = 0;
     int* advice_token_ids = nullptr;
-    if (config->sp_input_lookup && config->sp_advice_prompt_token_ids.size() == 0) {
-        advice_token_num = stream->seqLength();
-        advice_token_ids = stream->completeTokenIds()->data<int>();
-    } else {
+    if (use_sp_advice_prompt && config->sp_advice_prompt_token_ids.size() > 0) {
         advice_token_num = config->sp_advice_prompt_token_ids.size();
         advice_token_ids = config->sp_advice_prompt_token_ids.data(); 
+    } else {
+        advice_token_num = stream->seqLength();
+        advice_token_ids = stream->completeTokenIds()->data<int>();
     }
     const auto&  sp_edit_search_index    = stream->spEditSearchIndex();
     const size_t output_token_len        = stream->outputTokenLen();
@@ -85,16 +90,17 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
 }
 
 void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&            stream,
-                                                      SpeculativeExecutorStreamOutputPtr& stream_output) {
+                                                      SpeculativeExecutorStreamOutputPtr& stream_output,
+                                                      bool use_sp_advice_prompt) {
     auto& config                  = stream->generateConfig();
     size_t advice_token_num = 0;
     int* advice_token_ids = nullptr;
-    if (config->sp_input_lookup && config->sp_advice_prompt_token_ids.size() == 0) {
-        advice_token_num = stream->seqLength();
-        advice_token_ids = stream->completeTokenIds()->data<int>();
-    } else {
+    if (use_sp_advice_prompt && config->sp_advice_prompt_token_ids.size() > 0) {
         advice_token_num = config->sp_advice_prompt_token_ids.size();
         advice_token_ids = config->sp_advice_prompt_token_ids.data(); 
+    } else {
+        advice_token_num = stream->seqLength();
+        advice_token_ids = stream->completeTokenIds()->data<int>();
     }
 
     const size_t seq_len = stream->seqLength();
