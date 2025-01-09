@@ -32,7 +32,7 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     const_cast<ResourceContext*>(&engine->resourceContext())->reuse_cache = true;
-    auto result_status = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get());
+    auto result_status = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get(), true);
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
