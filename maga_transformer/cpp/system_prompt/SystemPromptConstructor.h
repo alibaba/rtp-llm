@@ -17,7 +17,8 @@ namespace rtp_llm {
 
 class SystemPromptConstructor {
 public:
-    static absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager);
+    static absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> construct(
+        const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager, bool insert_kv_cache);
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

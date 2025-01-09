@@ -157,7 +157,7 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
         resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(system_prompt_param,
                         SystemPromptConstructor::construct(
-                            score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get()));
+                            score_model_params_.gpt_init_parameter, this, resource_context_.cache_manager.get(), device_->getDeviceProperties().tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
     return absl::OkStatus();

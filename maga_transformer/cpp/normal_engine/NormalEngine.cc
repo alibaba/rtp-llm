@@ -112,7 +112,7 @@ absl::Status NormalEngine::initSystemPrompt() {
 
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
+        CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get(), device_->getDeviceProperties().tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
     
