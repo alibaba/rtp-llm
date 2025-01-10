@@ -13,6 +13,7 @@ class RequestFormat:
 
 class GenerateConfig(BaseModel):
     max_new_tokens: int = 1000
+    max_input_tokens: int = 32000
     num_beams: int = 1
     # 0 mean not use num_return_sequences,
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
