@@ -14,7 +14,7 @@ protected:
     void SetUp() override {
         const auto           port    = autil::NetUtil::randomPort();
         const std::string    address = "tcp:0.0.0.0:" + std::to_string(port);
-        ft::GptInitParameter params;
+        EngineInitParams params;
         server_ = std::make_shared<HttpApiServer>(nullptr, nullptr, address, params, py::none());
         EXPECT_TRUE(server_->start());
     }
@@ -29,7 +29,7 @@ private:
 TEST_F(HttpApiServerTest, testApiServerStart) {
     const auto           port = autil::NetUtil::randomPort();
     const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
-    ft::GptInitParameter params;
+    EngineInitParams params;
     py::object           token_processor;
     HttpApiServer        server(nullptr, nullptr, addr, params, token_processor);
     ASSERT_TRUE(server.start());
@@ -42,7 +42,7 @@ TEST_F(HttpApiServerTest, testApiServerStart) {
 TEST_F(HttpApiServerTest, testApiServerStop) {
     const auto           port = autil::NetUtil::randomPort();
     const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
-    ft::GptInitParameter params;
+    EngineInitParams params;
     auto                 server = std::make_shared<HttpApiServer>(nullptr, nullptr, addr, params, py::none());
     EXPECT_TRUE(server->start());
     server->active_request_count_->inc();
@@ -59,7 +59,7 @@ TEST_F(HttpApiServerTest, testApiServerStop) {
 TEST_F(HttpApiServerTest, IsEmbedding_InferenceService) {
     const auto           port = autil::NetUtil::randomPort();
     const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
-    ft::GptInitParameter params;
+    EngineInitParams params;
     py::object           token_processor;
     HttpApiServer        server(nullptr, nullptr, addr, params, token_processor);
     ASSERT_TRUE(server.start());
@@ -71,7 +71,7 @@ TEST_F(HttpApiServerTest, IsEmbedding_InferenceService) {
 TEST_F(HttpApiServerTest, IsEmbedding_EmbeddingService) {
     const auto           port = autil::NetUtil::randomPort();
     const std::string    addr = "tcp:0.0.0.0:" + std::to_string(port);
-    ft::GptInitParameter params;
+    EngineInitParams params;
     py::object           py_render;
     HttpApiServer        server(nullptr, nullptr, params, py_render);
     ASSERT_TRUE(server.start(addr));

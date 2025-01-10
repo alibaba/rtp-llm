@@ -78,4 +78,28 @@ void HttpApiServerException::handleException(const std::exception& e,
     WriteExceptionResponse(writer, e);
 }
 
+void HttpApiServerException::handleException(const std::exception& e,
+                                             int64_t request_id,
+                                             kmonitor::MetricsReporterPtr metric_reporter,
+                                             const http_server::HttpRequest& request,
+                                             const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
+    const auto body = request.GetBody();
+    if (metric_reporter) {
+        std::string source = getSource(body);
+        int error_code = Type::UNKNOWN_ERROR;
+        if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
+            FT_LOG_WARNING("dynamic_cast succ");
+            error_code = he->getType();
+        }
+        std::map<std::string, std::string> tag_map;
+        tag_map["source"] = source;
+        tag_map["error_code"] = std::to_string(error_code);
+        auto tags = kmonitor::MetricsTags(tag_map);
+        metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
+    }
+    FT_LOG_WARNING("found exception: [%s]", e.what());
+    AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
+    WriteExceptionResponse(writer, e);
+}
+
 }  // namespace rtp_llm

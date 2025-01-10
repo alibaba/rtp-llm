@@ -226,7 +226,7 @@ bool HttpApiServer::registerEmbedingService() {
     embedding_service_.reset(new EmbeddingService(embedding_endpoint_,
                                                   request_counter_,
                                                   controller_,
-                                                  metric_reporter_));
+                                                  metrics_reporter_));
     auto callback = [active_request_count = active_request_count_, embedding_service = embedding_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
         CounterGuard counter_guard(active_request_count);

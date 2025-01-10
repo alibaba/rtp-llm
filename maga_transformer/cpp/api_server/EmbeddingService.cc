@@ -10,11 +10,11 @@ namespace rtp_llm {
 EmbeddingService::EmbeddingService(const std::shared_ptr<EmbeddingEndpoint>&       embedding_endpoint,
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
-                                   const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
+                                   const kmonitor::MetricsReporterPtr&             metrics_reporter):
     embedding_endpoint_(embedding_endpoint),
     request_counter_(request_counter),
     controller_(controller),
-    metric_reporter_(metric_reporter) {
+    metrics_reporter_(metrics_reporter) {
 }
 
 std::string EmbeddingService::getSource(const std::string& raw_request) {
@@ -50,6 +50,16 @@ std::string EmbeddingService::getUsage(const std::string& response) {
     return usage;
 }
 
+void EmbeddingService::report(const double value, 
+                              const std::string& name, 
+                              const kmonitor::MetricsTags& tags,
+                              const kmonitor::MetricType type) {
+    kmonitor::MetricsTags metric_tags = kmonitor::MetricsTags(tags);
+    if (metrics_reporter_) {
+        metrics_reporter_->report(value, name, type, &metric_tags, true);
+    }
+}
+
 void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                  const http_server::HttpRequest&                         request,
                                  std::optional<EmbeddingEndpoint::EmbeddingType>         type) {
@@ -64,7 +74,9 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         FT_LOG_WARNING("worker can't process embedding request.");
         writer->SetStatus(403, "Forbidden");
         writer->Write(R"({"detail": "worker can't process embedding request."})");
-        metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNSUPPORTED_OPERATION);
+        auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNSUPPORTED_OPERATION));
+        report(1, "py_rtp_framework_error_qps", tags);
+        // metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNSUPPORTED_OPERATION);
         return;
     }
 
@@ -72,14 +84,18 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         FT_LOG_WARNING("non-embedding model can't handle embedding request!");
         writer->SetStatus(501, "Not Implemented");
         writer->Write(R"({"detail": "non-embedding model can't handle embedding request!"})");
-        metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNKNOWN_ERROR);
+        auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNKNOWN_ERROR));
+        report(1, "py_rtp_framework_error_qps", tags);
+        // metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNKNOWN_ERROR);
         return;
     }
     if (!controller_ || !request_counter_) {
         FT_LOG_WARNING("embedding model: controller or request_counter null!");
         writer->SetStatus(500, "Internal Server Error");
         writer->Write(R"({"detail": "embedding model: controller or request_counter null!"})");
-        metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNKNOWN_ERROR);
+        auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNKNOWN_ERROR));
+        report(1, "py_rtp_framework_error_qps", tags);
+        // metric_reporter_->reportErrorQpsMetric(getSource(body), HttpApiServerException::UNKNOWN_ERROR);
         return;
     }
 
@@ -94,21 +110,26 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
         writer->SetStatus(400, "Bad Request");
         writer->Write(R"({"detail": "embedding request parse failed."})");
-        metric_reporter_->reportErrorQpsMetric(req.source, HttpApiServerException::ERROR_INPUT_FORMAT_ERROR);
+        auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR));
+        report(1, "py_rtp_framework_error_qps", tags);
+        // metric_reporter_->reportErrorQpsMetric(req.source, HttpApiServerException::ERROR_INPUT_FORMAT_ERROR);
         return;
     }
 
     try {
-        metric_reporter_->reportQpsMetric(req.source);
+        // metric_reporter_->reportQpsMetric(req.source);
+        report(1, "py_rtp_framework_qps");
         auto [response, logable_response] = embedding_endpoint_->handle(body, type);
         AccessLogWrapper::logSuccessAccess(body, request_id, logable_response, req.private_request);
-        metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms);
+        report(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms, "py_rtp_framework_rt", kmonitor::MetricsTags(), kmonitor::MetricType::GAUGE);
+        // metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms);
         writer->AddHeader("USAGE", getUsage(response));
         writer->Write(response);
-        metric_reporter_->reportSuccessQpsMetric(req.source);
+        report(1, "py_rtp_success_qps_metric");
+        // metric_reporter_->reportSuccessQpsMetric(req.source);
     } catch (const std::exception& e) {
         FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
-        HttpApiServerException::handleException(e, request_id, metric_reporter_, request, writer);
+        HttpApiServerException::handleException(e, request_id, metrics_reporter_, request, writer);
     }
 }
 

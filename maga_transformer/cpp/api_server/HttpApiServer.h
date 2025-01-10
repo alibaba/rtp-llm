@@ -30,31 +30,36 @@ public:
     HttpApiServer(std::shared_ptr<EngineBase> engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   std::string                 address,
-                  const ft::GptInitParameter& params,
+                  const EngineInitParams&     params,
                   py::object                  token_processor):
         engine_(engine),
         mm_processor_(mm_processor),
         addr_(address),
-        params_(params),
-        token_processor_(new TokenProcessor(token_processor)) {
+        engine_init_param_(params),
+        params_(params.gpt_init_parameter),
+        token_processor_(new TokenProcessor(token_processor)),
+        metrics_reporter_(params.metrics_reporter) {
 
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params);
+        init_controller(params_);
     }
 
     // embedding engine
     HttpApiServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
-                  const ft::GptInitParameter&          params,
-                  py::object                           custom_module): params_(params) {
+                  const EngineInitParams&          params,
+                  py::object                           custom_module):
+        engine_init_param_(params),
+        params_(params.gpt_init_parameter),
+        metrics_reporter_(params.metrics_reporter) {
 
         is_embedding_ = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params);
+        init_controller(params_);
     }
 
     ~HttpApiServer() = default;
@@ -90,14 +95,17 @@ private:
     std::shared_ptr<EngineBase>            engine_;
     std::shared_ptr<MultimodalProcessor>   mm_processor_;
     std::string                            addr_;
-    ft::GptInitParameter                   params_;
+
+    const EngineInitParams&                engine_init_param_;
+    const ft::GptInitParameter&            params_;
     std::shared_ptr<ConcurrencyController> controller_;
-    std::shared_ptr<TokenProcessor>              token_processor_;
+    std::shared_ptr<TokenProcessor>        token_processor_;
 
     std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
 
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
 
     std::shared_ptr<HealthService>           health_service_;
     std::shared_ptr<WorkerStatusService>     worker_status_service_;
