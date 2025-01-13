@@ -224,6 +224,7 @@ class GptInitModelParameters:
             self.is_sparse_head = True
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int):
+        tp_size = int(tp_size / ep_size)
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
         else:
@@ -242,8 +243,9 @@ class GptInitModelParameters:
             self.inter_padding_size = self.inter_size
         if self.moe_inter_padding_size <= 0:
             self.moe_inter_padding_size = self.inter_size
-        if tp_size / ep_size > 1:
-            self.moe_inter_padding_size = self.moe_inter_padding_size + (get_pad_size(self.moe_inter_padding_size, align_size) if self.quant_algo.isQuant() else 0)
+        if self.moe_inter_padding_size > 0:
+            moe_align_size = align_size if self.quant_algo.isQuant() else  8 * tp_size
+            self.moe_inter_padding_size = self.moe_inter_padding_size + (get_pad_size(self.moe_inter_padding_size, moe_align_size))
 
     def update_task_prompt_tokens_id(self, tokenizer):
         if self.multi_task_prompt:
@@ -410,7 +412,7 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_data_type: {self.kv_cache_data_type}')
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
-        # use environment variables to update stop_words_str and stop_words_id 
+        # use environment variables to update stop_words_str and stop_words_id
         env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
         env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
         env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []

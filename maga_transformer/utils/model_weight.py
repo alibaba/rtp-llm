@@ -138,7 +138,7 @@ def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, *
     t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
     if ep > 1:
         t1 = torch.split(t1, t1.shape[0]// ep, dim=0)[ep_rank]
-    return t1 
+    return t1
 
 
 def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **kwargs: Any) -> torch.Tensor:
@@ -148,7 +148,7 @@ def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **
         tp_rank = int(tp_rank / ep)
     t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
     t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
-    t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]]) 
+    t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
     if ep > 1:
         t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
     t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
@@ -156,6 +156,32 @@ def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **
 
 def stack_(ts: List[torch.Tensor]):
     return torch.stack(ts, dim=0)
+
+def stack_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: int):
+    t = torch.stack(ts, dim=0)
+    if dim == 1:
+        pad_shape = [t.shape[0], moe_inter_padding_size - t.shape[1], t.shape[2]]
+    elif dim == 2:
+        pad_shape = [t.shape[0], t.shape[1], moe_inter_padding_size - t.shape[2]]
+    else:
+        raise Exception('moe unknown padding dim: ' + str(dim))
+    z = torch.zeros(pad_shape, device=t.device).half()
+    return torch.concat([t, z], dim)
+
+def stack_moe_w1_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: int):
+    gate_ = ts[:len(ts) // 2]
+    up_ = ts[len(ts) // 2:]
+    w1 = torch.stack(gate_, dim=0)
+    w3 = torch.stack(up_, dim=0)
+    if dim==1:
+        pad_shape = [w1.shape[0], moe_inter_padding_size - w1.shape[1], w1.shape[2]]
+        z = torch.zeros(pad_shape, device=w1.device).half()
+        w1 = torch.cat((w1, z), dim=1)
+        w3 = torch.cat((w3, z), dim=1)
+        x =  torch.concat([w1, w3], dim=1)
+        return x
+    else:
+        raise Exception('moe unknown padding dim: ' + str(dim))
 
 def stack_moe_w1(ts: List[torch.Tensor]):
     gate = ts[:len(ts) // 2]
@@ -1010,6 +1036,7 @@ class ModelDeployWeightInfo:
         self.moe_k_      = config.gpt_init_params.moe_k
         self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
         self.moe_style_ = config.gpt_init_params.moe_style
+        self._moe_inter_padding_size = config.moe_inter_padding_size
 
         self.tie_word_embeddings = config.tie_word_embeddings
         self.need_ffn_act_scale = config.need_ffn_act_scale
@@ -1197,7 +1224,7 @@ class ModelWeights:
     @staticmethod
     def layer_weight_prefix(tp_rank:int):
         return f"rank_{tp_rank:02d}.layers."
-    
+
     @staticmethod
     def global_weight_prefix(tp_rank:int):
         return f"rank_{tp_rank:02d}.global."
