@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 void ArpcServerWrapper::start() {
     arpc_server_transport_.reset(new anet::Transport(2, anet::SHARE_THREAD));
-    arpc_server_.reset(new arpc::ANetRPCServer(arpc_server_transport_.get(), 4, 10));
+    arpc_server_.reset(new arpc::ANetRPCServer(arpc_server_transport_.get(), 10, 20));
     FT_CHECK_WITH_INFO(arpc_server_transport_->start(), "arpc server start public transport failed");
     arpc_server_transport_->setName("ARPC SERVER");
     std::string spec("tcp:0.0.0.0:" + std::to_string(port_));
