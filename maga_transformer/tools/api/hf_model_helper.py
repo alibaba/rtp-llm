@@ -118,7 +118,8 @@ class HfStyleModelInfo:
 
     @staticmethod
     def is_from_hf(model_path: str) -> bool:
-        return model_path.startswith(HfStyleModelInfo.HF_URI_PREFIX) or not model_path.startswith(("oss:", "http:", "https:", "dfs:", "hdfs:", "/"))
+        return model_path.startswith(HfStyleModelInfo.HF_URI_PREFIX) or not model_path.startswith(("oss:", "http:", "https:", "dfs:", "hdfs:", "/", "nas://"))
+
     @staticmethod
     def _get_repo_from_hf_link(model_link: str) -> str:
         return model_link.replace(HfStyleModelInfo.HF_URI_PREFIX, "")
