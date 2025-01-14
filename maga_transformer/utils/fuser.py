@@ -168,7 +168,7 @@ class NfsManager():
             if mount_root not in self._nfs_info_map:
                 logging.info(f"first time mounting nfs path [{nfs_address}] for [{path}]")
                 self._do_mount_nfs(nfs_address, mount_root)
-            self._nfs_info_map[mount_root].mounted_user_addresses.add(path)
+            self._nfs_info_map[mount_root].mounted_user_addresses.add(mounted_dir_path)
             self._mounted_path_map[mounted_dir_path] = MountedPathInfo(mount_root)
             logging.info(f"nfs path {path} mounted to {mounted_dir_path}")
             return mounted_dir_path
