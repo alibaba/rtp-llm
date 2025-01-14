@@ -20,7 +20,10 @@ std::string EmbeddingEndpoint::embeddingTypeToString(EmbeddingType type) {
 
 std::pair<std::string, std::optional<std::string>>
 EmbeddingEndpoint::handle(const std::string& body,
-                          std::optional<EmbeddingEndpoint::EmbeddingType> type) {
+                          std::optional<EmbeddingEndpoint::EmbeddingType> type,
+                          const kmonitor::MetricsReporterPtr& metrics_reporter,
+                          autil::StageTime& stage_timer,
+                          int64_t start_time_ms) {
     py::gil_scoped_acquire gil_before_deocde;
     py::module embedding_endpoint = py::module::import("maga_transformer.embedding.embedding_endpoint");
     py::object EmbeddingHandler   = embedding_endpoint.attr("EmbeddingHandler");
@@ -36,7 +39,10 @@ EmbeddingEndpoint::handle(const std::string& body,
     auto mm_features    = getMultimodalFeature(batch_input.attr("multimodal_inputs"), token_ids);
 
     py::gil_scoped_release gil_release;
+    auto now = autil::TimeUtility::currentTimeInMilliSeconds();
+    metrics_reporter->report(now - start_time_ms, "ft_pre_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
     auto results = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, 0, mm_features);
+    stage_timer.end_stage();
 
     py::gil_scoped_acquire gil_after_deocde;
     py::object batch_output;

@@ -2,6 +2,7 @@
 
 #include "aios/network/anet/httppacket.h"
 #include "autil/StringUtil.h"
+#include "autil/TimeUtility.h"
 
 namespace http_server {
 
@@ -14,6 +15,7 @@ HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<v
         return HttpError::BadRequest("http packet is nullptr");
     }
     _request = std::move(request);
+    recv_time_ms_ = autil::TimeUtility::currentTimeInMilliSeconds();
 
     std::string uri = _request->getURI();
     std::vector<std::string> items = autil::StringUtil::split(uri, "?");

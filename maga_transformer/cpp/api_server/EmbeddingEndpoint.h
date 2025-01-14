@@ -22,7 +22,11 @@ public:
 public:
     // `virtual` for test
     virtual std::pair<std::string, std::optional<std::string>>
-    handle(const std::string& body, std::optional<EmbeddingEndpoint::EmbeddingType> type);
+    handle(const std::string& body,
+           std::optional<EmbeddingEndpoint::EmbeddingType> type,
+           const kmonitor::MetricsReporterPtr& metrics_reporter,
+           autil::StageTime& stage_timer,
+           int64_t start_time_ms);
 
 private:
     std::string embeddingTypeToString(EmbeddingType type);

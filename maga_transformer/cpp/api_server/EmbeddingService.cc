@@ -66,6 +66,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
 
     const auto body = request.GetBody();
     auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    autil::StageTime stage_timer;
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->AddHeader("Content-Type", "application/json");
@@ -119,14 +120,16 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
     try {
         // metric_reporter_->reportQpsMetric(req.source);
         report(1, "py_rtp_framework_qps");
-        auto [response, logable_response] = embedding_endpoint_->handle(body, type);
-        AccessLogWrapper::logSuccessAccess(body, request_id, logable_response, req.private_request);
+        auto [response, logable_response] = embedding_endpoint_->handle(body, type, metrics_reporter_, stage_timer, request.getRecvTime());
+        stage_timer.end_stage();
+        metrics_reporter_->report(stage_timer.last_ms(), "ft_post_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
         report(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms, "py_rtp_framework_rt", kmonitor::MetricsTags(), kmonitor::MetricType::GAUGE);
         // metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms);
         writer->AddHeader("USAGE", getUsage(response));
         writer->Write(response);
         report(1, "py_rtp_success_qps_metric");
         // metric_reporter_->reportSuccessQpsMetric(req.source);
+        AccessLogWrapper::logSuccessAccess(body, request_id, request.getRecvTime(), logable_response, req.private_request);
     } catch (const std::exception& e) {
         FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
         HttpApiServerException::handleException(e, request_id, metrics_reporter_, request, writer);

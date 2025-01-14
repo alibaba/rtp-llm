@@ -17,6 +17,7 @@ public:
 
     static void logSuccessAccess(const std::string&                raw_request,
                                  int64_t                           request_id,
+                                 int64_t                           start_time_ms,
                                  const std::optional<std::string>& logable_response,
                                  bool                              private_request);
 

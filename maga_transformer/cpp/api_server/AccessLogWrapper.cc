@@ -48,6 +48,32 @@ private:
     std::string              exception_traceback_;
 };
 
+class AccessLogInfoEmbedding: public autil::legacy::Jsonizable {
+public:
+    AccessLogInfoEmbedding(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id, int64_t start_time_ms):
+        request_(request),
+        response_(response),
+        request_id_(request_id),
+        log_time_(autil::TimeUtility::currentTimeString("%Y-%m-%d %H:%M:%S")),
+        query_time_(start_time_ms) {}
+
+public:
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("request", request_, request_);
+        json.Jsonize("response", response_, response_);
+        json.Jsonize("id", request_id_, request_id_);
+        json.Jsonize("log_time", log_time_, log_time_);
+        json.Jsonize("query_time", query_time_, query_time_);
+    }
+
+private:
+    RequestLogInfo  request_;
+    ResponseLogInfo response_;
+    int64_t         request_id_;
+    std::string     log_time_;
+    int64_t         query_time_;
+};
+
 class AccessLogInfo: public autil::legacy::Jsonizable {
 public:
     AccessLogInfo(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id):
@@ -170,6 +196,7 @@ std::string removeQuotesAroundBraces(const std::string& input) {
 // for embedding model
 void AccessLogWrapper::logSuccessAccess(const std::string&                raw_request,
                                         int64_t                           request_id,
+                                        int64_t                           start_time_ms,
                                         const std::optional<std::string>& logable_response,
                                         bool                              private_request) {
     if (private_request) {
@@ -185,7 +212,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
         if (logResponse()) {
             response.addResponse(logable_response.value());
         }
-        AccessLogInfo access_log_info(request, response, request_id);
+        AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_ms);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
         FT_ACCESS_LOG_INFO("%s", removeQuotesAroundBraces(removeEscapedQuotes(access_log_info_str)).c_str());
