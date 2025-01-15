@@ -16,9 +16,6 @@ cc_library(
         "torch/lib/libtorch_cpu.so",
         "torch/lib/libshm.so",
         "torch/lib/libc10.so",
-        "torch/lib/libaotriton_v2.so",
-        "torch/lib/libnuma.so",
-        "torch/lib/libcaffe2_nvrtc.so"
     ] + glob([
         "torch/lib/libgomp*.so*",
     ]) + select({
@@ -30,6 +27,11 @@ cc_library(
             "torch/lib/libnvToolsExt*.so*",
         ]),
         "//:using_rocm": [
+            "torch/lib/librocfft.so",
+            "torch/lib/librocsolver.so",
+            "torch/lib/libaotriton_v2.so",
+            "torch/lib/libnuma.so",
+            "torch/lib/libcaffe2_nvrtc.so",
             "torch/lib/libtorch_hip.so",
             "torch/lib/libc10_hip.so",
         ] +  glob([

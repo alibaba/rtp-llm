@@ -40,7 +40,6 @@ test_linkopts = [
     "-lrocprofiler-sdk-roctx",
     "-lhipsparse",
     "-lhiprtc-builtins",
-    "-lrocfft",
     "-lrocsolver",
     "-L/opt/amdgpu/lib64",
     "-ldrm_amdgpu",

@@ -2021,8 +2021,8 @@ python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
     # via matplotlib
-pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.1/pytorch_triton_rocm-2.1.0%2Brocm6.1.4d510c3a44-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:28e1c532337a6d0df7ecb4a37582dc790122210dced2ecc8ef673c7e8b08e67c
+pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/pytorch_triton_rocm-3.0.0%2Brocm6.3.0.75cc27c26a-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:aa87bc8a5b62a0cd6a3170fda1924c19e7c9801a0f868fad1035e1f8e0a8b0dc
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   torch
@@ -2630,16 +2630,16 @@ tokenizers==0.20.3 \
     --hash=sha256:fbaf3ea28fedfb2283da60e710aff25492e795a7397cad8a50f1e079b65a5a70 \
     --hash=sha256:ff1ef8bd47a02b0dc191688ccb4da53600df5d4c9a05a4b68e1e3de4823e78eb
     # via transformers
-torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.1/torch-2.1.2%2Brocm6.1-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:d19e70296deabe78059fcd06bd86b2ee0a18848fd2f08ca14bae2aafd9640146
+torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.1/torchvision-0.16.1%2Brocm6.1-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:e909bc5274a2d19c88c3732322330343008b1425345e88d332124967538bb07c
+torchvision @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torchvision-0.19.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:c5a47d66ead2620f62ba7921db5a8999f80fe190fbe71a614d26e167d22797ea
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm
