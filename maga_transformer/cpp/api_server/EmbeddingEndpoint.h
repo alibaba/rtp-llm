@@ -25,8 +25,7 @@ public:
     handle(const std::string& body,
            std::optional<EmbeddingEndpoint::EmbeddingType> type,
            const kmonitor::MetricsReporterPtr& metrics_reporter,
-           autil::StageTime& stage_timer,
-           int64_t start_time_ms);
+           int64_t start_time_us);
 
 private:
     std::string embeddingTypeToString(EmbeddingType type);

@@ -50,12 +50,12 @@ private:
 
 class AccessLogInfoEmbedding: public autil::legacy::Jsonizable {
 public:
-    AccessLogInfoEmbedding(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id, int64_t start_time_ms):
+    AccessLogInfoEmbedding(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id, int64_t start_time_us):
         request_(request),
         response_(response),
         request_id_(request_id),
         log_time_(autil::TimeUtility::currentTimeString("%Y-%m-%d %H:%M:%S")),
-        query_time_(start_time_ms) {}
+        query_time_(autil::TimeUtility::usFormat(start_time_us, "%Y-%m-%d %H:%M:%S")) {}
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
@@ -71,7 +71,7 @@ private:
     ResponseLogInfo response_;
     int64_t         request_id_;
     std::string     log_time_;
-    int64_t         query_time_;
+    std::string     query_time_;
 };
 
 class AccessLogInfo: public autil::legacy::Jsonizable {
