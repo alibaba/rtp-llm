@@ -15,7 +15,7 @@ HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<v
         return HttpError::BadRequest("http packet is nullptr");
     }
     _request = std::move(request);
-    recv_time_ms_ = autil::TimeUtility::currentTimeInMilliSeconds();
+    recv_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 
     std::string uri = _request->getURI();
     std::vector<std::string> items = autil::StringUtil::split(uri, "?");

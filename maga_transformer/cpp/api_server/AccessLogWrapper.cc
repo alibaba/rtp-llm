@@ -196,7 +196,7 @@ std::string removeQuotesAroundBraces(const std::string& input) {
 // for embedding model
 void AccessLogWrapper::logSuccessAccess(const std::string&                raw_request,
                                         int64_t                           request_id,
-                                        int64_t                           start_time_ms,
+                                        int64_t                           start_time_us,
                                         const std::optional<std::string>& logable_response,
                                         bool                              private_request) {
     if (private_request) {
@@ -212,7 +212,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
         if (logResponse()) {
             response.addResponse(logable_response.value());
         }
-        AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_ms);
+        AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_us);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
         FT_ACCESS_LOG_INFO("%s", removeQuotesAroundBraces(removeEscapedQuotes(access_log_info_str)).c_str());

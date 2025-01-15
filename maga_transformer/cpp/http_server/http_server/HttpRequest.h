@@ -27,10 +27,10 @@ public:
     std::string GetUri() const { return _request ? _request->getURI() : ""; }
     const std::string &GetEndpoint() const { return _endpoint; }
     const std::map<std::string, std::string> &GetUriParams() const { return _uriParams; }
-    int64_t getRecvTime() const { return recv_time_ms_; }
+    int64_t getRecvTime() const { return recv_time_us_; }
 
 private:
-    int64_t recv_time_ms_;
+    int64_t recv_time_us_;
     std::string _endpoint;
     std::map<std::string, std::string> _uriParams;
     std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>> _request;
