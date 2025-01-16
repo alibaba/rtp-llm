@@ -41,10 +41,10 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
 
 
 
-    const auto fc2_result = allocateBuffer({type, {token_num, top_k, hidden_dim}});
-    const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {pad_to_multiple_of_16(token_num * top_k)}});
-    const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
-    const auto expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
+    const auto fc2_result = allocateBuffer({type, {token_num, top_k, hidden_dim}}, {"moe_fc2_result"});
+    const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expert_scale"});
+    const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expand_src_to_dst"});
+    const auto expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expert_for_src"});
 
     auto normalization_mode = moe_conf.has_moe_norm
                             ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE
@@ -64,7 +64,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
                       moe_conf.ep_size,
                       moe_conf.ep_rank);
     const auto ws_size   = moe_plugin_->getWorkspaceSize(token_num);
-    const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}});
+    const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}}, {"moe_workspace"});
 
     moe_plugin_->enqueue(
         hidden.data(),
