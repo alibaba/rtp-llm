@@ -52,6 +52,26 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "cutlass3.6",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "cc3c29a81a140f7b97045718fb88eb0664c37bd7",
+        build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
+        patches = ["//3rdparty/cutlass:0001-cuda12.4-compat.patch"],
+    )
+
+    new_git_repository(
+        name = "flashinfer",
+        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        commit = "63fa200edbe4a54dcba36943ac0d0987f5292628",
+        build_file = str(Label("//3rdparty/flashinfer:flashinfer.BUILD")),
+        patches = [
+            "//3rdparty/flashinfer:0001-fix-compile.patch",
+            "//3rdparty/flashinfer:0002-dispatch-group-size.patch",
+            "//3rdparty/flashinfer:0003-tanh-compatibility.patch",
+        ],
+    )
+
+    new_git_repository(
         name = "flash_attention",
         remote = "https://github.com/Dao-AILab/flash-attention.git",
         # v2.5.6

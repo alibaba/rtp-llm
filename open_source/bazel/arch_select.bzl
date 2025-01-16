@@ -27,7 +27,7 @@ def cache_store_deps():
 
 def th_transformer_so():
     native.alias(
-        name = "th_transformer_so",
+        name = "th_transformer",
         actual = "//:th_transformer",
     )
 
@@ -106,7 +106,7 @@ def fa_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libflashinfer_0_so", ":libflashinfer_1_so", ":libflashinfer_2_so"],
         "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })

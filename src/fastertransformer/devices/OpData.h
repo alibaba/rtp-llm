@@ -19,7 +19,13 @@
 #include <memory>
 #include <torch/python.h>
 
+namespace rtp_llm {
+class GptModelInputs;
+}
+
 namespace fastertransformer {
+
+class DeviceBase;
 
 enum class OpErrorType {
     ERROR_NONE,
@@ -352,6 +358,8 @@ struct CacheStoreInputs {
     BufferPtr host_kv_cache_offset;
 };
 
+using FlashInferAttnParamsPtr = std::shared_ptr<void>;
+
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     ConstBufferPtr input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
@@ -364,29 +372,31 @@ struct AttentionCommonInputs {
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr padding_offset;
 
-    size_t context_batch_size;
-    size_t decoder_batch_size;
-    size_t context_max_seq_len;
-    size_t decoder_max_seq_len;
-    size_t context_token_num;
+    size_t context_batch_size = 0;
+    size_t decoder_batch_size = 0;
+    size_t context_max_seq_len = 0;
+    size_t decoder_max_seq_len = 0;
+    size_t context_token_num = 0;
 
     BufferPtr position_ids;
     BufferPtr attention_mask;
     ConstBufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
-    int32_t   max_prefix_length;
+    int32_t   max_prefix_length = 0;
 
     lora::AttentionLayerLoraInput lora_input;
 
-    int layer_id;
+    int layer_id = 0;
     BufferPtr                                 request_id;               // [context_batch_size]
     BufferPtr                                 request_pd_separation;    // [context_batch_size]
     std::vector<std::string>                  cache_keys;               // [context_batch_size]
-    size_t                                    block_size;
-    size_t                                    scale_block_size;
-    bool                                      pd_separation;
+    size_t                                    block_size = 0;
+    size_t                                    scale_block_size = 0;
+    bool                                      pd_separation = false;
 
     bool warmup;
+
+    FlashInferAttnParamsPtr flash_infer_attn_params;
 };
 
 struct AttentionConfigs {
@@ -613,17 +623,21 @@ using MaskOutput = BufferPtr;
 
 struct DevicePrepParams {
     const AttentionConfigs& configs;
-    DataType dtype;
-    size_t context_batch_size;
-    bool            has_kv_cache     = true;
-    bool            diff_qkv_len     = false;
-    KvCacheDataType kv_cache_dtype   = KvCacheDataType::BASE;
-    bool            has_alibi_slopes = false;
-    bool            sprase_head      = false;
+
+    const BufferPtr &sequence_lengths;
+    const BufferPtr &kv_cache_block_id;
+
+    DataType dtype = DataType::TYPE_INVALID;
+    size_t context_batch_size = 0;
+    size_t decoder_batch_size = 0;
+    bool has_kv_cache     = true;
+    bool diff_qkv_len     = false;
+    bool has_alibi_slopes = false;
 };
 
 struct DevicePrepOutput {
     bool need_mask = true;
+    FlashInferAttnParamsPtr flash_infer_attn_params;
 };
 
 struct LoraLinearOutput {

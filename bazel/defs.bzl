@@ -2,6 +2,16 @@ load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 
+def copy_so(target):
+    name = 'lib' + target.split(':')[1] + '_so'
+    so_name = 'lib' + target.split(':')[1] + '.so'
+    native.genrule(
+        name = name,
+        srcs = [target],
+        outs = [so_name],
+        cmd = "cp $(SRCS) $(@D)",
+    )
+
 def copy_target_to(name, to_copy, copy_name, dests = [], **kwargs):
     if dests:
         outs = [path + copy_name for path in dests]

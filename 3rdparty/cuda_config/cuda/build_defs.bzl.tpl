@@ -55,6 +55,23 @@ def cuda_default_copts():
         ["-O3"]
     )
 
+def cuda_default_copts_without_arch():
+    """Default options for all CUDA compilations."""
+    return if_cuda([
+        "-x", "cuda",
+        "-DGOOGLE_CUDA=1",
+        "-Xcuda-fatbinary=--compress-all",
+        "--no-cuda-include-ptx=all",
+        "-nvcc_options=relaxed-constexpr",
+        "-nvcc_options=ftz=true",
+        "-nvcc_options=generate-line-info",
+        "-nvcc_options=threads=8",
+        "-Xcompiler", "-Wno-deprecated-declarations",
+    ]) + if_cuda_clang_opt(
+        # Some important CUDA optimizations are only enabled at O3.
+        ["-O3"]
+    )
+
 def cuda_is_configured():
     """Returns true if CUDA was enabled during the configure process."""
     return %{cuda_is_configured}

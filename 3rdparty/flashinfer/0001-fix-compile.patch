@@ -1,0 +1,22 @@
+From 7ad3c75f6c4719b0f68f399148ec27db98897db9 Mon Sep 17 00:00:00 2001
+From: "liukan.lk" <liukan.lk@alibaba-inc.com>
+Date: Fri, 27 Dec 2024 16:29:47 +0800
+Subject: [PATCH 1/2] fix compile
+
+
+diff --git a/include/flashinfer/gemm/bmm_fp8.cuh b/include/flashinfer/gemm/bmm_fp8.cuh
+index 853d803..50ce7f9 100644
+--- include/flashinfer/gemm/bmm_fp8.cuh
++++ include/flashinfer/gemm/bmm_fp8.cuh
+@@ -45,7 +45,7 @@
+ #else
+ #define FLASHINFER_CUBLAS_CALL(EXPR)  \
+   {                                   \
+-    cudaError_t e = (EXPR);           \
++    auto e = (EXPR);           \
+     if (e != CUBLAS_STATUS_SUCCESS) { \
+       return e;                       \
+     }                                 \
+-- 
+2.19.1.6.gb485710b
+

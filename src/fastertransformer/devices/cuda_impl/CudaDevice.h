@@ -26,6 +26,49 @@ enum class FMHAType {
     TRT_V1
 };
 
+struct FlashInferAttnParams {
+    BufferPtr float_workspace;
+    BufferPtr int_workspace;
+    BufferPtr int_host_workspace;
+
+    BufferPtr batch_indice;
+    BufferPtr positions;
+    BufferPtr paged_kv_last_page_len; // w/o current
+    BufferPtr paged_kv_last_page_len_1; // w current
+
+    BufferPtr qo_indptr;
+    BufferPtr qo_indptr_host;
+    BufferPtr page_indptr;
+    BufferPtr page_indptr_host;
+    BufferPtr page_indice;
+
+    torch::Tensor float_workspace_t;
+    torch::Tensor int_workspace_t;
+    torch::Tensor int_host_workspace_t;
+
+    torch::Tensor batch_indice_t;
+    torch::Tensor positions_t;
+    torch::Tensor paged_kv_last_page_len_t;
+    torch::Tensor paged_kv_last_page_len_1_t;
+
+    torch::Tensor qo_indptr_t;
+    torch::Tensor qo_indptr_host_t;
+    torch::Tensor page_indptr_t;
+    torch::Tensor page_indptr_host_t;
+    torch::Tensor page_indice_t;
+
+    bool decode = true;
+    std::vector<int64_t> plan;
+
+    static FlashInferAttnParamsPtr prepareFlashInferAttnParams(
+            fastertransformer::DeviceBase *device,
+            const fastertransformer::AttentionConfigs &attn_configs,
+            const BufferPtr &sequence_lengths_host,
+            const BufferPtr &kv_cache_block_id_host,
+            DataType dtype);
+
+};
+
 nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype);
 
 class CudaGemmArguments;

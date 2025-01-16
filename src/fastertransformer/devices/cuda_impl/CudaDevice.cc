@@ -11,6 +11,7 @@
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/core/torch_utils/torch_cuda_allocator.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
+
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
@@ -228,11 +229,9 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     if (params.dtype == DataType::TYPE_FP32) {
         fmha_type_ = FMHAType::NONE;
         output.need_mask = true;
-        return output;
-    }
-    if (params.context_batch_size) {
+    } else if (params.context_batch_size) {
         selectCuFMHARunner(params);
-        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && (params.kv_cache_dtype==KvCacheDataType::BASE) && !params.sprase_head;
+        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
@@ -253,6 +252,14 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         }
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
+
+    output.flash_infer_attn_params = FlashInferAttnParams::prepareFlashInferAttnParams(
+            this,
+            params.configs,
+            params.sequence_lengths,
+            params.kv_cache_block_id,
+            params.dtype);
+
     return output;
 }
 

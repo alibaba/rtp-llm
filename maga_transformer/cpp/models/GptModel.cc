@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/models/W.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
@@ -12,6 +13,7 @@
 
 using namespace std;
 using namespace fastertransformer;
+using namespace rtp_llm;
 
 namespace rtp_llm {
 
@@ -209,21 +211,22 @@ void GptModel::prepareAttentionInputs(
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
 
-    const auto prep_output = device_->prepareModelRun({
+    auto prep_output = device_->prepareModelRun({
             description_.attention_conf,
+            inputs.sequence_lengths,
+            inputs.kv_cache_block_id,
             dtype,
             context_batch_size,
+            decoder_batch_size,
             (bool)k_cache_buffer_,
             attention_inputs.max_prefix_length > 0,
-            description_.attention_conf.kv_cache_dtype,
             (bool)weights_.linear_bias_slopes,
-            false // sparse head not support now
         });
-
     if (inputs.cache_keys) {
         vector<int64_t> cache_keys_vec = ft::buffer2vector<int64_t>(*inputs.cache_keys);
         attention_inputs.cache_keys = transVectorToString(cache_keys_vec);
     }
+    attention_inputs.flash_infer_attn_params.swap(prep_output.flash_infer_attn_params);
     attention_inputs.request_id = inputs.request_id;
     attention_inputs.request_pd_separation = inputs.request_pd_separation;
     attention_inputs.block_size = inputs.block_size;
@@ -319,7 +322,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
-    auto attention_common_inputs = inputs.attention_common_inputs;
+    auto attention_common_inputs = move(inputs.attention_common_inputs);
 
     attention_common_inputs.layer_id = layer_id;
     const auto& layer = weights_.layers[layer_id];
