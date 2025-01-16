@@ -19,14 +19,14 @@ cc_library(
     ] + glob([
         "torch/lib/libgomp*.so*",
     ]) + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "torch/lib/libtorch_cuda.so",
             "torch/lib/libc10_cuda.so",
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
         ]),
-        "//:using_rocm": [
+        "@//:using_rocm": [
             "torch/lib/librocfft.so",
             "torch/lib/librocsolver.so",
             "torch/lib/libaotriton_v2.so",

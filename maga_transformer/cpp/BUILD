@@ -54,7 +54,7 @@ cc_library(
         "@havenask//aios/autil:synchronized_queue",
         "@havenask//aios/autil:json",
     ] + select({
-        "//:using_arm": [
+        "@//:using_arm": [
             "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [],
@@ -168,11 +168,11 @@ cc_library(
         ":cache",
         "//src/fastertransformer/devices:devices_base",
     ] + select({
-        "//:using_cuda": [],
-        "//:using_rocm": [
+        "@//:using_cuda": [],
+        "@//:using_rocm": [
             "//src/fastertransformer/devices/rocm_impl:rocm_impl",
         ],
-        "//:using_arm": [
+        "@//:using_arm": [
             "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [
@@ -261,10 +261,10 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base_impl",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
-        "//:using_arm": [
+        "@//:using_arm": [
             "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [],
@@ -302,7 +302,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base_impl",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
         "//conditions:default": [],

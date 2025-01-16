@@ -21,7 +21,7 @@ tensorrt = [
 ]
 
 xft_dep = select({
-    "//:using_arm": [],
+    "@//:using_arm": [],
     "//:xft_use_icx": [
         "xfastertransformer_devel_icx",
     ],
@@ -31,12 +31,12 @@ xft_dep = select({
 })
 
 arch_dep = select({
-    "//:using_arm": [],
+    "@//:using_arm": [],
     "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
-    "//:using_arm": [],
+    "@//:using_arm": [],
     "//conditions:default": ["decord==0.6.0"],
 })
 
@@ -180,10 +180,10 @@ py_library(
         ":matplotlib",
         ":av",
     ] + arch_dep + select({
-        "//:using_cuda12": tensorrt,
+        "@//:using_cuda12": tensorrt,
         "//conditions:default": []
     }) + select({
-        "//:using_arm": [],
+        "@//:using_arm": [],
         "//:xft_use_icx": [
             "xfastertransformer_devel_icx",
         ],
@@ -191,10 +191,10 @@ py_library(
             "xfastertransformer_devel",
         ],
     }) + select({
-        "//:using_cuda11": [],
-        "//:using_arm": [],
-        "//:using_rocm": ["pyrsmi", "amdsmi"],
-        "//:using_cpu": [],
+        "@//:using_cuda11": [],
+        "@//:using_arm": [],
+        "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
         "//conditions:default": ["flash_attn"]
     }),
 )

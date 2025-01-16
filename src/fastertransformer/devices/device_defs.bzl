@@ -2,7 +2,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 def device_linkopts():
     return select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "-L/usr/local/cuda/lib64",
             "-lcudart",
             "-lcuda",
@@ -15,15 +15,15 @@ def device_linkopts():
 
 def device_test_envs():
     return select({
-        "//:using_cuda": {
+        "@//:using_cuda": {
             "TEST_USING_DEVICE": "CUDA",
             "LD_PRELOAD": "libtorch_cpu.so",
         },
-        "//:using_rocm": {
+        "@//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",
             # "LD_PRELOAD": "/opt/conda310/lib/python3.10/site-packages/torch/lib/libtorch_cpu.so",
         },
-        "//:using_arm": {
+        "@//:using_arm": {
             "TEST_USING_DEVICE": "ARM",
         },
         "//conditions:default": {
@@ -38,13 +38,13 @@ def device_test_envs():
 
 def device_impl_target():
     return select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
-        "//:using_rocm": [
+        "@//:using_rocm": [
             "//src/fastertransformer/devices/rocm_impl:rocm_impl",
         ],
-        "//:using_arm": [
+        "@//:using_arm": [
             "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [

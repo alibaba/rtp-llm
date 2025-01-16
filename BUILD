@@ -87,7 +87,7 @@ filegroup(
         "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "src/fastertransformer/th_op/common/NcclOp.cc",
         ],
         "//conditions:default": [],
@@ -98,7 +98,7 @@ filegroup(
 filegroup(
     name = "th_transformer_gpu_files",
     srcs = select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
         ],
         "//conditions:default": [],
@@ -120,7 +120,7 @@ cc_library(
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "//src/fastertransformer/cuda:allocator_torch",
         ],
         "//conditions:default": [],
@@ -142,7 +142,7 @@ cc_library(
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             "//src/fastertransformer/cuda:allocator_torch",
         ],
         "//conditions:default": [],
@@ -158,7 +158,7 @@ cc_binary(
         ":th_transformer_lib",
         ":gpt_init_params",
     ] + select({
-        "//:using_cuda": [
+        "@//:using_cuda": [
             ":th_transformer_gpu",
         ],
         "//conditions:default": [],

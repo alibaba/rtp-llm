@@ -3,7 +3,7 @@ load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_librar
 package(default_visibility = ["//maga_transformer:__subpackages__"])
 
 any_cuda_deps = select({
-    "//:using_cuda": [
+    "@//:using_cuda": [
         "//src/fastertransformer/cuda:memory_utils",
         "//src/fastertransformer/cuda:nvtx",
         "//src/fastertransformer/cuda:cuda_utils",
@@ -11,7 +11,7 @@ any_cuda_deps = select({
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
-    "//:using_rocm": [
+    "@//:using_rocm": [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "//src/fastertransformer/cuda:cuda_utils_rocm",

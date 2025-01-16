@@ -16,11 +16,11 @@ test_linkopts = [
     "-lnccl",
     "-lnvToolsExt",
 ] + select({
-    "//:using_cuda": [
+    "@//:using_cuda": [
         "-ltorch_cuda",
         "-lc10_cuda",
     ],
-    "//:using_rocm": [
+    "@//:using_rocm": [
         "-ltorch_hip",
         "-lc10_hip",
     ],

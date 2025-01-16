@@ -17,12 +17,12 @@ cc_library(
     deps = [
         ":types_hdr",
     ] + select({
-        "//:using_cuda": ["@local_config_cuda//cuda:cuda_headers",
-                          "@local_config_cuda//cuda:cudart"],
-        "//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
-                          "@local_config_rocm//rocm:rocm",
-                          "//src/fastertransformer/rocm:rocm_types_hdr"],
-        "//:using_arm": ["//src/fastertransformer/devices/arm_impl/type_bf16:hie_bfloat16"],
+        "@//:using_cuda": ["@local_config_cuda//cuda:cuda_headers",
+                           "@local_config_cuda//cuda:cudart"],
+        "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
+                           "@local_config_rocm//rocm:rocm",
+                           "//src/fastertransformer/rocm:rocm_types_hdr"],
+        "@//:using_arm": ["//src/fastertransformer/devices/arm_impl/type_bf16:hie_bfloat16"],
         "//conditions:default": [],
     }),
     copts = copts(),

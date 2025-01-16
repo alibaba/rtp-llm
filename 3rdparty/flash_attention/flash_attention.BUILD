@@ -3,11 +3,6 @@ load("@//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//visibility:public"])
 
-config_setting(
-    name = "using_arm",
-    values = {"define": "using_arm=true"},
-)
-
 cc_library(
     name = "flash_attention2_header",
     hdrs = [

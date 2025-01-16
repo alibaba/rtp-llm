@@ -78,7 +78,7 @@ cc_test(
         ":test_utils",
     ],
     env = select({
-        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
     exec_properties = {'gpu':'A10'},

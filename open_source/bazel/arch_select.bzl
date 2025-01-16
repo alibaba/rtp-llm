@@ -10,10 +10,10 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
-                "//:using_cuda12": [requirement_gpu_cuda12(name)],
-                "//:using_cuda11": [requirement_gpu(name)],
-                "//:using_rocm": [requirement_gpu_rocm(name)],
-                "//:using_arm": [requirement_arm(name)],
+                "@//:using_cuda12": [requirement_gpu_cuda12(name)],
+                "@//:using_cuda11": [requirement_gpu(name)],
+                "@//:using_rocm": [requirement_gpu_rocm(name)],
+                "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -45,15 +45,15 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "//:using_cuda12": ["torch==2.1.2+cu121"],
-        "//:using_cuda11": ["torch==2.1.2+cu118"],
-        "//:using_rocm": ["torch==2.1.2"],
+        "@//:using_cuda12": ["torch==2.1.2+cu121"],
+        "@//:using_cuda11": ["torch==2.1.2+cu118"],
+        "@//:using_rocm": ["torch==2.1.2"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
 def platform_deps():
     return select({
-        "//:using_arm": [],
+        "@//:using_arm": [],
         "//conditions:default": ["decord==0.6.0"],
     })
 
@@ -64,7 +64,7 @@ def torch_deps():
             "@torch_rocm//:torch",
             "@torch_rocm//:torch_libs",
         ],
-        "//:using_arm": [
+        "@//:using_arm": [
             "@torch_2.3_py310_cpu_aarch64//:torch_api",
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
@@ -106,8 +106,8 @@ def fa_deps():
 
 def kernel_so_deps():
     return select({
-        "//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
-        "//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
+        "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
 
@@ -120,7 +120,7 @@ def trt_plugins():
     native.alias(
         name = "trt_plugins",
         actual = select({
-            "//:using_cuda12": "//src/fastertransformer/trt_plugins:trt_plugins",
+            "@//:using_cuda12": "//src/fastertransformer/trt_plugins:trt_plugins",
             "//conditions:default": "//src/fastertransformer/trt_plugins:trt_plugins",
         })
     )
