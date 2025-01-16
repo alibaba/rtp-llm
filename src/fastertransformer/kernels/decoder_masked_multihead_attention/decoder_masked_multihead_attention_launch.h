@@ -66,7 +66,6 @@ inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTIO
 
     size_t transpose_rotary_size = 0;
     if (params.rope_config.dim > 0) {
-        assert(params.rope_config.rotary_embedding_dim > 0);
         transpose_rotary_size = 2 * params.rope_config.dim * sizeof(Tk);
     }
 
