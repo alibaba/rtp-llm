@@ -123,7 +123,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         writer->AddHeader("USAGE", getUsage(response));
         writer->Write(response);
 
-        report(autil::TimeUtility::currentTimeInMicroSeconds() - request.getRecvTime(), "py_rtp_framework_rt",
+        report((autil::TimeUtility::currentTimeInMicroSeconds() - request.getRecvTime()) / 1000.0, "py_rtp_framework_rt",
                 kmonitor::MetricsTags(), kmonitor::MetricType::GAUGE);
         report(1, "py_rtp_success_qps_metric");
         // metric_reporter_->reportSuccessQpsMetric(req.source);

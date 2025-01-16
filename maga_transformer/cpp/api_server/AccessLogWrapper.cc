@@ -1,3 +1,4 @@
+#include <sstream>
 #include "maga_transformer/cpp/api_server/AccessLogWrapper.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "autil/TimeUtility.h"
@@ -6,6 +7,14 @@ using namespace autil::legacy::json;
 using namespace autil::legacy;
 
 namespace rtp_llm {
+
+std::string logFormatTimeInMilliseconds(const int64_t& now_time_us) {
+    auto now_time = autil::TimeUtility::usFormat(now_time_us, "%Y-%m-%d %H:%M:%S");
+    auto ms_part = now_time_us / 1000 % 1000;
+    std::ostringstream ms_str;
+    ms_str << std::setfill('0') << std::setw(3) << ms_part;
+    return now_time + "." + ms_str.str();
+}
 
 class RequestLogInfo: public autil::legacy::Jsonizable {
 public:
@@ -54,8 +63,8 @@ public:
         request_(request),
         response_(response),
         request_id_(request_id),
-        log_time_(autil::TimeUtility::currentTimeString("%Y-%m-%d %H:%M:%S")),
-        query_time_(autil::TimeUtility::usFormat(start_time_us, "%Y-%m-%d %H:%M:%S")) {}
+        log_time_(logFormatTimeInMilliseconds(autil::TimeUtility::currentTimeInMicroSeconds())),
+        query_time_(logFormatTimeInMilliseconds(start_time_us)) {}
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
@@ -80,7 +89,7 @@ public:
         request_(request),
         response_(response),
         request_id_(request_id),
-        log_time_(autil::TimeUtility::currentTimeString("%Y-%m-%d %H:%M:%S")) {}
+        log_time_(logFormatTimeInMilliseconds(autil::TimeUtility::currentTimeInMicroSeconds())) {}
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {

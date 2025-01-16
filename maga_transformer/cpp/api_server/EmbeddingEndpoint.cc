@@ -38,7 +38,7 @@ EmbeddingEndpoint::handle(const std::string& body,
     auto mm_features    = getMultimodalFeature(batch_input.attr("multimodal_inputs"), token_ids);
 
     py::gil_scoped_release gil_release;
-    metrics_reporter->report(autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us,
+    metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
             "ft_pre_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
     auto results = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, 0, mm_features);
     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -60,7 +60,7 @@ EmbeddingEndpoint::handle(const std::string& body,
     coro = embedding_handler.attr("render_log_response")();
     auto logable_response = getAsyncResult(loop, coro);
 
-    metrics_reporter->report(autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us,
+    metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
             "ft_post_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
     if (logable_response == "null") {
         return std::make_pair(response, std::nullopt);
