@@ -88,6 +88,8 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
         expert_for_source_row->data<int>(),
         stream_
     );
+    printBufferData(*expanded_source_row_to_dest, "expanded_source_row_to_dest");
+    printBufferData(*expert_for_source_row, "expert_for_source_row");
     printBufferData(*output, "moe_ffn_out");
 
     return FfnLayerOutput({move(output)});
