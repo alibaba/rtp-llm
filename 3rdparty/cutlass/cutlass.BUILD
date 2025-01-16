@@ -18,9 +18,9 @@ cc_library(
 cc_library(
     name = "cutlass_utils",
     hdrs = glob([
-        "tools/util/include/cutlass/util/*.h",
-        "tools/util/include/cutlass/util/*.hpp",
-        "tools/util/include/cutlass/util/*.cuh"
+        "tools/util/include/**/*.h",
+        "tools/util/include/**/*.hpp",
+        "tools/util/include/**/*.cuh"
     ]),
     deps = [
         "@local_config_cuda//cuda:cuda_headers",
