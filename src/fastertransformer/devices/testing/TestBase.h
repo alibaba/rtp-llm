@@ -394,5 +394,6 @@ protected:
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    rtp_llm::initLogger();
     return RUN_ALL_TESTS();
 }
