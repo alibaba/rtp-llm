@@ -16,7 +16,8 @@ public:
         const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
     static std::tuple<CacheConfig, CacheConfig> createSpConfig(
         const ft::GptInitParameter& score_param,
-        const ft::GptInitParameter& propose_param);
+        const ft::GptInitParameter& propose_param,
+        const std::optional<WarmUpResult>& warm_up_result);
 
 private:
     static CacheConfig createBasicConfig(const ft::GptInitParameter& param);

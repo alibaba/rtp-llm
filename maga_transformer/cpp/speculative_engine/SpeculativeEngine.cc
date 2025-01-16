@@ -30,6 +30,7 @@ SpeculativeEngine::~SpeculativeEngine() {
 
 absl::Status SpeculativeEngine::init() {
     FT_LOG_INFO(__PRETTY_FUNCTION__);
+    std::optional<WarmUpResult> warm_up_result = std::nullopt;
     if (score_model_params_.gpt_init_parameter.warm_up_) {
         // warm up
         const ft::GptInitParameter& score_gpt_params = score_model_params_.gpt_init_parameter;
@@ -37,10 +38,14 @@ absl::Status SpeculativeEngine::init() {
                     score_gpt_params.max_context_batch_size_,
                     score_gpt_params.max_seq_len_,
                     int(score_gpt_params.warm_up_with_loss_));
-        const auto result = warmUp();
-        FT_LOG_INFO("warm up done, max runtime used bytes %ld", result.max_used_memory);
+        warm_up_result = warmUp();
+        FT_LOG_INFO("warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
+                    warm_up_result->max_used_memory,
+                    warm_up_result->max_used_memory / 1024 / 1024,
+                    warm_up_result->device_reserved_bytes,
+                    warm_up_result->device_reserved_bytes / 1024 / 1024);
     }
-    RETURN_IF_STATUS_ERROR(initCacheManager());
+    RETURN_IF_STATUS_ERROR(initCacheManager(warm_up_result));
     FT_LOG_INFO("create cache manager done");
     propose_executor_ = createProposeExecutor(score_model_params_,
         propose_model_params_, device_, resource_context_.propose_cache_manager, getLoraManager());
@@ -108,18 +113,19 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
     return score_streams.front();
 }
 
-absl::Status SpeculativeEngine::initCacheManager() {
+absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_model_params_->gpt_model()) {
         const auto& config = CacheConfigCreator::createSpConfig(
             score_model_params_.gpt_init_parameter,
-            propose_model_params_->vanilla_model_params->gpt_init_parameter);
+            propose_model_params_->vanilla_model_params->gpt_init_parameter,
+            warm_up_result);
         auto scorer_cache_config        = std::get<0>(config);
         auto proposer_cache_config      = std::get<1>(config);
         resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, metrics_reporter_);
         resource_context_.propose_cache_manager =
             make_shared<CacheManager>(proposer_cache_config, device_, metrics_reporter_);
     } else {
-        const auto& config = CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter);
+        const auto& config = CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter, warm_up_result);
         resource_context_.cache_manager = make_shared<CacheManager>(config, device_, metrics_reporter_);
     }
     return absl::OkStatus();
@@ -142,12 +148,15 @@ WarmUpResult SpeculativeEngine::warmUp() {
         propose_executor_.reset(new VanillaExecutor(propose_model_params_, device_, nullptr, nullptr, true));
     }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
+    const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
     (void)score_executor_.reset(nullptr);
     if (propose_model_params_->gpt_model()) {
         (void)propose_executor_.reset(nullptr);
     }
-    return WarmUpResult();
+    return WarmUpResult({
+        device_status.device_memory_status.preserved_bytes,
+        device_status.device_memory_status.max_consumed_bytes});
 }
 
 absl::Status SpeculativeEngine::initSystemPrompt() {

@@ -125,7 +125,8 @@ CacheConfig CacheConfigCreator::createConfig(
 }
 
 std::tuple<CacheConfig, CacheConfig> CacheConfigCreator::createSpConfig(
-        const ft::GptInitParameter& score_param, const ft::GptInitParameter& propose_param)
+        const ft::GptInitParameter& score_param, const ft::GptInitParameter& propose_param,
+        const std::optional<WarmUpResult>& warm_up_result)
 {
     CacheConfig  score_config         = CacheConfigCreator::createBasicConfig(score_param);
     CacheConfig  propose_config         = CacheConfigCreator::createBasicConfig(propose_param);
@@ -133,7 +134,7 @@ std::tuple<CacheConfig, CacheConfig> CacheConfigCreator::createSpConfig(
     if (score_param.block_nums_ > 0) {
         block_nums = score_param.block_nums_;
     } else {
-        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param);
+        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
         block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
     }
     FT_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);

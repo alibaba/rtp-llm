@@ -36,7 +36,7 @@ private:
     absl::Status startLoop();
     void         loop();
     absl::Status trySaveStepError() const;
-    absl::Status initCacheManager();
+    absl::Status initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status initSystemPrompt();
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics(int64_t                         propose_begin_time_us,
