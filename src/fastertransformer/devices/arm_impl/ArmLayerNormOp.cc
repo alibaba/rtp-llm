@@ -1007,7 +1007,193 @@ LayernormOutput ArmCpuDevice::layernorm(const LayernormParams& params) {
     } else if (params.qscheme == Qint8PerToken) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    
+   
+    int convert_gamma = 0;
+    int convert_beta = 0;
+    int convert_bias = 0;
+    if (data_type == DataType::TYPE_FP32) {
+        if (gamma) {
+            if (weights->get().gamma.get()->type() == DataType::TYPE_FP16) {
+                convert_gamma = 1;
+            }
+        }
+        if (beta) {
+            if (weights->get().beta.get()->type() == DataType::TYPE_FP16) {
+                convert_beta = 1;
+            }
+        }
+        if (bias) {
+            if (params.bias->get().type() == DataType::TYPE_FP16) {
+                convert_bias = 1;
+            }
+        }
+    }
+    // for BERT
+    // before_norm_output       params.return_norm_output        bias/residual exist
+    // .  .  F
+    // layernorm(input)->normed_output  
+    // F  .  T
+    // layernorm(input+bias+residual)->normed_output  
+    // T  T  T
+    // layernorm(input+bias+residual)->before_norm_output
+    // layernorm(input+bias+residual)->normed_output
+    // T  F  T
+    // (input+bias+residual)->before_norm_output
+    // layernorm(input+bias+residual)->normed_output
+    if (norm_type == NormType::layernorm && (convert_gamma || convert_beta || convert_bias)) {
+        float* gamma_converted = new float[n];
+        if (gamma) {
+            if (convert_gamma) {
+                convert_fp16_to_float((__fp16*)gamma,gamma_converted,n);
+            } else {
+                for (int d = 0; d < n; ++d) {
+                    gamma_converted[d] = static_cast<float>(((float*)gamma)[d]);
+                }
+            }
+        }
+        if(!is_output){//. .  F
+            if (!gamma || std::all_of((float *)gamma_converted, (float *)gamma_converted + n, [](float value) { return value == 1.0f; })){
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if(convert_beta) {
+                        float* beta_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        layerNorm_Nogamma(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, beta_converted, eps);
+                        delete[] beta_converted;
+                    } else {
+                        layerNorm_Nogamma(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)beta, eps);
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});          
+            }//(gamma =1,1......)OR (no gamma)
+            else{
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if(convert_beta) {
+                        float* beta_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        layerNorm(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, gamma_converted, beta_converted, eps);
+                        delete[] beta_converted;
+                    } else {
+                        layerNorm(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, gamma_converted, (float*)beta, eps);
+                    }     
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});              
+            }          
+        }
+        else if(!before_norm_output){//add bias residual   //F . T 
+            if (!gamma || std::all_of((float *)gamma_converted, (float *)gamma_converted + n, [](float value) { return value == 1.0f; })){
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_Nogamma_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, beta_converted,(residual != nullptr) ? (float*)residual + i*n : (float*)residual,bias_converted, eps);
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_Nogamma_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)beta,(residual != nullptr) ? (float*)residual + i*n : (float*)residual,(float*)bias, eps);
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});          
+            }//(gamma =1,1......)OR (no gamma)
+            else{
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, gamma_converted, beta_converted,(residual != nullptr) ? ((float*)residual + i*n) : nullptr ,bias_converted, eps);
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)gamma, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : nullptr ,(float*)bias, eps);   
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});              
+            }               
+        }
+        else if(params.return_normed_output){// T  T  T
+            if (!gamma || std::all_of((float *)gamma_converted, (float *)gamma_converted + n, [](float value) { return value == 1.0f; })){
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_Nogamma_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual,(float*)bias, eps);
+                        if(before_norm_output != norm_output->data())std::memcpy((float*)before_norm_output + i*n,(float*)norm_output->data() + i*n,n * sizeof(float));
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_Nogamma_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual,(float*)bias, eps);
+                        if(before_norm_output != norm_output->data())std::memcpy((float*)before_norm_output + i*n,(float*)norm_output->data() + i*n,n * sizeof(float)); 
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});          
+            }//gamma =1,1......  No gamma
+            else{
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, gamma_converted, beta_converted,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual ,bias_converted, eps);
+                        if(before_norm_output != norm_output->data()) std::memcpy((float*)before_norm_output + i*n,(float*)norm_output->data() + i*n,n * sizeof(float)); 
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_isoutput(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)gamma, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual ,(float*)bias, eps);
+                        if(before_norm_output != norm_output->data()) std::memcpy((float*)before_norm_output + i*n,(float*)norm_output->data() + i*n,n * sizeof(float)); 
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});              
+            } 
+        }
+        else{ //T F T
+            if (!gamma || std::all_of((float *)gamma_converted, (float *)gamma_converted + n, [](float value) { return value == 1.0f; })){
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_Nogamma_isoutput_unnormedout(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, beta_converted, (residual != nullptr) ? ((float*)residual + i*n) : (float*)residual,bias_converted, ((float*)before_norm_output + i*n), eps); 
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_Nogamma_isoutput_unnormedout(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual,(float*)bias, ((float*)before_norm_output + i*n), eps); 
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});          
+            }//gamma =1,1......  No gamma
+            else{
+                #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
+                for(int i=0;i<m;i++){
+                    if (convert_beta && convert_bias) {
+                        float* beta_converted   = new float[n];
+                        float* bias_converted   = new float[n];
+                        convert_fp16_to_float((__fp16*)beta,beta_converted,n);
+                        convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                        layerNorm_isoutput_unnormedout(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, gamma_converted, beta_converted,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual ,bias_converted, ((float*)before_norm_output+ i*n),eps);
+                        delete[] beta_converted;
+                        delete[] bias_converted;
+                    } else {
+                        layerNorm_isoutput_unnormedout(n,(float*)input->data()+i*n, (float*)norm_output->data()+i*n, (float*)gamma, (float*)beta,(residual != nullptr) ? ((float*)residual + i*n) : (float*)residual ,(float*)bias, ((float*)before_norm_output+ i*n),eps);
+                    }
+                }
+                return LayernormOutput({norm_output, params.before_norm_output});              
+            }
+        }
+    } 
 
     // Due to the cumulative errors caused by using fp16 precision calculations, the fp16 input is first converted to fp32 before using the fp32 kernel.
     if(norm_type == NormType::rmsnorm){

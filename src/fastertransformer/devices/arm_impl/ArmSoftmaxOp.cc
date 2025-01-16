@@ -176,9 +176,13 @@ inline void context_mask_float(float *input, float *mask,int n){
         input_v = vld1q_f32_x4(input+i);
         mask_v = vld1q_f32_x4(mask+i);
     #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            mask_v.val[i]  = vmulq_f32(coefficient_v,vsubq_f32(ones_v , mask_v.val[i]));
-            input_v.val[i] = vaddq_f32(input_v.val[i],mask_v.val[i]);
+        //for (int i = 0; i < 4; ++i) {
+        //    mask_v.val[i]  = vmulq_f32(coefficient_v,vsubq_f32(ones_v , mask_v.val[i]));
+        //    input_v.val[i] = vaddq_f32(input_v.val[i],mask_v.val[i]);
+        //}
+        for (int j = 0; j < 4; ++j) {
+            mask_v.val[j]  = vmulq_f32(coefficient_v,vsubq_f32(ones_v , mask_v.val[j]));
+            input_v.val[j] = vaddq_f32(input_v.val[j],mask_v.val[j]);
         }
     vst1q_f32_x4(input + i , input_v);
     }
@@ -309,33 +313,84 @@ BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
     if (params.mask.has_value()) {
         /* Apply mask. */
         auto mask_type = params.mask.value().get().type();
-        if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP32) {
+        //if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP32) {
+        if (params.mask.value().get().shape()[3] > input->shape()[3]) { // params.mask.shape maybe larger than input.shape in BERT
+            std::vector<size_t> mask_shape = {1, input->shape()[2], input->shape()[3]};
+            auto mask = allocateBuffer({mask_type,
+                                  mask_shape,
+                                  AllocationType::HOST});
+            if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP32) {
+                for (int i = 0; i < mask_shape[1]; i++) {
+                    std::memcpy((float*)mask->data() + i*mask_shape[2],(float*)params.mask.value().get().data()+i*params.mask.value().get().shape()[2],mask_shape[2] * sizeof(float));
+                }
 #pragma omp parallel for num_threads(std::min((int)(input->shape()[0] *input->shape()[1]),(int)numThreads)) if((input->shape()[0] *input->shape()[1])>=4) collapse(2)
+            //for(int i = 0;i<input->shape()[0];i++){
+            //    for(int j = 0;j<input->shape()[1];j++){
+            //          context_mask_float((float*)input->data()+i*input->shape()[1]*input->shape()[2]*input->shape()[3] + j*input->shape()[2]*input->shape()[3],
+            //            (float*)params.mask.value().get().data()+i*input->shape()[2]*input->shape()[3],
+            //            input->shape()[2]*input->shape()[3]);
             for(int i = 0;i<input->shape()[0];i++){
                 for(int j = 0;j<input->shape()[1];j++){
                         context_mask_float((float*)input->data()+i*input->shape()[1]*input->shape()[2]*input->shape()[3] + j*input->shape()[2]*input->shape()[3],\
-                        (float*)params.mask.value().get().data()+i*input->shape()[2]*input->shape()[3],\
+                        (float*)mask->data()+i*input->shape()[2]*input->shape()[3],\
                         input->shape()[2]*input->shape()[3]);
+                    }
                 }
+            } else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
+                for (int i = 0; i < mask_shape[1]; i++) {
+                    std::memcpy((__fp16*)mask->data() + i*mask_shape[2],(__fp16*)params.mask.value().get().data()+i*params.mask.value().get().shape()[2],mask_shape[2] * sizeof(__fp16));
+                }
+                context_mask<float, __fp16>(params.input, *mask);
+            } else if (type == DataType::TYPE_FP16) {
+                for (int i = 0; i < mask_shape[1]; i++) {
+                    std::memcpy((__fp16*)mask->data() + i*mask_shape[2],(__fp16*)params.mask.value().get().data()+i*params.mask.value().get().shape()[2],mask_shape[2] * sizeof(__fp16));
+                }
+                context_mask<__fp16, __fp16>(params.input, *mask);
+            } else {
+                throw std::runtime_error("Softmax data type is not supported");
             }
-        } else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
-            //context_mask<float, __fp16>(params.input, params.mask.value().get());
-            auto batch_size = input->shape()[0];
-            auto num_heads = input->shape()[1];
-            auto q_length = input->shape()[2];
-            auto k_length = input->shape()[3];
+        //} else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
+        //    //context_mask<float, __fp16>(params.input, params.mask.value().get());
+        //    auto batch_size = input->shape()[0];
+        //    auto num_heads = input->shape()[1];
+        //    auto q_length = input->shape()[2];
+        //    auto k_length = input->shape()[3];
+        } else { 
+            if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP32) {
+    #pragma omp parallel for num_threads(std::min((int)(input->shape()[0] *input->shape()[1]),(int)numThreads)) if((input->shape()[0] *input->shape()[1])>=4) collapse(2)
+                for(int i = 0;i<input->shape()[0];i++){
+                    for(int j = 0;j<input->shape()[1];j++){
+                            context_mask_float((float*)input->data()+i*input->shape()[1]*input->shape()[2]*input->shape()[3] + j*input->shape()[2]*input->shape()[3],\
+                            (float*)params.mask.value().get().data()+i*input->shape()[2]*input->shape()[3],\
+                            input->shape()[2]*input->shape()[3]);
+                    }
+                }
+            } else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
+                auto batch_size = input->shape()[0];
+                auto num_heads = input->shape()[1];
+                auto q_length = input->shape()[2];
+                auto k_length = input->shape()[3];
 
+            //float* score = (float*)input->data();
+            //float16_t* mask = (float16_t*)params.mask.value().get().data();
             float* score = (float*)input->data();
             float16_t* mask = (float16_t*)params.mask.value().get().data();
 
+            //parallel_for(batch_size * num_heads, [&](int idx) {
+            //    int m = idx / num_heads;       // Batch index
+            //    int n = idx % num_heads;       // Head index
             parallel_for(batch_size * num_heads, [&](int idx) {
-                int m = idx / num_heads;       // Batch index
-                int n = idx % num_heads;       // Head index
+                    int m = idx / num_heads;       // Batch index
+                    int n = idx % num_heads;       // Head index
 
+                //parallel_for(q_length, [&](int j) {
+                //    size_t score_offset = m * q_length * num_heads * k_length + n * q_length * k_length + j * k_length;
+                //    size_t mask_offset = (m * k_length + j) * k_length;
                 parallel_for(q_length, [&](int j) {
-                    size_t score_offset = m * q_length * num_heads * k_length + n * q_length * k_length + j * k_length;
-                    size_t mask_offset = (m * k_length + j) * k_length;
+                        size_t score_offset = m * q_length * num_heads * k_length + n * q_length * k_length + j * k_length;
+                        size_t mask_offset = (m * k_length + j) * k_length;
 
+                    //vSoftmaxMask(k_length, score + score_offset, mask + mask_offset, params.scale);
                     vSoftmaxMask(k_length, score + score_offset, mask + mask_offset, params.scale);
                 });
             });
@@ -346,6 +401,7 @@ BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
         } else {
             throw std::runtime_error("Softmax data type is not supported");
         }
+      }
     }
     
     if(type == DataType::TYPE_FP32){

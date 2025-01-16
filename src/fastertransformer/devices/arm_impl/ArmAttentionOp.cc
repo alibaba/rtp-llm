@@ -190,7 +190,8 @@ void ArmCpuDevice::runOneBatch(const AttentionModuleParams& params, size_t past_
     printBufferData(params.input, "qkv");
 
     tStart = std::chrono::steady_clock::now();
-    if (params.weights.qkv_weight->bias) {
+    //if (params.weights.qkv_weight->bias) {
+    if (params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
         if (datatype == DataType::TYPE_FP32) {
             auto bias_data_type = params.weights.qkv_weight->bias->type();
             if (bias_data_type == DataType::TYPE_FP32) {
@@ -489,7 +490,8 @@ void ArmCpuDevice::runOneBatchStride(const AttentionModuleParams& params, size_t
     logTime(diff, 0);
 
     tStart = std::chrono::steady_clock::now();
-    if (params.weights.qkv_weight->bias) {
+    //if (params.weights.qkv_weight->bias) {
+    if (params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
         auto bias_data_type = params.weights.qkv_weight->bias->type();
         if (bias_data_type == DataType::TYPE_FP32) {
             addQKVBias<float, float>(qkv, params.weights.qkv_weight->bias->data(), 1, seq_len, head_num, kv_head_num, size_per_head);

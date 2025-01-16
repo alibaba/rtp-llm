@@ -88,10 +88,10 @@ cat $DIR/maga.Dockerfile >> /tmp/maga.Dockerfile
 docker build --build-arg WHL_FILE=$WHL_FILE --build-arg START_FILE=maga_start.sh \
        -f /tmp/maga.Dockerfile --network=host -t $TARGET_IMAGE:$TAG $DIR
 docker tag $TARGET_IMAGE:$TAG $TARGET_IMAGE:latest
-docker push $TARGET_IMAGE:$TAG
-docker push $TARGET_IMAGE:latest
+#docker push $TARGET_IMAGE:$TAG
+#docker push $TARGET_IMAGE:latest
 echo "docker name: $TARGET_IMAGE:$TAG"
 
 #cleanup context
-rm $DIR/$WHL_FILE -f
+#rm $DIR/$WHL_FILE -f
 rm $DIR/maga_start.sh -f
