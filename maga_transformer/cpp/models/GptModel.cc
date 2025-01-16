@@ -9,10 +9,6 @@
 #include "maga_transformer/cpp/utils/StringUtil.h"
 #include <memory>
 
-#if defined(__aarch64__)
-#include <arm_neon.h> // for convert_fp16_to_float
-#include <omp.h>
-#endif
 
 using namespace std;
 using namespace fastertransformer;
@@ -58,44 +54,6 @@ string GptModelInputs::debugString() const {
     debug_string << "}";
     return debug_string.str();
 }
-
-#if defined(__aarch64__)
-void convert_fp16_to_float(const __fp16* input, float* output, int length) {
-    int d = 0;
-    for (; d <= length - 32; d += 32) {
-        // Load 32 fp16 values
-        float16x8_t fp16_vec0 = vld1q_f16(&input[d]);
-        float16x8_t fp16_vec1 = vld1q_f16(&input[d + 8]);
-        float16x8_t fp16_vec2 = vld1q_f16(&input[d + 16]);
-        float16x8_t fp16_vec3 = vld1q_f16(&input[d + 24]);
-
-
-        // Convert to float32
-        float32x4_t float_vec0_low = vcvt_f32_f16(vget_low_f16(fp16_vec0));
-        float32x4_t float_vec0_high = vcvt_f32_f16(vget_high_f16(fp16_vec0));
-        float32x4_t float_vec1_low = vcvt_f32_f16(vget_low_f16(fp16_vec1));
-        float32x4_t float_vec1_high = vcvt_f32_f16(vget_high_f16(fp16_vec1));
-        float32x4_t float_vec2_low = vcvt_f32_f16(vget_low_f16(fp16_vec2));
-        float32x4_t float_vec2_high = vcvt_f32_f16(vget_high_f16(fp16_vec2));
-        float32x4_t float_vec3_low = vcvt_f32_f16(vget_low_f16(fp16_vec3));
-        float32x4_t float_vec3_high = vcvt_f32_f16(vget_high_f16(fp16_vec3));
-
-        // Store results
-        vst1q_f32(&output[d], float_vec0_low);
-        vst1q_f32(&output[d + 4], float_vec0_high);
-        vst1q_f32(&output[d + 8], float_vec1_low);
-        vst1q_f32(&output[d + 12], float_vec1_high);
-        vst1q_f32(&output[d + 16], float_vec2_low);
-        vst1q_f32(&output[d + 20], float_vec2_high);
-        vst1q_f32(&output[d + 24], float_vec3_low);
-        vst1q_f32(&output[d + 28], float_vec3_high);
-    }
-    for (; d < length; ++d) {
-        output[d] = static_cast<float>(input[d]);
-    }
-}
-#endif
-
 
 GptModel::GptModel(const GptModelInitParams& params)
     : device_(params.device)
@@ -303,23 +261,6 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
             weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
             weights_.token_type_embedding ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
-#if defined(__aarch64__)
-    [[maybe_unused]] int numThreads  = omp_get_num_threads();
-    if (hidden->type() == DataType::TYPE_FP16 && weights_.position_encoding && weights_.token_type_embedding) {
-        size_t hidden_m = hidden->shape()[0];
-        size_t hidden_n = hidden->shape()[1];
-        auto hidden_fp32 = device_->allocateBuffer({DataType::TYPE_FP32, {hidden_m, hidden_n}, AllocationType::HOST});
-        auto hidden_fp16 = device_->allocateBuffer({DataType::TYPE_FP16, {hidden_m, hidden_n}, AllocationType::HOST}); // for cache
-        #pragma omp parallel for num_threads(std::min(m,numThreads)) if(m>=2)
-        for(size_t i=0;i<hidden_m;i++){
-            convert_fp16_to_float((__fp16*)hidden->data()+i*hidden_n,(float*)hidden_fp32->data()+i*hidden_n,hidden_n);
-        }
-
-        // update infomation
-        hidden_fp16 = hidden;
-        hidden = hidden_fp32;
-    }
-#endif
     const auto dtype = hidden->type();
     if (residual_scale_fp32_ && residual_scale_->type() != dtype) {
         residual_scale_ = device_->convert({residual_scale_fp32_, dtype});

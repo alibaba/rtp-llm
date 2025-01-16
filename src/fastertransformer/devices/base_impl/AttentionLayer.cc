@@ -107,7 +107,9 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         }
         contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs, params.qscheme});
     }
-    params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
+    if (layer_kv_cache) {
+        params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
+    }
     printBufferData(*qkv_output, "qkv_output");
 
     if(params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTensor) {
