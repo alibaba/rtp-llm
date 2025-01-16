@@ -13,7 +13,6 @@ struct CacheConfig {
     uint32_t     local_head_num_kv      = 0;
     uint32_t     size_per_head          = 0;
     uint32_t     seq_size_per_block     = 0;
-    size_t       reserve_runtime_mem_mb = 0;
     ft::DataType dtype                  = ft::TYPE_INVALID;
 
     size_t       block_size             = 0;
@@ -62,7 +61,7 @@ struct CacheConfig {
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "CacheConfig { "
-                     << "layer_num: " << layer_num 
+                     << "layer_num: " << layer_num
                      << ", block_nums: " << block_nums
                      << ", block_size: " << block_size
                      << ", local_head_num_kv: " << local_head_num_kv
@@ -72,7 +71,7 @@ struct CacheConfig {
                      << ", kv_block_stride: " << kv_block_stride
                      << ", kv_scale_block_stride: " << kv_scale_block_stride
                      << ", total_size: " << total_size
-                     << ", reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "}";
+                     << "}";
         return debug_string.str();
     }
 };
