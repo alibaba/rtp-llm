@@ -23,13 +23,15 @@ class FunctionCall(BaseModel):
     name: Optional[str]
     arguments: Optional[str]
 
+# 有用吗
 class ToolCallFunction(BaseModel):
     name: Optional[str] = None
     arguments: Optional[str] = None
 
 class ToolCall(BaseModel):
-    index: int
-    id: Optional[str] = None
+    # 参照 openai 官方api definition
+    index: Optional[int] = None
+    id: str
     type: str
     function: FunctionCall
 
@@ -94,10 +96,18 @@ class GPTFunctionDefinition(BaseModel):
     name_for_human: Optional[str] = None
     description_for_model: Optional[str] = None
 
+
+class GPTToolDefinition(BaseModel):
+    # 目前仅考虑type为function的tool
+    type: str = "function"
+    function: GPTFunctionDefinition
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
+    tools: Optional[List[GPTToolDefinition]] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     max_tokens: Optional[int] = None

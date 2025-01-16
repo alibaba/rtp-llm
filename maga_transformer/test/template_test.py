@@ -5,17 +5,29 @@ from unittest import TestCase, main
 from typing import Any
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
+from maga_transformer.openai.renderers.qwen_tool_renderer import QwenToolRenderer
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
 from maga_transformer.models.starcoder import StarcoderTokenizer
 from maga_transformer.models.llava import LlavaTokenizer
-from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, \
-    ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
+from maga_transformer.openai.api_datatype import (
+    ChatMessage,
+    FunctionCall,
+    GPTToolDefinition,
+    RoleEnum,
+    ChatCompletionRequest,
+    GPTFunctionDefinition,
+    ContentPart,
+    ContentPartTypeEnum,
+    RendererInfo,
+    ToolCall,
+)
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.renderer_factory import ChatRendererFactory, RendererParams, \
     CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer
 from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer
 from maga_transformer.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
+
 
 class TemplateTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -152,7 +164,6 @@ Thought:"""
         logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
         assert (prompt == expected_prompt)
 
-
     def test_qwen_agent(self):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken")
         render_params = RendererParams(
@@ -281,6 +292,246 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
         assert (prompt == expected_prompt)
 
+    def test_qwen_tool(self):
+        logging.info("begin test_qwen_tool")
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        render_params = RendererParams(
+            model_type="qwen_tool",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        logging.info(
+            f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
+        )
+        assert isinstance(chat_renderer, QwenToolRenderer)
+
+        # 定义两个工具
+        tools = [
+            GPTToolDefinition(
+                type="function",
+                function=GPTFunctionDefinition(
+                    **{
+                        "name": "get_current_temperature",
+                        "description": "Get current temperature at a location.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": 'The location to get the temperature for, in the format "City, State, Country".',
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                    "description": 'The unit to return the temperature in. Defaults to "celsius".',
+                                },
+                            },
+                            "required": ["location"],
+                        },
+                    }
+                ),
+            ),
+            GPTToolDefinition(
+                type="function",
+                function=GPTFunctionDefinition(
+                    **{
+                        "name": "get_temperature_date",
+                        "description": "Get temperature at a location and date.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": 'The location to get the temperature for, in the format "City, State, Country".',
+                                },
+                                "date": {
+                                    "type": "string",
+                                    "description": 'The date to get the temperature for, in the format "Year-Month-Day".',
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                    "description": 'The unit to return the temperature in. Defaults to "celsius".',
+                                },
+                            },
+                            "required": ["location", "date"],
+                        },
+                    }
+                ),
+            ),
+        ]
+
+        # 初始对话消息
+        messages = [
+            ChatMessage(
+                **{
+                    "role": RoleEnum.system,
+                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "What's the temperature in San Francisco now? How about tomorrow?",
+                }
+            ),
+        ]
+
+        request = ChatCompletionRequest(
+            **{
+                "messages": messages,
+                "tools": tools,
+                "stream": False,
+            }
+        )
+
+        ids = chat_renderer.render_chat(request).input_ids
+        prompt = tokenizer.decode(ids)
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+
+        # 第一次断言: 检查初始提示
+        expected_prompt = """<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.
+
+Current Date: 2024-09-30
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}
+{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+What's the temperature in San Francisco now? How about tomorrow?<|im_end|>
+<|im_start|>assistant
+"""
+        logging.info(
+            f"expected prompt: \n{expected_prompt}\n-----------------------------------"
+        )
+        assert prompt == expected_prompt
+
+        # 添加助手的工具调用
+        messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": None,
+                    "tool_calls": [
+                        ToolCall(
+                            id="call_1",
+                            type="function",
+                            index=0,
+                            function=FunctionCall(
+                                name="get_current_temperature",
+                                arguments='{"location": "San Francisco, CA, USA"}',
+                            ),
+                        ),
+                        ToolCall(
+                            id="call_2",
+                            type="function",
+                            index=1,
+                            function=FunctionCall(
+                                name="get_temperature_date",
+                                arguments='{"location": "San Francisco, CA, USA", "date": "2024-10-01"}',
+                            ),
+                        ),
+                    ],
+                }
+            )
+        )
+
+        # 添加工具响应
+        messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.tool,
+                    "content": '{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}',
+                    "tool_call_id": "call_1",
+                }
+            )
+        )
+        messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.tool,
+                    "content": '{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}',
+                    "tool_call_id": "call_2",
+                }
+            )
+        )
+
+        # 添加最终助手响应
+        messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": "The current temperature in San Francisco is approximately 26.1°C. Tomorrow, on October 1, 2024, the temperature is expected to be around 25.9°C.",
+                }
+            )
+        )
+
+        request.messages = messages
+        ids = chat_renderer.render_chat(request).input_ids
+        prompt = tokenizer.decode(ids)
+        logging.info(f"final prompt: \n{prompt}\n-----------------------------------")
+
+        # 最终断言: 检查完整对话
+        expected_final_prompt = """<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.
+
+Current Date: 2024-09-30
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}
+{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+What's the temperature in San Francisco now? How about tomorrow?<|im_end|>
+<|im_start|>assistant
+<tool_call>
+{"name": "get_current_temperature", "arguments": {"location": "San Francisco, CA, USA"}}
+</tool_call>
+<tool_call>
+{"name": "get_temperature_date", "arguments": {"location": "San Francisco, CA, USA", "date": "2024-10-01"}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}
+</tool_response>
+<tool_response>
+{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}
+</tool_response><|im_end|>
+<|im_start|>assistant
+The current temperature in San Francisco is approximately 26.1°C. Tomorrow, on October 1, 2024, the temperature is expected to be around 25.9°C.<|im_end|>
+"""
+        logging.info(
+            f"expected final prompt: \n{expected_final_prompt}\n-----------------------------------"
+        )
+        assert prompt == expected_final_prompt
 
     def test_qwen_vl(self):
         tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_vl/tokenizer/", trust_remote_code=True)
