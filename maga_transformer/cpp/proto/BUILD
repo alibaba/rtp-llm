@@ -1,12 +1,28 @@
-load("//bazel:tf_proto.bzl", "tf_proto_library")
+load("//bazel:tf_proto.bzl", "tf_proto_library_cc")
+load("//bazel:py_proto.bzl", "generate_grpc_proto")
 
-tf_proto_library(
+tf_proto_library_cc(
     name = "model_rpc_service",
     srcs = ["model_rpc_service.proto"],
     has_services = True,
     cc_grpc_version = True,
     default_header = True,
 )
+
+py_binary(
+    name = "create_grpc_proto",
+    srcs = ["create_grpc_proto.py"],
+    data = ["model_rpc_service.proto"],
+    deps = ["//maga_transformer:grpcio-tools", "//maga_transformer:setuptools"],
+    visibility = ["//visibility:public"],
+)
+
+generate_grpc_proto(
+    name = "model_rpc_service_py",
+    proto = "model_rpc_service.proto",
+    create_grpc_proto = ":create_grpc_proto"
+)
+
 
 cc_library(
     name = "model_rpc_service_cc_proto",
@@ -20,8 +36,6 @@ cc_library(
 
 py_library(
     name = "model_rpc_service_py_proto",
-    srcs = ["model_rpc_service_pb2.py",
-            "model_rpc_service_pb2_grpc.py"],
-    deps = [":model_rpc_service_py"],
+    srcs = [":model_rpc_service_py"],
     visibility = ["//visibility:public"],
 )
