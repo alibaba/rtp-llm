@@ -42,6 +42,7 @@ static const std::string DEFAULT_DEVICE = "CPU";
 class DeviceTestBase: public ::testing::Test {
 public:
     void SetUp() override {
+        rtp_llm::initLogger();
         initTestDevices();
         initTestDataDir();
         torch::manual_seed(114514);

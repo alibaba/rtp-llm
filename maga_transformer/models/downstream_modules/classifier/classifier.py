@@ -48,7 +48,7 @@ class ClassifierHandler(CustomHandler):
         data_type = to_torch_dtype(self.config_.data_type)
         self.linear.weight.data = tensor_map['classifier.weight']
         self.linear.bias.data = tensor_map['classifier.bias']
-        self.linear = self.linear.to(data_type).eval().cuda()
+        self.linear = self.linear.to(data_type).eval().to(self.device)
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         #TODO test it

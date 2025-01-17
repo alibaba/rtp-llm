@@ -29,7 +29,6 @@ class BertClassifierHandler(CustomHandler):
                                      self.config_.hidden_size)
         self.activation = torch.nn.Tanh()
         self.linear = torch.nn.Linear(self.config_.hidden_size, num_labels)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def tensor_info(self):
         return [

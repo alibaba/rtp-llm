@@ -33,8 +33,8 @@ class RobertaClassifierHandler(CustomHandler):
         self.out_proj.bias.data = tensor_map['classifier.out_proj.bias']
         self.dense.weight.data = tensor_map['classifier.dense.weight']
         self.dense.bias.data = tensor_map['classifier.dense.bias']
-        self.out_proj = self.out_proj.to(data_type).eval().cuda()
-        self.dense = self.dense.to(data_type).eval().cuda()
+        self.out_proj = self.out_proj.to(data_type).eval().to(self.device)
+        self.dense = self.dense.to(data_type).eval().to(self.device)
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         first_tokens = get_first_token_from_combo_tokens(hidden_states, input_lengths)
