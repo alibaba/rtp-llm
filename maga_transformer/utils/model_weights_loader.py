@@ -81,11 +81,14 @@ class ModelWeightsLoader:
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
             self._weights_info.process_meta_from_ckpt(self._database.FinetuneFileList)
-            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
-            self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
-            if self._merge_lora:
-                static_lora_config: LoraConfig = list(self._database.LoraCkpt.LoraFileList.keys())[0]
-                self._static_lora_adapter_name = static_lora_config.name if self._merge_lora else None
+            self._model_weights_info: Optional[ModelWeightInfo] = None
+            if not self._is_ft_style_weight:
+                self._model_weights_info: Optional[ModelWeightInfo] = self._weights_info.get_weight_info()
+                self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
+                if self._merge_lora:
+                    static_lora_config: LoraConfig = list(self._database.LoraCkpt.LoraFileList.keys())[0]
+                    self._static_lora_adapter_name = static_lora_config.name if self._merge_lora else None
+                
         else:
             raise Exception("Unknown database class")
         logging.info(f"merge lora is enable ? : {self._merge_lora}")
