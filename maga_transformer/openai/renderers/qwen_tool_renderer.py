@@ -75,17 +75,8 @@ class QwenToolStreamStatus(StreamStatus):
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
-
-class QwenToolRenderer(CustomChatRenderer):
-    IM_START = "<|im_start|>"
-    IM_END = "<|im_end|>"
-    TOOL_START = "<tools>"
-    TOOL_END = "</tools>"
-    TOOL_CALL_START = "<tool_call>"
-    TOOL_CALL_END = "</tool_call>"
-
-    # 采用的模板来源 https://ollama.com/library/qwen2.5:72b/blobs/eb4402837c78以及https://qwen.readthedocs.io/en/latest/framework/function_call.html#qwen2-5-function-calling-templates
-    TOOL_INSTRUCTION = """
+# 采用的模板来源 https://ollama.com/library/qwen2.5:72b/blobs/eb4402837c78以及https://qwen.readthedocs.io/en/latest/framework/function_call.html#qwen2-5-function-calling-templates
+TOOL_INSTRUCTION = """
 # Tools
 
 You may call one or more functions to assist with the user query.
@@ -98,16 +89,13 @@ For each function call, return a json object with function name and arguments wi
 {{"name": <function-name>, "arguments": <args-json-object>}}
 </tool_call>"""
 
+
+class QwenToolRenderer(CustomChatRenderer):
+
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.add_extra_stop_word_ids([[self.tokenizer.encode(self.IM_END)[0]]])
+        self.add_extra_stop_word_ids([[self.tokenizer.encode("<|im_end|>")[0]]])
 
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        prompt = self._build_prompt(request.messages, request.tools)
-        input_ids = self.tokenizer.encode(prompt)
-        return RenderedInputs(input_ids=input_ids)
-
-    @overrides
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
@@ -115,6 +103,11 @@ For each function call, return a json object with function name and arguments wi
             return [StreamStatus(request) for _ in range(n)]
         else:
             return [QwenToolStreamStatus(request) for _ in range(n)]
+
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        prompt = self._build_prompt(request.messages, request.tools)
+        input_ids = self.tokenizer.encode(prompt)
+        return RenderedInputs(input_ids=input_ids)
 
     def _build_prompt(
         self,
@@ -131,13 +124,13 @@ For each function call, return a json object with function name and arguments wi
             system_msg = "You are a helpful assistant."
 
         # Add system message
-        prompt += f"{self.IM_START}system\n{system_msg}\n"
+        prompt += f"<|im_start|>system\n{system_msg}\n"
 
         # Add tool definitions if present
         if tools:
             tool_definitions = self._format_tool_definitions(tools)
-            prompt += self.TOOL_INSTRUCTION.format(tool_definitions=tool_definitions)
-        prompt += f"{self.IM_END}\n"
+            prompt += TOOL_INSTRUCTION.format(tool_definitions=tool_definitions)
+        prompt += f"<|im_end|>\n"
 
         # Handle conversation messages
         for i, message in enumerate(messages):
@@ -146,30 +139,30 @@ For each function call, return a json object with function name and arguments wi
             next_is_tool = i < len(messages) - 1 and messages[i + 1].role == "tool"
 
             if message.role == "user":
-                prompt += f"{self.IM_START}user\n{message.content}{self.IM_END}\n"
+                prompt += f"<|im_start|>user\n{message.content}<|im_end|>\n"
 
             elif message.role == "assistant":
-                prompt += f"{self.IM_START}assistant\n"
+                prompt += f"<|im_start|>assistant\n"
                 if message.content:
                     prompt += message.content
                 if message.tool_calls:
                     prompt += self._format_tool_calls(message.tool_calls)
-                prompt += f"{self.IM_END}\n"
+                prompt += f"<|im_end|>\n"
 
             elif message.role == "tool":
                 # 只有当不是连续tool消息中的一个时，才添加im_start和im_end
                 if not prev_is_tool:
-                    prompt += f"{self.IM_START}user\n"
+                    prompt += f"<|im_start|>user\n"
 
                 prompt += f"<tool_response>\n{message.content}\n</tool_response>"
 
                 if not next_is_tool:
-                    prompt += f"{self.IM_END}\n"
+                    prompt += f"<|im_end|>\n"
                 else:
                     prompt += "\n"
 
             if not message.role == "assistant" and is_last:
-                prompt += f"{self.IM_START}assistant\n"
+                prompt += f"<|im_start|>assistant\n"
 
         return prompt
 
@@ -186,7 +179,7 @@ For each function call, return a json object with function name and arguments wi
                 },
             }
             tool_defs.append(json.dumps(tool_def))
-        return f"{self.TOOL_START}\n" + "\n".join(tool_defs) + f"\n{self.TOOL_END}"
+        return f"<tools>\n" + "\n".join(tool_defs) + f"\n</tools>"
 
     def _format_tool_calls(self, tool_calls: List[ToolCall]) -> str:
         """格式化工具调用"""
@@ -203,7 +196,7 @@ For each function call, return a json object with function name and arguments wi
 
             tool_call_json = {"name": tool_call.function.name, "arguments": arguments}
             formatted_calls.append(
-                f"{self.TOOL_CALL_START}\n{json.dumps(tool_call_json)}\n{self.TOOL_CALL_END}"
+                f"<tool_call>\n{json.dumps(tool_call_json)}\n</tool_call>"
             )
 
         return "\n".join(formatted_calls)
