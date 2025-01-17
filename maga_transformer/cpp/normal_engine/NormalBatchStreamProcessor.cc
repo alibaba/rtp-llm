@@ -360,8 +360,6 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto token_size = stream->currentExecuteTokenSize();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->slice(offset, batch);
-        // auto batch_softmax_result = model_output.softmax_result->slice(offset, batch);
-        BufferPtr batch_softmax_result;
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
@@ -373,20 +371,30 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
             loss = device_->loss({all_logits, *label});
         }
+        BufferPtr batch_softmax_result;
+        BufferPtr current_softmax_result;
+        if (stream->calculateSoftmaxProbs()) {
+            current_softmax_result = device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
+            batch_softmax_result = device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
+        }
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
+            if (stream->calculateSoftmaxProbs()) {
+                device_->copy({(*current_softmax_result)[i], (*batch_softmax_result)[i].view(*(new_tokens->dataWithOffset<int32_t>(i)), 1)});
+            }
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+
         if (stream->numBeams() > 1 && beam_index != nullptr) {
             StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
-                    batch_softmax_result, batch_cum_log_probs, all_probs, loss};
+                    current_softmax_result, batch_cum_log_probs, all_probs, loss};
             stream->update(update_info);
             stream->beamSearchKvCacheUpdate(beam_index);
         } else {
             stream->update({new_tokens, 1, batch_hidden_states, batch_logits,
-                    batch_softmax_result, batch_cum_log_probs, all_probs, loss});
+                    current_softmax_result, batch_cum_log_probs, all_probs, loss});
         }
         offset += batch;
         token_offset += token_size;

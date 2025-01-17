@@ -57,6 +57,7 @@ message GenerateConfigPB {
     bool return_all_probs = 27;
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
+    bool return_softmax_probs = 30;
 }
 
 message MMPreprocessConfigPB {
@@ -97,6 +98,7 @@ message AuxInfoPB {
     int32 step_output_len = 10;
     bool pd_sep = 11;
     int32 first_token_cost_time_us = 12;
+    TensorPB softmax_probs = 13;
 }
 
 message GenerateOutputPB {

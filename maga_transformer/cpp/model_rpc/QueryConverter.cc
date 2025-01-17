@@ -27,6 +27,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->sp_edit                        = config_proto->sp_edit();
     generate_config->force_disable_sp_run           = config_proto->force_disable_sp_run();
     generate_config->return_all_probs               = config_proto->return_all_probs();
+    generate_config->return_softmax_probs           = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation          = config_proto->can_use_pd_separation();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(), config_proto->select_tokens_id().data(), config_proto->select_tokens_id_size() * sizeof(int));
@@ -72,7 +73,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         for (int i = 0;i < input->multimodal_inputs_size();i++) {
             auto mm_input = &input->multimodal_inputs(i);
             auto mm_preprocess_config = &mm_input->mm_preprocess_config();
-            mm_inputs.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(), 
+            mm_inputs.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(),
                 mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps(),
                 mm_preprocess_config->min_frames(), mm_preprocess_config->max_frames());
         }
@@ -134,6 +135,9 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
         if (response.aux_info.cum_log_probs.has_value()) {
             transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
+        }
+        if (response.aux_info.softmax_probs.has_value()) {
+            transTensor(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
         }
         if (response.aux_info.all_probs.has_value()) {
             transTensor(output->mutable_all_probs(), response.aux_info.all_probs.value().get());

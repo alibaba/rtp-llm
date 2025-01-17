@@ -41,6 +41,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         loss_ = device_->allocateBuffer(
                 {ft::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, ft::AllocationType::HOST}, {});
     }
+    if (generate_input_->generate_config->return_softmax_probs) {
+        softmax_probs_ = device_->allocateBuffer(
+                {ft::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
+    }
     complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input);
 
@@ -189,6 +193,10 @@ int GenerateStream::numReturnSequences() const {
 
 bool GenerateStream::calculateLoss() const {
     return loss_ && loss_index_ < inputLength() - 1;
+}
+
+bool GenerateStream::calculateSoftmaxProbs() const {
+    return generate_input_->generate_config->return_softmax_probs;
 }
 
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
@@ -651,8 +659,20 @@ void GenerateStream::setLoss(const ft::Buffer& loss) {
     loss_index_ += loss.size();
 }
 
+void GenerateStream::setSoftmaxProbs(const ft::Buffer& softmax_probs, int start_pos) {
+    FT_CHECK(softmax_probs.dim() == 2);
+    FT_CHECK(softmax_probs.shape()[0] == tileNum());
+    for (int i = 0; i < tileNum(); ++i) {
+        device_->copy({(*softmax_probs_)[i].view(start_pos, softmax_probs.shape()[1]), softmax_probs[i]});
+    }
+}
+
 ft::BufferPtr GenerateStream::getLoss() {
     return loss_;
+}
+
+ft::BufferPtr GenerateStream::getSoftmaxProbs() {
+    return softmax_probs_;
 }
 
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {

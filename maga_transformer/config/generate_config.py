@@ -57,6 +57,7 @@ class GenerateConfig(BaseModel):
     sp_edit: bool = False
     force_disable_sp_run: bool = False
     return_all_probs: bool = False
+    return_softmax_probs: bool = False
     can_use_pd_separation: bool = True
 
     # lora
@@ -127,12 +128,12 @@ class GenerateConfig(BaseModel):
             check_with_info(is_positive_integer(self.num_return_sequences), \
                 f"num_return_sequences {self.num_return_sequences} is wrong data type")
             check_with_info(is_union_positive_number(self.temperature), \
-                f"temperature {self.temperature} is wrong data type")            
+                f"temperature {self.temperature} is wrong data type")
             check_with_info(check_optional(is_union_positive_integer, self.no_repeat_ngram_size), \
                 f"no_repeat_ngram_size {self.no_repeat_ngram_size} is wrong data type")
             check_with_info(check_optional(is_union_positive_integer, self.random_seed), \
                 f"random_seed {self.random_seed} is wrong data type")
-            check_with_info(check_optional(is_union_positive_number, self.top_p_decay), 
+            check_with_info(check_optional(is_union_positive_number, self.top_p_decay),
                 f"top_p_decay {self.top_p_decay} is wrong data type")
             check_with_info(check_optional(is_union_positive_number, self.top_p_min), \
                 f"top_p_min {self.top_p_min} is wrong data type")
@@ -146,7 +147,7 @@ class GenerateConfig(BaseModel):
                 f"bos_token_id {self.bos_token_id} is wrong data type")
             check_with_info(is_list_positive_integer_list(self.stop_words_list), \
                 f"stop_words_list {self.stop_words_list} is wrong data type")
-            check_with_info(is_union_positive_integer(self.sp_advice_prompt_token_ids), 
+            check_with_info(is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type")
             calculate_loss_list = [0, 1, 2]
             check_with_info(self.calculate_loss in calculate_loss_list, \

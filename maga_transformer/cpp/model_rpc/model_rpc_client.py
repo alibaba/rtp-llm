@@ -72,6 +72,7 @@ def trans_input(input_py: GenerateInput):
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
+    generate_config_pb.return_softmax_probs = input_py.generate_config.return_softmax_probs
     generate_config_pb.can_use_pd_separation = input_py.generate_config.can_use_pd_separation
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -128,6 +129,8 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
         if output_pb.aux_info.HasField('cum_log_probs'):
             output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
+        if output_pb.aux_info.HasField('softmax_probs'):
+            output_py.aux_info.softmax_probs = trans_tensor(output_pb.aux_info.softmax_probs).tolist()
         output_py.output_ids = trans_tensor(output_pb.output_ids)
         output_py.input_ids = input_py.token_ids.reshape(1, -1)
         if output_pb.HasField('hidden_states'):

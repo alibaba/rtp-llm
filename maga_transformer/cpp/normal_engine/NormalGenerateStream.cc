@@ -78,6 +78,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.loss = loss;
         }
 
+        if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
+            generate_output.aux_info.softmax_probs = device_->clone({(*softmax_probs_)[i].view(last_output_pos_, output_len), ft::AllocationType::HOST});
+        }
+
         generate_output.finished              = sub_generate_status_[i].status == GenerateState::FINISHED;
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
@@ -127,6 +131,12 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     if (update_info.loss) {
         setLoss(*update_info.loss);
+    }
+
+    if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {
+        FT_CHECK(update_info.softmax_probs->dim() == 2);
+        FT_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);
+        setSoftmaxProbs(*update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
     finished_ = needFinish();

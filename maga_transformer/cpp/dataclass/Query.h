@@ -33,9 +33,9 @@ struct MultimodalInput {
     torch::Tensor      tensor               = torch::empty({0});
     int32_t            mm_type              = 0;
     MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
-    MultimodalInput(std::string url, torch::Tensor t, int32_t mm_type = 0, int32_t width = -1, int32_t height = -1, int32_t min_pixels = -1, int32_t max_pixels = -1, int32_t fps = -1, int32_t min_frames = -1, int32_t max_frames = -1): 
+    MultimodalInput(std::string url, torch::Tensor t, int32_t mm_type = 0, int32_t width = -1, int32_t height = -1, int32_t min_pixels = -1, int32_t max_pixels = -1, int32_t fps = -1, int32_t min_frames = -1, int32_t max_frames = -1):
         url(url), tensor(t), mm_type(mm_type), mm_preprocess_config(MMPreprocessConfig(width, height, min_pixels, max_pixels, fps, min_frames, max_frames)) {}
-    MultimodalInput(std::string url): 
+    MultimodalInput(std::string url):
         url(url), tensor(torch::empty(0)) {}
 };
 
@@ -110,6 +110,7 @@ public:
     bool                                             pd_sep          = false;
     std::optional<ft::ConstBufferPtr>                cum_log_probs;
     std::optional<ft::ConstBufferPtr>                all_probs;
+    std::optional<ft::ConstBufferPtr>                softmax_probs;
 };
 
 

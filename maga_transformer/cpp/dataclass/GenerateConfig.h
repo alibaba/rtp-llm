@@ -53,6 +53,7 @@ public:
     bool                sp_edit              = false;
     bool                force_disable_sp_run = false;
     bool                return_all_probs     = false;
+    bool                return_softmax_probs = false;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;

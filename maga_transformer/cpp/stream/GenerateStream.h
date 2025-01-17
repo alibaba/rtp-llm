@@ -22,7 +22,7 @@ struct StreamUpdateInfo {
     int                 num_new_tokens;
     const ft::BufferPtr hidden_states;
     const ft::BufferPtr logits;
-    const ft::BufferPtr softmax_result;
+    const ft::BufferPtr softmax_probs;
     const ft::BufferPtr cum_log_probs;
     const ft::BufferPtr all_probs;
     const ft::BufferPtr loss;
@@ -82,6 +82,7 @@ public:
     int numBeams() const;
     int numReturnSequences() const;
     bool calculateLoss() const;
+    bool calculateSoftmaxProbs() const;
 
     bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
@@ -149,6 +150,7 @@ public:
     const ResourceContext& resourceContext() const;
     void setKVCache(const BatchKVCacheResource &kv_cache_resource);
     void setLoss(const ft::Buffer& loss);
+    void setSoftmaxProbs(const ft::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
     size_t maxBlockSize() const;
 
@@ -168,6 +170,7 @@ public:
     // for test
     void setIsContextStream(bool is_context_stream);
     ft::BufferPtr getLoss();
+    ft::BufferPtr getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void setPerfTest(bool perf_test_);
 
@@ -216,7 +219,7 @@ public:
             sp_edit_search_index_ += accepted_num;
         }
     }
-    
+
     void setSpEditRun(bool is_sp_edit_run) {
         sp_edit_run_ = is_sp_edit_run;
     }
@@ -293,6 +296,7 @@ protected:
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
     ft::BufferPtr                       all_probs_;
+    ft::BufferPtr                       softmax_probs_;
     ft::BufferPtr                       loss_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;

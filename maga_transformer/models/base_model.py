@@ -83,6 +83,7 @@ class AuxInfo(PyBaseModel):
     pd_sep: bool = False
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
+    softmax_probs: List[float] = []
 
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
