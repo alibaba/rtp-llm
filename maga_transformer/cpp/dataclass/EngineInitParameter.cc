@@ -92,12 +92,11 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
             FT_LOG_DEBUG("load weight_only qbuffer weight [%s] scale [%s]", kernel_key.c_str(), scales_key.c_str());
             if (quant_algo_.getWeightBits() == 4) {
                 dtype = DataType::TYPE_INT4X2;
-#if USING_CUDA
-                shape[kernel->dim()-1] = shape[kernel->dim()-1] * 2;
-#endif
-                
-#if USING_ROCM // for composable kernel specific
+
+#if USING_CK_INT4 // for composable kernel specific
                 shape[kernel->dim()-2] = shape[kernel->dim()-2] * 2;
+#else
+                shape[kernel->dim()-1] = shape[kernel->dim()-1] * 2;
 # endif
             }
         }
