@@ -211,9 +211,14 @@ class QwenToolRenderer(CustomChatRenderer):
     async def _process_tool_calls(
         self, status: QwenToolStreamStatus, output: GenerateOutput
     ) -> Optional[OutputDelta]:
-        """处理工具调用相关的逻辑"""
+        import pdb
+
+        pdb.set_trace()
+
+        status.responded_string += status.delta_output_string
+        status.delta_output_string = ""
+
         if "<tool_call>" in status.responded_string:
-            status.delta_output_string = ""
             if "</tool_call>" in status.responded_string:
                 # 提取和处理工具调用
                 tool_call_name_args_str = status.responded_string[
@@ -307,18 +312,24 @@ class QwenToolRenderer(CustomChatRenderer):
             while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
+
+        import pdb
+
+        pdb.set_trace()
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
+
+        if status.request.tools:
+            tool_delta = await self._process_tool_calls(status, output)
+            if tool_delta is not None:
+                return tool_delta
+
         if not is_truncated(
             status.delta_output_string, stop_word_slice_list, is_streaming
         ):
             status.update_result()
             # 事实上的修改就下面4行
-            if status.request.tools:
-                tool_delta = await self._process_tool_calls(status, output)
-                if tool_delta is not None:
-                    return tool_delta
 
             delta = OutputDelta(
                 output_str=status.delta_output_string,
