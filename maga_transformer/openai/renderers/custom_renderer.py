@@ -253,11 +253,13 @@ class CustomChatRenderer():
         )
         for i in range(prob_return_num):
             token = self.tokenizer.decode(tokens[i].item())
-            chat_logprob.top_logprobs.append(TopLogprob(
-                token=token,
-                logprob=log_values[i].item(),
-                bytes=list(token.encode("utf-8", errors="replace")),
-            ))
+            chat_logprob.top_logprobs.append(
+                TopLogprob(
+                    token=token,
+                    logprob=log_values[i].item(),
+                    bytes=list(token.encode("utf-8", errors="replace")),
+                )
+            )
 
         logging.debug(f"chat_logprob: {chat_logprob.model_dump_json(indent=4)}")
 
@@ -352,6 +354,16 @@ class CustomChatRenderer():
         for i, buffer in enumerate(buffer_list):
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
+            # 避免循环引用
+            from maga_transformer.openai.renderers.qwen_tool_renderer import (
+                QwenToolStreamStatus,
+            )
+
+            if (
+                isinstance(StreamStatus, QwenToolStreamStatus)
+                and buffer.generating_tool_call
+            ):
+                buffer.finish_reason = FinisheReason.tool_call
             if buffer.finish_reason == None:
                 logging.debug(f"output {i} found no stop reason! use stop as default.")
                 buffer.finish_reason = FinisheReason.stop
