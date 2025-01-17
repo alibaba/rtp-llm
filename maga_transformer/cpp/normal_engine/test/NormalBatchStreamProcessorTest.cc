@@ -101,6 +101,49 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
+    ResourceContext  resource_context;
+    GptInitParameter param;
+    param.max_seq_len_                      = 2048;
+    param.vocab_size_                       = 2;
+    param.num_layers_                       = 2;
+    std::shared_ptr<GenerateInput> query1   = make_shared<GenerateInput>();
+    query1->input_ids                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config                 = make_shared<GenerateConfig>();
+    query1->generate_config->return_softmax_probs = true;
+    // query1->generate_config->is_streaming   = true;
+    GenerateStreamPtr     stream1           = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.batch_block_id = {{1}};
+    stream1->setKVCache(addr1);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+
+    for (const auto& stream : streams) {
+        stream->setRunning();
+    }
+    NormalBatchStreamProcessor processor(param, CacheConfig(), false);
+    StreamGroups               stream_groups(streams);
+    auto                       merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    SamplerInputs                 sampler_inputs;
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.model_output.logits          = createBuffer<float>({1, 2}, {1, 2});
+    merge_outputs.sampler_output.token_ids =
+        createBuffer<int>({1, 2}, {0, 1}, AllocationType::HOST);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({1}, {1});
+    auto status                                 = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    auto softmax_probs = stream1->getSoftmaxProbs();
+    EXPECT_TRUE(softmax_probs);
+    EXPECT_EQ(2048, softmax_probs->size());
+    EXPECT_NEAR(0.731058, *(softmax_probs->dataWithOffset<float>(1)), 0.0001);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     ResourceContext  resource_context;
     GptInitParameter param;

@@ -44,6 +44,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (generate_input_->generate_config->return_softmax_probs) {
         softmax_probs_ = device_->allocateBuffer(
                 {ft::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
+        memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
     complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input);
