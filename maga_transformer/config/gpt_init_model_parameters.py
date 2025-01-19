@@ -405,10 +405,13 @@ class GptInitModelParameters:
         logging.info(f'reuse_cache: {self.reuse_cache}')
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
-        kv_cache_data_type = WEIGHT_TYPE.INT8 if bool(int(os.environ.get('INT8_KV_CACHE', 0))) else WEIGHT_TYPE.FP16
-        if self.quant_algo.isFp8():
-            kv_cache_data_type = WEIGHT_TYPE.FP8
-        self.kv_cache_data_type = kv_cache_data_type.to_str()
+        if bool(int(os.environ.get('INT8_KV_CACHE', 0))):
+            self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()
+        elif self.quant_algo.isFp8():
+            self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
+        else:
+            self.kv_cache_data_type = self.data_type
+
         logging.info(f'kv_cache_data_type: {self.kv_cache_data_type}')
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
