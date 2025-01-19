@@ -293,9 +293,7 @@ protected:
             }
 
         }
-        auto kv_cache_offset_gpu_buf = device_->allocateBuffer({kv_cache_block_id->type(), kv_cache_block_id->shape()});
-        device_->copy({*kv_cache_offset_gpu_buf, *kv_cache_block_id});
-        return kv_cache_offset_gpu_buf;
+        return kv_cache_block_id;
     }
 
     void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,
