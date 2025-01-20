@@ -69,6 +69,7 @@ class OpenaiEndopoint():
             if len(word):
                 self.stop_words_str_list.append(word)
 
+
         env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
         env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
         env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
@@ -80,8 +81,8 @@ class OpenaiEndopoint():
         else:
             self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
-
-        logging.info(f"use stop_words_list [{self.stop_words_str_list}]")
+        
+            logging.info(f"use stop_words_list [{self.stop_words_str_list}]")
 
     async def list_models(self):
         global model_args
@@ -140,8 +141,7 @@ class OpenaiEndopoint():
                             ),
                             finish_reason=choice.finish_reason,
                             logprobs=choice.logprobs,
-                        )
-                        for i, choice in enumerate(response.choices)
+                        ) for i, choice in enumerate(response.choices)
                     ]
                 else:
                     raise ValueError(f"response.choices has different length! "

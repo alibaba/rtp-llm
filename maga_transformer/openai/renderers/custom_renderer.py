@@ -253,13 +253,11 @@ class CustomChatRenderer():
         )
         for i in range(prob_return_num):
             token = self.tokenizer.decode(tokens[i].item())
-            chat_logprob.top_logprobs.append(
-                TopLogprob(
-                    token=token,
-                    logprob=log_values[i].item(),
-                    bytes=list(token.encode("utf-8", errors="replace")),
-                )
-            )
+            chat_logprob.top_logprobs.append(TopLogprob(
+                token=token,
+                logprob=log_values[i].item(),
+                bytes=list(token.encode("utf-8", errors="replace")),
+            ))
 
         logging.debug(f"chat_logprob: {chat_logprob.model_dump_json(indent=4)}")
 

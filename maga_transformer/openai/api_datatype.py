@@ -23,11 +23,6 @@ class FunctionCall(BaseModel):
     name: Optional[str]
     arguments: Optional[str]
 
-# 有用吗
-class ToolCallFunction(BaseModel):
-    name: Optional[str] = None
-    arguments: Optional[str] = None
-
 class ToolCall(BaseModel):
     # 参照 openai 官方api definition
     index: Optional[int] = None
