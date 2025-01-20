@@ -17,7 +17,7 @@
 
 #include "ck/tensor_operation/gpu/device/impl/device_gemm_xdl_cshuffle_v3_b_scale.hpp"
 
-#include "../CKGemmWrapper.h"
+#include "../rocmCKGemmWrapper.h"
 
 namespace fastertransformer {
 

@@ -19,7 +19,7 @@
 #include "src/fastertransformer/rocm/rocmFmhaWrapper.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
 #include "src/fastertransformer/rocm/rocmMoeWrapper.h"
-#include "src/fastertransformer/rocm/CKGemmWrapper.h"
+#include "src/fastertransformer/rocm/rocmCKGemmWrapper.h"
 
 #include "torch_hip_allocator.h"
 #include "custom_ar_comm.h"
@@ -123,7 +123,7 @@ private:
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
 
     //CK gemm
-    std::unique_ptr<CKGemmWrapper> ck_gemm_runner_;
+    std::unique_ptr<rocmCKGemmWrapper> ck_gemm_runner_;
 
 
 protected:

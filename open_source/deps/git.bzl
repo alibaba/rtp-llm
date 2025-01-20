@@ -11,7 +11,7 @@ def amd_ck_dep():
     new_git_repository(
         name = "composable_kernel_archive",
         remote = "https://github.com/ROCm/composable_kernel.git",
-        commit = "4f62f6e9b77a41ca34a68efd1297d4b68eda06d2", # CommitTag: [CK_TILE] FA bwd kernels optimization (#1397)
+        commit = "86d1b46aa6d4e0c8ca19f2048ac9c0c97cf7752e", # CommitTag: [CK_TILE] fix a bug for int4 scale weight only kernel (#1820)
         patches = ["//3rdparty/composable_kernel:ck.patch"],
         build_file = "//3rdparty/composable_kernel:ck.BUILD",
         shallow_since = "1719582646 -0700",

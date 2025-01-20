@@ -120,7 +120,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     moe_runner_.reset(new rocmMoeWrapper());
-    ck_gemm_runner_.reset(new CKGemmWrapper());
+    ck_gemm_runner_.reset(new rocmCKGemmWrapper());
 }
 
 ROCmDevice::~ROCmDevice() {

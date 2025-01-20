@@ -1,4 +1,4 @@
-#include "CKGemmWrapper.h"
+#include "rocmCKGemmWrapper.h"
 
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "ck/library/utility/host_tensor.hpp"
@@ -153,7 +153,7 @@ void CKGemmQINT4X2Impl(const ckGemmParam& params) {
     int4Gemm_caller(params);
 }
 
-void CKGemmWrapper::runCKGemm(const ckGemmParam& ckParams, DataType ADtype, DataType BDtype) {
+void rocmCKGemmWrapper::runCKGemm(const ckGemmParam& ckParams, DataType ADtype, DataType BDtype) {
     if (BDtype == TYPE_INT8) {
         // implemented here for fusion dequantize GEMM
         // BDtype is the weight

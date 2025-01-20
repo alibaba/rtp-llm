@@ -19,10 +19,10 @@ typedef struct {
     hipStream_t stream;
 } ckGemmParam;
 
-class CKGemmWrapper {
+class rocmCKGemmWrapper {
 public:
-    CKGemmWrapper()  = default;
-    ~CKGemmWrapper() = default;
+    rocmCKGemmWrapper()  = default;
+    ~rocmCKGemmWrapper() = default;
     void runCKGemm(const ckGemmParam& ckParams, DataType ADtype, DataType BDtype);
 };
 

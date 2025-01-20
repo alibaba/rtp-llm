@@ -73,10 +73,7 @@ void int4_dequant_gemm_128x64x16x128_16_16x16_2x1_16x8x1_8x16x1_16_1x16x1x8_2_in
 // Kernel index 25
 void int4_dequant_gemm_128x32x16x128_16_16x16_1x1_16x8x1_8x16x1_16_1x16x1x8_2_intrawave_v4(const ckGemmParam& params);
 
-// Kernel index 26
-void int4_dequant_gemm_64x16x16x128_16_16x16_1x1_16x4x1_8x8x1_16_1x16x1x4_4_intrawave_v4(const ckGemmParam& params);
-
-// Kernel index 27
+// Kernel index 26 27
 void int4_dequant_gemm_64x16x16x128_16_16x16_1x1_16x4x1_8x8x1_16_1x16x1x4_4_intrawave_v4(const ckGemmParam& params);
 
 // Kernel index 28
