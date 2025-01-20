@@ -69,7 +69,7 @@ BufferPtr ROCmDevice::softmax(const SoftmaxParams& params) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(input_type,
                                          invokeAddBiasSoftMax,
                                          params.input->data(),
-                                         params.bias.value().get().data(),
+                                         params.bias.has_value() ? params.bias.value().get().data() : nullptr,
                                          nullptr,
                                          nullptr,
                                          params.input->shape()[0],
