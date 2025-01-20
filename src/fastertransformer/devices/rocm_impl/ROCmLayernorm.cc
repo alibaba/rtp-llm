@@ -98,6 +98,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                 layernorm2d_fwd_args   args{input->data(),
                                           params.residual1.value().get().data(),
                                           nullptr,
+                                          nullptr,
                                           gamma,
                                           beta,
 
@@ -171,6 +172,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             if (data_type == DataType::TYPE_FP16 && m > 32 && n <= 768) {
                 layernorm2d_fwd_traits traits{"fp16", "fp16", "fp32", "fp32", 0, 0, 0};
                 layernorm2d_fwd_args   args{input->data(),
+                                          nullptr,
                                           nullptr,
                                           nullptr,
                                           gamma,
