@@ -24,6 +24,18 @@
 #include "custom_ar_comm.h"
 
 namespace fastertransformer {
+    
+class ROCmEvent : public DeviceEvent {
+public:
+    ROCmEvent(hipStream_t stream);
+    ~ROCmEvent() override;
+
+    void synchronize() const override;
+
+private:
+    hipEvent_t event_;
+    hipStream_t stream_;
+};
 
 class ROCmDevice: public DeviceBase {
 public:
@@ -58,6 +70,7 @@ public:
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
     void preRun() override { ROCM_CHECK(hipSetDevice(device_id_)); }
+    DeviceEventPtr createEvent() override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
     BufferPtr dequantize(const QuantizeParams& params);

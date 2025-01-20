@@ -190,6 +190,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             stream_
         );
         sync_check_cuda_error();
+        
+        writeCacheStore(params);
     }
 
     fmha_runner_->setup(datatype,

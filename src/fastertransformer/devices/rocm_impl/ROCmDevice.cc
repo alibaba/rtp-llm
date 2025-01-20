@@ -410,4 +410,21 @@ void ROCmDevice::printBuffer(const BufferPtr b) {
 
 RTP_LLM_REGISTER_DEVICE(ROCm);
 
+DeviceEventPtr ROCmDevice::createEvent() {
+    return std::make_unique<ROCmEvent>(stream_);
+}
+
+ROCmEvent::ROCmEvent(hipStream_t stream) : stream_(stream) {
+    ROCM_CHECK(hipEventCreate(&event_));
+    ROCM_CHECK(hipEventRecord(event_, stream));
+}
+
+ROCmEvent::~ROCmEvent() {
+    ROCM_CHECK(hipEventDestroy(event_));
+}
+
+void ROCmEvent::synchronize() const {
+    ROCM_CHECK(hipEventSynchronize(event_));
+}
+
 }  // namespace fastertransformer
