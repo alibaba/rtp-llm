@@ -49,7 +49,7 @@ def http_deps():
     )
 
     http_archive(
-        name = "torch_2.4_py310_rocm",
+        name = "torch_rocm",
         sha256 = "8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c",
         urls = [
             "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl"

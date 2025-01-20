@@ -52,6 +52,16 @@ xft_loaded = False
 # if not xft_loaded:
 #     logging.info("xfastertransformer-devel package not loaded, this won't affect run.")
 
+# hack for amd rocm 6.3.0.2 test, libcaffe2_nvrtc.so should have been automatically loaded via torch
+try:
+    logging.info(f"torch path: {torch.__path__}")
+    so_load_path = f"{torch.__path__[0]}/lib/libcaffe2_nvrtc.so"
+    if os.path.exists(so_load_path):
+        from ctypes import cdll
+        cdll.LoadLibrary(so_load_path)
+        logging.info(f"loaded libcaffe2_nvrtc.so from {so_load_path}")
+except BaseException as e:
+    logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
 try:
     from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo

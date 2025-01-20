@@ -68,17 +68,14 @@ build:cuda12 --copt="-DUSING_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
 build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
 build:cuda12 --copt="-DENABLE_FP8=1"
-build:cuda12 --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 build:cuda12_2 --config=cuda12
 build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
-build:cuda12_2 --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 build:cuda12_6 --config=cuda12
 build:cuda12_6 --action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --host_action_env TF_CUDA_VERSION="12.6"
-build:cuda12_6 --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true
@@ -92,7 +89,6 @@ build:cpu --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 # NOTE: intel xfastertransformer package has two version,
 # icx version is for 1-3 gen intel xeon cpu, non-icl version is for 4th gen and later.
 build:cpu_latest --define=xft_use_icx=false
-build:cpu_latest --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 build:rocm --copt="-DENABLE_BF16=1"
 build:rocm --action_env TF_NEED_CUDA="0"
@@ -135,14 +131,11 @@ build:arm --copt=-Wno-unused-result # grpc
 build:arm --copt=-Wno-array-parameter # boringssl
 
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
-build:debug --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
-build:trace --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
-build:cicd --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
 # asan
@@ -153,7 +146,6 @@ build:asan --copt -fno-omit-frame-pointer
 build:asan --copt -fPIC # for "fix relocation truncated to fit: R_X86_64_32 against `.debug_info'" collect2 error
 build:asan --copt -fdebug-types-section # for "fix relocation truncated to fit: R_X86_64_32 against `.debug_info'" collect2 error
 build:asan --linkopt -fsanitize=address
-build:asan --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
 test --test_env LD_LIBRARY_PATH="/opt/rocm-6.3.0.2/lib:/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64"
 test --test_env OMP_NUM_THREADS=8

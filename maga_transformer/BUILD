@@ -83,6 +83,8 @@ requirement([
     "matplotlib", # required by qwen vl tokenizer
     "flash_attn",
     "av",
+    "pyrsmi",
+    "amdsmi",
 ] + tensorrt)
 
 
@@ -189,7 +191,7 @@ py_library(
     }) + select({
         "//:using_cuda11": [],
         "//:using_arm": [],
-        "//:using_rocm": [],
+        "//:using_rocm": ["pyrsmi", "amdsmi"],
         "//:using_cpu": [],
         "//conditions:default": ["flash_attn"]
     }),
