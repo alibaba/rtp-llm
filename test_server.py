@@ -79,7 +79,7 @@ def create_chat_request(messages, tools=None, functions=None):
     """创建聊天请求"""
     return {
         "temperature": 0.0,
-        "top_p": 0.1,
+        "top_p": 1,
         "messages": messages,
         "debug_info": False,
         "aux_info": False,
@@ -116,12 +116,16 @@ if __name__ == "__main__":
     # Step 1: 初始对话 - 只有用户提问
     chat_messages = [
         {
+            "role": "system",
+            "content": "you are a helpful assistant, your name is Qwen",
+        },
+        {
             "role": "user",
-            "content": "北京,杭州,上海分别怎么样",
+            "content": "北京和杭州的天气怎么样",
         },
     ]
     request1 = create_chat_request(chat_messages)
-    # send_chat_request(port, request1, "1: Initial Question")
+    send_chat_request(port, request1, "1: Initial Question")
 
     # Step 2: 添加工具定义
     request2 = create_chat_request(chat_messages, tools=tools)
@@ -156,17 +160,17 @@ if __name__ == "__main__":
             # 工具返回的结果
             {
                 "role": "tool",
-                "content": "北京: 10 摄氏度",
+                "content": "北京: 10 摄氏度, 天气一般",
             },
             {
                 "role": "tool",
-                "content": "杭州: 20 摄氏度",
+                "content": "杭州: 20 摄氏度, 天气很好",
             },
         ]
     )
 
     request3 = create_chat_request(chat_messages, tools=tools)
-    # send_chat_request(port, request3, "3: With Tool Results")
+    send_chat_request(port, request3, "3: With Tool Results")
 
     # 清理和退出
     if pgrp_set:

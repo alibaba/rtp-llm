@@ -354,16 +354,6 @@ class CustomChatRenderer():
         for i, buffer in enumerate(buffer_list):
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
-            # 避免循环引用
-            from maga_transformer.openai.renderers.qwen_tool_renderer import (
-                QwenToolStreamStatus,
-            )
-
-            if (
-                isinstance(StreamStatus, QwenToolStreamStatus)
-                and buffer.generating_tool_call
-            ):
-                buffer.finish_reason = FinisheReason.tool_call
             if buffer.finish_reason == None:
                 logging.debug(f"output {i} found no stop reason! use stop as default.")
                 buffer.finish_reason = FinisheReason.stop

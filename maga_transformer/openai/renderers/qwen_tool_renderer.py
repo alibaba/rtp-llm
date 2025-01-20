@@ -1,31 +1,20 @@
 import copy
 import json
-import re
 import logging
-import torch
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
+from typing import Optional, List, Dict, Any, Union
 import functools
-import pdb
-from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
-from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import (
     ChatMessage,
-    GPTFunctionDefinition,
     GPTToolDefinition,
     UsageInfo,
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
     DeltaMessage,
     FinisheReason,
-    RoleEnum,
-    RendererInfo,
     PromptTokensDetails,
-    ChatCompletionTokenLogprob,
-    TopLogprob,
-    ChoiceLogprobs,
     ToolCall,
     FunctionCall,
 )
@@ -37,13 +26,8 @@ from maga_transformer.openai.renderers.custom_renderer import (
     StreamStatus,
     OutputDelta,
 )
-from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.word_util import (
-    get_stop_word_slices,
-    truncate_response_with_stop_words,
-    is_truncated,
-)
+from maga_transformer.utils.word_util import is_truncated
 
 """
 TODO List
@@ -64,6 +48,27 @@ TODO List
   • 任务：在system_prompt中添加日期时间信息
   • 目的：减少AI推理过程中的时间相关幻觉
 
+- Qwen2支持
+  • 任务：除开对qwen2.5 tool能力的支持, 还需要支持qwen2
+  • 原因: qwen2.5的<tool_call>和</tool_call>都是1个token,而qwen2不是
+
+- 对某些异常情况的支持:
+  • 例如:
+        为了给您提供北京、上海和伦敦的当前温度，我将分别查询这三个城市的温度。请稍等。
+        <tool_call> 
+        {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
+        </tool_call> 
+        {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
+        </tool_call> 
+        {"name": "get_current_temperature", "arguments": {"location": "London, UK", "unit": "celsius"}}
+        </tool_call>
+    而非标准的:
+        <tool_call> 
+        {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
+        </tool_call> 
+        <tool_call> 
+        {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
+        </tool_call>
 
 """
 
@@ -71,6 +76,7 @@ TODO List
 class QwenToolStreamStatus(StreamStatus):
     generating_tool_call: bool = False
     tool_call_index = 0
+    tool_call_responded_string = ""
 
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
@@ -100,6 +106,55 @@ class QwenToolRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_word_ids([[self.tokenizer.encode("<|im_end|>")[0]]])
+
+    # override
+    async def _generate_final(self, buffer_list: List[StreamStatus]):
+        input_token_length = 0
+        output_token_length = 0
+        reuse_length = 0
+        aux_info = None
+        for i, buffer in enumerate(buffer_list):
+            if buffer.output is None:
+                raise Exception("buffer last output should not be None")
+            # <增加的部分>
+            # 避免循环引用
+            from maga_transformer.openai.renderers.qwen_tool_renderer import (
+                QwenToolStreamStatus,
+            )
+
+            if isinstance(buffer, QwenToolStreamStatus) and buffer.generating_tool_call:
+                buffer.finish_reason = FinisheReason.tool_call
+            # </增加的部分>
+            if buffer.finish_reason == None:
+                logging.debug(f"output {i} found no stop reason! use stop as default.")
+                buffer.finish_reason = FinisheReason.stop
+            if i == 0:
+                input_token_length = buffer.output.aux_info.input_len
+                reuse_length = buffer.output.aux_info.reuse_len
+            output_token_length += buffer.output.aux_info.output_len
+        return StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(
+                        content="",
+                    ),
+                    finish_reason=buffer.finish_reason,
+                )
+                for i, buffer in enumerate(buffer_list)
+            ],
+            usage=UsageInfo(
+                prompt_tokens=input_token_length,
+                total_tokens=input_token_length + output_token_length,
+                completion_tokens=output_token_length,
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_length)
+                    if reuse_length > 0
+                    else None
+                ),
+            ),
+            aux_info=aux_info,
+        )
 
     # override
     async def _create_status_list(
@@ -209,30 +264,48 @@ class QwenToolRenderer(CustomChatRenderer):
         return "\n".join(formatted_calls)
 
     async def _process_tool_calls(
-        self, status: QwenToolStreamStatus, output: GenerateOutput
+        self,
+        status: QwenToolStreamStatus,
+        output: GenerateOutput,
+        is_streaming: bool,
     ) -> Optional[OutputDelta]:
-        import pdb
+        status.tool_call_responded_string += status.delta_output_string
 
-        pdb.set_trace()
+        # 对于批式情况的处理
+        if not is_streaming:
+            tool_calls = self._extract_tool_calls(status)
+            status.delta_output_string = ""
+            if tool_calls:
+                status.generating_tool_call = True
+            return OutputDelta(
+                output_str=DeltaMessage(
+                    content=status.tool_call_responded_string,
+                    tool_calls=tool_calls,
+                ),
+                logprobs=await self._generate_log_probs(status, output),
+                input_length=output.aux_info.input_len,
+                output_length=output.aux_info.output_len,
+                reuse_length=output.aux_info.reuse_len,
+            )
 
-        status.responded_string += status.delta_output_string
-        status.delta_output_string = ""
-
-        if "<tool_call>" in status.responded_string:
-            if "</tool_call>" in status.responded_string:
+        if "<tool_call>" in status.tool_call_responded_string:
+            status.delta_output_string = ""
+            if "</tool_call>" in status.tool_call_responded_string:
                 # 提取和处理工具调用
-                tool_call_name_args_str = status.responded_string[
-                    status.responded_string.index("<tool_call>")
-                    + len("<tool_call>") : status.responded_string.index("</tool_call>")
+                tool_call_name_args_str = status.tool_call_responded_string[
+                    status.tool_call_responded_string.index("<tool_call>")
+                    + len("<tool_call>") : status.tool_call_responded_string.index(
+                        "</tool_call>"
+                    )
                 ]
 
-                # 更新responded_string
-                status.responded_string = (
-                    status.responded_string[
-                        : status.responded_string.index("<tool_call>")
+                # 更新tool_call_responded_string
+                status.tool_call_responded_string = (
+                    status.tool_call_responded_string[
+                        : status.tool_call_responded_string.index("<tool_call>")
                     ]
-                    + status.responded_string[
-                        status.responded_string.index("</tool_call>")
+                    + status.tool_call_responded_string[
+                        status.tool_call_responded_string.index("</tool_call>")
                         + len("</tool_call>") :
                     ]
                 )
@@ -275,6 +348,60 @@ class QwenToolRenderer(CustomChatRenderer):
 
         return None
 
+    def _extract_tool_calls(self, status: QwenToolStreamStatus) -> List[ToolCall]:
+        """
+        从文本中提取所有被 <tool_call> </tool_call> 标签包围的内容,并解析成 ToolCall 对象列表,
+        同时从原文本中删除这些标签及其内容
+
+        Args:
+            status: 包含 tool_call 标签的状态对象
+
+        Returns:
+            List[ToolCall]: ToolCall 对象列表
+        """
+        tool_calls = []
+        text = status.tool_call_responded_string
+
+        # 用 <tool_call> 分割
+        parts = text.split("<tool_call>\n")
+
+        # 保存第一部分(标签之前的内容)
+        result_text = parts[0]
+
+        # 处理剩余部分
+        for index, part in enumerate(parts[1:]):
+            # 用 </tool_call> 分割
+            tool_parts = part.split("</tool_call>")
+            content = tool_parts[0].strip()
+
+            if content:
+                try:
+                    # 解析 JSON 内容
+                    data = json.loads(content)
+                    # 创建 FunctionCall 对象
+                    function_call = FunctionCall(
+                        name=str(data["name"]), arguments=str(data["arguments"])
+                    )
+                    # 创建 ToolCall 对象
+                    tool_call = ToolCall(
+                        index=index,
+                        id=self._generate_random_call_id(),
+                        type="function",
+                        function=function_call,
+                    )
+                    tool_calls.append(tool_call)
+                except (json.JSONDecodeError, KeyError) as e:
+                    logging.error(f"json loads error: {e}")
+
+            # 如果有剩余文本，添加到结果中
+            if len(tool_parts) > 1 and tool_parts[1] != "\n":
+                result_text += tool_parts[1]
+
+        # 更新状态对象中的文本
+        status.tool_call_responded_string = result_text
+
+        return tool_calls
+
     def _generate_random_call_id(self, length: int = 24) -> str:
         """生成随机调用ID"""
         import secrets
@@ -313,24 +440,23 @@ class QwenToolRenderer(CustomChatRenderer):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
-        import pdb
-
-        pdb.set_trace()
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
 
+        # <增加的部分>
         if status.request.tools:
-            tool_delta = await self._process_tool_calls(status, output)
+            tool_delta = await self._process_tool_calls(status, output, is_streaming)
+            # tool_delta为None代表继续默认逻辑处理
             if tool_delta is not None:
+                status.update_result()
                 return tool_delta
+        # </增加的部分>
 
         if not is_truncated(
             status.delta_output_string, stop_word_slice_list, is_streaming
         ):
             status.update_result()
-            # 事实上的修改就下面4行
-
             delta = OutputDelta(
                 output_str=status.delta_output_string,
                 logprobs=await self._generate_log_probs(status, output),

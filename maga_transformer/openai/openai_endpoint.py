@@ -68,8 +68,7 @@ class OpenaiEndopoint():
             word = self.tokenizer.decode(stop_word_ids)
             if len(word):
                 self.stop_words_str_list.append(word)
-        
-        
+
         env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
         env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
         env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
@@ -81,7 +80,7 @@ class OpenaiEndopoint():
         else:
             self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
-        
+
         logging.info(f"use stop_words_list [{self.stop_words_str_list}]")
 
     async def list_models(self):
@@ -137,10 +136,12 @@ class OpenaiEndopoint():
                                 role=choice.delta.role or RoleEnum.assistant,
                                 content=choice.delta.content or None,
                                 function_call=choice.delta.function_call or None,
+                                tool_calls=choice.delta.tool_calls or None,
                             ),
                             finish_reason=choice.finish_reason,
                             logprobs=choice.logprobs,
-                        ) for i, choice in enumerate(response.choices)
+                        )
+                        for i, choice in enumerate(response.choices)
                     ]
                 else:
                     raise ValueError(f"response.choices has different length! "
@@ -153,6 +154,10 @@ class OpenaiEndopoint():
                         all_choices[i].message.content += (response.choices[i].delta.content or "")
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
+                    all_choices[i].message.tool_calls = (
+                        response.choices[i].delta.tool_calls
+                        or all_choices[i].message.tool_calls
+                    )
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
                     if all_choices[i].logprobs != None:
                         if response.choices[i].logprobs != None:
