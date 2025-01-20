@@ -2,6 +2,7 @@ import os
 import sys
 import signal
 from threading import Thread
+from typing import Optional
 import requests
 import time
 import pathlib
@@ -9,28 +10,16 @@ import logging
 import json
 import asyncio
 import subprocess
-
-# import openai
-# from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
-# openai.base_url = f"http://127.0.0.1:{int(os.environ['START_PORT'])}/"
-# openai.api_key = "none"
-from typing import List, Dict, Optional
+from contextlib import redirect_stdout
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 sys.path.insert(0, "/home/pengshixin.psx/FasterTransformer/bazel-out/k8-opt/bin")
 
 from maga_transformer.start_server import main as server_main
-
-# from py_inference.benchmark.bench_args import BenchArgs
-# from py_inference.benchmark.test_object import BaseTester, HttpTester
-# from py_inference.benchmark.benchmark_runner import BenchRunner
-# from py_inference.benchmark.analyzers.llm_analyzer import LlmAnalyzer
-
 from uvicorn.loops.uvloop import uvloop_setup
 
 uvloop_setup()
-
 
 def wait_server_start(server_thread: Optional[Thread], port: int):
     start_time = time.time()
@@ -42,9 +31,7 @@ def wait_server_start(server_thread: Optional[Thread], port: int):
             requests.get(f"http://localhost:{port}/status")
             break
         except Exception as e:
-            # logging.info(f"Waiting server on {port}, used {time.time() - start_time}s: {e}")
             continue
-
 
 def setup_server(port):
     """设置和启动服务器"""
@@ -62,20 +49,25 @@ def setup_server(port):
     return pgrp_set, server_thread
 
 
-def send_chat_request(port, request, step=""):
+def send_chat_request(port, request, step="", output_file=None):
     """发送聊天请求并返回响应"""
-    print("\n" + "=" * 20 + f" Step {step} " + "=" * 20)
-    print(json.dumps(request, indent=4, ensure_ascii=False))
-    print("-" * 50)
-    response = requests.post(
-        f"http://localhost:{port}/v1/chat/completions", json=request
-    )
-    print(response.content.decode("utf-8"))
-    print("=" * 50 + "\n")
+    if output_file:
+        with open(output_file, "a") as f:
+            with redirect_stdout(f):
+                print("\n" + "=" * 20 + f" Step {step} " + "=" * 20)
+                print(json.dumps(request, indent=4, ensure_ascii=False))
+                print("-" * 50)
+                response = requests.post(
+                    f"http://localhost:{port}/v1/chat/completions", json=request
+                )
+                print(response.content.decode("utf-8"))
+                print("=" * 50 + "\n")
+                if request.get("stream", False):
+                    f.flush()
     return response
 
 
-def create_chat_request(messages, tools=None, functions=None):
+def create_chat_request(messages, tools=None, functions=None, stream=True):
     """创建聊天请求"""
     return {
         "temperature": 0.0,
@@ -84,11 +76,17 @@ def create_chat_request(messages, tools=None, functions=None):
         "debug_info": False,
         "aux_info": False,
         "tools": tools,
-        # "stream": True,
+        "stream": stream,
     }
 
 
 if __name__ == "__main__":
+    # 创建输出文件
+    with open("output_stream.txt", "w") as f:
+        f.write("Testing with streaming\n")
+    with open("output_no_stream.txt", "w") as f:
+        f.write("Testing without streaming\n")
+
     port = int(os.environ["START_PORT"])
     pgrp_set, server_thread = setup_server(port)
 
@@ -113,7 +111,7 @@ if __name__ == "__main__":
     }
     tools = [weather_tool]
 
-    # Step 1: 初始对话 - 只有用户提问
+    # 基础对话消息
     chat_messages = [
         {
             "role": "system",
@@ -124,17 +122,40 @@ if __name__ == "__main__":
             "content": "北京和杭州的天气怎么样",
         },
     ]
-    request1 = create_chat_request(chat_messages)
-    send_chat_request(port, request1, "1: Initial Question")
 
-    # Step 2: 添加工具定义
-    request2 = create_chat_request(chat_messages, tools=tools)
-    send_chat_request(port, request2, "2: With Tools Definition")
+    # Step 1: 初始对话测试
+    # 流式测试
+    request1_stream = create_chat_request(chat_messages, stream=True)
+    send_chat_request(
+        port, request1_stream, "1: Initial Question (Stream)", "output_stream.txt"
+    )
+    # 非流式测试
+    request1_no_stream = create_chat_request(chat_messages, stream=False)
+    send_chat_request(
+        port,
+        request1_no_stream,
+        "1: Initial Question (No Stream)",
+        "output_no_stream.txt",
+    )
+
+    # Step 2: 添加工具定义测试
+    # 流式测试
+    request2_stream = create_chat_request(chat_messages, tools=tools, stream=True)
+    send_chat_request(
+        port, request2_stream, "2: With Tools Definition (Stream)", "output_stream.txt"
+    )
+    # 非流式测试
+    request2_no_stream = create_chat_request(chat_messages, tools=tools, stream=False)
+    send_chat_request(
+        port,
+        request2_no_stream,
+        "2: With Tools Definition (No Stream)",
+        "output_no_stream.txt",
+    )
 
     # Step 3: 添加工具调用结果
     chat_messages.extend(
         [
-            # 助手的工具调用请求
             {
                 "role": "assistant",
                 "tool_calls": [
@@ -157,7 +178,6 @@ if __name__ == "__main__":
                     },
                 ],
             },
-            # 工具返回的结果
             {
                 "role": "tool",
                 "content": "北京: 10 摄氏度, 天气一般",
@@ -169,8 +189,28 @@ if __name__ == "__main__":
         ]
     )
 
-    request3 = create_chat_request(chat_messages, tools=tools)
-    send_chat_request(port, request3, "3: With Tool Results")
+    # 流式测试
+    request3_stream = create_chat_request(chat_messages, tools=tools, stream=True)
+    send_chat_request(
+        port, request3_stream, "3: With Tool Results (Stream)", "output_stream.txt"
+    )
+    # 非流式测试
+    request3_no_stream = create_chat_request(chat_messages, tools=tools, stream=False)
+    send_chat_request(
+        port,
+        request3_no_stream,
+        "3: With Tool Results (No Stream)",
+        "output_no_stream.txt",
+    )
+
+    # 读取并显示结果文件内容
+    print("\nContents of output_stream.txt:")
+    with open("output_stream.txt", "r") as f:
+        print(f.read())
+
+    print("\nContents of output_no_stream.txt:")
+    with open("output_no_stream.txt", "r") as f:
+        print(f.read())
 
     # 清理和退出
     if pgrp_set:
