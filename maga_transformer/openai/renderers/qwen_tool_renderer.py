@@ -9,12 +9,9 @@ from transformers import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import (
     ChatMessage,
     GPTToolDefinition,
-    UsageInfo,
     ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
     DeltaMessage,
     FinisheReason,
-    PromptTokensDetails,
     ToolCall,
     FunctionCall,
 )
@@ -102,60 +99,9 @@ class QwenToolRenderer(CustomChatRenderer):
     """QwenToolRenderer
     考虑到<|im_start|> ,<tool_call>等token都比较精简, 故不提取成常量, 增强直接可读性
     """
-
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.add_extra_stop_word_ids([[self.tokenizer.encode("<|im_end|>")[0]]])
-
-    # override
-    async def _generate_final(self, buffer_list: List[StreamStatus]):
-        input_token_length = 0
-        output_token_length = 0
-        reuse_length = 0
-        aux_info = None
-        for i, buffer in enumerate(buffer_list):
-            if buffer.output is None:
-                raise Exception("buffer last output should not be None")
-            # <增加的部分>
-            # 避免循环引用
-            from maga_transformer.openai.renderers.qwen_tool_renderer import (
-                QwenToolStreamStatus,
-            )
-
-            if isinstance(buffer, QwenToolStreamStatus) and buffer.generating_tool_call:
-                buffer.finish_reason = FinisheReason.tool_call
-            # </增加的部分>
-            if buffer.finish_reason == None:
-                logging.debug(f"output {i} found no stop reason! use stop as default.")
-                buffer.finish_reason = FinisheReason.stop
-            if i == 0:
-                input_token_length = buffer.output.aux_info.input_len
-                reuse_length = buffer.output.aux_info.reuse_len
-            output_token_length += buffer.output.aux_info.output_len
-        return StreamResponseObject(
-            choices=[
-                ChatCompletionResponseStreamChoice(
-                    index=i,
-                    delta=DeltaMessage(
-                        content="",
-                    ),
-                    finish_reason=buffer.finish_reason,
-                )
-                for i, buffer in enumerate(buffer_list)
-            ],
-            usage=UsageInfo(
-                prompt_tokens=input_token_length,
-                total_tokens=input_token_length + output_token_length,
-                completion_tokens=output_token_length,
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
-                ),
-            ),
-            aux_info=aux_info,
-        )
-
+        
     # override
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
@@ -262,6 +208,65 @@ class QwenToolRenderer(CustomChatRenderer):
             )
 
         return "\n".join(formatted_calls)
+
+    # override
+    async def _update_single_status(
+        self,
+        status: QwenToolStreamStatus,
+        output: GenerateOutput,
+        max_new_tokens: int,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> OutputDelta:
+        if status.finish_reason != None:
+            return await self._create_empty_delta(status.output.aux_info)
+        status.update_output(
+            output,
+            self._clean_output_ids,
+            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+            self._remove_stop_word_ids,
+        )
+        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
+        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+        if is_streaming:
+            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
+                return await self._create_empty_delta(output.aux_info)
+        else:
+            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
+                decoded_string = decoded_string[:-1]
+        status.delta_output_string = decoded_string[len(decoded_prev_token) :]
+
+        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
+            status.finish_reason = FinisheReason.stop
+            return await self._create_empty_delta(output.aux_info)
+
+        # <增加的部分>
+        if status.request.tools:
+            tool_delta = await self._process_tool_calls(status, output, is_streaming)
+            # tool_delta为None代表继续默认逻辑处理
+            if tool_delta is not None:
+                status.update_result()
+                return tool_delta
+        # </增加的部分>
+
+        if not is_truncated(
+            status.delta_output_string, stop_word_slice_list, is_streaming
+        ):
+            status.update_result()
+            delta = OutputDelta(
+                output_str=status.delta_output_string,
+                logprobs=await self._generate_log_probs(status, output),
+                input_length=output.aux_info.input_len,
+                output_length=output.aux_info.output_len,
+                reuse_length=output.aux_info.reuse_len,
+            )
+            status.delta_output_string = ""
+            return delta
+        else:
+            return await self._create_empty_delta(output.aux_info)
+
 
     async def _process_tool_calls(
         self,
@@ -410,64 +415,6 @@ class QwenToolRenderer(CustomChatRenderer):
         characters = string.ascii_letters + string.digits
         random_string = "".join(secrets.choice(characters) for _ in range(length))
         return "call_" + random_string
-
-    # override
-    async def _update_single_status(
-        self,
-        status: QwenToolStreamStatus,
-        output: GenerateOutput,
-        max_new_tokens: int,
-        stop_words_str: List[str],
-        stop_word_slice_list: List[str],
-        is_streaming: bool,
-    ) -> OutputDelta:
-        if status.finish_reason != None:
-            return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
-            output,
-            self._clean_output_ids,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
-        )
-        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
-        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if is_streaming:
-            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
-                return await self._create_empty_delta(output.aux_info)
-        else:
-            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
-                decoded_string = decoded_string[:-1]
-        status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
-
-        # <增加的部分>
-        if status.request.tools:
-            tool_delta = await self._process_tool_calls(status, output, is_streaming)
-            # tool_delta为None代表继续默认逻辑处理
-            if tool_delta is not None:
-                status.update_result()
-                return tool_delta
-        # </增加的部分>
-
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming
-        ):
-            status.update_result()
-            delta = OutputDelta(
-                output_str=status.delta_output_string,
-                logprobs=await self._generate_log_probs(status, output),
-                input_length=output.aux_info.input_len,
-                output_length=output.aux_info.output_len,
-                reuse_length=output.aux_info.reuse_len,
-            )
-            status.delta_output_string = ""
-            return delta
-        else:
-            return await self._create_empty_delta(output.aux_info)
 
 
 register_renderer("qwen_tool", QwenToolRenderer)

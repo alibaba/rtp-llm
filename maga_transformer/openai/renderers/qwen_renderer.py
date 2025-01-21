@@ -9,6 +9,7 @@ import functools
 
 from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.openai.renderers.qwen_tool_renderer import QwenToolRenderer, QwenToolStreamStatus
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
@@ -144,6 +145,8 @@ class QwenRenderer(CustomChatRenderer):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]]) # Observation:
 
+        self.qwen_tool_renderer = QwenToolRenderer(tokenizer, renderer_params)
+
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
             if tokenizer.chat_template != None:
@@ -154,6 +157,9 @@ class QwenRenderer(CustomChatRenderer):
             pass
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        if request.tools:
+            return self.qwen_tool_renderer.render_chat(request)
+
         if (self.template_chat_renderer != None) and \
             ((request.functions == None) or (len(request.functions) == 0)):
             return self.template_chat_renderer.render_chat(request)
@@ -326,6 +332,9 @@ class QwenRenderer(CustomChatRenderer):
         return ProcessedOutput(output_str, output_length, finish_reason)
 
     async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
+        if status.request.tools:
+            return await self.qwen_tool_renderer._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
+
         # function call is disabled when logprobs is required.
         if not isinstance(status, QwenStreamStatus):
             return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
@@ -363,10 +372,15 @@ class QwenRenderer(CustomChatRenderer):
         if request.logprobs:
             return [StreamStatus(request) for _ in range(n)]
         else:
+            if request.tools:
+                return [QwenToolStreamStatus(request) for _ in range(n)]
             return [QwenStreamStatus(request) for _ in range(n)]
 
     #override
     async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
+        if buffer_list[0].request.tools:
+            return await self.qwen_tool_renderer._flush_buffer(buffer_list, stop_words_str, is_streaming)
+
         if (not isinstance(buffer_list[0], QwenStreamStatus)):
             return await super()._flush_buffer(buffer_list, stop_words_str, is_streaming)
         output_items: List[OutputDelta] = []

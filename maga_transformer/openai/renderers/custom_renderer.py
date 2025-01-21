@@ -352,6 +352,10 @@ class CustomChatRenderer():
         for i, buffer in enumerate(buffer_list):
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
+            # 判断buffer有无generating_tool_call这个属性
+            if hasattr(buffer, "generating_tool_call") and buffer.generating_tool_call:
+                buffer.finish_reason = FinisheReason.tool_call
+
             if buffer.finish_reason == None:
                 logging.debug(f"output {i} found no stop reason! use stop as default.")
                 buffer.finish_reason = FinisheReason.stop
