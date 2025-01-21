@@ -13,6 +13,7 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
+from maga_transformer.openai.renderers.qwen_tool_renderer import QwenToolStreamStatus
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
@@ -353,7 +354,7 @@ class CustomChatRenderer():
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
             # 判断buffer有无generating_tool_call这个属性
-            if hasattr(buffer, "generating_tool_call") and buffer.generating_tool_call:
+            if isinstance(buffer, QwenToolStreamStatus) and buffer.generating_tool_call:
                 buffer.finish_reason = FinisheReason.tool_call
 
             if buffer.finish_reason == None:
