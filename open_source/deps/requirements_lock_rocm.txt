@@ -122,6 +122,10 @@ aliyun-python-sdk-kms==2.16.5 \
     --hash=sha256:24b6cdc4fd161d2942619479c8d050c63ea9cd22b044fe33b60bbb60153786f0 \
     --hash=sha256:f328a8a19d83ecbb965ffce0ec1e9930755216d104638cd95ecd362753b813b3
     # via oss2
+amdsmi==6.2.4 \
+    --hash=sha256:02429befc9f138c3a6bfd0359b44d5f31976804f9818c560f480dab05ac7937a \
+    --hash=sha256:5c1b34138038686c1e1b1c6b90708b858f8dc5d2d6af009fa5bd35fa3aa3bdfb
+    # via -r open_source/deps/requirements_rocm.txt
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \
     --hash=sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89
@@ -360,6 +364,10 @@ charset-normalizer==3.3.2 \
     --hash=sha256:fd1abc0d89e30cc4e02e4064dc67fcc51bd941eb395c502aac3ec19fab46b519 \
     --hash=sha256:ff8fa367d09b717b2a17a052544193ad76cd49979c805768879cb63d9ca50561
     # via requests
+clang==17.0.6 \
+    --hash=sha256:d05ad6dddc9b360e94b9420e239c639a9117902cce8a57fd288a5226eea3092e \
+    --hash=sha256:d228511e6a29e866dcbe99e10ed10649317b9b3e636ba805f6867b7afb6e8c44
+    # via amdsmi
 click==8.1.7 \
     --hash=sha256:ae74fb96c20a0277a1d615f1e4d73c8414f5a98db8b799a7931d1582f3390c28 \
     --hash=sha256:ca9853ad459e787e2192211578cc907e7594e294c7ccc834310722b41b9ca6de
@@ -2103,6 +2111,7 @@ pyyaml==6.0.2 \
     --hash=sha256:ff3824dc5261f50c9b0dfb3be22b4567a6f938ccce4587b38952d85fd9e9afe4
     # via
     #   accelerate
+    #   amdsmi
     #   huggingface-hub
     #   timm
     #   transformers
@@ -2199,7 +2208,6 @@ requests==2.32.3 \
     #   pooch
     #   pyodps
     #   tiktoken
-    #   torchvision
     #   transformers
 safetensors==0.4.4 \
     --hash=sha256:005ef9fc0f47cb9821c40793eb029f712e97278dae84de91cb2b4809b856685d \
@@ -2490,9 +2498,9 @@ starlette==0.41.3 \
     --hash=sha256:0e4ab3d16522a255be6b28260b938eae2482f98ce5cc934cb08dce8dc3ba5835 \
     --hash=sha256:44cedb2b7c77a9de33a8b74b2b90e9f50d11fcf25d8270ea525ad71a25374ff7
     # via fastapi
-sympy==1.13.2 \
-    --hash=sha256:401449d84d07be9d0c7a46a64bd54fe097667d5e7181bfe67ec777be9e01cb13 \
-    --hash=sha256:c51d75517712f1aed280d4ce58506a4a88d635d6b5dd48b39102a7ae1f3fcfe9
+sympy==1.12.1 \
+    --hash=sha256:2877b03f998cd8c08f07cd0de5b767119cd3ef40d09f41c30d722f6686b0fb88 \
+    --hash=sha256:9b2cbc7f1a640289430e13d2a56f02f867a1da0190f2f99d8968c2f74da0e515
     # via
     #   -r open_source/deps/requirements_base.txt
     #   torch
