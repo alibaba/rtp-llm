@@ -18,7 +18,7 @@ if [ -f .bazeliskrc ]; then
 fi
 
 
-bazelisk --output_user_root=~/temp build //:th_transformer //maga_transformer:maga_transformer_lib --config=cuda12_6 --keep_going || {
+bazelisk --output_user_root=~/temp/build_cache build //:th_transformer //maga_transformer:maga_transformer_lib --config=cuda12_6 --keep_going || {
     echo "bazel build failed";
     exit 1;
 };
