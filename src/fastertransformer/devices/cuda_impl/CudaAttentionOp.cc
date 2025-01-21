@@ -43,6 +43,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
     const int local_head_num = attn_configs.head_num;
     const int local_head_num_kv = attn_configs.kv_head_num;
     const int size_per_head = attn_configs.size_per_head;
+    const int group_size = local_head_num / local_head_num_kv;
 
     if (!cuda_device ||
         (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16) ||
@@ -56,11 +57,16 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
         attn_configs.use_mla ||
         attn_configs.use_logn_attn ||
         (size_per_head != 64 && size_per_head != 128) ||
-        local_head_num / local_head_num_kv > 10)
+        group_size > 10)
     {
         return ret;
     }
 
+    if (group_size > 5) {
+        params->decode = false;
+    } else {
+        params->decode = true;
+    }
 
     const int tokens_per_block = attn_configs.tokens_per_block;
     const int max_batch_blocks = kv_cache_block_id_host->shape()[1];
