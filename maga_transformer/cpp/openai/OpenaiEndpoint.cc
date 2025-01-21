@@ -101,4 +101,56 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     return std::make_shared<GenerateConfig>(config);
 }
 
+/*
+def _get_debug_info(self, renderer: CustomChatRenderer,
+                    renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
+    if renderered_input.rendered_prompt != "":
+        prompt = renderered_input.rendered_prompt
+    else:
+        prompt = self.tokenizer.decode(renderered_input.input_ids)
+    return DebugInfo(
+        input_prompt=prompt,
+        input_ids=renderered_input.input_ids,
+        input_urls=[mm_input.url for mm_input in renderered_input.multimodal_inputs],
+        tokenizer_info=str(self.tokenizer),
+        max_seq_len=self.max_seq_len,
+        eos_token_id=self.eos_token_id,
+        stop_word_ids_list=self.stop_words_id_list,
+        stop_words_list=self.stop_words_str_list,
+        renderer_info=renderer.get_renderer_info(),
+        generate_config=gen_config
+    )
+*/
+std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_request,
+                                         const RenderedInputs& rendered_input) {
+    std::vector<std::string> input_urls;
+    const auto& mm_inputs = rendered_input.multimodal_inputs;
+    std::transform(mm_inputs.begin(), mm_inputs.end(),
+                   std::back_inserter(input_urls),
+                   [](const auto& mm_input) {
+                       return mm_input.url;
+                   });
+
+    std::string prompt;
+    if (rendered_input.rendered_prompt.empty()) {
+        prompt = tokenizer_->decode(rendered_input.input_ids);
+    } else {
+        prompt = rendered_input.rendered_prompt;
+    }
+
+    DebugInfo debug_info;
+    debug_info.input_prompt = prompt;
+    debug_info.input_ids = rendered_input.input_ids;
+    debug_info.input_urls = input_urls;
+    debug_info.tokenizer_info = tokenizer_->toString();
+    debug_info.max_seq_len = max_seq_len_;
+    debug_info.eos_token_id = eos_token_id_;
+    debug_info.stop_word_ids_list = stop_word_ids_list_;
+    debug_info.stop_words_list = stop_words_list_;
+    debug_info.renderer_info = chat_render_->toString();
+    debug_info.generate_config = *(extract_generation_config(chat_request));
+
+    return ToJsonString(debug_info, true);
+}
+
 }  // namespace rtp_llm

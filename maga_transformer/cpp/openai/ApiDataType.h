@@ -119,4 +119,19 @@ public:
     std::optional<std::map<std::string, std::string>> extend_fields;
 };
 
+class DebugInfo: public autil::legacy::Jsonizable {
+public:
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
+    std::string input_prompt;
+    std::vector<int> input_ids;
+    std::vector<std::string> input_urls;
+    std::string tokenizer_info;
+    int max_seq_len;
+    int eos_token_id;
+    std::vector<std::vector<int>> stop_word_ids_list;
+    std::vector<std::string> stop_words_list;
+    std::string renderer_info;
+    GenerateConfig generate_config;
+};
+
 }  // namespace rtp_llm

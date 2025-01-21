@@ -24,6 +24,8 @@ public:
     std::shared_ptr<ChatRender>             getChatRender() {
         return chat_render_;
     }
+    std::string getDebugInfo(const ChatCompletionRequest& chat_request,
+                             const RenderedInputs& rendered_input);
 
 private:
     int                           max_seq_len_;

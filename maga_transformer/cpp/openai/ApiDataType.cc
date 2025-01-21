@@ -15,6 +15,7 @@ using namespace autil::legacy::json;
                                         field = std::nullopt; \
                                     } \
                                 }
+#define JSONIZE(field) json.Jsonize(#field, field, field)
 
 void FunctionCall::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(name);
@@ -138,5 +139,21 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(aux_info);
     JSONIZE_OPTIONAL(extend_fields);
 }
+
+void DebugInfo::Jsonize(Jsonizable::JsonWrapper& json) {
+    JSONIZE(input_prompt);
+    JSONIZE(input_ids);
+    JSONIZE(input_urls);
+    JSONIZE(tokenizer_info);
+    JSONIZE(max_seq_len);
+    JSONIZE(eos_token_id);
+    JSONIZE(stop_word_ids_list);
+    JSONIZE(stop_words_list);
+    JSONIZE(renderer_info);
+    JSONIZE(generate_config);
+}
+
+#undef JSONIZE
+#undef JSONIZE_OPTIONAL
 
 }  // namespace rtp_llm

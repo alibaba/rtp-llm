@@ -19,8 +19,9 @@ class RenderedInputs {
 public:
     std::vector<int>             input_ids;
     std::vector<MultimodalInput> multimodal_inputs;
-    RenderedInputs(std::vector<int> ids, std::vector<MultimodalInput> mm_inputs):
-        input_ids(ids), multimodal_inputs(mm_inputs) {}
+    std::string                  rendered_prompt;
+    RenderedInputs(std::vector<int> ids, std::vector<MultimodalInput> mm_inputs, std::string rendered_prompt):
+        input_ids(ids), multimodal_inputs(mm_inputs), rendered_prompt(rendered_prompt) {}
 };
 
 class ChatRender {
@@ -35,6 +36,7 @@ public:
     virtual RenderedInputs                render_chat_request(const std::string& req);
     py::object getRender();
     virtual std::shared_ptr<RenderContext> getRenderContext();
+    std::string toString();
 private:
     py::object render_;
 };
@@ -59,7 +61,7 @@ public:
 
 
     // streaming
-    virtual std::string render_stream_response_first(int n);
+    virtual std::string render_stream_response_first(int n, std::string debug_info);
     virtual std::string render_stream_response(const GenerateOutputs& outputs,
                                                const std::shared_ptr<GenerateConfig>& config,
                                                bool is_streaming);

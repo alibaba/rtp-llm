@@ -19,7 +19,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo, ChatCompletionStreamResponse, PromptTokensDetails, \
     ChatCompletionTokenLogprob, TopLogprob, ChoiceLogprobs, \
-    ChatCompletionResponseChoice, ChatCompletionResponse
+    ChatCompletionResponseChoice, ChatCompletionResponse, DebugInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
@@ -657,13 +657,13 @@ class CustomChatRenderer():
         request = self.getRequest(body)
         return [StreamStatusSync(request) for _ in range(n)]
 
-    def render_stream_response_first(self, n: int):
+    def render_stream_response_first(self, n: int, debug_info: str):
         stream_response = self._generate_first_sync(n)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
                             aux_info=stream_response.aux_info,
-                            # TODO: debug_info=debug_info if not debug_info_responded else None
+                            debug_info=debug_info
                         )
         return chat_response.model_dump_json(exclude_none=True)
 
@@ -695,8 +695,7 @@ class CustomChatRenderer():
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
-                            aux_info=stream_response.aux_info,
-                            # TODO: debug_info=debug_info if not debug_info_responded else None
+                            aux_info=stream_response.aux_info
                         )
         return chat_response.model_dump_json(exclude_none=True)
 
@@ -714,8 +713,7 @@ class CustomChatRenderer():
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
-                            aux_info=stream_response.aux_info,
-                            # TODO: debug_info=debug_info if not debug_info_responded else None
+                            aux_info=stream_response.aux_info
                         )
         return chat_response.model_dump_json(exclude_none=True)
 
@@ -727,8 +725,7 @@ class CustomChatRenderer():
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
-                            aux_info=stream_response.aux_info,
-                            # TODO: debug_info=debug_info if not debug_info_responded else None
+                            aux_info=stream_response.aux_info
                         )
         return chat_response.model_dump_json(exclude_none=True)
 

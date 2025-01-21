@@ -102,9 +102,9 @@ std::string RenderContext::render_common_response(const GenerateOutputs& outputs
     return res;
 }
 
-std::string RenderContext::render_stream_response_first(int n) {
+std::string RenderContext::render_stream_response_first(int n, std::string debug_info) {
     py::gil_scoped_acquire acquire;
-    auto json_response = render_->attr("render_stream_response_first")(n);
+    auto json_response = render_->attr("render_stream_response_first")(n, debug_info);
     auto res = py::cast<std::string>(json_response);
     return res;
 }
@@ -160,11 +160,13 @@ std::vector<std::vector<int>> ChatRender::get_all_extra_stop_word_ids_list() {
 }
 
 RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
-    py::gil_scoped_acquire       acquire;
-    py::object                   chat_request   = render_.attr("getRequest")(reqBody);
-    py::object                   rendered_input = render_.attr("render_chat")(chat_request);
-    auto                         input_ids      = py::cast<std::vector<int>>(rendered_input.attr("input_ids"));
-    py::list                     mm_inputs_py   = rendered_input.attr("multimodal_inputs");
+    py::gil_scoped_acquire acquire;
+
+    auto chat_request   = render_.attr("getRequest")(reqBody);
+    auto rendered_input = render_.attr("render_chat")(chat_request);
+
+    auto     input_ids    = py::cast<std::vector<int>>(rendered_input.attr("input_ids"));
+    py::list mm_inputs_py = rendered_input.attr("multimodal_inputs");
     std::vector<MultimodalInput> mm_inputs;
     for (const auto& item : mm_inputs_py) {
         mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
@@ -179,7 +181,16 @@ RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
                                py::cast<int>(item.attr("config").attr("max_frames"))
                                );
     }
-    return RenderedInputs(input_ids, mm_inputs);
+    auto rendered_prompt = py::cast<std::string>(rendered_input.attr("rendered_prompt"));
+
+    return RenderedInputs(input_ids, mm_inputs, rendered_prompt);
+}
+
+std::string ChatRender::toString() {
+    py::gil_scoped_acquire acquire;
+    py::str py_str = py::str(render_);
+    std::string cpp_str = py_str;
+    return cpp_str;
 }
 
 }  // namespace rtp_llm

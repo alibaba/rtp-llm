@@ -15,6 +15,7 @@ public:
     virtual ~Tokenizer() {}
 
 public:
+    std::string toString();
     // `virtual` for test
     virtual bool               isPreTrainedTokenizer();
     virtual std::optional<int> getEosTokenId();

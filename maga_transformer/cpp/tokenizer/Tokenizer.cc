@@ -43,4 +43,11 @@ std::string Tokenizer::decode(const std::vector<int>& token_ids) {
     return res;
 }
 
+std::string Tokenizer::toString() {
+    py::gil_scoped_acquire acquire;
+    py::str py_str = py::str(tokenizer_);
+    std::string cpp_str = py_str;
+    return cpp_str;
+}
+
 }  // namespace rtp_llm

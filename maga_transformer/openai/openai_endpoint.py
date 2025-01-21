@@ -217,7 +217,7 @@ class OpenaiEndopoint():
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
             stop_words_list=self.stop_words_str_list,
-            renderer_info=self.chat_renderer.get_renderer_info(),
+            renderer_info=renderer.get_renderer_info(),
             generate_config=gen_config
         )
 

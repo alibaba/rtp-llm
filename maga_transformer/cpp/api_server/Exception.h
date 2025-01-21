@@ -1,14 +1,22 @@
 #pragma once
 
-#include <exception>
 #include <string>
+#include <exception>
 
+#include "autil/legacy/jsonizable.h"
+
+#include "maga_transformer/cpp/utils/Logger.h"
 #include "maga_transformer/cpp/http_server/http_server/HttpResponseWriter.h"
 #include "maga_transformer/cpp/http_server/http_server/HttpRequest.h"
-
 #include "maga_transformer/cpp/api_server/ApiServerMetrics.h"
+#include "maga_transformer/cpp/api_server/ErrorResponse.h"
+#include "maga_transformer/cpp/api_server/AccessLogWrapper.h"
 
 namespace rtp_llm {
+
+std::string getSource(const std::string& raw_request);
+template <typename T>
+void WriteExceptionResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer, const T& e);
 
 class HttpApiServerException: public std::exception {
 public:
@@ -48,21 +56,101 @@ public:
     std::string getMessage() const {
         return message_;
     }
-    static void handleException(const std::exception& e,
+    template <typename T>
+    static void handleException(const T& e,
                                 int64_t request_id,
                                 std::shared_ptr<ApiServerMetricReporter> metric_reporter,
                                 const http_server::HttpRequest& request,
-                                const std::unique_ptr<http_server::HttpResponseWriter>& writer);
-
-    static void handleException(const std::exception& e,
+                                const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
+        const auto body = request.GetBody();
+        if (metric_reporter) {
+            std::string source = getSource(body);
+            int error_code = -1;
+            if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
+                FT_LOG_WARNING("dynamic_cast succ");
+                error_code = he->getType();
+            }
+            metric_reporter->reportErrorQpsMetric(source, error_code);
+        }
+        FT_LOG_WARNING("found exception: [%s]", e.what());
+        AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
+        WriteExceptionResponse(writer, e);
+    }
+    template <typename T>
+    static void handleException(const T& e,
                                 int64_t request_id,
                                 kmonitor::MetricsReporterPtr metric_reporter,
                                 const http_server::HttpRequest& request,
-                                const std::unique_ptr<http_server::HttpResponseWriter>& writer);
-
+                                const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
+        const auto body = request.GetBody();
+        if (metric_reporter) {
+            std::string source = getSource(body);
+            int error_code = Type::UNKNOWN_ERROR;
+            if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
+                FT_LOG_WARNING("dynamic_cast succ");
+                error_code = he->getType();
+            }
+            std::map<std::string, std::string> tag_map;
+            tag_map["source"] = source;
+            tag_map["error_code"] = std::to_string(error_code);
+            auto tags = kmonitor::MetricsTags(tag_map);
+            metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
+        }
+        FT_LOG_WARNING("found exception: [%s]", e.what());
+        AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
+        WriteExceptionResponse(writer, e);
+    }
 private:
     Type type_;
     std::string message_;
 };
+
+template <typename T>
+inline std::string formatException(const T& e) {
+    std::string res;
+    if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
+        res = ErrorResponse::CreateErrorResponseJsonString(he->getType(), he->getMessage());
+    } else {
+        res = ErrorResponse::CreateErrorResponseJsonString(
+                HttpApiServerException::UNKNOWN_ERROR,
+                std::string("inference failed, exception occurred: ") + e.what());
+    }
+    return res;
+}
+
+inline std::string getSource(const std::string& raw_request) {
+    std::string source = "unknown";
+    try {
+        auto body    = autil::legacy::json::ParseJson(raw_request);
+        auto bodyMap = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(body);
+        auto it      = bodyMap.find("source");
+        if (it == bodyMap.end()) {
+            return source;
+        }
+        autil::legacy::FromJson(source, it->second);
+        return source;
+    } catch (const std::exception& e) {
+        FT_LOG_DEBUG("getSource failed, error: %s", e.what());
+    }
+    return source;
+}
+
+template <typename T>
+inline void WriteExceptionResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                                   const T& e) {
+    if (writer->isConnected() == false) {
+        return;
+    }
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+    writer->AddHeader("Content-Type", "application/json");
+
+    int status_code = 500;
+    if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
+        status_code = he->getType();
+    }
+    writer->SetStatus(status_code, "Internal Server Error");
+
+    writer->Write(formatException(e));
+}
 
 }  // namespace rtp_llm

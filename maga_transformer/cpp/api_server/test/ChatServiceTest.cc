@@ -127,7 +127,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
 
     auto generate_config = std::make_shared<GenerateConfig>();
     EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config)
-        .WillOnce(Invoke([generate_config](const ChatCompletionRequest& req) {
+        .WillRepeatedly(Invoke([generate_config](const ChatCompletionRequest& req) {
             EXPECT_EQ(req.messages.size(), 1);
             EXPECT_EQ(req.messages[0].role, "user");
             EXPECT_TRUE(std::holds_alternative<std::string>(req.messages[0].content));
@@ -147,7 +147,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
     EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
 
-    RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>()};
+    RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
     EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
 
     auto mock_stream = CreateMockGenerateStream();
@@ -171,7 +171,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     //     }));
 
     try {
-        chat_service_->chatCompletions(writer_, request);
+        chat_service_->chatCompletions(writer_, request, 10086);
     } catch (const std::runtime_error& e) {
         EXPECT_EQ(typeid(e), typeid(FTException));
     }
@@ -195,7 +195,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
 
     auto generate_config = std::make_shared<GenerateConfig>();
     EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config)
-        .WillOnce(Invoke([generate_config](const ChatCompletionRequest& req) {
+        .WillRepeatedly(Invoke([generate_config](const ChatCompletionRequest& req) {
             EXPECT_EQ(req.messages.size(), 1);
             EXPECT_EQ(req.messages[0].role, "user");
             EXPECT_TRUE(std::holds_alternative<std::string>(req.messages[0].content));
@@ -215,7 +215,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
     EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
 
-    RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>()};
+    RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
     EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
 
     auto mock_stream = CreateMockGenerateStream();
@@ -230,7 +230,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     const std::string json_response = "this is a test json response";
     EXPECT_CALL(*mock_ctx, render_stream_response_first)
         .WillOnce(
-            Invoke([generate_config, json_response](int n) {
+            Invoke([generate_config, json_response](int n, std::string debug_info) {
                 EXPECT_EQ(generate_config->num_return_sequences, n);
                 return json_response;
             }));
@@ -316,7 +316,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
         EXPECT_TRUE(val >= 0);
     }));
 
-    chat_service_->chatCompletions(writer_, request);
+    chat_service_->chatCompletions(writer_, request, 10086);
 
     EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Stream);
     EXPECT_EQ(writer_->_headers.count("Content-Type"), 1);

@@ -32,7 +32,7 @@ public:
     MOCK_METHOD(
             std::string,
             render_stream_response_first,
-            (int n),
+            (int n, std::string debug_info),
             (override));
     MOCK_METHOD(
             std::string,

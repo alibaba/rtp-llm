@@ -193,9 +193,11 @@ bool HttpApiServer::registerChatService() {
     auto chat_completions_callback = [active_request_count = active_request_count_,
                                       chat_service = chat_service_,
                                       controller = controller_,
+                                      request_counter = request_counter_,
                                       metric_reporter = metric_reporter_](
                                          std::unique_ptr<http_server::HttpResponseWriter> writer,
                                          const http_server::HttpRequest&                  request) -> void {
+        auto request_id = request_counter->incAndReturn();
         try {
             CounterGuard counter_guard(active_request_count);
             ConcurrencyControllerGuard controller_guard(controller);
@@ -205,23 +207,32 @@ bool HttpApiServer::registerChatService() {
                 }
                 throw HttpApiServerException(HttpApiServerException::CONCURRENCY_LIMIT_ERROR, "Too Many Requests");
             }
-            chat_service->chatCompletions(writer, request);
+            chat_service->chatCompletions(writer, request, request_id);
         } catch (const py::error_already_set& e) {
             FT_LOG_WARNING("chat completion failed, found python exception: [%s]", e.what());
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
             FT_LOG_WARNING("called chat completion route but found exception: [%s]", e.what());
-            metric_reporter->reportErrorQpsMetric("unknown", HttpApiServerException::UNKNOWN_ERROR);
-            writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-            writer->SetStatus(500, "Internal Server Error");
-            writer->Write(e.what());
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
 
     auto chat_render_callback = [active_request_count = active_request_count_,
+                                 request_counter = request_counter_,
+                                 metric_reporter = metric_reporter_,
                                  chat_service = chat_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                                const http_server::HttpRequest& request) -> void {
-        CounterGuard counter_guard(active_request_count);
-        chat_service->chatRender(writer, request);
+        auto request_id = request_counter->incAndReturn();
+        try {
+            CounterGuard counter_guard(active_request_count);
+            chat_service->chatRender(writer, request);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("chat render failed, found python exception: [%s]", e.what());
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("called chat render route but found exception: [%s]", e.what());
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        }
     };
     return http_server_->RegisterRoute("POST", "/chat/completions",    chat_completions_callback) &&
            http_server_->RegisterRoute("POST", "/v1/chat/completions", chat_completions_callback) &&

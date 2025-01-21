@@ -32,16 +32,18 @@ public:
 
 public:
     void chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                         const http_server::HttpRequest&                         request);
+                         const http_server::HttpRequest&                         request,
+                         int64_t                                                 request_id);
     void chatRender(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                     const http_server::HttpRequest&                         request);
 
 private:
     std::shared_ptr<GenerateInput> fillGenerateInput(int64_t request_id,
                                                      const ChatCompletionRequest& chat_request,
-                                                     const std::string& body);
+                                                     const RenderedInputs& body);
     void generateResponse(const std::shared_ptr<GenerateConfig>& config,
                           const GenerateStreamPtr& stream,
+                          const RenderedInputs& rendered_input,
                           autil::StageTime& iterate_stage_timer,
                           const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                           const ChatCompletionRequest& chat_request,
@@ -50,6 +52,7 @@ private:
                           int64_t start_time_us);
     void generateStreamingResponse(const std::shared_ptr<GenerateConfig>& config,
                                    const GenerateStreamPtr& stream,
+                                   const RenderedInputs& rendered_input,
                                    autil::StageTime& iterate_stage_timer,
                                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                    const ChatCompletionRequest& chat_request,

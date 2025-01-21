@@ -203,7 +203,7 @@ class ChatCompletionResponse(BaseModel):
     model: str = ""
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
-    debug_info: Optional[DebugInfo] = None
+    debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
 
 class DeltaMessage(BaseModel):
@@ -225,5 +225,5 @@ class ChatCompletionStreamResponse(BaseModel):
     model: Optional[str] = None
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
-    debug_info: Optional[DebugInfo] = None
+    debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
