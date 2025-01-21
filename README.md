@@ -2,8 +2,20 @@
 
 ### *News*
 
+- [2025 / 01] RTP-LLM now releases the latest code with support for Prefill/Decode seperation, as well as a detailed technical report.
+- [2025 / 01] Check below for our latest technical reports !
+- [2025 / 01] Qwen series model and bert embedding model are now supported on Yitian ARM CPU.
 - [2024 / 06] We are releasing a brand new version of rtp-llm, which features scheduling and batching framework refactored in c++, complete gpu memory management and allocation track and new Device backend. Check release info for more details !
 - [2024 / 06] We are currently working on support for multiple hardware backends in extensive collaborations with hardware manufacturers. AMD ROCm, Intel CPU and ARM CPU support are on their way, stay tuned for upcoming releases!
+
+## **New!** Our technical reports
+Check below for series of public technical reports released by RTP-LLM team.
+
+- [大模型推理新突破：分布式推理技术探索与实践](https://mp.weixin.qq.com/s/Zs61CDerMwI7JKbFyD001Q)
+- [为异构推理做好准备：次世代 RTP-LLM 推理引擎设计分享](https://mp.weixin.qq.com/s/bsB2QImcOZKHpmHMHd0P9w)
+- [LLM推理加速：decode阶段的Attention在GPU上的优化](https://zhuanlan.zhihu.com/p/715348837)
+- [LLM推理加速：decode阶段的Attention在GPU上的优化（二）](https://zhuanlan.zhihu.com/p/719068931)
+
 
 ## About
 * rtp-llm is a Large Language Model (LLM) inference acceleration engine developed by Alibaba's Foundation Model Inference Team. It is widely used within Alibaba Group, supporting LLM service across multiple business units including Taobao, Tmall, Idlefish, Cainiao, Amap, Ele.me, AE, and Lazada.
