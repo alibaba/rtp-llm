@@ -316,9 +316,7 @@ class QwenToolRenderer(CustomChatRenderer):
                 )
 
                 # 解析工具调用参数
-                tool_call_name_args = json.loads(tool_call_name_args_str)
-                function_name = str(tool_call_name_args["name"])
-                function_args = str(tool_call_name_args["arguments"])
+                function_name, function_args = self._extract_name_args(tool_call_name_args_str)
 
                 # 设置工具调用状态
                 status.generating_tool_call = True
@@ -382,10 +380,10 @@ class QwenToolRenderer(CustomChatRenderer):
             if content:
                 try:
                     # 解析 JSON 内容
-                    data = json.loads(content)
+                    function_name, function_args = self._extract_name_args(content)
                     # 创建 FunctionCall 对象
                     function_call = FunctionCall(
-                        name=str(data["name"]), arguments=str(data["arguments"])
+                        name=function_name, arguments=function_args
                     )
                     # 创建 ToolCall 对象
                     tool_call = ToolCall(
@@ -415,6 +413,18 @@ class QwenToolRenderer(CustomChatRenderer):
         characters = string.ascii_letters + string.digits
         random_string = "".join(secrets.choice(characters) for _ in range(length))
         return "call_" + random_string
+
+    def _extract_name_args(self, text: str):
+        try:
+            data = json.loads(text)
+            function_name = data['name']
+            # 将 arguments 转换为标准 JSON 字符串格式
+            function_args = json.dumps(data['arguments'], ensure_ascii=False) 
+            return function_name, function_args
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format: {str(e)}")
+        except KeyError as e:
+            raise ValueError(f"Missing required field: {str(e)}")
 
 
 register_renderer("qwen_tool", QwenToolRenderer)
