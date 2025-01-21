@@ -67,6 +67,8 @@ TODO List
         {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
         </tool_call>
 
+- tool_choice的支持        
+
 """
 
 
