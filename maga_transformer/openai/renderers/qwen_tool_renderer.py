@@ -186,7 +186,7 @@ class QwenToolRenderer(CustomChatRenderer):
                     "parameters": tool.function.parameters,
                 },
             }
-            tool_defs.append(json.dumps(tool_def))
+            tool_defs.append(json.dumps(tool_def, ensure_ascii=False))
         return f"<tools>\n" + "\n".join(tool_defs) + f"\n</tools>"
 
     def _format_tool_calls(self, tool_calls: List[ToolCall]) -> str:
@@ -204,7 +204,7 @@ class QwenToolRenderer(CustomChatRenderer):
 
             tool_call_json = {"name": tool_call.function.name, "arguments": arguments}
             formatted_calls.append(
-                f"<tool_call>\n{json.dumps(tool_call_json)}\n</tool_call>"
+                f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>"
             )
 
         return "\n".join(formatted_calls)
