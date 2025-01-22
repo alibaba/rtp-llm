@@ -16,7 +16,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
     DeltaMessage, FinisheReason, UsageInfo, RendererInfo, PromptTokensDetails
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs, StreamStatus, OutputDelta
+    StreamResponseObject, RenderedInputs, StreamStatus, StreamStatusSync, OutputDelta
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
@@ -50,6 +50,29 @@ DUMMY_THOUGHT = {
 _TEXT_COMPLETION_CMD = object()
 
 class QwenStreamStatus(StreamStatus):
+    generating_function_call: bool = False
+    total_output_string: str = ""
+
+    def __init__(self, request: ChatCompletionRequest):
+        super().__init__(request)
+
+    def update_result(self):
+        self.responded_string = self.total_output_string[: - len('\nAction:')]
+
+    @property
+    def responded_length(self):
+        return len(self.responded_string)
+
+    @property
+    def output_length(self):
+        return len(self.total_output_string)
+
+    def check_stop_reason(self):
+        if self.finish_reason == None:
+            logging.debug(f"output [{self.responded_string}] found no stop reason! use stop as default.")
+            self.finish_reason = FinisheReason.stop
+
+class QwenStreamStatusSync(StreamStatusSync):
     generating_function_call: bool = False
     total_output_string: str = ""
 
@@ -408,6 +431,109 @@ class QwenRenderer(CustomChatRenderer):
                     status.output_token_length,
                     status.reuse_length))
         return await self._generate_stream_response(output_items)
+
+    #override
+    def _update_single_status_sync(self,
+                                   status: StreamStatusSync,
+                                   input_len, # output.aux_info
+                                   output_len, # output.aux_info
+                                   reuse_len, # output.aux_info
+                                   all_probs: torch.Tensor,
+                                   output_ids: torch.Tensor,
+                                   max_new_tokens: int,
+                                   stop_words_str: List[str],
+                                   stop_word_slice_list: List[str],
+                                   is_streaming: bool) -> OutputDelta:
+        # function call is disabled when logprobs is required.
+        if not isinstance(status, QwenStreamStatusSync):
+            return super()._update_single_status_sync(status,
+                                                       input_len, output_len, reuse_len,
+                                                       all_probs, output_ids,
+                                                       max_new_tokens, stop_words_str,
+                                                       stop_word_slice_list,
+                                                       is_streaming)
+        if status.finish_reason != None:
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        status.update_output_sync(output_ids, input_len,
+                                  self._clean_output_ids,
+                                  functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+                                  self._remove_stop_word_ids)
+        status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
+        if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+        if (status.total_output_string.endswith("\nAction:")):
+            status.generating_function_call = True
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        if (status.generating_function_call):
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
+            status.finish_reason = FinisheReason.stop
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
+            status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
+            if is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
+                return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+            else:
+                status.update_result()
+                return OutputDelta(
+                    output_str=status.delta_output_string,
+                    logprobs=self._generate_log_probs_sync(status, all_probs, output_ids),
+                    input_length=input_len,
+                    output_length=output_len,
+                    reuse_length=reuse_len)
+        return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+
+    #override
+    def _create_status_list_sync(self, n: int, body: str) -> List[StreamStatusSync]:
+        request = self.getRequest(body)
+        if request.logprobs:
+            return [StreamStatusSync(request) for _ in range(n)]
+        else:
+            return [QwenStreamStatusSync(request) for _ in range(n)]
+
+    #override
+    def _flush_buffer_sync(self,
+                           buffer_list: List[StreamStatusSync],
+                           input_len_list, output_len_list, reuse_len_list,
+                           all_probs_list, output_ids_list,
+                           stop_words_str: List[str],
+                           is_streaming: bool):
+        if (not isinstance(buffer_list[0], QwenStreamStatusSync)):
+            return super()._flush_buffer_sync(buffer_list,
+                                              input_len_list, output_len_list, reuse_len_list,
+                                              all_probs_list, output_ids_list,
+                                              stop_words_str,
+                                              is_streaming)
+        output_items: List[OutputDelta] = []
+        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
+                buffer_list,
+                input_len_list, output_len_list, reuse_len_list,
+                all_probs_list, output_ids_list
+                ):
+            if status.generating_function_call:
+                function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
+                if (function_message == None):
+                    logging.warning(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
+                                    "regarded as normal output.")
+                    function_message = ""
+                else:
+                    status.finish_reason = FinisheReason.function_call
+                output_items.append(OutputDelta(
+                    function_message,
+                    self._generate_log_probs_sync(status, all_probs, output_ids),
+                    input_len,
+                    output_len,
+                    reuse_len))
+            else:
+                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str, is_streaming)
+                output_items.append(OutputDelta(
+                    trunc_string,
+                    self._generate_log_probs_sync(status, all_probs, output_ids),
+                    input_len,
+                    output_len,
+                    reuse_len))
+        return self._generate_stream_response_sync(output_items)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()

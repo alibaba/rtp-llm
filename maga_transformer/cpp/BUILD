@@ -43,6 +43,7 @@ cc_library(
     deps = torch_deps() + [
         ":utils",
         ":metrics",
+        ":tokenizer",
         ":system_prompt",
         ":position_ids_generator",
         "//:gpt_init_params",
@@ -355,6 +356,42 @@ cc_library(
 )
 
 cc_library(
+    name = "tokenizer",
+    hdrs = glob([
+        "tokenizer/*.h",
+    ]),
+    srcs = glob([
+        "tokenizer/*.cc",
+    ]),
+    deps = [
+        "//src/fastertransformer/devices:devices_base", # for pybind11
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "openai",
+    hdrs = glob([
+        "openai/*.h",
+    ]),
+    srcs = glob([
+        "openai/*.cc",
+    ]),
+    deps = [
+        "@havenask//aios/autil:json",
+        "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp:dataclass",
+        "//maga_transformer/cpp:normal_engine",
+        "//maga_transformer/cpp/embedding_engine:embedding_engine",
+        ":embedding_arpc_deps",
+        # "//maga_transformer/cpp:speculative_engine",
+        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp:multimodal_processor",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
     name = "http_api_server",
     srcs = glob([
         "api_server/*.cc",
@@ -364,6 +401,7 @@ cc_library(
     ]),
     deps = [
         "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp:openai",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp:multimodal_processor",

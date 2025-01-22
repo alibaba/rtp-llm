@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/api_server/ModelStatusService.h"
 #include "maga_transformer/cpp/api_server/SysCmdService.h"
 #include "maga_transformer/cpp/api_server/TokenizerService.h"
+#include "maga_transformer/cpp/api_server/Exception.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -50,6 +51,12 @@ bool HttpApiServer::start() {
     return start(addr_);
 }
 
+bool HttpApiServer::start(py::object tokenizer, py::object render) {
+    tokenizer_.reset(new Tokenizer(tokenizer));
+    render_.reset(new ChatRender(render));
+    return start(addr_);
+}
+
 bool HttpApiServer::registerServices() {
     // add uri:
     // GET: / /health /GraphService/cm2_status /SearchService/cm2_status
@@ -82,6 +89,13 @@ bool HttpApiServer::registerServices() {
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
         FT_LOG_WARNING("HttpApiServer register tokenizer service failed.");
+        return false;
+    }
+
+    // add uri:
+    // POST: /chat/completions /v1/chat/completions /chat/render /v1/chat/render
+    if (!registerChatService()) {
+        FT_LOG_WARNING("HttpApiServer register chat service failed.");
         return false;
     }
 
@@ -191,6 +205,48 @@ bool HttpApiServer::registerTokenizerService() {
         tokenizer_service->tokenizerEncode(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/tokenizer/encode", tokenizer_encode_callback);
+}
+
+bool HttpApiServer::registerChatService() {
+    chat_service_.reset(
+        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_, metric_reporter_));
+    auto chat_completions_callback = [active_request_count = active_request_count_,
+                                      chat_service = chat_service_,
+                                      controller = controller_,
+                                      metric_reporter = metric_reporter_](
+                                         std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                         const http_server::HttpRequest&                  request) -> void {
+        try {
+            CounterGuard counter_guard(active_request_count);
+            ConcurrencyControllerGuard controller_guard(controller);
+            if (controller_guard.isPassed() == false) {
+                if (metric_reporter) {
+                    metric_reporter->reportConflictQpsMetric();
+                }
+                throw HttpApiServerException(HttpApiServerException::CONCURRENCY_LIMIT_ERROR, "Too Many Requests");
+            }
+            chat_service->chatCompletions(writer, request);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("chat completion failed, found python exception: [%s]", e.what());
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("called chat completion route but found exception: [%s]", e.what());
+            metric_reporter->reportErrorQpsMetric("unknown", HttpApiServerException::UNKNOWN_ERROR);
+            writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+            writer->SetStatus(500, "Internal Server Error");
+            writer->Write(e.what());
+        }
+    };
+
+    auto chat_render_callback = [active_request_count = active_request_count_,
+                                 chat_service = chat_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                               const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count);
+        chat_service->chatRender(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/chat/completions",    chat_completions_callback) &&
+           http_server_->RegisterRoute("POST", "/v1/chat/completions", chat_completions_callback) &&
+           http_server_->RegisterRoute("POST", "/chat/render",         chat_render_callback) &&
+           http_server_->RegisterRoute("POST", "/v1/chat/render",      chat_render_callback);
 }
 
 bool HttpApiServer::registerInferenceService() {

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "maga_transformer/cpp/utils/StringUtil.h"
+#include "maga_transformer/cpp/tokenizer/Tokenizer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
 
@@ -41,7 +42,8 @@ public:
     std::optional<std::string>   task_id;
     std::string          adapter_name = "";
 
-    std::vector<int>    select_tokens_id;
+    std::vector<int>         select_tokens_id;
+    std::vector<std::string> select_tokens_str;
     int                 calculate_loss       = 0;
     bool                return_logits        = false;
     bool                return_incremental   = false;
@@ -77,6 +79,22 @@ public:
         }
         const auto& vec = special_tokens.stop_words_str_list_;
         stop_words_str.insert(stop_words_str.begin(), vec.begin(), vec.end());
+    }
+
+    void convertSelectTokens(int vocab_size, std::shared_ptr<Tokenizer> tokenizer) {
+        for (const auto& token_str: select_tokens_str) {
+            auto vec = tokenizer->encode(token_str);
+            select_tokens_id.insert(select_tokens_id.begin(), vec.begin(), vec.end());
+        }
+
+        auto areTokensValid = [](const std::vector<int>& select_tokens_id, int vocab_size) {
+            return std::all_of(select_tokens_id.begin(), select_tokens_id.end(), [vocab_size](int token_id) {
+                return token_id < vocab_size && token_id >= 0;
+            });
+        };
+        if (!areTokensValid(select_tokens_id, vocab_size)) {
+            throw std::runtime_error("token_id should be less than vocab_size");
+        }
     }
 
     std::string debugString() const {
@@ -132,6 +150,7 @@ public:
         JSONIZE_OPTIONAL(task_id);
         JSONIZE(adapter_name);
         JSONIZE(select_tokens_id);
+        JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
         JSONIZE(return_incremental);

@@ -83,6 +83,9 @@ cc_library(
         "mock/MockGenerateStream.h",
         "mock/MockGenerateStreamWrapper.h",
         "mock/MockEmbeddingEndpoint.h",
+        "mock/MockChatRender.h",
+        "mock/MockTokenizer.h",
+        "mock/MockOpenaiEndpoint.h",
         "ErrorResponseTest.cc",
         "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
@@ -97,6 +100,7 @@ cc_library(
         "EmbeddingServiceTest.cc",
         "InferenceDataTypeTest.cc",
         "ConcurrencyControllerTest.cc",
+        "ChatServiceTest.cc",
         "TestMain.cc",
     ],
     deps = test_deps + [
@@ -105,4 +109,13 @@ cc_library(
     copts = test_copts,
     linkopts = test_linkopts,
     alwayslink = 1,
+)
+
+filegroup(
+    name = "api_server_mock_hdrs",
+    srcs = [
+        "mock/MockChatRender.h",
+        "mock/MockTokenizer.h",
+    ],
+    visibility = ["//visibility:public"],
 )

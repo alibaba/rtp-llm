@@ -153,8 +153,7 @@ void RtpLLMOp::startHttpServer(py::object tokenizer, py::object render) {
         FT_FAIL("normal HTTP Server nullptr error.");
         return;
     }
-
-    if (http_server_->start()) {
+    if (http_server_->start(tokenizer, render)) {
         FT_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {
         FT_FAIL("normal HTTP Server start fail.");

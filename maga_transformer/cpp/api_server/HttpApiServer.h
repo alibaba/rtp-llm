@@ -13,6 +13,7 @@
 #include "maga_transformer/cpp/api_server/ConcurrencyControllerUtil.h"
 #include "maga_transformer/cpp/api_server/TokenProcessor.h"
 #include "maga_transformer/cpp/api_server/EmbeddingEndpoint.h"
+#include "maga_transformer/cpp/api_server/ChatService.h"
 #include "maga_transformer/cpp/api_server/InferenceService.h"
 #include "maga_transformer/cpp/api_server/EmbeddingService.h"
 
@@ -67,6 +68,7 @@ public:
 public:
     bool        start();
     bool        start(const std::string& address);
+    bool        start(py::object tokenizer, py::object render);
     void        stop();
     bool        isStoped() const;
     std::string getListenAddr() const {
@@ -83,6 +85,7 @@ private:
     bool registerModelStatusService();
     bool registerSysCmdService();
     bool registerTokenizerService();
+    bool registerChatService();
     bool registerInferenceService();
     bool registerEmbedingService();
 
@@ -101,7 +104,9 @@ private:
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
-    std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
+    std::shared_ptr<EmbeddingEndpoint>     embedding_endpoint_;
+    std::shared_ptr<Tokenizer>             tokenizer_;
+    std::shared_ptr<ChatRender>            render_;
 
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
@@ -112,6 +117,7 @@ private:
     std::shared_ptr<ModelStatusService>      model_status_service_;
     std::shared_ptr<SysCmdService>           sys_cmd_service_;
     std::shared_ptr<TokenizerService>        tokenizer_service_;
+    std::shared_ptr<ChatService>             chat_service_;
     std::shared_ptr<InferenceService>        inference_service_;
     std::shared_ptr<EmbeddingService>        embedding_service_;
 };
