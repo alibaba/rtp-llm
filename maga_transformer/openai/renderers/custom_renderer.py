@@ -228,7 +228,7 @@ class CustomChatRenderer():
 
     async def _generate_log_probs(self, status: StreamStatus, output: Optional[GenerateOutput]) -> Optional[ChatCompletionTokenLogprob]:
         assert output is not None
-        if (status.request.logprobs == None):
+        if not status.request.logprobs:
             return None
         prob_return_num = status.request.top_logprobs or 1
         all_probs = output.all_probs
