@@ -207,10 +207,9 @@ class QwenToolRenderer(CustomChatRenderer):
 
         return "\n".join(formatted_calls)
 
-    # override
     async def _update_single_status(
         self,
-        status: QwenToolStreamStatus,
+        status: StreamStatus,
         output: GenerateOutput,
         max_new_tokens: int,
         stop_words_str: List[str],
@@ -236,19 +235,18 @@ class QwenToolRenderer(CustomChatRenderer):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
-        # <增加的部分>
-        if status.request.tools:
-            tool_delta = await self._process_tool_calls(status, output, is_streaming)
+        # <qwen_tool_renderer>, 其他部分同父类custom_renderer保持一致
+        if isinstance(status, QwenToolStreamStatus) and status.request.tools:
+            tool_delta = await self.process_tool_calls(status, output, is_streaming)
             # tool_delta为None代表继续默认逻辑处理
             if tool_delta is not None:
                 status.update_result()
                 return tool_delta
-        # </增加的部分>
+        # </qwen_tool_renderer>
 
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
-
         if not is_truncated(
             status.delta_output_string, stop_word_slice_list, is_streaming
         ):
@@ -265,7 +263,7 @@ class QwenToolRenderer(CustomChatRenderer):
         else:
             return await self._create_empty_delta(output.aux_info)
 
-    async def _process_tool_calls(
+    async def process_tool_calls(
         self,
         status: QwenToolStreamStatus,
         output: GenerateOutput,
