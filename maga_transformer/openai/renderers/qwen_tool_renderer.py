@@ -1,7 +1,7 @@
 import copy
 import json
 import logging
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Tuple, Union
 import functools
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
@@ -18,7 +18,6 @@ from maga_transformer.openai.api_datatype import (
 from maga_transformer.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RendererParams,
-    StreamResponseObject,
     RenderedInputs,
     StreamStatus,
     OutputDelta,
@@ -44,10 +43,6 @@ TODO List
 - System Prompt时间支持
   • 任务：在system_prompt中添加日期时间信息
   • 目的：减少AI推理过程中的时间相关幻觉
-
-- Qwen2支持
-  • 任务：除开对qwen2.5 tool能力的支持, 还需要支持qwen2
-  • 原因: qwen2.5的<tool_call>和</tool_call>都是1个token,而qwen2不是
 
 - 对某些异常情况的支持:
   • 例如:
@@ -101,9 +96,10 @@ class QwenToolRenderer(CustomChatRenderer):
     """QwenToolRenderer
     考虑到<|im_start|> ,<tool_call>等token都比较精简, 故不提取成常量, 增强直接可读性
     """
+
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        
+
     # override
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
@@ -240,10 +236,6 @@ class QwenToolRenderer(CustomChatRenderer):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
-
         # <增加的部分>
         if status.request.tools:
             tool_delta = await self._process_tool_calls(status, output, is_streaming)
@@ -252,6 +244,10 @@ class QwenToolRenderer(CustomChatRenderer):
                 status.update_result()
                 return tool_delta
         # </增加的部分>
+
+        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
+            status.finish_reason = FinisheReason.stop
+            return await self._create_empty_delta(output.aux_info)
 
         if not is_truncated(
             status.delta_output_string, stop_word_slice_list, is_streaming
@@ -269,91 +265,44 @@ class QwenToolRenderer(CustomChatRenderer):
         else:
             return await self._create_empty_delta(output.aux_info)
 
-
     async def _process_tool_calls(
         self,
         status: QwenToolStreamStatus,
         output: GenerateOutput,
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
-        status.tool_call_responded_string += status.delta_output_string
+        return await (
+            self._handle_streaming_case(status, output)
+            if is_streaming
+            else self._handle_no_streaming_case(status, output)
+        )
 
-        # 对于批式情况的处理
-        if not is_streaming:
-            tool_calls = self._extract_tool_calls(status)
-            status.delta_output_string = ""
-            if tool_calls:
-                status.generating_tool_call = True
-            return OutputDelta(
-                output_str=DeltaMessage(
-                    content=status.tool_call_responded_string,
-                    tool_calls=tool_calls,
-                ),
-                logprobs=await self._generate_log_probs(status, output),
-                input_length=output.aux_info.input_len,
-                output_length=output.aux_info.output_len,
-                reuse_length=output.aux_info.reuse_len,
-            )
+    async def _handle_no_streaming_case(
+        self,
+        status: QwenToolStreamStatus,
+        output: GenerateOutput,
+    ) -> OutputDelta:
+        # before: status.delta_output_string = "你好\n<tool_call>\n{"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}</tool_call>"
+        # after: status.delta_output_string = "你好\n"
+        tool_calls, status.delta_output_string = (
+            self._extract_tool_calls_from_complete_message(status.delta_output_string)
+        )
+        if tool_calls:
+            status.generating_tool_call = True
+        return OutputDelta(
+            output_str=DeltaMessage(
+                tool_calls=tool_calls,
+            ),
+            logprobs=await self._generate_log_probs(status, output),
+            input_length=output.aux_info.input_len,
+            output_length=output.aux_info.output_len,
+            reuse_length=output.aux_info.reuse_len,
+        )
 
-        if "<tool_call>" in status.tool_call_responded_string:
-            status.delta_output_string = ""
-            if "</tool_call>" in status.tool_call_responded_string:
-                # 提取和处理工具调用
-                tool_call_name_args_str = status.tool_call_responded_string[
-                    status.tool_call_responded_string.index("<tool_call>")
-                    + len("<tool_call>") : status.tool_call_responded_string.index(
-                        "</tool_call>"
-                    )
-                ]
-
-                # 更新tool_call_responded_string
-                status.tool_call_responded_string = (
-                    status.tool_call_responded_string[
-                        : status.tool_call_responded_string.index("<tool_call>")
-                    ]
-                    + status.tool_call_responded_string[
-                        status.tool_call_responded_string.index("</tool_call>")
-                        + len("</tool_call>") :
-                    ]
-                )
-
-                # 解析工具调用参数
-                function_name, function_args = self._extract_name_args(tool_call_name_args_str)
-
-                # 设置工具调用状态
-                status.generating_tool_call = True
-
-                # 创建工具调用的delta输出
-                delta = OutputDelta(
-                    output_str=DeltaMessage(
-                        tool_calls=[
-                            ToolCall(
-                                index=status.tool_call_index,
-                                id=self._generate_random_call_id(),
-                                type="function",
-                                function=FunctionCall(
-                                    name=function_name, arguments=function_args
-                                ),
-                            )
-                        ]
-                    ),
-                    logprobs=await self._generate_log_probs(status, output),
-                    input_length=output.aux_info.input_len,
-                    output_length=output.aux_info.output_len,
-                    reuse_length=output.aux_info.reuse_len,
-                )
-                status.tool_call_index += 1
-                return delta
-            else:
-                return await self._create_empty_delta(output.aux_info)
-
-        # 处理特殊换行情况
-        if status.generating_tool_call and status.delta_output_string == "\n":
-            return await self._create_empty_delta(output.aux_info)
-
-        return None
-
-    def _extract_tool_calls(self, status: QwenToolStreamStatus) -> List[ToolCall]:
+    def _extract_tool_calls_from_complete_message(
+        self,
+        original_text: str,
+    ) -> Tuple[List[ToolCall], str]:
         """
         从文本中提取所有被 <tool_call> </tool_call> 标签包围的内容,并解析成 ToolCall 对象列表,
         同时从原文本中删除这些标签及其内容
@@ -365,10 +314,9 @@ class QwenToolRenderer(CustomChatRenderer):
             List[ToolCall]: ToolCall 对象列表
         """
         tool_calls = []
-        text = status.tool_call_responded_string
 
         # 用 <tool_call> 分割
-        parts = text.split("<tool_call>\n")
+        parts = original_text.split("<tool_call>\n")
 
         # 保存第一部分(标签之前的内容)
         result_text = parts[0]
@@ -402,10 +350,93 @@ class QwenToolRenderer(CustomChatRenderer):
             if len(tool_parts) > 1 and tool_parts[1] != "\n":
                 result_text += tool_parts[1]
 
-        # 更新状态对象中的文本
-        status.tool_call_responded_string = result_text
+        return tool_calls, result_text
 
-        return tool_calls
+    async def _handle_streaming_case(
+        self,
+        status: QwenToolStreamStatus,
+        output: GenerateOutput,
+    ) -> Optional[OutputDelta]:
+        # 如果是qwen2.5之前的qwen, 可能会提前stream出<tool_call这样的内容
+        status.tool_call_responded_string += status.delta_output_string
+        if "<tool_call>" in status.tool_call_responded_string:
+            status.delta_output_string = ""
+            if "</tool_call>" not in status.tool_call_responded_string:
+                return await self._create_empty_delta(output.aux_info)
+            else:
+                # 提取和处理工具调用
+                function_call, status.tool_call_responded_string = (
+                    self._extract_function_call_from_streaming_message(
+                        status.tool_call_responded_string
+                    )
+                )
+                # 设置工具调用状态
+                if not function_call:
+                    # 如果没有提取到工具调用，则把完整的原始文本作为delta输出
+                    status.delta_output_string = status.tool_call_responded_string
+                else:
+                    status.generating_tool_call = True
+                    # 创建工具调用的delta输出
+                    delta = OutputDelta(
+                        output_str=DeltaMessage(
+                            tool_calls=[
+                                ToolCall(
+                                    index=status.tool_call_index,
+                                    id=self._generate_random_call_id(),
+                                    type="function",
+                                    function=function_call,
+                                )
+                            ]
+                        ),
+                        logprobs=await self._generate_log_probs(status, output),
+                        input_length=output.aux_info.input_len,
+                        output_length=output.aux_info.output_len,
+                        reuse_length=output.aux_info.reuse_len,
+                    )
+                    status.tool_call_index += 1
+                    return delta
+
+        """
+        处理特殊换行情况, 例如
+        <tool_call>
+        {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
+        </tool_call>\n<tool_call>
+        {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
+        </tool_call>
+        """
+
+        if status.generating_tool_call and status.delta_output_string == "\n":
+            return await self._create_empty_delta(output.aux_info)
+
+        # 返回None的意义是让_update_single_status按照默认逻辑继续返回status.delta_output_string的delta
+        return None
+
+    def _extract_function_call_from_streaming_message(
+        self, text: str
+    ) -> Tuple[Optional[FunctionCall], str]:
+        tool_call_name_args_str = text[
+            text.index("<tool_call>") + len("<tool_call>") : text.index("</tool_call>")
+        ]
+
+        # 更新tool_call_responded_string
+        extracted_text = (
+            text[: text.index("<tool_call>")]
+            + text[text.index("</tool_call>") + len("</tool_call>") :]
+        )
+
+        # 解析工具调用参数
+        try:
+            function_name, function_args = self._extract_name_args(
+                tool_call_name_args_str
+            )
+            return (
+                FunctionCall(name=function_name, arguments=function_args),
+                extracted_text,
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            # json提取失败的时候, 返回原始文本
+            logging.error(f"qwen tool extract function call error: {str(e)}")
+            return None, text
 
     def _generate_random_call_id(self, length: int = 24) -> str:
         """生成随机调用ID"""
@@ -419,9 +450,9 @@ class QwenToolRenderer(CustomChatRenderer):
     def _extract_name_args(self, text: str):
         try:
             data = json.loads(text)
-            function_name = data['name']
+            function_name = data["name"]
             # 将 arguments 转换为标准 JSON 字符串格式
-            function_args = json.dumps(data['arguments'], ensure_ascii=False) 
+            function_args = json.dumps(data["arguments"], ensure_ascii=False)
             return function_name, function_args
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON format: {str(e)}")
