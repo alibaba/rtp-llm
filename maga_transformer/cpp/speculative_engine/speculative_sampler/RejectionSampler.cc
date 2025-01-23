@@ -110,13 +110,16 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
     torch::Tensor randoms      = torch::rand({(long)propose_step}, torch::Device(host_device)).to(torch::kFloat);
     size_t        accepted_len = 0;
     torch::Tensor row_indices  = torch::arange((long)propose_step, torch::Device(target_device)).to(torch::kInt32);
-    torch::Tensor col_indices  = torch::from_blob(propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len),
+    torch::Tensor col_indices  = torch::from_blob(propose_stream_output->tokens->dataWithOffset<int32_t>(0),
                                                  {(long)propose_step},
                                                  torch::kInt32)
                                     .to(torch::Device(target_device));
     torch::Tensor score_probs   = score_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     torch::Tensor propose_probs = propose_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     torch::Tensor div_probs     = score_probs.div(propose_probs);
+    for (size_t i = 0; i < propose_step; i++) {
+        FT_LOG_INFO("randoms[%d] = %f, div_probs[%d] = %f, score_probs[%d] = %f, propose_probs[%d] = %f", i, randoms[i].item<float>(), i, div_probs[i].item<float>(), score_probs[i].item<float>(), i, propose_probs[i].item<float>());
+    }
     while (accepted_len < propose_step) {
         int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len);
         if (randoms[accepted_len].greater(div_probs[accepted_len]).item<bool>()) {
@@ -137,6 +140,7 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
         *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = propose_token_id;
         accepted_len++;
     }
+    FT_LOG_INFO("accepted_len[%d]", accepted_len + 1);
     return accepted_len + 1;
 }
 
