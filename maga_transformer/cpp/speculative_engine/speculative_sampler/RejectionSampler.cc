@@ -19,11 +19,11 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     SpeculativeSamplerOutput sampler_output;
     FT_CHECK(proposer_output.outputs.size() == scorer_output.outputs.size());
-    size_t stream_index = 0;
     // TODO(xyz): optimize the RejectionSampler with batch processing interface
     for (const GenerateStreamPtr& stream : streams) {
-        const SpeculativeExecutorStreamOutputPtr& propose_stream_output = proposer_output.outputs[stream_index];
-        const SpeculativeExecutorStreamOutputPtr& scorer_stream_output  = scorer_output.outputs[stream_index];
+        size_t stream_id = stream->streamId();
+        const SpeculativeExecutorStreamOutputPtr& propose_stream_output = proposer_output.outputs.at(stream_id);
+        const SpeculativeExecutorStreamOutputPtr& scorer_stream_output  = scorer_output.outputs.at(stream_id);
         size_t propose_step = propose_stream_output->propose_step;
         std::shared_ptr<GenerateConfig>&          stream_config         = stream->generateConfig();
         size_t                                    accepted_len          = 0;
@@ -33,15 +33,21 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             CHECK_AND_ASSIGN(accepted_len, top1Sample(propose_step, propose_stream_output, scorer_stream_output));
         } else {
             // TODO(xyz): catch exception for specified stream
-            CHECK_AND_ASSIGN(accepted_len, stochasticSample(propose_step, propose_stream_output, scorer_stream_output));
+            auto status = stochasticSample(propose_step, propose_stream_output, scorer_stream_output);
+            if (status.ok()) {
+                accepted_len = status.value();
+            } else {
+                stream->setStop(ErrorCode::OUT_OF_VOCAB_RANGE, "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output");
+                continue;
+            }
         }
-        FT_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_tokens = [%d], accept_tokens = [%d]",
+
+        FT_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
                      stream->streamId(),
                      stream_config->top_k,
                      stream_config->top_p,
                      propose_step,
                      accepted_len);
-
 
         ft::BufferPtr accepted_tokens =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST}, {"accepted_tokens"});
@@ -67,7 +73,6 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
         }
         sampler_output.outputs.emplace_back(
             propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), accepted_len > propose_step);
-        stream_index++;
     }
     FT_LOG_DEBUG("speculative sample done");
     return sampler_output;
@@ -90,11 +95,23 @@ absl::StatusOr<size_t> RejectionSampler::top1Sample(size_t                      
 absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                                    propose_step,
                                           const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
                                           const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const {
-    torch::Tensor propose_all_probs = Buffer2torchTensor(propose_stream_output->all_probs, false);
     torch::Tensor score_all_probs   = Buffer2torchTensor(scorer_stream_output->all_probs, false);
+    size_t score_vocab_size   = score_all_probs.size(1);
+    
+    if (!propose_stream_output->all_probs) {
+        auto all_probs = device_->allocateBuffer(
+            {ft::DataType::TYPE_FP32, {propose_step, score_vocab_size}, ft::AllocationType::HOST}, {""});
+        device_->bufMemset(*all_probs, 0);
+        for (size_t i = 0; i < propose_step; i++) {
+            *(all_probs->view(i, 1).dataWithOffset<float>(*propose_stream_output->tokens->dataWithOffset<int32_t>(i))) = 1.0;
+        }
+        propose_stream_output->all_probs = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"all_probs"}});
+    }
+
+
+    torch::Tensor propose_all_probs = Buffer2torchTensor(propose_stream_output->all_probs, false);
 
     size_t propose_vocab_size = propose_all_probs.size(1);
-    size_t score_vocab_size   = score_all_probs.size(1);
 
     if (propose_vocab_size > score_vocab_size) {
         propose_all_probs = propose_all_probs.narrow(1, 0, score_vocab_size);
@@ -114,12 +131,12 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
                                                  {(long)propose_step},
                                                  torch::kInt32)
                                     .to(torch::Device(target_device));
+
     torch::Tensor score_probs   = score_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     torch::Tensor propose_probs = propose_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
+    propose_probs = propose_probs.maximum(torch::full_like(propose_probs, 1e-7).to(torch::Device(host_device)));
     torch::Tensor div_probs     = score_probs.div(propose_probs);
-    for (size_t i = 0; i < propose_step; i++) {
-        FT_LOG_INFO("randoms[%d] = %f, div_probs[%d] = %f, score_probs[%d] = %f, propose_probs[%d] = %f", i, randoms[i].item<float>(), i, div_probs[i].item<float>(), score_probs[i].item<float>(), i, propose_probs[i].item<float>());
-    }
+
     while (accepted_len < propose_step) {
         int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len);
         if (randoms[accepted_len].greater(div_probs[accepted_len]).item<bool>()) {
@@ -140,7 +157,6 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
         *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = propose_token_id;
         accepted_len++;
     }
-    FT_LOG_INFO("accepted_len[%d]", accepted_len + 1);
     return accepted_len + 1;
 }
 

@@ -9,16 +9,17 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
                                         const ProposeOutput&                proposer_output) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    size_t stream_index = 0;
     std::list<GenerateStreamPtr> score_streams;
 
-    ScoreOutput score_output(streams.size());
+    ScoreOutput score_output;
     for (const GenerateStreamPtr& stream : streams) {
-        size_t propose_step = proposer_output.outputs[stream_index]->propose_step;
-        score_output.outputs[stream_index]->propose_step = propose_step;
+        size_t stream_id = stream->streamId();
+        SpeculativeExecutorStreamOutputPtr stream_propose_output = proposer_output.outputs.at(stream_id);
+        size_t propose_step = stream_propose_output->propose_step;
+        score_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
+        score_output.outputs[stream_id]->propose_step = propose_step;
         score_streams.emplace_back(std::make_shared<ScoreStream>(
-            *stream, proposer_output.outputs[stream_index], score_output.outputs[stream_index], propose_step));
-        stream_index++;
+            *stream, propose_step, stream_propose_output->tokens == nullptr ? nullptr : &stream_propose_output->tokens, &score_output));
     }
 
     for (auto& stream: score_streams) {

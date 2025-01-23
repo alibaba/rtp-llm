@@ -10,13 +10,13 @@ namespace rtp_llm {
 absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     std::list<GenerateStreamPtr> propose_streams;
-    ProposeOutput propose_output(streams.size());
+    ProposeOutput propose_output;
 
-    size_t stream_index = 0;
     for (auto& stream : streams) {
-        propose_output.outputs[stream_index]->propose_step = propose_step_;
-        propose_streams.emplace_back(std::make_shared<VanillaStream>(*stream, propose_output.outputs[stream_index], propose_step_));
-        stream_index++;
+        size_t stream_id = stream->streamId();
+        propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
+        propose_output.outputs[stream_id]->propose_step = propose_step_;
+        propose_streams.emplace_back(std::make_shared<VanillaStream>(*stream, &propose_output, propose_step_));
     }
 
     for (auto& stream: propose_streams) {

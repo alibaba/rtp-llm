@@ -7,11 +7,10 @@
 namespace rtp_llm {
 
 absl::StatusOr<ProposeOutput> DeterministicExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
-    ProposeOutput output(streams.size());
-    size_t        stream_index = 0;
+    ProposeOutput output;
     for (auto& stream : streams) {
-        ruleBasedTokenSelector(stream, output.outputs[stream_index]);
-        stream_index++;
+        output.outputs[stream->streamId()] = std::make_shared<SpeculativeExecutorStreamOutput>();
+        ruleBasedTokenSelector(stream, output.outputs[stream->streamId()]);
     }
 
     return output;
@@ -148,20 +147,8 @@ void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stre
         return;
     }
 
-    auto&  config               = stream->generateConfig();
     size_t propose_step         = stream_output->tokens->size();
     stream_output->propose_step = propose_step;
-
-    if (!config->top1()) {
-        const auto& all_probs = device_->allocateBuffer(
-            {ft::DataType::TYPE_FP32, {propose_step, (size_t)stream->vocabSize()}, ft::AllocationType::HOST}, {""});
-        device_->bufMemset(*all_probs, 0);
-        for (size_t i = 0; i < propose_step; i++) {
-            *all_probs->view(i, 0).dataWithOffset<float>(stream_output->tokens->data<int32_t>()[i]) = 1.0;
-        }
-
-        stream_output->all_probs = device_->clone({*all_probs, AllocationType::DEVICE, {"determinisitic_all_probs"}});
-    }
 }
 
 };  // namespace rtp_llm

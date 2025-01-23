@@ -148,7 +148,8 @@ class RequestExtractor:
         generate_configs = self._get_adapter(generate_config, len(input_texts))
         input_texts, input_urls, generate_configs = self.extend_sequences(input_texts, input_urls, generate_configs)
         is_streaming = RequestExtractor.is_streaming(kwargs)
-
+        if generate_config.is_streaming:
+            is_streaming = True
         return Request(request_id, batch_infer, input_texts, input_urls, generate_configs, is_streaming)
 
     def _format_chat_api_messages(self, generate_config: GenerateConfig, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:

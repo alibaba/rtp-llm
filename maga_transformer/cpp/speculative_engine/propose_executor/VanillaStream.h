@@ -1,6 +1,6 @@
 #pragma once
 #include "maga_transformer/cpp/stream/GenerateStream.h"
-#include "maga_transformer/cpp/speculative_engine/SpeculativeStreamOutput.h"
+#include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <cstddef>
@@ -12,9 +12,9 @@ namespace rtp_llm {
 class VanillaStream: public GenerateStream {
 public:
     VanillaStream(const GenerateStream&                     stream,
-                  const SpeculativeExecutorStreamOutputPtr& stream_output,
+                  ProposeOutput*                            propose_output,
                   size_t                                    propose_step):
-        GenerateStream(stream), output_buffer_(stream_output), propose_step_(propose_step) {
+        GenerateStream(stream), propose_output_(propose_output), propose_step_(propose_step) {
         // WARNING: VanillaStream currently only support batch_size = 1
         FT_CHECK(tileNum() == 1);
         CopyOnWrite(stream, false);
@@ -37,23 +37,24 @@ public:
     };
 
     void updateOutput(const StreamUpdateInfo& update_info) override {
+        SpeculativeExecutorStreamOutputPtr output_buffer = propose_output_->outputs[streamId()];
         // TODO(xyz): optimize deepclone
         if (update_info.all_probs) {
             // lazy allocate buffer
-            if (!output_buffer_->all_probs) {
+            if (!output_buffer->all_probs) {
                 size_t vocab_size         = update_info.all_probs->shape()[1];
-                output_buffer_->all_probs = device_->allocateBuffer(
+                output_buffer->all_probs = device_->allocateBuffer(
                     {ft::DataType::TYPE_FP32, {propose_step_, vocab_size}, ft::AllocationType::DEVICE}, {"vanilla_all_probs"});
             }
-            device_->copy({output_buffer_->all_probs->view(current_step_, 1), *update_info.all_probs});
+            device_->copy({output_buffer->all_probs->view(current_step_, 1), *update_info.all_probs});
         }
-        *((*output_buffer_->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)update_info.new_tokens->data())[0];
+        *((*output_buffer->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)update_info.new_tokens->data())[0];
         current_step_++;
     }
 
 private:
     void allocateOutputBuffer(size_t propose_step) {
-        output_buffer_->tokens = device_->allocateBuffer(
+        propose_output_->outputs[streamId()]->tokens = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"vanilla_propose_tokens"});
     }
 
@@ -77,8 +78,8 @@ private:
     }
 
 protected:
-    int                                old_top_k_    = -1;              
-    SpeculativeExecutorStreamOutputPtr output_buffer_;
+    int                                old_top_k_    = -1;
+    ProposeOutput*                     propose_output_;       
     size_t                             current_step_ = 0;
     size_t                             propose_step_ = 0;
 };
