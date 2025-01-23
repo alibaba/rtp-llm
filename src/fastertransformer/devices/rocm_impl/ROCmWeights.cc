@@ -49,7 +49,7 @@ torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight)
 
         packed_ptr[packed_idx] = packed_int4s;
     }
-   
+
     return packed_weight.transpose(0, 1);
 }
 #else
@@ -88,7 +88,7 @@ torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
 }
 #endif
 
-torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor column_major_quantized_weight, torch::ScalarType quant_type) {
+torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type) {
     auto _st = column_major_quantized_weight.scalar_type();
     CHECK_CPU(column_major_quantized_weight);
     TORCH_CHECK(_st == torch::kInt8, "Quantized tensor must be int8 dtype");
@@ -108,7 +108,7 @@ torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor column_maj
 
     int8_t* unpermute_ptr = get_ptr<int8_t>(column_major_quantized_weight);
     int8_t* permute_ptr   = get_ptr<int8_t>(permute_weight);
-    
+
     for (int permute_idx = 0; permute_idx < permute_weight.numel(); permute_idx += 4) {
         int input[8];
 

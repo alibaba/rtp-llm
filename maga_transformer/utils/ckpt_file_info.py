@@ -1,9 +1,8 @@
-from typing import Any, Dict, List, Set, Union, Optional, NamedTuple
-from pathlib import PosixPath, Path
+from typing import Any, Dict, List
+from pathlib import PosixPath
 import json
 import enum
 import os
-import logging
 import torch
 import struct
 from safetensors import safe_open
@@ -136,6 +135,15 @@ class CkptFileInfo:
                     tensor = tensor.contiguous().to(datatype)
 
                     return tensor
+
+
+    def load_tensors(self, device: str = "cuda:0"):
+        if self.is_safetensor():
+            from safetensors.torch import load_file
+            return load_file(self.file_name, device=device)
+        else:
+            return torch.load(self.file_name, map_location=torch.device(device))
+
 
     def __lt__(self, other):
         if not isinstance(other, CkptFileInfo):

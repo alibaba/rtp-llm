@@ -123,26 +123,25 @@ class ModelWeightsLoader:
         weights = [ {} for id in range(self._num_layers)]
         global_weights = {}
         # 重新构建权重
-        all_tensor_name = self._database.get_pretrain_tensor_names()
-        for key in all_tensor_name:
+        all_tensors = self._database.load_tensors_by_prefix((layer_weight_prefix, global_weight_prefix), device)
+        for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
                 # 解析键名，例如 "layers.0.weight"
                 parts = key[len(layer_weight_prefix):].split(".")
                 layer_id = int(parts[0])
                 name = ".".join(parts[1:])
-                tensor = self.load_tensor(key, None)[0]
                 # 将张量移动到设备，并设置到对应的层
-                weights[layer_id][name] = tensor.to(device)
+                weights[layer_id][name] = tensor[0].to(device)
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix):]
-                tensor = self.load_tensor(key, None)[0]
-                global_weights[name] = tensor.to(device)
+                global_weights[name] = tensor[0].to(device)
         model_weights.weights = weights
         model_weights.global_weights = global_weights
+        model_weights.is_ft_style_weight = True
         return model_weights
 
     @timer_wrapper(description="load_weights_from_scratch")
-    def load_weights_from_scratch(self, device: str, num_process=1):
+    def load_weights_from_scratch(self, device: str, num_process: int=1):
         if self._is_ft_style_weight:
             return self.load_from_ft_style_weight(device)
         weights = ModelWeights(self._num_layers, device, self._data_type)
@@ -574,7 +573,14 @@ def estimate_load_parallel_num(config, tp_size):
     model_size = config.eval_model_size()
     cuda_runtime_mem = 2
     weight_compute_mem = 2
-    free_mem = get_current_device().get_mem_info().free / (1024.0 ** 3)
+    device_mem_info = get_current_device().get_mem_info()
+    if device_mem_info is None:
+        # 使用虚拟内存加载数据
+        import psutil
+        vmem = psutil.virtual_memory()
+        free_mem = vmem.free / (1024.0 ** 3) / tp_size 
+    else:
+        free_mem = device_mem_info.free / (1024.0 ** 3)
     model_mem = model_size / tp_size / (1024.0 ** 3)
     parallel_num = int((free_mem - model_mem) / (weight_compute_mem + cuda_runtime_mem))
     parallel_num = min(max(parallel_num, 1), 4) # 以防并发太多影响 io 效率

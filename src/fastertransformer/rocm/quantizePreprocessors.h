@@ -27,7 +27,7 @@ void subbyte_transpose(int8_t* transposed_quantized_tensor, const int8_t* quanti
 void add_bias_and_interleave_quantized_tensor_inplace(int8_t* tensor, const size_t num_elts, QuantType quant_type);
 
 void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, const int8_t* row_major_quantized_weight,
-    const std::vector<size_t>& shape, QuantType quant_type);
+    const std::vector<size_t>& shape, QuantType quant_type, const int arch);
 
 #if 0
 template <typename ComputeType, typename WeightType>

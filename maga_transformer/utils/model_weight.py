@@ -1199,6 +1199,7 @@ class ModelWeights:
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._dtype = dtype
+        self.is_ft_style_weight: bool = False
 
         for _ in range(num_layers):
             self.weights.append({})
@@ -1210,12 +1211,15 @@ class ModelWeights:
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
 
-    def steal_global_weight(self, name: str):
+    def get_global_weight(self, name: str):
+        return self.global_weights.get(name, None)
+    
+    def steal_global_weight(self, name: str): 
         if name not in self.global_weights:
             return None
         tensor = self.global_weights[name]
         del self.global_weights[name]
-        return tensor
+        return tensor        
 
     @property
     def dtype(self):

@@ -128,6 +128,20 @@ class CkptDatabase(BaseDatabase):
 
         return tensors
 
+    def load_tensors_by_prefix(self, prefix_list: List[str], device: str) -> dict[str, List[torch.Tensor]]:
+        res = {}
+        for ckptfile in self.PretrainFileList:
+            if any(tensor.startswith(prefix_list) for tensor in ckptfile.get_tensor_names()):
+                tensors = ckptfile.load_tensors(device)
+                for k, v in tensors.items():
+                    if not k.startswith(prefix_list):
+                        continue
+                    if k not in res:
+                        res[k] = [v]
+                    else:
+                        res[k].append(v)
+        return res
+
     @property
     def pretrain_pp_tp(self):
         for pretrainfile in self.PretrainFileList:

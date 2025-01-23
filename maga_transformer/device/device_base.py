@@ -24,9 +24,16 @@ class DeviceBase:
 
     def get_device_id(self) -> int:
         return self.exported_device.get_device_id()
+    
+    def _get_mem_info(self) -> MemInfo:
+        raise NotImplementedError("_get_mem_info is not implemented")
 
     def get_mem_info(self) -> MemInfo:
-        raise NotImplementedError("get_mem_info is not implemented")
+        try:
+            return self._get_mem_info()
+        except Exception as e:
+            logging.warning(f"get_mem_info failed: {e}")
+            return None
 
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str,
                                            gptq: bool, awq: bool, weight_bits: int):

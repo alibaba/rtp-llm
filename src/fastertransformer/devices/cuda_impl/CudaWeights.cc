@@ -42,7 +42,7 @@ torch::Tensor CudaDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
     return packed_weight;
 }
 
-torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type) {
+torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const string &arch) {
     auto _st = row_major_quantized_weight.scalar_type();
     CHECK_CPU(row_major_quantized_weight);
     CHECK_CONTIGUOUS(row_major_quantized_weight);
@@ -62,14 +62,17 @@ torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_
     int8_t* input_byte_ptr   = get_ptr<int8_t>(row_major_quantized_weight);
     int8_t* output_byte_ptr  = get_ptr<int8_t>(processed_tensor);
 
+    int sm_version = arch.empty() ? get_sm() : atoi(arch.c_str());
+
     trt_cutlass::preprocess_weights_for_mixed_gemm(
-        output_byte_ptr, input_byte_ptr, {num_experts, num_rows, num_cols}, ft_quant_type);
+        output_byte_ptr, input_byte_ptr, {num_experts, num_rows, num_cols}, ft_quant_type, sm_version);
 
     return processed_tensor;
 }
 
-std::vector<torch::Tensor> CudaDevice::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type) {
-    return symmetric_quantize_helper(weight, quant_type, false);
+std::vector<torch::Tensor> CudaDevice::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const string &arch) {
+    int sm_version = arch.empty() ? get_sm() : atoi(arch.c_str());
+    return symmetric_quantize_helper(weight, quant_type, false, sm_version);
 }
 
 } // namespace fastertransformer

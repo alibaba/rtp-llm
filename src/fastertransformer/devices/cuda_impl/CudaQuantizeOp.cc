@@ -65,21 +65,24 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                     scales->data<half>(),
                                     params.input.data<half>(),
                                     params.input.shape(),
-                                    trtQuantTypeConvert(params.qtype));
+                                    trtQuantTypeConvert(params.qtype),
+                                    get_sm());
         } else if (params.input.type() == DataType::TYPE_BF16) {
             trt::symmetric_quantize(kernel->data<int8_t>(),
                                     nullptr,
                                     scales->data<half>(),
                                     params.input.data<__nv_bfloat16>(),
                                     params.input.shape(),
-                                    trtQuantTypeConvert(params.qtype));
+                                    trtQuantTypeConvert(params.qtype),
+                                    get_sm());
         } else if (params.input.type() == DataType::TYPE_FP32) {
             trt::symmetric_quantize(kernel->data<int8_t>(),
                                     nullptr,
                                     scales->data<half>(),
                                     params.input.data<float>(),
                                     params.input.shape(),
-                                    trtQuantTypeConvert(params.qtype));
+                                    trtQuantTypeConvert(params.qtype),
+                                    get_sm());
         } else {
             FT_CHECK_WITH_INFO(false,
                 "ERROR data type [%d] for cuda quantize input.", params.input.type());

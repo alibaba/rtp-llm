@@ -66,8 +66,9 @@ public:
     // for device-specific weights preprocess
     static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type);
+    static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
     static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 };
 

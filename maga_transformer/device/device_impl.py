@@ -1,15 +1,18 @@
+import re
 from maga_transformer.device.device_base import DeviceBase, DeviceType, MemInfo
 from maga_transformer.ops import DeviceType, DeviceExporter
 from maga_transformer.utils.model_weight import W
 
 import torch
 import psutil
+import os
+import logging
 
 class CpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):
         super().__init__(exported_device)
 
-    def get_mem_info(self) -> MemInfo:
+    def _get_mem_info(self) -> MemInfo:
         vmem = psutil.virtual_memory()
         return MemInfo(vmem.used, vmem.free)
 
@@ -108,10 +111,14 @@ class GpuImpl(DeviceBase):
 
         return reorder_tensor
 
+    @property
+    def specify_gpu_arch(self) -> int:
+        return os.environ.get('SPECIFY_GPU_ARCH', "")
+
     def apply_int8(self, tensor: torch.Tensor, device: str):
         shape = tensor.shape
         int8_weight, int8_scale = self.exported_device.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
-            tensor.reshape([shape[0], -1]).cpu(), torch.int8)
+            tensor.reshape([shape[0], -1]).cpu(), torch.int8, self.specify_gpu_arch)
         int8_weight = int8_weight.reshape(shape)
         return int8_weight.to(device), int8_scale.to(device)
 
@@ -124,7 +131,7 @@ class GpuImpl(DeviceBase):
             t = torch.squeeze(t).transpose(1,0).contiguous()
             shape = t.shape
             weight, scale = self.exported_device.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
-                t.reshape([shape[0], -1]).cpu(), torch.int8)
+                t.reshape([shape[0], -1]).cpu(), torch.int8, self.specify_gpu_arch)
             int8_weights.append(weight)
             int8_scales.append(scale)
         int8_weight = torch.stack(int8_weights, dim=0)
@@ -156,7 +163,7 @@ class GpuImpl(DeviceBase):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
-        qweight_interleaved = preprocessor(qweight, quant_type)
+        qweight_interleaved = preprocessor(qweight, quant_type, self.specify_gpu_arch)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
         # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
@@ -186,7 +193,7 @@ class GpuImpl(DeviceBase):
             w = torch.squeeze(w).transpose(1, 0).contiguous()
             z = torch.squeeze(z).transpose(1, 0).contiguous()
             s = torch.squeeze(s).transpose(1, 0).contiguous()
-            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq, weight_bits)
+            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq, weight_bits, self.specify_gpu_arch)
             processed_weights.append(p_w)
             processed_zeros.append(p_z)
             processed_scalses.append(p_s)
@@ -198,28 +205,47 @@ class GpuImpl(DeviceBase):
 class CudaImpl(GpuImpl):
     def __init__(self, exported_device: DeviceExporter):
         super().__init__(exported_device)
-        import pynvml
-        pynvml.nvmlInit()
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+        except Exception as e:
+            logging.warn(f"no nvml found: " + str(e))
 
-    def get_mem_info(self) -> MemInfo:
+    def _get_mem_info(self) -> MemInfo:
         import pynvml
         handle = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda._parse_visible_devices()[0])
         meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
         return MemInfo(meminfo.used, meminfo.free)
 
+    @property
+    def arch(self) -> int:
+        try:
+            device = self.get_device_id()
+            major, minor = torch.cuda.get_device_capability(device)
+            arch = major * 10 + minor
+            return arch
+        except Exception as e:
+            logging.warn(f"Cannot get CUDA device capability: {e}")
+            return super().arch  # 使用父类的实现
+
+
+
 class RocmImpl(GpuImpl):
     def __init__(self, exported_device: DeviceExporter):
         super().__init__(exported_device)
-        from pyrsmi import rocml
-        rocml.smi_initialize()
+        try:
+            from pyrsmi import rocml
+            rocml.smi_initialize()
+        except Exception as e:
+            logging.warn(f"no rocm smi found: " + str(e))
 
-    def get_mem_info(self) -> MemInfo:
+    def _get_mem_info(self) -> MemInfo:
         from pyrsmi import rocml
         id = self.get_device_id()
         used = rocml.smi_get_device_memory_used(id)
         total = rocml.smi_get_device_memory_total(id)
         return MemInfo(total - used, used)
-    
+
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str,
                                            gptq: bool, awq: bool, weight_bits: int):
         GPTQ_FLAG = 1 if gptq == True else 0
@@ -264,7 +290,7 @@ class RocmImpl(GpuImpl):
         # TODO: need add device infomation for selection
         scales_fp16_t = scales_fp16.transpose(0, 1).contiguous()
         scales_fp16 = scales_fp16_t.transpose(1, 0).cpu()
-        
+
         # zeros_x_scales row major -> zeros_x_scales column major layout to match CK kernel layout
         zeros_x_scales_fp16_t = zeros_x_scales_fp16.transpose(0, 1).contiguous()
         zeros_x_scales_fp16 = zeros_x_scales_fp16_t.transpose(1, 0).cpu()
@@ -275,3 +301,18 @@ class RocmImpl(GpuImpl):
         # kernel, scales, zeros all need for column major layout
         return qweight_interleaved.to(device),  zeros_x_scales_fp16.to(device), scales_fp16.to(device)
 
+
+    @property
+    def arch(self) -> str:
+        if self.rocml:
+            try:
+                id = self.get_device_id()
+                device_name = self.rocml.smi_get_device_name(id)
+                # 从设备名称中提取架构信息（假设名称包含 gfx 版本）
+                gfx_match = re.search(r'gfx(\d+)', device_name)
+                if gfx_match:
+                    return gfx_match.group(1)
+            except Exception as e:
+                logging.warn(f"Cannot get ROCm device gfx version: {e}")
+        # 如果无法获取，则使用环境变量或默认值
+        return os.environ.get('SPECIFY_GPU_ARCH', "900")

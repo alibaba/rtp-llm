@@ -9,7 +9,7 @@ import copy
 import shutil
 import time
 from typing import Dict, Optional
-import torch 
+import torch
 from maga_transformer.utils.fuser import fetch_remote_file_to_local, MountRwMode
 from maga_transformer.utils.time_util import timer_wrapper
 from maga_transformer.utils.weight_type import get_weight_type_from_env
@@ -17,7 +17,7 @@ from maga_transformer.distribute.worker_info import ParallelInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory import ModelFactory
 from maga_transformer.models.base_model import ModelConfig
-from maga_transformer.tools.api.model_basic_info_analyzer import parse_ft_model_type
+from maga_transformer.tools.api.model_basic_info_analyzer import parse_ft_model_type, parse_model_basic_info
 from safetensors import safe_open
 
 
@@ -25,6 +25,16 @@ CUR_PATH: str = os.path.dirname(os.path.abspath(__file__))
 
 class WeightConverter:
     def __init__(self, model_path: str, model_type: Optional[str], env_params: Dict[str,str]) -> None:
+        self.model_basic_info = parse_model_basic_info(model_path, {})
+        if self.model_basic_info is not None and not model_type:
+            self.model_type = self.model_basic_info.ft_model_type
+        elif model_type:
+            self.model_type = model_type
+        else:
+            logging.error(f"not set model_type and cannot get model_type from {model_path}")
+            raise RuntimeError("model_type is None")
+
+
         self.model_path: str | None = fetch_remote_file_to_local(model_path)
         self.env_params = env_params
 
@@ -37,29 +47,41 @@ class WeightConverter:
 
 
     def convert(self,  output_dir_base: str):
-        tp_size = int(self.env_params.get("TP_SIZE", "1"))
         output_dir_base = fetch_remote_file_to_local(output_dir_base, MountRwMode.RWMODE_RW)
-        num_gpus = self.get_number_of_gpus()
         # 确定并发进程数，不超过tp_size
-        pool_size = min(num_gpus, tp_size)
+        pool_size = self._estimate_convert_parallel_num()
         if pool_size > 1:
             ctx = multiprocessing.get_context('spawn')
             with ctx.Pool(processes=pool_size) as pool:
                 # 准备参数列表
-                args_list = [(world_rank, output_dir_base) for world_rank in range(tp_size)]
+                args_list = [(world_rank, output_dir_base) for world_rank in range(self.tp_size)]
                 # 使用starmap并行执行_convert方法
                 pool.starmap(self._convert, args_list)
         else:
-            for world_rank in range(tp_size):
+            for world_rank in range(self.tp_size):
                 self._convert(world_rank, output_dir_base)
         # copy other files:
         self._save_converted(self.model_path, output_dir_base)
 
         return 0
 
+    @property
+    def tp_size(self):
+        return int(self.env_params.get("TP_SIZE", "1"))
+
     @staticmethod
-    def get_number_of_gpus():
-        return torch.cuda.device_count()
+    def get_free_mem_MB():
+        import psutil
+        memory_info = psutil.virtual_memory()
+        free_memory = memory_info.free/1024/1024/1024
+        return free_memory
+
+    def _estimate_convert_parallel_num(self):
+        free_mb = self.get_free_mem_MB() * 0.8
+        if self.model_basic_info.model_size:
+            model_size_mb = self.model_basic_info.model_size/1024/1024
+            return min(free_mb / model_size_mb, self.tp_size)
+        return 1
 
     @timer_wrapper('convert 1 tp')
     def _convert(self, world_rank: int, output_dir_base: str):

@@ -90,7 +90,7 @@ def _load_as_hf_style(model_path, ft_model_type, env_params) -> ModelBasicInfo:
     #             config_dict = json.load(f)
     #     else:
     #         config_dict = {}
-    
+
     methods = [
         lambda: AutoConfig.from_pretrained(
             os.path.dirname(config_file), trust_remote_code=True
@@ -182,7 +182,7 @@ def _load_as_ft_style(model_path, is_from_hf, ft_model_type, env_params) -> Mode
             quant_method = "pertensor_quant"
         elif config.quant_algo.isWeightOnlyPerCol():
             quant_method = "weight_only_per_col"
-        
+
         quant_config = QuantConfig(
             weight_bits = config.quant_algo.getWeightBits(),
             quant_algo = quant_method,
@@ -215,7 +215,7 @@ def _load_as_ft_style(model_path, is_from_hf, ft_model_type, env_params) -> Mode
         quant_config=quant_config
     )
 
-def _analyze_model_basic_info(model_path, env_params=dict({}), ft_model_type=None):
+def parse_model_basic_info(model_path, env_params=dict({}), ft_model_type=None):
     is_from_hf = HfStyleModelInfo.is_from_hf(model_path)
     model_path = model_path if is_from_hf else fetch_remote_file_to_local(model_path)
     ft_model_type = _analyze_model_type(model_path).get("ft_model_type", None) if not ft_model_type else ft_model_type

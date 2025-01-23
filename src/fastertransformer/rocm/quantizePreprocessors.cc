@@ -108,9 +108,8 @@ LayoutDetails getLayoutDetailsForArch(QuantType quant_type)
     return details;
 }
 
-LayoutDetails getLayoutDetailsForTransform(QuantType quant_type)
+LayoutDetails getLayoutDetailsForTransform(QuantType quant_type, const int arch)
 {
-    const int arch = fastertransformer::get_sm();
 
     if (arch >= 70 && arch < 75)
     {
@@ -511,10 +510,10 @@ void interleave_column_major_tensor(int8_t* interleaved_quantized_tensor, const 
 }
 
 void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, const int8_t* row_major_quantized_weight,
-    const std::vector<size_t>& shape, QuantType quant_type)
+    const std::vector<size_t>& shape, QuantType quant_type, const int arch)
 {
     // TODO : feifei
-    // LayoutDetails details = getLayoutDetailsForTransform(quant_type);
+    // LayoutDetails details = getLayoutDetailsForTransform(quant_type, arch);
     LayoutDetails details = {};
     details.layoutB = LayoutDetails::Layout::ROW_MAJOR;
     details.rows_per_column_tile = 1;
@@ -596,7 +595,7 @@ Outputs
 
 template <typename ComputeType, typename WeightType>
 void symmetric_quantize(int8_t* processed_quantized_weight, int8_t* unprocessed_quantized_weight,
-    ComputeType* scale_ptr, const WeightType* input_weight_ptr, const std::vector<size_t>& shape, QuantType quant_type)
+    ComputeType* scale_ptr, const WeightType* input_weight_ptr, const std::vector<size_t>& shape, QuantType quant_type, const int arch)
 {
     FT_CHECK_WITH_INFO(processed_quantized_weight, "Processed quantized tensor is NULL");
     FT_CHECK_WITH_INFO(scale_ptr, "Scale output pointer is NULL");
@@ -697,48 +696,48 @@ void symmetric_quantize(int8_t* processed_quantized_weight, int8_t* unprocessed_
         }
     }
 
-    preprocess_weights_for_mixed_gemm(processed_quantized_weight, unprocessed_quantized_weight, shape, quant_type);
+    preprocess_weights_for_mixed_gemm(processed_quantized_weight, unprocessed_quantized_weight, shape, quant_type, arch);
 }
 
 template void symmetric_quantize<half, float>(
-    int8_t*, int8_t*, half*, const float*, const std::vector<size_t>&, QuantType);
+    int8_t*, int8_t*, half*, const float*, const std::vector<size_t>&, QuantType, const int);
 
 template void symmetric_quantize<half, half>(
-    int8_t*, int8_t*, half*, const half*, const std::vector<size_t>&, QuantType);
+    int8_t*, int8_t*, half*, const half*, const std::vector<size_t>&, QuantType, const int);
 
 #ifdef ENABLE_BF16
 template void symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(
-    int8_t*, int8_t*, __nv_bfloat16*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType);
+    int8_t*, int8_t*, __nv_bfloat16*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType, const int);
 
 template void symmetric_quantize<__nv_bfloat16, float>(
-    int8_t*, int8_t*, __nv_bfloat16*, const float*, const std::vector<size_t>&, QuantType);
+    int8_t*, int8_t*, __nv_bfloat16*, const float*, const std::vector<size_t>&, QuantType, const int);
 #endif
 
 template <typename ComputeType, typename WeightType>
 void symmetric_quantize(int8_t* processed_quantized_weight, ComputeType* scale_ptr, const WeightType* input_weight_ptr,
-    const std::vector<size_t>& shape, QuantType quant_type)
+    const std::vector<size_t>& shape, QuantType quant_type, const int arch)
 {
-    symmetric_quantize(processed_quantized_weight, nullptr, scale_ptr, input_weight_ptr, shape, quant_type);
+    symmetric_quantize(processed_quantized_weight, nullptr, scale_ptr, input_weight_ptr, shape, quant_type, arch);
 }
 
-template void symmetric_quantize<float, float>(int8_t*, float*, const float*, const std::vector<size_t>&, QuantType);
+template void symmetric_quantize<float, float>(int8_t*, float*, const float*, const std::vector<size_t>&, QuantType, const int);
 
-template void symmetric_quantize<half, float>(int8_t*, half*, const float*, const std::vector<size_t>&, QuantType);
+template void symmetric_quantize<half, float>(int8_t*, half*, const float*, const std::vector<size_t>&, QuantType, const int);
 
-template void symmetric_quantize<half, half>(int8_t*, half*, const half*, const std::vector<size_t>&, QuantType);
+template void symmetric_quantize<half, half>(int8_t*, half*, const half*, const std::vector<size_t>&, QuantType, const int);
 
 #ifdef ENABLE_BF16
 template void symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(
-    int8_t*, __nv_bfloat16*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType);
+    int8_t*, __nv_bfloat16*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType, const int);
 
 template void symmetric_quantize<__nv_bfloat16, half>(
-    int8_t*, __nv_bfloat16*, const half*, const std::vector<size_t>&, QuantType);
+    int8_t*, __nv_bfloat16*, const half*, const std::vector<size_t>&, QuantType, const int);
 
 template void symmetric_quantize<half, __nv_bfloat16>(
-    int8_t*, half*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType);
+    int8_t*, half*, const __nv_bfloat16*, const std::vector<size_t>&, QuantType, const int);
 
 template void symmetric_quantize<__nv_bfloat16, float>(
-    int8_t*, __nv_bfloat16*, const float*, const std::vector<size_t>&, QuantType);
+    int8_t*, __nv_bfloat16*, const float*, const std::vector<size_t>&, QuantType, const int);
 #endif
 } // namespace cutlass_kernels
 } // namespace tensorrt_llm

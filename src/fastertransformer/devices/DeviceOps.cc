@@ -154,11 +154,11 @@ torch::Tensor DeviceOps::packInt8TensorToPackedInt4(torch::Tensor weight) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-torch::Tensor DeviceOps::preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type) {
+torch::Tensor DeviceOps::preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-std::vector<torch::Tensor> DeviceOps::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type) {
+std::vector<torch::Tensor> DeviceOps::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

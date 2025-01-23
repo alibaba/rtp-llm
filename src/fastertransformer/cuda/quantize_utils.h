@@ -25,7 +25,8 @@ inline void check_quant_type_allowed(torch::ScalarType quant_type) {
 
 inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight,
                                                             torch::ScalarType quant_type,
-                                                            bool return_unprocessed_quantized_tensor)
+                                                            bool return_unprocessed_quantized_tensor,
+                                                            const int arch)
 {
     CHECK_CPU(weight);
     CHECK_CONTIGUOUS(weight);
@@ -75,7 +76,8 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
                                              torch_ext::get_ptr<float>(scales),
                                              torch_ext::get_ptr<const float>(weight),
                                              {num_experts, num_rows, num_cols},
-                                             ft_quant_type);
+                                             ft_quant_type,
+                                             arch);
     }
     else if (weight.scalar_type() == at::ScalarType::Half) {
         trt_cutlass::symmetric_quantize<half, half>(processed_quantized_weight_ptr,
@@ -83,7 +85,8 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
                                            torch_ext::get_ptr<half>(scales),
                                            torch_ext::get_ptr<const half>(weight),
                                            {num_experts, num_rows, num_cols},
-                                           ft_quant_type);
+                                           ft_quant_type,
+                                           arch);
     }
     else if (weight.scalar_type() == at::ScalarType::BFloat16) {
         trt_cutlass::symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(processed_quantized_weight_ptr,
@@ -91,7 +94,8 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
                                                              torch_ext::get_ptr<__nv_bfloat16>(scales),
                                                              torch_ext::get_ptr<const __nv_bfloat16>(weight),
                                                              {num_experts, num_rows, num_cols},
-                                                             ft_quant_type);
+                                                             ft_quant_type,
+                                                             arch);
     }
     else {
         TORCH_CHECK(false, "Invalid datatype. Weight must be BF16/FP16");
