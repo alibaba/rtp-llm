@@ -70,6 +70,7 @@ def mla_pad_t(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_he
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
+    has_e_score_correction_bias = False
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         super().__init__(config, tp_size, tp_rank)
@@ -77,6 +78,10 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     def _process_meta(self, meta_dict, weight_keys):
         if "model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
+        for layer_id in range(self._num_layers):
+            if f"model.layers.{layer_id}.mlp.gate.e_score_correction_bias" in weight_keys:
+                self.has_e_score_correction_bias = True
+                break
 
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = [
@@ -125,7 +130,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
 
         if layer_id in self.moe_layer_index_:
-            return [
+            layer_weights = [
                 WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], transpose),
                 WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.gate_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
                 WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
@@ -136,6 +141,9 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in range(self.expert_num_)] + \
                                      [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
             ]
+            if self.has_e_score_correction_bias:
+                layer_weights.append(WeightInfo(W.e_score_correction_b, [CkptWeightInfo('model.layers.{i}.mlp.gate.e_score_correction_bias', identity)], identity))
+            return layer_weights
         else:
             return [
                 WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
@@ -223,6 +231,15 @@ class DeepSeekV2(BaseModel):
             config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
             # MOE config
+            if "scoring_func" in config_json:
+                scoring_func = config_json['scoring_func']
+                if scoring_func == "softmax":
+                    config.scoring_func = 0
+                elif scoring_func == "sigmoid":
+                    config.scoring_func = 1
+                else:
+                    raise ValueError(f"Unknown scoring_func: {scoring_func}")
+
             config.routed_scaling_factor = config_json['routed_scaling_factor']
             config.moe_k = config_json['num_experts_per_tok']
             config.expert_num = config_json['n_routed_experts']
@@ -232,7 +249,7 @@ class DeepSeekV2(BaseModel):
             config.inter_size = n_shared_experts * config.moe_inter_padding_size
 
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
-            config.has_moe_norm = False
+            config.has_moe_norm = config_json.get("norm_topk_prob", False)
             config.moe_style = 2 # shared + expert
 
             moe_step = config_json['moe_layer_freq']
@@ -253,3 +270,4 @@ class DeepSeekV2(BaseModel):
         return DeepSeekV2Weight
 
 register_model('deepseek2', DeepSeekV2, ["DeepseekV2ForCausalLM"])
+register_model('deepseek3', DeepSeekV2, ["DeepseekV3ForMaskedLM"])

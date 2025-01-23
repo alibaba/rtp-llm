@@ -484,6 +484,8 @@ struct MoeConfigs {
     size_t  tp_size                = 1;
     size_t  dp_rank                = 0;
     size_t  dp_size                = 1;
+
+    int scoring_func = 0;  // 0: softmax, 1: sigmoid
 };
 
 struct FfnConfigs {

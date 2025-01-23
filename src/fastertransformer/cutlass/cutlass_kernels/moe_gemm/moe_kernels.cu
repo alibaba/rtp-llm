@@ -210,6 +210,103 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const* inputs_after_softmax
     }
 }
 
+// moeTopK based on input with bias
+template<int TPB>
+__launch_bounds__(TPB) __global__
+void moeTopK(float const*                    inputs_after_softmax,
+             float const*                    input_with_bias,
+             bool const*                     finished,
+             float*                          output,
+             int*                            indices,
+             int*                            source_rows,
+             int const                       num_experts,
+             int const                       k,
+             int const                       startk,
+             int const                       endk,
+             int const                       start_expert,
+             int const                       end_expert,
+             MOEExpertScaleNormalizationMode norm_mode)
+{
+    using cub_kvp = cub::KeyValuePair<int, float>;
+    using BlockReduce = cub::BlockReduce<cub_kvp, TPB>;
+    __shared__ typename BlockReduce::TempStorage tmpStorage;
+
+    cub_kvp thread_kvp;
+    cub::ArgMax arg_max;
+
+    int64_t const num_rows = gridDim.x;
+    int64_t const block_row = blockIdx.x;
+
+    float renorm_value = 0.0f;
+    bool const row_is_active = finished ? !finished[block_row] : true;
+    int64_t const thread_read_offset = blockIdx.x * num_experts;
+    for (int k_idx = startk; k_idx < endk; ++k_idx)
+    {
+        thread_kvp.key = 0;
+        thread_kvp.value = -1.f; // This is OK because inputs are probabilities
+
+        cub_kvp inp_kvp;
+        for (int expert = threadIdx.x; expert < num_experts; expert += TPB)
+        {
+            int64_t const idx = thread_read_offset + expert;
+            inp_kvp.key = expert;
+            inp_kvp.value = input_with_bias[idx];
+
+            for (int prior_k = startk; prior_k < k_idx; ++prior_k)
+            {
+                int prior_winning_expert = indices[k * block_row + prior_k];
+                // Adjust the selected index to correct for the expert parallel transformation
+                prior_winning_expert = prior_winning_expert >= num_experts ? prior_winning_expert - num_experts
+                                                                           : prior_winning_expert + start_expert;
+                if (prior_winning_expert == expert)
+                {
+                    inp_kvp = thread_kvp;
+                }
+            }
+
+            thread_kvp = arg_max(inp_kvp, thread_kvp);
+        }
+
+        cub_kvp const result_kvp = BlockReduce(tmpStorage).Reduce(thread_kvp, arg_max);
+        if (threadIdx.x == 0)
+        {
+            // Ignore experts the node isn't responsible for with expert parallelism
+            int const expert = result_kvp.key;
+            int const origin_idx = thread_read_offset + expert;
+            bool const node_uses_expert = expert >= start_expert && expert < end_expert;
+            bool const should_process_row = row_is_active && node_uses_expert;
+
+            int64_t const idx = k * block_row + k_idx;
+            output[idx] = inputs_after_softmax[origin_idx];
+            indices[idx] = should_process_row ? (expert - start_expert) : (num_experts + expert);
+            assert(indices[idx] >= 0);
+            source_rows[idx] = k_idx * num_rows + block_row;
+
+            if (norm_mode == MOEExpertScaleNormalizationMode::RENORMALIZE)
+            {
+                renorm_value += inputs_after_softmax[origin_idx];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (norm_mode == MOEExpertScaleNormalizationMode::RENORMALIZE)
+    {
+        renorm_value += 1e-20;
+
+        if (threadIdx.x == 0 && renorm_value != 0.f)
+        {
+            assert(startk == 0 && endk == k);
+            renorm_value = 1 / renorm_value;
+            for (int k_idx = 0; k_idx < k; k_idx++)
+            {
+                int64_t const idx = k * block_row + k_idx;
+                output[idx] *= renorm_value;
+            }
+        }
+    }
+}
+
 // ====================== TopK softmax things ===============================
 
 /*
@@ -548,6 +645,86 @@ void topkGatingSoftmaxKernelLauncher(float const* input, float* output, float* s
     }
 }
 
+template <int TPB>
+void topkKernelLauncherHelper(float const* input, float const* input_with_bias, float* output, float* softmax_temp_output, int* indices,
+    int* source_row, int64_t const num_rows, int const num_experts, int const k, int const startk, int const endk,
+    int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
+{
+    moeTopK<TPB><<<num_rows, TPB, 0, stream>>>(input, input_with_bias, nullptr, output, indices, source_row,
+                    num_experts, k, startk, endk, start_expert, end_expert, norm_mode);
+}
+
+void topkKernelLauncher(float const* input, float const* input_with_bias, float* output, float* softmax_temp_output, int* indices,
+    int* source_row, int64_t const num_rows, int const num_experts, int const k, int const startk, int const endk,
+    int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
+{
+    static constexpr int WARPS_PER_TB = 4;
+
+    switch (num_experts)
+    {
+    case 1:
+    {
+        topkKernelLauncherHelper<1>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 2:
+    {
+        topkKernelLauncherHelper<4>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 4:
+    {
+        topkKernelLauncherHelper<4>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 8:
+    {
+        topkKernelLauncherHelper<8>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 16:
+    {
+        topkKernelLauncherHelper<16>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 32:
+    {
+        topkKernelLauncherHelper<32>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 64:
+    {
+        topkKernelLauncherHelper<64>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 128:
+    {
+        topkKernelLauncherHelper<128>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    case 256:
+    {
+        topkKernelLauncherHelper<256>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+        break;
+    }
+    default:
+    {
+        static constexpr int TPB = 256;
+        topkKernelLauncherHelper<256>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+            num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
+    }
+    }
+}
+
 __global__ void sparseMixerMask(float const* input, float* output, int const* indices, int k_idx, int k, int num_tokens,
     int num_experts, int start_expert, float epsilon)
 {
@@ -605,21 +782,29 @@ void sparseMixerTopkSoftmax(float const* input, float* output, float* mixer_temp
     }
 }
 
-void selectExpertsForTokens(float const* input, float* output, float* mixer_temp_output, float* softmax_temp_output,
+void selectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
     int* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
     int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
 {
-    if (norm_mode == MOEExpertScaleNormalizationMode::SPARSE_MIXER)
-    {
-        TLLM_CHECK_WITH_INFO(mixer_temp_output, "Sparse mixer output is null when running sparse mixer");
-        sparseMixerTopkSoftmax(input, output, mixer_temp_output, softmax_temp_output, indices, source_row, num_rows,
-            num_experts, k, start_expert, end_expert, mixer_epsilon, stream);
+    if (input == input_with_bias) {
+        if (norm_mode == MOEExpertScaleNormalizationMode::SPARSE_MIXER)
+        {
+            TLLM_CHECK_WITH_INFO(mixer_temp_output, "Sparse mixer output is null when running sparse mixer");
+            sparseMixerTopkSoftmax(input, output, mixer_temp_output, softmax_temp_output, indices, source_row, num_rows,
+                num_experts, k, start_expert, end_expert, mixer_epsilon, stream);
+        }
+        else
+        {
+            topkGatingSoftmaxKernelLauncher(input, output, softmax_temp_output, indices, source_row, num_rows, num_experts,
+                k, 0, k, start_expert, end_expert, norm_mode, stream);
+        }
     }
     else
     {
-        topkGatingSoftmaxKernelLauncher(input, output, softmax_temp_output, indices, source_row, num_rows, num_experts,
-            k, 0, k, start_expert, end_expert, norm_mode, stream);
+        topkKernelLauncher(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows, num_experts, k, 0, k,
+            start_expert, end_expert, norm_mode, stream);
     }
+
 }
 
 // ========================== CUB Sorting things ====================================

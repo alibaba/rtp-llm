@@ -94,7 +94,7 @@ __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices, i
     return target_location + 1;
 }
 
-void selectExpertsForTokens(float const* input, float* output, float* mixer_temp_output, float* softmax_temp_output,
+void selectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
     int* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
     int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream);
 
@@ -1051,18 +1051,40 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     sync_check_cuda_error();
 }
 
-template <class T, class WeightType, cutlass::WeightOnlyQuantOp QuantOp, class OutputType, class ScaleBiasType,
-    class Enable>
+template<class T,
+         class WeightType,
+         cutlass::WeightOnlyQuantOp QuantOp,
+         class OutputType,
+         class ScaleBiasType,
+         class Enable>
 void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enable>::runMoe(
-    void const* input_activations_void, float const* gating_output, void const* fc1_expert_weights_void,
-    void const* fc1_expert_biases_void, ActivationType fc1_activation_type, void const* fc2_expert_weights_void,
-    void const* fc2_expert_biases_void, QuantParams quant_params, int64_t const num_rows, int64_t const hidden_size,
-    int64_t const inter_size, int const num_experts, int const k, char* workspace_ptr, void* final_output_void,
-    bool const* finished, int64_t const active_rows, void* token_topk_final_scales_void,
-    int* expanded_source_row_to_expanded_dest_row, int* expert_for_source_row, float sparse_mixer_epsilon,
-    MOEParallelismConfig parallelism_config, MOEExpertScaleNormalizationMode normalization_mode, bool use_lora,
-    LoraParams& lora_params, cudaStream_t stream)
-{
+    void const*                     input_activations_void,
+    float const*                    gating_output,
+    float const*                    gating_output_with_bias,
+    void const*                     fc1_expert_weights_void,
+    void const*                     fc1_expert_biases_void,
+    ActivationType                  fc1_activation_type,
+    void const*                     fc2_expert_weights_void,
+    void const*                     fc2_expert_biases_void,
+    QuantParams                     quant_params,
+    int64_t const                   num_rows,
+    int64_t const                   hidden_size,
+    int64_t const                   inter_size,
+    int const                       num_experts,
+    int const                       k,
+    char*                           workspace_ptr,
+    void*                           final_output_void,
+    bool const*                     finished,
+    int64_t const                   active_rows,
+    void*                           token_topk_final_scales_void,
+    int*                            expanded_source_row_to_expanded_dest_row,
+    int*                            expert_for_source_row,
+    float                           sparse_mixer_epsilon,
+    MOEParallelismConfig            parallelism_config,
+    MOEExpertScaleNormalizationMode normalization_mode,
+    bool                            use_lora,
+    LoraParams&                     lora_params,
+    cudaStream_t                    stream) {
     static constexpr bool int_scales_required
         = std::is_same<WeightType, uint8_t>::value || std::is_same<WeightType, cutlass::uint4b_t>::value;
     static constexpr bool fp8_scales_required
@@ -1165,7 +1187,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     int const start_expert = num_experts_per_node * parallelism_config.ep_rank;
     int const end_expert = start_expert + num_experts_per_node;
 
-    selectExpertsForTokens(gating_output, token_topk_unpermuted_scales, sparse_mixer_out_, softmax_out_,
+    selectExpertsForTokens(gating_output, gating_output_with_bias, token_topk_unpermuted_scales, sparse_mixer_out_, softmax_out_,
         expert_for_source_row, source_rows_, num_rows, num_experts, k, start_expert, end_expert, sparse_mixer_epsilon,
         normalization_mode, stream);
 

@@ -92,6 +92,8 @@ static const std::string moe_b1   = "partial_moe_weights.intermediate_weight.bia
 static const std::string moe_w2   = "partial_moe_weights.intermediate_weight2.kernel";
 static const std::string moe_b2   = "partial_moe_weights.intermediate_weight2.bias";
 static const std::string moe_gate = "partial_moe_weights.gate.kernel";
+static const std::string moe_e_score_correction_b = "partial_moe_weights.e_score_correction_bias";
+
 
 static const std::string attn_qkv_z = "self_attention_weights.query_weight.zero";
 static const std::string attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale";

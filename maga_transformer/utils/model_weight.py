@@ -775,6 +775,8 @@ class W:
         moe_s2: sp_moe_neg1,
         moe_b2: sp_moe_neg1,
 
+        e_score_correction_b: sp_id,
+
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
         positional_embedding: sp_neg1,

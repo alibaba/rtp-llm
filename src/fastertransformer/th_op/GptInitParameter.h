@@ -121,6 +121,8 @@ public:
     bool                 moe_normalize_expert_scale_ = false;
     // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     int64_t              moe_style_                  = 0;
+    // 0 for softmax; 1 for sigmoid
+    int64_t              scoring_func_               = 0;
     std::vector<int64_t> moe_layer_index_            = {};
 
     bool has_positional_encoding_    = false;

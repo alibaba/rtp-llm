@@ -224,6 +224,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(moe_normalize_expert_scale, moe_normalize_expert_scale_) \
     DEF_PROPERTY(moe_style, moe_style_)                                 \
     DEF_PROPERTY(moe_layer_index, moe_layer_index_)                     \
+    DEF_PROPERTY(scoring_func, scoring_func_)                           \
     DEF_PROPERTY(layernorm_eps, layernorm_eps_)                         \
     /* In python, the following types use strings for branch condition */ \
     /* Everytime type changes, corresponding set type function should  */ \

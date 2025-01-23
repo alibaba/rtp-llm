@@ -111,7 +111,7 @@ MOEParallelismConfig MixtureOfExpertsPlugin::getParallelismConfig() const
     // return {};
 }
 
-int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, void const* fc1_expert_weight,
+int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, float const* moe_gates_with_bias, void const* fc1_expert_weight,
     void const* fc1_quant_scale, void const* fc1_quant_zeros, void const* fc1_expert_bias,
     void const* fc2_expert_weight, void const* fc2_quant_scale, void const* fc2_quant_zeros,
     void const* fc2_expert_bias, int const num_rows, void* workspace, void* final_output, void* fc2_result,
@@ -124,7 +124,7 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, v
 
     mMOERunner->setTactic(num_rows, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, mActivationType, stream);
     mMOERunner->runMoe(input, // const void*
-        moe_gates, fc1_expert_weight, fc1_expert_bias, mActivationType, fc2_expert_weight, fc2_expert_bias,
+        moe_gates, moe_gates_with_bias, fc1_expert_weight, fc1_expert_bias, mActivationType, fc2_expert_weight, fc2_expert_bias,
         QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize), num_rows,
         mExpertHiddenSize, mExpertInterSize, mNumExperts, mK,
         // mNormalizeExpertScale,

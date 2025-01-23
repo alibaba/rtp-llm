@@ -125,6 +125,7 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
     ffn_weights.moe_gate_weight   = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1, W::moe_z1);
     ffn_weights.moe_down_weight   = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2, W::moe_z2);
+    ffn_weights.e_score_correction_bias = mayFindBuffer(map, W::moe_e_score_correction_b);
 
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
     ffn_weights.act_scale       = mayFindBuffer(map, W::ffn_act_s);

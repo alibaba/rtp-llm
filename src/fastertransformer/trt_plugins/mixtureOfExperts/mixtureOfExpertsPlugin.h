@@ -56,7 +56,7 @@ public:
     ~MixtureOfExpertsPlugin() = default;
 
     size_t getWorkspaceSize(int num_tokens);
-    int enqueue(void const* input, float const* moe_gates, void const* fc1_expert_weight, void const* fc1_quant_scale,
+    int enqueue(void const* input, float const* moe_gates, float const* moe_gates_with_bias, void const* fc1_expert_weight, void const* fc1_quant_scale,
         void const* fc1_quant_zero, void const* fc1_expert_bias, void const* fc2_expert_weight,
         void const* fc2_quant_scale, void const* fc2_quant_zero, void const* fc2_expert_bias, int const num_rows,
         void* workspace, void* final_output, void* fc2_result, bool const* finished, void* expert_scale,

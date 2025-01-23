@@ -221,15 +221,33 @@ public:
         = 0;
     virtual std::vector<cutlass_extensions::CutlassGemmConfig> getTactics() = 0;
 
-    virtual void runMoe(void const* input_activations, float const* gating_output, void const* fc1_expert_weights,
-        void const* fc1_expert_biases, ActivationType fc1_activation_type, void const* fc2_expert_weights,
-        void const* fc2_expert_biases, QuantParams quant_params, int64_t const num_rows, int64_t const hidden_size,
-        int64_t const inter_size, int const num_experts, int const k, char* workspace_ptr, void* final_output,
-        bool const* finished, int64_t const active_rows, void* token_topk_unpermuted_scales,
-        int* expanded_source_row_to_expanded_dest_row, int* expert_for_source_row, float sparse_mixer_epsilon,
-        MOEParallelismConfig parallelism_config, MOEExpertScaleNormalizationMode normalization_mode, bool use_lora,
-        LoraParams& lora_params, cudaStream_t stream)
-        = 0;
+    virtual void runMoe(void const*                     input_activations,
+                        float const*                    gating_output,
+                        float const*                    gating_output_with_bias,
+                        void const*                     fc1_expert_weights,
+                        void const*                     fc1_expert_biases,
+                        ActivationType                  fc1_activation_type,
+                        void const*                     fc2_expert_weights,
+                        void const*                     fc2_expert_biases,
+                        QuantParams                     quant_params,
+                        int64_t const                   num_rows,
+                        int64_t const                   hidden_size,
+                        int64_t const                   inter_size,
+                        int const                       num_experts,
+                        int const                       k,
+                        char*                           workspace_ptr,
+                        void*                           final_output,
+                        bool const*                     finished,
+                        int64_t const                   active_rows,
+                        void*                           token_topk_unpermuted_scales,
+                        int*                            expanded_source_row_to_expanded_dest_row,
+                        int*                            expert_for_source_row,
+                        float                           sparse_mixer_epsilon,
+                        MOEParallelismConfig            parallelism_config,
+                        MOEExpertScaleNormalizationMode normalization_mode,
+                        bool                            use_lora,
+                        LoraParams&                     lora_params,
+                        cudaStream_t                    stream) = 0;
 
     // Aliases for profiling the gemms
     virtual void gemm1(void const* const input, void* const output, void* const intermediate_result,
@@ -329,14 +347,33 @@ public:
         return RunnerType::getConfigs(sm);
     }
 
-    void runMoe(void const* input_activations, float const* gating_output, void const* fc1_expert_weights,
-        void const* fc1_expert_biases, ActivationType fc1_activation_type, void const* fc2_expert_weights,
-        void const* fc2_expert_biases, QuantParams quant_params, int64_t const num_rows, int64_t const hidden_size,
-        int64_t const inter_size, int const num_experts, int const k, char* workspace_ptr, void* final_output,
-        bool const* finished, int64_t const active_rows, void* token_topk_unpermuted_scales,
-        int* expanded_source_row_to_expanded_dest_row, int* expert_for_source_row, float sparse_mixer_epsilon,
-        MOEParallelismConfig parallelism_config, MOEExpertScaleNormalizationMode normalization_mode, bool use_lora,
-        LoraParams& lora_params, cudaStream_t stream) override;
+    void runMoe(void const*                     input_activations,
+                float const*                    gating_output,
+                float const*                    gating_output_with_bias,
+                void const*                     fc1_expert_weights,
+                void const*                     fc1_expert_biases,
+                ActivationType                  fc1_activation_type,
+                void const*                     fc2_expert_weights,
+                void const*                     fc2_expert_biases,
+                QuantParams                     quant_params,
+                int64_t const                   num_rows,
+                int64_t const                   hidden_size,
+                int64_t const                   inter_size,
+                int const                       num_experts,
+                int const                       k,
+                char*                           workspace_ptr,
+                void*                           final_output,
+                bool const*                     finished,
+                int64_t const                   active_rows,
+                void*                           token_topk_unpermuted_scales,
+                int*                            expanded_source_row_to_expanded_dest_row,
+                int*                            expert_for_source_row,
+                float                           sparse_mixer_epsilon,
+                MOEParallelismConfig            parallelism_config,
+                MOEExpertScaleNormalizationMode normalization_mode,
+                bool                            use_lora,
+                LoraParams&                     lora_params,
+                cudaStream_t                    stream) override;
 
     // We make these GEMM1 & GEMM2 static because they need to be stateless for the profiler to work
     static void gemm1(MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>& gemm_runner,

@@ -1,6 +1,9 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/cuda/Dispatch.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 
@@ -18,7 +21,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto hidden_dim = hidden.shape()[1];
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k = moe_conf.top_k;
-    const auto moe_inter_size = moe_conf.moe_inter_padding_size; 
+    const auto moe_inter_size = moe_conf.moe_inter_padding_size;
     const auto normalize_expert_scale = moe_conf.normalize_expert_scale;
     // TODO group_size
     auto group_size = 0;
@@ -39,8 +42,6 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel,
                             nullopt, nullptr, DataType::TYPE_FP32});
 
-
-
     const auto fc2_result = allocateBuffer({type, {token_num, top_k, hidden_dim}}, {"moe_fc2_result"});
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expert_scale"});
     const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expand_src_to_dst"});
@@ -49,6 +50,25 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     auto normalization_mode = moe_conf.has_moe_norm
                             ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE
                             : tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+
+    if (moe_conf.scoring_func == 1) {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            DataType::TYPE_FP32, invokeSigmoid,
+            gate->data(), gate->size(), 1.0f, stream_
+        );
+    }
+
+    auto gate_with_bias = gate;
+
+    if (params.weights.e_score_correction_bias) {
+        torch::Tensor gate_tensor = Buffer2torchTensor(gate, false);
+        torch::Tensor e_score_correction_bias_tensor = Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
+        auto gate_tensor_with_bias = gate_tensor.add(e_score_correction_bias_tensor);
+        gate_with_bias = torchTensor2Buffer(gate_tensor_with_bias);
+        printBufferData(*gate_with_bias, "gate_with_bias");
+    }
+
+    printBufferData(*gate, "MOE gate");
 
     moe_plugin_->init(num_expert,
                       top_k,
@@ -69,6 +89,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     moe_plugin_->enqueue(
         hidden.data(),
         gate->data<float>(),
+        gate_with_bias->data<float>(),
         weights.moe_gate_weight->kernel->data(),
         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
         BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),

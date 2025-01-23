@@ -110,6 +110,7 @@ struct FfnLayerWeights {
     // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
     std::shared_ptr<FfnLayerWeights>        shared_expert;
     std::shared_ptr<const DenseWeights>     shared_expert_gate;
+    ConstBufferPtr                          e_score_correction_bias; // noaux_tc
 };
 
 struct LayerWeights {
