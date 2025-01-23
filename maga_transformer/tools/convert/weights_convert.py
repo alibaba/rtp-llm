@@ -12,7 +12,7 @@ from typing import Dict, Optional
 import torch
 from maga_transformer.utils.fuser import fetch_remote_file_to_local, MountRwMode
 from maga_transformer.utils.time_util import timer_wrapper
-from maga_transformer.utils.weight_type import get_weight_type_from_env
+from maga_transformer.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
 from maga_transformer.distribute.worker_info import ParallelInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory import ModelFactory
@@ -92,6 +92,7 @@ class WeightConverter:
             model_type=self.model_type,
             ckpt_path=self.model_path,
             weight_type=get_weight_type_from_env(env_params),
+            act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
             ptuning_path=None,
             max_seq_len=0,
             tokenizer_path=self.model_path

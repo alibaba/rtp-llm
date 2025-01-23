@@ -424,7 +424,7 @@ py_wheel(
     name = "maga_transformer_whl",
     distribution = "maga_transformer",
     python_tag = "py3",
-    tags = ["manual", "local"],
+    tags = ["manual", "local", "no-remote"],
     version = "0.2.0",
     deps = [
         ":maga_transformer_package",
