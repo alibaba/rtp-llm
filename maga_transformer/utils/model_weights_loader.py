@@ -12,6 +12,7 @@ from itertools import repeat
 from maga_transformer.device import get_current_device
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights
+from maga_transformer.utils.util import check_with_info
 from maga_transformer.lora.lora_weights import LoRAWeights
 from maga_transformer.utils.time_util import timer_wrapper
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -131,9 +132,11 @@ class ModelWeightsLoader:
                 layer_id = int(parts[0])
                 name = ".".join(parts[1:])
                 # 将张量移动到设备，并设置到对应的层
+                check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 weights[layer_id][name] = tensor[0].to(device)
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix):]
+                check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 global_weights[name] = tensor[0].to(device)
         model_weights.weights = weights
         model_weights.global_weights = global_weights
