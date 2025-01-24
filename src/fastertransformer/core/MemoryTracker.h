@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <set>
 #include <shared_mutex>
 #include <mutex>
 
@@ -48,6 +49,7 @@ private:
     size_t total_size_;
     size_t align_size_;
     std::map<void*, MemoryChunk*> chunk_map_;
+    std::set<std::pair<size_t, MemoryChunk*>> free_chunk_;
 };
 
 } // namespace fastertransformer

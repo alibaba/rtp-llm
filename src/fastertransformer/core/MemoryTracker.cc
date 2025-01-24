@@ -14,6 +14,7 @@ MemoryTracker::MemoryTracker(void* ptr, const size_t size, const size_t align_si
     chunk->ptr = ptr;
     chunk->size = size;
     chunk_map_[ptr] = chunk;
+    free_chunk_.insert({size, chunk});
 }
 
 MemoryTracker::~MemoryTracker() {
@@ -25,6 +26,7 @@ MemoryTracker::~MemoryTracker() {
     for (auto& pair : chunk_map_) {
         delete pair.second;
     }
+    free_chunk_.clear();
 }
 
 void* MemoryTracker::allocate(const size_t alloc_size) {
@@ -35,15 +37,11 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
     WriteLock lock(mutex_);
     MemoryChunk* chunk_to_use = nullptr;
     const auto aligned_size = align(alloc_size);
-
     // 1. find the smallest chunk that holds the requested size
-    for (auto& pair : chunk_map_) {
-        MemoryChunk* chunk = pair.second;
-        if ((!chunk->used) && (chunk->size >= aligned_size) && \
-            ((chunk_to_use == nullptr) || (chunk->size < chunk_to_use->size)))
-        {
-            chunk_to_use = chunk;
-        }
+    auto it = free_chunk_.lower_bound({aligned_size, nullptr});
+    if (it != free_chunk_.end()) {
+        chunk_to_use = it->second;
+        free_chunk_.erase(it);
     }
 
     // 2. allocate memory
@@ -60,6 +58,7 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
             new_chunk->size = chunk_size - aligned_size;
             new_chunk->used = false;
             chunk_map_[new_chunk->ptr] = new_chunk;
+            free_chunk_.insert({new_chunk->size, new_chunk});
             return chunk_to_use->ptr;
         }
     }
@@ -85,11 +84,14 @@ void MemoryTracker::deallocate(void* ptr) {
         return;
     }
     chunk_iter->second->used = false;
-
+    MemoryChunk* new_chunk = chunk_iter->second;
     // 2. merge with the next chunk if possible
     auto next_chunk_iter = next(chunk_iter);
     if ((next_chunk_iter != chunk_map_.end()) && (!next_chunk_iter->second->used)) {
         chunk_iter->second->size += next_chunk_iter->second->size;
+        if (!free_chunk_.erase({next_chunk_iter->second->size, next_chunk_iter->second})) {
+            FT_LOG_ERROR("free_chunk erase error, can not found.");
+        }
         delete next_chunk_iter->second;
         chunk_map_.erase(next_chunk_iter);
     }
@@ -97,10 +99,15 @@ void MemoryTracker::deallocate(void* ptr) {
     // 3. merge with the previous chunk if possible
     if ((chunk_iter != chunk_map_.begin()) && (!prev(chunk_iter)->second->used)) {
         auto prev_chunk_iter = prev(chunk_iter);
+        if (!free_chunk_.erase({prev_chunk_iter->second->size, prev_chunk_iter->second})) {
+            FT_LOG_ERROR("free_chunk erase error, can not found.");
+        }
         prev_chunk_iter->second->size += chunk_iter->second->size;
+        new_chunk = prev_chunk_iter->second;
         delete chunk_iter->second;
         chunk_map_.erase(chunk_iter);
     }
+    free_chunk_.insert({new_chunk->size, new_chunk});
 }
 
 vector<MemoryChunk *> MemoryTracker::getAllChunks() const {
