@@ -156,6 +156,28 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     FT_LOG_DEBUG("request:[%ld] get rpc connection done", prefill_context.request_id);
 }
 
+void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
+    auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    input->generate_config->pd_separation = true;
+    input->generate_config->force_disable_sp_run = true;
+    prefill_context.generate_input = input;
+
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+        if (!mm_res.ok()) {
+            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
+            return;
+        }
+
+        auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
+        mutable_request->clear_token_ids();
+        // TODO(xinfei.sxf) optimize copy
+        for (size_t i = 0; i < input->input_ids->size(); i++) {
+            mutable_request->add_token_ids(*input->input_ids->dataWithOffset<int32_t>(i));
+        }
+    }
+}
+
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
@@ -172,6 +194,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
+    // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     alloc_request.set_allocated_input(new_request);
 
@@ -185,19 +208,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] trans query", prefill_context.request_id);
-    auto input                               = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    input->generate_config->pd_separation    = true;
-    input->generate_config->force_disable_sp_run = true;
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        if (!mm_res.ok()) {
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
-            return;
-        }
-    }
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
+    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(),
+        prefill_context.generate_input->generate_config->adapter_name);
     FT_LOG_DEBUG("request:[%ld] trans to stream success", prefill_context.request_id);
-    auto stream = engine_->enqueue(input);
+    auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.stream = stream;
     FT_LOG_DEBUG("request:[%ld] enqueue success", prefill_context.request_id);
 }
@@ -293,6 +307,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
     EXECUTE_STAGE_FUNC(getRpcConnection, prefill_context);
+    EXECUTE_STAGE_FUNC(multimodalProcess, prefill_context);
     EXECUTE_STAGE_FUNC(remoteAllocateResource, prefill_context);
     return grpc::Status::OK;
 }

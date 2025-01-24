@@ -123,9 +123,12 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
 void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
     auto& param = params.common;
     if (param.warmup) {
+        FT_LOG_DEBUG("is warmup, so ignore writeCacheStore");
         return;
     }
     if (!param.pd_separation || param.context_batch_size == 0) {
+        FT_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
+            param.pd_separation, param.context_batch_size);
         return;
     }
 
@@ -143,6 +146,8 @@ void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
     FT_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
                         "context batch size and request id size is not same");
 
+    FT_LOG_DEBUG("write cache store, context_batch_size is %ld", param.context_batch_size);
+
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
         if (*(param.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
             continue;
@@ -158,6 +163,7 @@ void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
                             + seq_size_per_block - 1) / seq_size_per_block;
         auto request_id = *(param.request_id->dataWithOffset<int64_t>(batch_id));
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
+        FT_LOG_DEBUG("write cache store, blocks num is %ld", block_num + reuse_block_num);
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
             auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);

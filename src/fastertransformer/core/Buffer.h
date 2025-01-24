@@ -85,7 +85,7 @@ public:
     }
 
     size_t typeSize() const;
-    size_t size() const;
+    size_t size() const;        // number of elements
     size_t sizeBytes() const;
     size_t dim() const;
 

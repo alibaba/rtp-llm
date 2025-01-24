@@ -26,7 +26,7 @@ public:
 
 public:
     // [batch_size, max_block_per_seq]
-std::vector<std::vector<int32_t>> batch_block_id;
+    std::vector<std::vector<int32_t>> batch_block_id;
 
     // cache_keys and batch_block_id are not consistent at all times
     std::vector<std::vector<int64_t>> cache_keys;

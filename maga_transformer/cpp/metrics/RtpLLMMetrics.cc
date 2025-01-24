@@ -40,6 +40,7 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_request_metric, "rtp_llm_rpc_loading_cache_request");
     
     REGISTER_GAUGE_MUTABLE_METRIC(get_rpc_connection_rt_us_metric, "rtp_llm_rpc_get_rpc_connection_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(multimodal_process_rt_us_metric, "rtp_llm_rpc_multimodal_process_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_allocate_resource_rt_us_metric, "rtp_llm_rpc_remote_allocate_resource_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(enqueue_request_rt_us_metric, "rtp_llm_rpc_enqueue_request_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_start_rt_us_metric, "rtp_llm_rpc_remote_load_cache_start_rt_us");
@@ -71,6 +72,7 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(loading_cache_request);
 
     REPORT_GAUGE(get_rpc_connection_rt_us);
+    REPORT_GAUGE(multimodal_process_rt_us);
     REPORT_GAUGE(remote_allocate_resource_rt_us);
     REPORT_GAUGE(enqueue_request_rt_us);
     REPORT_GAUGE(remote_load_cache_start_rt_us);

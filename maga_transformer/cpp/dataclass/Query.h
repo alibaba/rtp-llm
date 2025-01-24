@@ -84,11 +84,10 @@ public:
     bool                            need_release_resource   = true;
 
     // For multi-modality models
-    // std::optional<MultimodalFeature> multimodal_features;
-    std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
-    std::optional<ft::BufferPtr>                text_tokens_mask; // text part for 1 and multimodal part for 0
-    std::optional<ft::BufferPtr>                mm_locs; // multimodal input locations
+    std::optional<std::vector<torch::Tensor>>   multimodal_features;
+    std::optional<ft::BufferPtr>                text_tokens_mask;   // text part for 1 and multimodal part for 0
+    std::optional<ft::BufferPtr>                mm_locs;            // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
     int                             prefix_length = 0;

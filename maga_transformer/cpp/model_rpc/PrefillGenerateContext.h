@@ -13,18 +13,20 @@ struct PrefillStatInfo {
     enum ExecuteStage {
         start                   = 0,
         getRpcConnection        = 1,
-        remoteAllocateResource  = 2,
-        enqueueRequest          = 3,
-        remoteLoadCacheStart    = 4,
-        pollLocalOutput         = 5,
-        remoteLoadCacheEnd      = 6,
-        RemoteGenerate          = 7,
-        pollRemoteOutput        = 8,
-        finish                  = 9
+        multimodalProcess       = 2,
+        remoteAllocateResource  = 3,
+        enqueueRequest          = 4,
+        remoteLoadCacheStart    = 5,
+        pollLocalOutput         = 6,
+        remoteLoadCacheEnd      = 7,
+        RemoteGenerate          = 8,
+        pollRemoteOutput        = 9,
+        finish                  = 10
     };
 
     int64_t begin_time                      = 0;
     int64_t get_rpc_connection_rt_us        = 0;
+    int64_t multimodal_process_rt_us        = 0;
     int64_t remote_allocate_resource_rt_us  = 0;
     int64_t enqueue_request_rt_us           = 0;
     int64_t remote_load_cache_start_rt_us   = 0;
@@ -71,6 +73,7 @@ public:
 
     RemoteServerResource*                   resource;
     RPCContext                              rpc_context;
+    std::shared_ptr<GenerateInput>          generate_input;
 
     std::string                             decode_addr;
     std::shared_ptr<RpcService::Stub>       stub;

@@ -37,19 +37,19 @@ string GptModelInputs::debugString() const {
         debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
     }
     if (kv_cache_block_id) {
-        debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugString();
+        debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugStringWithData<int32_t>();
     }
     if (attention_mask) {
         debug_string << ", attention_mask: " << attention_mask->debugString();
     }
     if (request_id) {
-        debug_string << ", request_id: " << request_id->debugString();
+        debug_string << ", request_id: " << request_id->debugStringWithData<int64_t>();
     }
     if (request_pd_separation) {
-        debug_string << ", request_pd_separation: " << request_pd_separation->debugString();
+        debug_string << ", request_pd_separation: " << request_pd_separation->debugStringWithData<bool>();
     }
     if (cache_keys) {
-        debug_string << ", cache_keys: " << cache_keys->debugString();
+        debug_string << ", cache_keys: " << cache_keys->debugStringWithData<int64_t>();
     }
     debug_string << ", block_size: " << block_size;
     debug_string << ", pd_separation: " << pd_separation;

@@ -29,6 +29,7 @@ public:
 
     // pd-sep prefill metrics
     int64_t get_rpc_connection_rt_us        = 0;
+    int64_t multimodal_process_rt_us        = 0;
     int64_t remote_allocate_resource_rt_us  = 0;
     int64_t enqueue_request_rt_us           = 0;
     int64_t remote_load_cache_start_rt_us   = 0;
@@ -65,6 +66,7 @@ public:
     kmonitor::MutableMetric* loading_cache_request_metric               = nullptr;
 
     kmonitor::MutableMetric* get_rpc_connection_rt_us_metric            = nullptr;
+    kmonitor::MutableMetric* multimodal_process_rt_us_metric            = nullptr;
     kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric      = nullptr;
     kmonitor::MutableMetric* enqueue_request_rt_us_metric               = nullptr;
     kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric       = nullptr;

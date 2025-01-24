@@ -21,8 +21,12 @@ void PrefillStatInfo::nextStage() {
         case getRpcConnection: {
             break;
         }
-        case remoteAllocateResource: {
+        case multimodalProcess: {
             get_rpc_connection_rt_us += cost_time_us;
+            break;
+        }
+        case remoteAllocateResource: {
+            multimodal_process_rt_us += cost_time_us;
             break;
         }
         case enqueueRequest: {
@@ -150,6 +154,7 @@ void PrefillGenerateContext::reportTime() {
     collector.loading_cache_request             = loading_cache_requests;
     collector.get_rpc_connection_rt_us          = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us    = stat_info.remote_allocate_resource_rt_us;
+    collector.multimodal_process_rt_us          = stat_info.multimodal_process_rt_us;
     collector.enqueue_request_rt_us             = stat_info.enqueue_request_rt_us;
     collector.remote_load_cache_start_rt_us     = stat_info.remote_load_cache_start_rt_us;
     collector.poll_local_output_rt_us           = stat_info.poll_local_output_rt_us;
