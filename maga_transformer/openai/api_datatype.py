@@ -164,7 +164,7 @@ class FinisheReason(str, Enum):
     stop = "stop"
     length = "length"
     function_call = "function_call"
-    tool_call = "tool_call"
+    tool_calls = "tool_calls"
 
 class RendererInfo(BaseModel):
     class_name: str

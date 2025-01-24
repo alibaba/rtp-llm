@@ -356,7 +356,7 @@ class CustomChatRenderer():
             from maga_transformer.openai.renderers.qwen_tool_renderer import QwenToolStreamStatus
             # 判断buffer有无generating_tool_call这个属性
             if isinstance(buffer, QwenToolStreamStatus) and buffer.generating_tool_call:
-                buffer.finish_reason = FinisheReason.tool_call
+                buffer.finish_reason = FinisheReason.tool_calls
 
             if buffer.finish_reason == None:
                 logging.debug(f"output {i} found no stop reason! use stop as default.")
