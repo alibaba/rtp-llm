@@ -119,7 +119,8 @@ class TestGemmDequantize(unittest.TestCase):
                 qweight_unprocessed, uint4_input).char()
             qweight_int4x2_interleaved = self.preprocess_weights_for_mixed_gemm(
                 self.pack_int4s(qweight_int8 - uint4_input * 8),
-                torch.quint4x2)
+                torch.quint4x2,
+                "")
 
             ref_th_weight = qweight_int8.half() * scale.repeat_interleave(
                 group_size, dim=0) - uint4_input * 8 * scale.repeat_interleave(

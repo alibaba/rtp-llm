@@ -445,7 +445,8 @@ Tensor unpack_int4_packed_tensor_to_int8(Tensor weight)
 // Exposed mainly for testing, so that the unprocessed weights can be passed to torch functions.
 std::vector<Tensor> _symmetric_quantize_last_axis_of_batched_matrix(Tensor weight, torch::ScalarType quant_type)
 {
-    return ft::symmetric_quantize_helper(weight, quant_type, true, get_sm());
+    int arch = fastertransformer::get_sm();
+    return ft::symmetric_quantize_helper(weight, quant_type, true, arch);
 }
 
 TORCH_LIBRARY(gemm_dq_unit_ops, m) {
