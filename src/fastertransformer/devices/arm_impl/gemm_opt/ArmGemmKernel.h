@@ -8,7 +8,13 @@
 namespace fastertransformer {
 
 // declares here for test
-BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
+//BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
+ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input);
+
+ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false, bool unused = false);
+BufferPtr transposeWeight(ConstBufferPtr input);
+ConstBufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose = false, bool isForceF32Out = false);
+ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr scales, const std::string& key);
 
 template<typename Ta, typename Tb, typename Tc, typename Tp>
 class GemmPartParam {

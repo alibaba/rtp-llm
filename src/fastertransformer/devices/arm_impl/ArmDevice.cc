@@ -7,6 +7,7 @@
 #include <sys/sysinfo.h>
 
 namespace fastertransformer {
+ConstBufferPtr (*armPrepareWeightFunc)(ConstBufferPtr input, bool isTranspose, bool isForceF32Out);
 
 int getMemoryInfo(unsigned long *free_bytes, unsigned long *total_bytes) {
     struct sysinfo info;
@@ -42,6 +43,15 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
     } else {
         allocator_.reset(allocator_ptr);
     }
+
+    if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
+        isKAIenabled = false;
+        gemmFunc = &ArmCpuDevice::gemm_opt;
+    } else {
+        isKAIenabled = true;
+        gemmFunc = &ArmCpuDevice::gemm_kai_bf16;
+    }
+
 }
 
 ArmCpuDevice::~ArmCpuDevice() {}

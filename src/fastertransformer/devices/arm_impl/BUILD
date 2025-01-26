@@ -16,9 +16,11 @@ cc_library(
         "//src/fastertransformer/devices:devices_base_impl",
         "//src/fastertransformer/core:cpu_allocator",
         "//src/fastertransformer/devices/arm_impl/type_bf16:hie_bfloat16",
+        "//:th_utils",
         "@arm_compute//arm_compute:core_headers",
         "@arm_compute//arm_compute:runtime_headers",
         "@arm_compute//support",
+        "@KleidiAI//kai/ukernels/matmul",
     ],
     visibility = ["//visibility:public"],
     copts = copts() + [

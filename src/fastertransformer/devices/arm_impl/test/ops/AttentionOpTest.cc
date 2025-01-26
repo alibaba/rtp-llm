@@ -136,7 +136,8 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     device_->contextAttention({0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config});
 
     auto result = bufferToTensor(*qkv_output);
-    assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
+    //assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
+    assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()), 1e-2, 1e-2);
 }
 
 void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,

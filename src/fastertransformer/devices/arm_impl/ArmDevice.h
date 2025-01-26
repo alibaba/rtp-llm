@@ -26,6 +26,8 @@ public:
     BufferPtr gemm(const GemmParams& params) override;
     BufferPtr gemm_acl(const GemmParams& params);
     BufferPtr gemm_opt(const GemmParams& params);
+    BufferPtr gemm_kai_bf16(const GemmParams& params);
+    BufferPtr gemm_kai_a8w4(const GemmParams& params);
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
@@ -44,6 +46,9 @@ public:
 #endif
     static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
 
+    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type);
+
 private:
     std::unique_ptr<IAllocator> allocator_;
     arm_compute::DataType getAclDataType(DataType type);
@@ -60,10 +65,15 @@ private:
     uint64_t a_tave_[16] = {0};
     GemmKernel gemm_kernel_;
 
+    BufferPtr (ArmCpuDevice::*gemmFunc)(const GemmParams& params);
+    bool isKAIenabled;
+
 #ifdef GEMM_DEBUG
     static TimerRecorder timer_recorder_;
 #endif
 };
+
+extern ConstBufferPtr (*armPrepareWeightFunc)(ConstBufferPtr input, bool isTranspose, bool isForceF32Out);
 
 } // namespace fastertransformer
 

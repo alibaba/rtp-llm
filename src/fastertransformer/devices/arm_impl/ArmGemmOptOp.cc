@@ -17,7 +17,10 @@ namespace fastertransformer {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
-        return gemm_opt(params);
+//        return gemm_opt(params);
+    if (params.B.type() == DataType::TYPE_UINT8)
+            return gemm_kai_a8w4(params);
+    return (this->*gemmFunc)(params);
 }
 
 
@@ -102,7 +105,9 @@ BufferPtr ArmCpuDevice::gemm_opt(const GemmParams& params) {
     size_t height = n / 2 + n % 2;
     if (params.B.type() == DataType::TYPE_FP32 ||
         params.B.type() == DataType::TYPE_FP16 ||
-        params.B.type() == DataType::TYPE_BF16) {
+        //params.B.type() == DataType::TYPE_BF16) {
+        params.B.type() == DataType::TYPE_BF16 ||
+        params.B.type() == DataType::TYPE_QINT4X2) {
         weight_workspace_ptr = &(params.B);
     } else {
         std::cerr << "Unsupported data type for B" << std::endl;
