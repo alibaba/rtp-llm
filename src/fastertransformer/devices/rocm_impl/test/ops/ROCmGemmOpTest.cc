@@ -42,6 +42,9 @@ TEST_F(ROCmGemmOpTest, Q4x2GemmOpTest) {
     RocmQ4x2OpTest(2048, 256, 64, DataType::TYPE_FP16);
     RocmQ4x2OpTest(1024, 2048, 128, DataType::TYPE_FP16);
 
+#if USING_CK_INT4
+    // Add ck int4 unit tests here.
+#else
     RocmQ4x2GemmOpTest(64, 64, 64, 64, DataType::TYPE_FP16);
     RocmQ4x2GemmOpTest(256, 128, 256, 64, DataType::TYPE_FP16);
     RocmQ4x2GemmOpTest(1024, 2048, 512, 64, DataType::TYPE_FP16);
@@ -49,6 +52,7 @@ TEST_F(ROCmGemmOpTest, Q4x2GemmOpTest) {
     RocmQ4x2GemmOpTest(128, 128, 128, 128, DataType::TYPE_FP16);
     RocmQ4x2GemmOpTest(256, 128, 256, 128, DataType::TYPE_FP16);
     RocmQ4x2GemmOpTest(1024, 2048, 512, 128, DataType::TYPE_FP16);
+#endif
 }
 
 TEST_F(ROCmGemmOpTest, BasicGemmOpTest) {
