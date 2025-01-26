@@ -273,7 +273,7 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params, 
     // The location in the destination array (load 8 fp16 or load 4 fp32 using LDG.128).
     size_t offset = bidx * params.elts_per_block + tidx * NUM_ELTS + params.rank_offset;
     // The end of the segment computed by that block.
-    size_t max_offset = min(offset + params.elts_per_block, params.elts_total_num);
+    size_t max_offset = offset + params.elts_per_block;
 
     multi_gpu_barrier(params.peer_barrier_ptrs, barrier_flag, params.local_rank, RANKS_PER_NODE, tidx, bidx);
 
@@ -316,9 +316,11 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params, 
 #pragma unroll
         for (size_t ii = 0; ii < RANKS_PER_NODE; ++ii) {
             // use round-robin gathering from other ranks
-            size_t offset_rank = local_offset + (dst_rank[ii] - params.local_rank) * params.elts_per_rank;
-            reinterpret_cast<PackedType*>(&((T*)params.local_output_buffer_ptr)[offset_rank])[0] =
-                reinterpret_cast<PackedType*>(&src_d[ii][offset_rank])[0];
+            size_t offset_rank = local_offset + ((int)dst_rank[ii] - (int)params.local_rank) * params.elts_per_rank;
+            if (offset_rank < params.elts_total_num) {
+                reinterpret_cast<PackedType*>(&((T*)params.local_output_buffer_ptr)[offset_rank])[0] =
+                    reinterpret_cast<PackedType*>(&src_d[ii][offset_rank])[0];
+            }
         }
     }
 }
@@ -366,7 +368,6 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
                 }
                 elts_total_num += (mod - remain);
                 elts_total_num        = std::min(elts_total_num, max_elts_num);
-                param->elts_total_num = elts_total_num;
             }
 
             assert(elts_total_num / (elts_per_thread * ranks_per_node) == 0);
