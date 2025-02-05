@@ -46,20 +46,22 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
         advice_token_ids = stream->completeTokenIds()->data<int>();
     }
     const auto&  sp_edit_search_index    = stream->spEditSearchIndex();
-    const size_t output_token_len        = stream->outputTokenLen();
+    const size_t seq_len = stream->seqLength();
     size_t max_new_tokens = std::min((size_t)config->max_new_tokens, stream->maxSeqLen() - stream->seqLength() - 1);
     if (stream->spEditFirstTime()) {
+        size_t begin_propose_offset = seq_len - stream->inputLength();
+        advice_token_num -= begin_propose_offset;
         size_t propose_len    = std::min(max_new_tokens,
                                       std::min(propose_step_, advice_token_num - sp_edit_search_index));
         stream_output->tokens = std::make_shared<fastertransformer::Buffer>(fastertransformer::MemoryType::MEMORY_CPU,
                                                                             ft::DataType::TYPE_INT32,
                                                                             std::vector{1, propose_len},
-                                                                            advice_token_ids);
+                                                                            advice_token_ids + begin_propose_offset);
         stream->setSpEditFirstTime(false);
         stream->setSpEditRun(true);
         postProcess(stream, stream_output);
-    } else if (min_token_match_len_ <= output_token_len) {
-        size_t begin_match_len = std::min(max_token_match_len_, output_token_len);
+    } else if (min_token_match_len_ <= seq_len) {
+        size_t begin_match_len = std::min(max_token_match_len_, seq_len);
 
         std::vector<int> max_latest_tokens = stream->getLatestTokens(begin_match_len);
         for (size_t match_len = begin_match_len; match_len >= min_token_match_len_; match_len--) {

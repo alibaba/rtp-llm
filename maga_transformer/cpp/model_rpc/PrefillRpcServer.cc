@@ -187,6 +187,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] trans query", prefill_context.request_id);
     auto input                               = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation    = true;
+    input->generate_config->force_disable_sp_run = true;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {

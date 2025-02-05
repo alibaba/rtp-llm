@@ -215,7 +215,11 @@ void SpeculativeEngine::loop() {
 
 absl::Status SpeculativeEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
+}
 
+std::shared_ptr<GenerateStream> SpeculativeEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, score_model_params_.gpt_init_parameter, resource_context_, metrics_reporter_);
+    return stream;
 }
 
 void SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {

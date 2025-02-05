@@ -18,6 +18,7 @@ public:
                                std::unique_ptr<ProposeModelEngineInitParams> propose_model_engine_init_params);
     ~SpeculativeEngine();
     absl::Status                      init();
+    std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
     std::shared_ptr<GenerateStream>   enqueue(const std::shared_ptr<GenerateInput>& input) override;
     void enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
