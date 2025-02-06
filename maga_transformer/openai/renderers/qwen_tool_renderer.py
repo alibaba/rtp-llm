@@ -1,7 +1,7 @@
 import copy
 import json
 import logging
-from typing import Optional, List, Dict, Any, Tuple, Union
+from typing import Any, Dict, Optional, List, Tuple, Union
 import functools
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
@@ -111,8 +111,8 @@ class QwenToolRenderer(CustomChatRenderer):
 
     # override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        prompt = self._build_prompt(request.messages, request.tools)
-        input_ids = self.tokenizer.encode(prompt)
+        prompt: str = self._build_prompt(request.messages, request.tools)
+        input_ids: List[int] = self.tokenizer.encode(prompt)
         return RenderedInputs(input_ids=input_ids)
 
     def _build_prompt(
@@ -125,7 +125,9 @@ class QwenToolRenderer(CustomChatRenderer):
 
         # Handle system message and tools
         if messages and messages[0].role == "system":
-            system_msg = messages.pop(0).content.lstrip("\n").rstrip()
+            message_content = messages[0].content
+            assert isinstance(message_content, str)
+            system_msg = message_content.lstrip("\n").rstrip()
         else:
             system_msg = "You are a helpful assistant."
 
@@ -149,7 +151,7 @@ class QwenToolRenderer(CustomChatRenderer):
 
             elif message.role == "assistant":
                 prompt += f"<|im_start|>assistant\n"
-                if message.content:
+                if message.content and isinstance(message.content, str):
                     prompt += message.content
                 if message.tool_calls:
                     prompt += self._format_tool_calls(message.tool_calls)
@@ -174,7 +176,7 @@ class QwenToolRenderer(CustomChatRenderer):
 
     def _format_tool_definitions(self, tools: List[GPTToolDefinition]) -> str:
         """格式化工具定义"""
-        tool_defs = []
+        tool_defs: List[str] = []
         for tool in tools:
             tool_def = {
                 "type": "function",
@@ -189,18 +191,25 @@ class QwenToolRenderer(CustomChatRenderer):
 
     def _format_tool_calls(self, tool_calls: List[ToolCall]) -> str:
         """格式化工具调用"""
-        formatted_calls = []
+        formatted_calls: List[str] = []
         for tool_call in tool_calls:
             try:
-                arguments = (
-                    json.loads(tool_call.function.arguments)
-                    if tool_call.function.arguments
-                    else {}
-                )
-            except json.JSONDecodeError:
-                arguments = tool_call.function.arguments
-
-            tool_call_json = {"name": tool_call.function.name, "arguments": arguments}
+                if isinstance(tool_call.function.arguments, dict):
+                    arguments = tool_call.function.arguments
+                elif tool_call.function.arguments:  # 确保字符串非空
+                    try:
+                        arguments = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}  # 解析失败则设置为空字典
+                else:
+                    arguments = {}
+            except Exception as e:
+                print(f"处理 arguments 出现异常: {e}")
+                arguments = {}
+            tool_call_json: Dict[str, Any] = {
+                "name": tool_call.function.name,
+                "arguments": arguments,
+            }
             formatted_calls.append(
                 f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>"
             )
@@ -216,16 +225,16 @@ class QwenToolRenderer(CustomChatRenderer):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
-        if status.finish_reason != None:
-            return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
+        if status.finish_reason != None:  # type: ignore
+            return await self._create_empty_delta(status.output.aux_info)  # type: ignore
+        status.update_output(  # type: ignore
             output,
             self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
-        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
-        decoded_string = self.tokenizer.decode(status.tokens_to_decode)
+        decoded_prev_token = self.tokenizer.decode(status.prev_token_id)  # type: ignore
+        decoded_string = self.tokenizer.decode(status.tokens_to_decode)  # type: ignore
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if is_streaming:
             if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
@@ -311,7 +320,7 @@ class QwenToolRenderer(CustomChatRenderer):
         Returns:
             List[ToolCall]: ToolCall 对象列表
         """
-        tool_calls = []
+        tool_calls: List[ToolCall] = []
 
         # 用 <tool_call> 分割
         parts = original_text.split("<tool_call>\n")
