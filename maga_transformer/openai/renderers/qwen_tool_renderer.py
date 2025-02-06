@@ -1,17 +1,15 @@
-import copy
 import json
 import logging
-from typing import Any, Dict, Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union
 import functools
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import (
-    ChatMessage,
-    GPTToolDefinition,
     ChatCompletionRequest,
     DeltaMessage,
     FinisheReason,
+    RoleEnum,
     ToolCall,
     FunctionCall,
 )
@@ -24,6 +22,7 @@ from maga_transformer.openai.renderers.custom_renderer import (
 )
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import is_truncated
+from jinja2 import Environment, BaseLoader
 
 """
 TODO List
@@ -91,6 +90,8 @@ For each function call, return a json object with function name and arguments wi
 {{"name": <function-name>, "arguments": <args-json-object>}}
 </tool_call>"""
 
+JINJA_TEMPLATE = """{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n"""
+
 
 class QwenToolRenderer(CustomChatRenderer):
     """QwenToolRenderer
@@ -111,110 +112,46 @@ class QwenToolRenderer(CustomChatRenderer):
 
     # override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        prompt: str = self._build_prompt(request.messages, request.tools)
-        input_ids: List[int] = self.tokenizer.encode(prompt)
+        prompt: str = self._build_prompt(request)
+        input_ids: List[int] = self.tokenizer.encode(prompt)  # type: ignore
         return RenderedInputs(input_ids=input_ids)
 
     def _build_prompt(
         self,
-        messages: List[ChatMessage],
-        tools: Optional[List[GPTToolDefinition]] = None,
+        request: ChatCompletionRequest,
     ) -> str:
-        messages = copy.deepcopy(messages)
-        prompt = ""
+        """
+        构建提示文本
+        Args:
+            request: 聊天完成请求
+        Returns:
+            str: 格式化后的提示文本
+        """
 
-        # Handle system message and tools
-        if messages and messages[0].role == "system":
-            message_content = messages[0].content
-            assert isinstance(message_content, str)
-            system_msg = message_content.lstrip("\n").rstrip()
-        else:
-            system_msg = "You are a helpful assistant."
+        context = request.model_dump(exclude_none=True)
 
-        # Add system message
-        prompt += f"<|im_start|>system\n{system_msg}\n"
+        if request.messages[-1].role == RoleEnum.user:
+            context["add_generation_prompt"] = True
 
-        # Add tool definitions if present
-        if tools:
-            tool_definitions = self._format_tool_definitions(tools)
-            prompt += TOOL_INSTRUCTION.format(tool_definitions=tool_definitions)
-        prompt += f"<|im_end|>\n"
+        env = Environment(loader=BaseLoader())
+        # 重写tojson过滤器, 这里存在三个注意点
+        # 1. tojson过滤器默认会排序, 导致生成的json字符串不符合预期
+        # 2. tojson过滤器默认会转义汉字, 导致生成的json字符串不符合预期
+        # 3. arguments默认是str, 而官方模板会对json str再次dumps
+        
+        env.filters["tojson"] = lambda value: (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, sort_keys=False, ensure_ascii=False)
+        )
 
-        # Handle conversation messages
-        for i, message in enumerate(messages):
-            is_last = i == len(messages) - 1
-            prev_is_tool = i > 0 and messages[i - 1].role == "tool"
-            next_is_tool = i < len(messages) - 1 and messages[i + 1].role == "tool"
-
-            if message.role == "user":
-                prompt += f"<|im_start|>user\n{message.content}<|im_end|>\n"
-
-            elif message.role == "assistant":
-                prompt += f"<|im_start|>assistant\n"
-                if message.content and isinstance(message.content, str):
-                    prompt += message.content
-                if message.tool_calls:
-                    prompt += self._format_tool_calls(message.tool_calls)
-                prompt += f"<|im_end|>\n"
-
-            elif message.role == "tool":
-                # 只有当不是连续tool消息中的一个时，才添加im_start和im_end
-                if not prev_is_tool:
-                    prompt += f"<|im_start|>user\n"
-
-                prompt += f"<tool_response>\n{message.content}\n</tool_response>"
-
-                if not next_is_tool:
-                    prompt += f"<|im_end|>\n"
-                else:
-                    prompt += "\n"
-
-            if not message.role == "assistant" and is_last:
-                prompt += f"<|im_start|>assistant\n"
-
-        return prompt
-
-    def _format_tool_definitions(self, tools: List[GPTToolDefinition]) -> str:
-        """格式化工具定义"""
-        tool_defs: List[str] = []
-        for tool in tools:
-            tool_def = {
-                "type": "function",
-                "function": {
-                    "name": tool.function.name,
-                    "description": tool.function.description,
-                    "parameters": tool.function.parameters,
-                },
-            }
-            tool_defs.append(json.dumps(tool_def, ensure_ascii=False))
-        return f"<tools>\n" + "\n".join(tool_defs) + f"\n</tools>"
-
-    def _format_tool_calls(self, tool_calls: List[ToolCall]) -> str:
-        """格式化工具调用"""
-        formatted_calls: List[str] = []
-        for tool_call in tool_calls:
-            try:
-                if isinstance(tool_call.function.arguments, dict):
-                    arguments = tool_call.function.arguments
-                elif tool_call.function.arguments:  # 确保字符串非空
-                    try:
-                        arguments = json.loads(tool_call.function.arguments)
-                    except json.JSONDecodeError:
-                        arguments = {}  # 解析失败则设置为空字典
-                else:
-                    arguments = {}
-            except Exception as e:
-                print(f"处理 arguments 出现异常: {e}")
-                arguments = {}
-            tool_call_json: Dict[str, Any] = {
-                "name": tool_call.function.name,
-                "arguments": arguments,
-            }
-            formatted_calls.append(
-                f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>"
-            )
-
-        return "\n".join(formatted_calls)
+        try:
+            # 使用自定义环境创建模板
+            template = env.from_string(JINJA_TEMPLATE)
+            rendered_prompt = template.render(**context)
+            return rendered_prompt
+        except Exception as e:
+            raise ValueError(f"Error rendering prompt template: {str(e)}")
 
     async def _update_single_status(
         self,
