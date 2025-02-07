@@ -37,6 +37,12 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
     auto ret = FlashInferAttnParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
     auto params = (FlashInferAttnParams*)ret.get();
 
+    const char* disable_flash_infer_env = getenv("DISABLE_FLASH_INFER");
+
+    if (fastertransformer::get_sm() < 80 || (disable_flash_infer_env && strcmp(disable_flash_infer_env, "1") == 0)) {
+        return ret;
+    }
+
 #if USING_CUDA12 == 1
     auto cuda_device = dynamic_cast<CudaDevice*>(device);
     const size_t batch_size = sequence_lengths_host->shape()[0];
