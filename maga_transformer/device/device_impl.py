@@ -202,6 +202,9 @@ class GpuImpl(DeviceBase):
         processed_scalses = torch.stack(processed_scalses, dim=0)
         return processed_weights, processed_zeros, processed_scalses
 
+    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, align: list, is_gate: bool = False) -> torch.Tensor:
+        return x
+
 class CudaImpl(GpuImpl):
     def __init__(self, exported_device: DeviceExporter):
         super().__init__(exported_device)
@@ -301,7 +304,6 @@ class RocmImpl(GpuImpl):
         # kernel, scales, zeros all need for column major layout
         return qweight_interleaved.to(device),  zeros_x_scales_fp16.to(device), scales_fp16.to(device)
 
-
     @property
     def arch(self) -> str:
         if self.rocml:
@@ -316,3 +318,40 @@ class RocmImpl(GpuImpl):
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
         return os.environ.get('SPECIFY_GPU_ARCH', "900")
+    
+    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, align: list, is_gate: bool = False) -> torch.Tensor:
+        if len(align) != len(x.shape):
+            logging.error(f'Data type for moe weight is not supported: {datatype}')
+            return x
+        x_ = torch.cat([x[:, x.shape[1] // 2:, :], x[:, :x.shape[1]//2, :]], dim =1) if is_gate else x #swap from [up, gate] to [gate, up]
+        shape_tmp = list(x_.shape) #due to gate+up, need temporarily seperate them for padding
+        if (is_gate):
+            shape_tmp[1] = shape_tmp[1] // 2
+        #align and padding
+        padding = [0 for i in range(len(align)*2)]
+        for i in range(len(align)):
+            if (align[i] > 0) and (shape_tmp[i] % align[i] > 0):
+                padding[-(i*2+1)] = align[i] - (shape_tmp[i] % align[i])
+        if sum(padding):
+            if (is_gate):
+                x_ = torch.cat(
+                    [torch.nn.functional.pad(x_[:, :x_.shape[1] // 2, :], padding, mode='constant', value=0),
+                    torch.nn.functional.pad(x_[:, x_.shape[1] // 2:, :], padding, mode='constant', value=0)],
+                    dim = 1)
+            else:
+                x_ = torch.nn.functional.pad(x_, tuple(padding), mode='constant', value=0)
+            logging.info(f'Padding shape {[ele for ele in x.shape]} with {padding} to {[ele for ele in x_.shape]}')
+        b_: int = x_.shape[0]
+        n_: int = x_.shape[1]
+        k_: int = x_.shape[2]
+        if (datatype==torch.float16) or (datatype==torch.bfloat16):
+            x_ = x_.view(b_, n_ // 16, 16, k_ // 32, 4, 8)
+        elif (datatype==torch.float8) or (datatype==torch.int8):
+            x_ = x_.view(b_, n_ // 16, 16, k_ // 64, 4, 16)
+        else:
+            logging.error(f'Data type for moe weight is not supported: {datatype}')
+            return x
+        x_ = x_.permute(0, 1, 3, 4, 2, 5).contiguous()
+        x_ = x_.view(b_, n_ , k_)
+        x_ = x_.contiguous()
+        return x_ 

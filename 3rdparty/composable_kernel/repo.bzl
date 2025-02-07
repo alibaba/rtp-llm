@@ -33,6 +33,16 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "ck_fused_moe_example",
+    hdrs = glob(["example/ck_tile/15_fused_moe/**/*.hpp",]),
+    copts = rocm_copts(),
+    deps = [
+        "@composable_kernel_archive//:ck_fused_moe_example_headers",
+    ],
+    visibility = ["//visibility:public"],
+)
 """
 
 def _ck_repo_impl(repository_ctx):

@@ -66,6 +66,22 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "ck_fused_moe_example_headers",
+    srcs = glob([
+        "example/ck_tile/15_fused_moe/instances/*.cpp",
+    ]),
+    hdrs = glob([
+        "example/ck_tile/15_fused_moe/**/*.hpp",
+    ]),
+    deps = [
+        ":ck_headers",
+    ],
+    copts = rocm_default_copts(),
+    strip_include_prefix = "example/ck_tile/15_fused_moe",
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "config_h",
     srcs = [

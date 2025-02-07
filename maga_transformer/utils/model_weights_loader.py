@@ -603,6 +603,11 @@ class ModelWeightsLoader:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
 
         after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(convert_type)
+        if layer_id in self._weights_info.moe_layer_index_:
+            if "moe_weights.intermediate_weight" in weight_info.name:
+                is_gate = "moe_weights.intermediate_weight.kernel" in weight_info.name
+                align = [0, 512, 0] if is_gate else [0, 0, 512]
+                after_merge_tensor = self._exported_device.shuffle_moe_weight(after_merge_tensor, datatype, align, is_gate)
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):

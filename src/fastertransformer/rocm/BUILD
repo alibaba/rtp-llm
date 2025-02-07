@@ -30,6 +30,7 @@ cc_library(
         "//src/fastertransformer/core:types",
         "@composable_kernel//:ck_fmha_example",
         "@composable_kernel//:ck_layernorm2d_example",
+        "@composable_kernel//:ck_fused_moe_example",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/status:statusor",

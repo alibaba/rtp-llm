@@ -12,61 +12,47 @@ using namespace std;
 namespace fastertransformer {
 
 FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
-/*
+    // printf("[ROCM] moeFfnLayer: token_num=%d\n", params.input.shape()[0]);
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
 
-    const auto& moe_conf     = params.configs.moe_configs.value();
-    const auto& hidden       = params.input;
-    const auto& weights      = params.weights;
-    const auto  compute_type = hidden.type();
-    const auto  weights_type = weights.moe_down_weight->kernel->type();
-    const auto  num_token    = hidden.shape()[0];
-    const auto  model_dim    = hidden.shape()[1];
-    const auto  num_expert   = params.weights.moe_gating_weight->kernel->shape()[1];
-    const auto  inter_dim    = (size_t)moe_conf.moe_inter_padding_size;
-    const auto  top_k        = moe_conf.top_k;
-    // TODO group_size
-    auto group_size = 0;
-    if (params.weights.moe_gate_weight->kernel->isQBuffer()) {
-        if (dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zerosData() != nullptr) {
-            group_size =
-                params.weights.moe_gate_weight->kernel->shape()[1]
-                / dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zeros().shape()[1];
-        }
-    }
+    const auto& moe_conf      = params.configs.moe_configs.value();
+    const auto& hidden        = params.input;
+    const auto& weights       = params.weights;
+    const auto  compute_type  = hidden.type();
+    const auto  weights_type  = weights.moe_down_weight->kernel->type();
+    const auto  num_token     = hidden.shape()[0];
+    const auto  model_dim     = hidden.shape()[1];
+    const auto  num_expert    = moe_conf.expert_num;
+    const auto  inter_dim     = weights.moe_gate_weight->kernel->shape()[1];  //(size_t)moe_conf.moe_inter_padding_size;
+    const auto  top_k         = moe_conf.top_k;
+    const int   fused_quant   = (params.qscheme == QScheme::NoQuantize) ? 0 : 1;
+    const int   gate_only     = (inter_dim == weights.moe_down_weight->kernel->shape()[1]) ? 1 : 0;
+    const auto  inter_dim_per = inter_dim / (gate_only ? 1 : 2);
 
-    const auto output          = allocateBuffer({compute_type, {num_token, model_dim}});
-    const auto output_gate     = allocateBuffer({compute_type, {2, top_k * num_token, inter_dim}});
-    const auto hidden_permuted = allocateBuffer({compute_type, {top_k * num_token, model_dim}});
-
-    const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
-
-    MOEParallelismConfig parallelism_config;
     // TODO: cuda version also not init this
+    MOEParallelismConfig parallelism_config;
+    // const size_t inter_dim_per_node = inter_dim / parallelism_config.ep_size;
     const size_t num_experts_per_node = num_expert / parallelism_config.ep_size;
     const int    start_expert         = num_experts_per_node * parallelism_config.ep_rank;
     const int    end_expert           = start_expert + num_experts_per_node;
+    // TODO group_size
+    // auto group_size = 0;
+    // if (params.weights.moe_gate_weight->kernel->isQBuffer()) {
+    //     if (dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zerosData() != nullptr) {
+    //         group_size =
+    //             params.weights.moe_gate_weight->kernel->shape()[1]
+    //             / dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zeros().shape()[1];
+    //     }
+    // }
+    const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
 
-    // const size_t num_topkTokens = pad_to_multiple_of_16(num_token * top_k);
     const size_t num_topkTokens = num_token * top_k;
-    const auto   topk_scales    = allocateBuffer({DataType::TYPE_FP32, {num_token, top_k}});
-    // top_k will be 1, 2, 4, 8, ..., 2**n
-    // topk_rowColID >> log2(top_k)   = rowID (i.e. tokenID)
-    // topk_rowColID &&     (top_k-1) = colID (i.e. k_ID)
-    const auto topk_rowColID            = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}}, {"topk_rowColID"});
-    const auto topk_rowColID_sorted     = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto topk_expertID            = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto topk_expertID_sorted     = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto total_rows_before_expert = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}});
-    const auto total_rows_before_expert_host =
-        allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}, AllocationType::HOST});
-
-    const auto expanded_source_row_to_expanded_dest_row = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-
-    const auto softmax_out = allocateBuffer(
+    const auto   softmax_out    = allocateBuffer(
         {DataType::TYPE_FP32,
-         {((num_experts_per_node & (num_experts_per_node - 1)) == 0) ? 0 : num_token * num_experts_per_node}});
-    printBufferData(*gate, "moe_gate");
+              {((num_experts_per_node & (num_experts_per_node - 1)) == 0) ? 0 : num_token * num_experts_per_node}});
+    const auto topk_scales   = allocateBuffer({DataType::TYPE_FP32, {num_token, top_k}});
+    const auto topk_expertID = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
+    const auto topk_rowColID = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}}, {"topk_rowColID"});
     topkGatingSoftmax_KL(gate->data<float>(),
                          nullptr,                     // finished
                          softmax_out->data<float>(),  // softmax_out
@@ -79,95 +65,63 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
                          start_expert,
                          end_expert,
                          stream_);
-    printBufferData(*topk_scales, "topk_scales");
-    printBufferData(*topk_expertID, "topk_expertID");
-    printBufferData(*topk_rowColID, "topk_rowColID");
 
-    size_t num_bits = (int)log2(num_experts_per_node) + 1;
-    sort_KL(topk_expertID->data<int>(),
-            topk_rowColID->data<int>(),
-            topk_expertID_sorted->data<int>(),
-            topk_rowColID_sorted->data<int>(),
-            num_topkTokens,
-            num_bits,
-            stream_);
-    printBufferData(*topk_expertID_sorted, "topk_expertID_sorted");
-    printBufferData(*topk_rowColID_sorted, "topk_rowColID_sorted");
+    // keep print cmd
+    // printBufferData(hidden, "rocm_moe_input_token", nullptr, true);
+    // printBufferData(*(params.weights.moe_gating_weight->kernel), "moe_gating", nullptr, true);
+    // printBufferData(*gate, "topk_gate", nullptr, true);
+    // printBufferData(*topk_scales, "topk_scales", nullptr, true);
+    // printBufferData(*topk_expertID, "topk_expertID", nullptr, true);
+    // printBufferData(*(weights.moe_gate_weight->kernel), "rocm_moe_input_gate", nullptr, true);
+    // printBufferData(*(weights.moe_down_weight->kernel), "rocm_moe_input_down", nullptr, true);
+    // printBufferData(*(gate), "rocm_moe_sorting_gate", nullptr, true);
 
-    // Upper bound on number of expanded rows
-    computeTotalRowsBeforeExpert_KL(topk_expertID_sorted->data<int>(),
-                                    num_token * top_k,
-                                    num_experts_per_node,
-                                    total_rows_before_expert->data<int>(),
-                                    stream_);
-    printBufferData(*total_rows_before_expert, "total_rows_before_expert");
+    BufferPtr output = nullptr;
+    if (params.output) {
+        output = params.output;
+    } else {
+        output = allocateBuffer({compute_type, {num_token, model_dim}});
+    }
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(compute_type,
-                                     permutInputRows_KL,
-                                     hidden.data(),
-                                     hidden_permuted->data(),
-                                     topk_rowColID_sorted->data<int>(),
-                                     expanded_source_row_to_expanded_dest_row->data<int>(),
-                                     num_token,
-                                     model_dim,
-                                     nullptr,  // num_valid_tokens_ptr
-                                     top_k,
-                                     stream_);
-    printBufferData(*expanded_source_row_to_expanded_dest_row, "expanded_source_row_to_expanded_dest_row");
-    // std::cout << "hidden" << hidden.debugStringMeta() << std::endl;
-    // printBufferData(hidden, "hidden");
-    // std::cout << "hidden_permuted" << hidden_permuted->debugStringMeta() << std::endl;
-    // printBufferData(*hidden_permuted, "hidden_permuted");
+    size_t block_m = 32;  // temporarily support only tile_size 32
+    size_t stride  = model_dim;
 
-    copy({*total_rows_before_expert_host, *total_rows_before_expert});
-    syncAndCheck();
+    // buffer for sorting passing to expert ffn.
+    size_t max_num_tokens_padded = top_k * num_token + num_expert * block_m - top_k;
+    auto   sorted_token_ids_ptr  = allocateBuffer({DataType::TYPE_INT32, {max_num_tokens_padded}});
+    auto   sorted_weight_ptr     = allocateBuffer({DataType::TYPE_FP32, {max_num_tokens_padded}});
+    auto   sorted_expert_ids_ptr =
+        allocateBuffer({DataType::TYPE_INT32, {(max_num_tokens_padded + block_m - 1) / block_m}});
+    auto num_sorted_tiles_ptr = allocateBuffer({DataType::TYPE_INT32, {1}});
 
-    auto moeParams = rocmMoeParams({hidden_permuted->data(),
-                                    params.configs.activation_type,
+    // assert(inter_dim == params.weights.moe_gate_weight->kernel->shape()[1]); // not support row major.
+    auto moeParams = rocmMoeParams(
+        {hidden.data(),
+         nullptr,  // no a scale ?
+         weights.moe_gate_weight->kernel->data(),
+         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
+         weights.moe_down_weight->kernel->data(),
+         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
+         weights.smoother_weight ? BUFFER_GET_SCALE_IF_Q_BUFFER(weights.smoother_weight->kernel) : nullptr,
+         output->data(),
+         topk_expertID->data(),
+         topk_scales->data(),
+         sorted_token_ids_ptr->data(),
+         sorted_weight_ptr->data(),
+         sorted_expert_ids_ptr->data(),
+         num_sorted_tiles_ptr->data(),
+         block_m,
+         model_dim,
+         inter_dim_per,
+         num_token,
+         num_expert,
+         top_k,
+         stride,
+         stream_});
+    uint32_t ckmoe_workspace_sz = moe_runner_->runCKMoe(
+        moeParams, compute_type, weights_type, params.configs.activation_type, fused_quant, gate_only);
 
-                                    weights.moe_gate_weight->kernel->data(),
-                                    BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
-                                    BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
-                                    OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
-                                    inter_dim == params.weights.moe_gate_weight->kernel->shape()[2],  // is_rowMajor
-
-                                    weights.moe_up_weight->kernel->data(),
-                                    BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_up_weight->kernel),
-                                    BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_up_weight->kernel),
-                                    OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_up_weight->bias),
-                                    inter_dim == params.weights.moe_up_weight->kernel->shape()[2],  // is_rowMajor
-
-                                    weights.moe_down_weight->kernel->data(),
-                                    BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
-                                    BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
-                                    OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
-                                    inter_dim == params.weights.moe_down_weight->kernel->shape()[1],  // is_rowMajor
-
-                                    output->data(),
-                                    output_gate->data(),
-                                    num_experts_per_node,
-                                    total_rows_before_expert_host->data<int>(),
-                                    inter_dim,
-                                    model_dim,
-                                    stream_});
-    uint32_t ckmoe_workspace_sz = moe_runner_->runCKMoe(moeParams, compute_type, weights_type, nullptr, nullptr);
-
-    auto gemm_desc_workspace = allocateBuffer({DataType::TYPE_FP32, {ckmoe_workspace_sz}, AllocationType::DEVICE}, {"gemm_desc_workspace"});
-    auto gemm_kernel_args_dev = allocateBuffer({DataType::TYPE_FP32, {ckmoe_workspace_sz}, AllocationType::DEVICE}, {"gemm_kernel_args_dev"});
-
-    moe_runner_->runCKMoe(moeParams, compute_type, weights_type,gemm_desc_workspace->data(),gemm_kernel_args_dev->data());
-
-    // std::cout << "1111gate" << weights.moe_gate_weight->kernel->debugStringMeta() << std::endl;
-    // printBufferData(*((weights.moe_gate_weight->kernel->index(0))->slice(0, 6)), "moe_gate_weight");
-    printBufferData(*(output_gate->index(0)), "output_gate");
-
-    // std::cout << "1111up" << weights.moe_up_weight->kernel->debugStringMeta() << std::endl;
-    // printBufferData(*((weights.moe_up_weight->kernel->index(0))->slice(0, 6)), "moe_up_weight");
-    printBufferData(*(output_gate->index(1)), "output_up");
-
-    // std::cout << "1111down" << weights.moe_down_weight->kernel->debugStringMeta() << std::endl;
-    // printBufferData(*((weights.moe_down_weight->kernel->index(0))->slice(0, 6)), "moe_down_weight");
-    printBufferData(*(hidden_permuted), "output_all");
+    /*
 
     // todo: moe_norm not implemented, this dispatch need be fused into runCKMoe
     assert(moe_conf.has_moe_norm == false);
@@ -189,11 +143,9 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
         parallelism_config.tp_rank,
         moe_conf.has_moe_norm ? 2 : 1,  // renormalization_mode, 0: no norm, 1: * topk_scale, 2: renorm_scale
         stream_);
-    printBufferData(*(output), "output_all2");
-
+    */
+    // printBufferData(*(output), "rocm_moe_output", nullptr, true);
     return FfnLayerOutput({move(output)});
-*/
-    return FfnLayerOutput();
 }
 
 FfnLayerOutput ROCmDevice::ffnLayer(const FfnLayerParams& params) {
