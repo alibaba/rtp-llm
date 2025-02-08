@@ -3,9 +3,13 @@
 
 namespace rtp_llm {
 
-int Tokenizer::getEosTokenId() {
+std::optional<int> Tokenizer::getEosTokenId() {
     py::gil_scoped_acquire acquire;
-    return py::cast<int>(tokenizer_.attr("eos_token_id"));
+    auto res = tokenizer_.attr("eos_token_id");
+    if (res.is_none()) {
+        return std::nullopt;
+    }
+    return res.cast<int>();
 }
 
 bool Tokenizer::isPreTrainedTokenizer() {

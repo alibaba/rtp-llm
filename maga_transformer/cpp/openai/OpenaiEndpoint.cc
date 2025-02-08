@@ -11,12 +11,11 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
 
     max_seq_len_ = model_config_.max_seq_len_;
 
+    std::optional<int> res;
     if (tokenizer_ && tokenizer_->isPreTrainedTokenizer()) {
-        eos_token_id_ = tokenizer_->getEosTokenId();
-    } else {
-        FT_LOG_WARNING("tokenizer is nullptr or not pretrained tokenizer, tokenizer=%p", tokenizer_.get());
-        eos_token_id_ = model_config_.special_tokens_.eos_token_id_;
+        res = tokenizer_->getEosTokenId();
     }
+    eos_token_id_ = res.value_or(model_config_.special_tokens_.eos_token_id_);
 
     for (const auto& vec : model_config_.special_tokens_.stop_words_id_list_) {
         std::vector<int> tmpVec;

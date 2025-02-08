@@ -2,7 +2,8 @@
 
 #include <string>
 #include <vector>
-#include <pybind11/pybind11.h>
+
+#include "maga_transformer/cpp/utils/PyUtils.h"
 
 namespace py = pybind11;
 
@@ -15,10 +16,10 @@ public:
 
 public:
     // `virtual` for test
-    virtual bool             isPreTrainedTokenizer();
-    virtual int              getEosTokenId();
-    virtual std::string      decode(const std::vector<int>& ids);
-    virtual std::vector<int> encode(const std::string& tokens);
+    virtual bool               isPreTrainedTokenizer();
+    virtual std::optional<int> getEosTokenId();
+    virtual std::string        decode(const std::vector<int>& ids);
+    virtual std::vector<int>   encode(const std::string& tokens);
 
 private:
     py::object tokenizer_;
