@@ -73,14 +73,15 @@ class WeightConverter:
     def get_free_mem_MB():
         import psutil
         memory_info = psutil.virtual_memory()
-        free_memory = memory_info.free/1024/1024/1024
+        free_memory = memory_info.free/1024/1024
         return free_memory
 
     def _estimate_convert_parallel_num(self):
         free_mb = self.get_free_mem_MB() * 0.8
+        refactor = self.tp_size/1.25 if self.tp_size > 1 else 1
         if self.model_basic_info.model_size:
-            model_size_mb = self.model_basic_info.model_size/1024/1024
-            return min(free_mb / model_size_mb, self.tp_size)
+            model_size_mb_1tp = self.model_basic_info.model_size/1024/1024/refactor
+            return int(min(free_mb / model_size_mb_1tp, self.tp_size))
         return 1
 
     @timer_wrapper('convert 1 tp')
