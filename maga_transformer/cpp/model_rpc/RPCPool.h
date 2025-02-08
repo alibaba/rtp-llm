@@ -9,15 +9,14 @@
 
 namespace rtp_llm {
 
+struct GrpcConnection {
+    std::shared_ptr<grpc::Channel> channel;
+    std::shared_ptr<RpcService::Stub> stub;
+};
+
 class RPCPool {
 public:
-    struct Connection {
-        std::shared_ptr<grpc::Channel> channel;
-        std::shared_ptr<RpcService::Stub> stub;
-    };
-
-public:
-    absl::StatusOr<Connection> getConnection(std::string peer) {
+    absl::StatusOr<GrpcConnection> getConnection(std::string peer) {
         std::lock_guard<std::mutex> guard(mutex_);
         auto iter = connection_pool_.find(peer);
         if (iter == connection_pool_.end()
@@ -37,7 +36,7 @@ public:
                 std::string error_msg = "create grpc stub for " + peer + " failed";
                 return absl::InternalError(error_msg);
             }
-            Connection connection = {grpc_channel, std::move(grpc_stub)};
+            GrpcConnection connection = {grpc_channel, std::move(grpc_stub)};
             connection_pool_[peer] = connection;
             return connection;
         } else {
@@ -45,11 +44,16 @@ public:
         }
     }
 
+    void removeConnection(std::string peer) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        connection_pool_.erase(peer);
+    }
+
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed
 
 private:
     std::mutex mutex_;
-    std::unordered_map<std::string, Connection> connection_pool_;
+    std::unordered_map<std::string, GrpcConnection> connection_pool_;
 };
 
 }  // namespace rtp_llm

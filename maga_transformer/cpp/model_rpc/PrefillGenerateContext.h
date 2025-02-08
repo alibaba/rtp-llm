@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "maga_transformer/cpp/utils/ErrorCode.h"
+#include "maga_transformer/cpp/model_rpc/RPCPool.h"
 #include "maga_transformer/cpp/model_rpc/GenerateContext.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
@@ -61,6 +62,7 @@ public:
     void reset() override;
     void nextStage();
     grpc::Status closeGrpcStream();
+    void closeGrpcConnection();
 
 private:
     void markRequestEnd();
@@ -76,6 +78,7 @@ public:
     std::shared_ptr<GenerateInput>          generate_input;
 
     std::string                             decode_addr;
+    GrpcConnection                          grpc_connection;
     std::shared_ptr<RpcService::Stub>       stub;
     std::shared_ptr<grpc::ClientContext>    client_context;
     std::shared_ptr<ClientStream>           client_stream;

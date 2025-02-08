@@ -34,10 +34,19 @@ namespace rtp_llm {
             const auto& error_msg = status.error_message();                                                     \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                        \
                 new_error_code = ErrorCode::CONNECT_FAILED;                                                     \
-            } else if(error_msg.find("No route to host") != std::string::npos) {                                \
+                prefill_context.closeGrpcConnection();                                                          \
+            } else if (error_msg.find("No route to host") != std::string::npos) {                               \
                 new_error_code = ErrorCode::CONNECT_FAILED;                                                     \
-            }  else if(error_msg.find("Connection reset by peer") != std::string::npos) {                       \
+                prefill_context.closeGrpcConnection();                                                          \
+            } else if (error_msg.find("Connection reset by peer") != std::string::npos) {                       \
                 new_error_code = ErrorCode::CONNECTION_RESET_BY_PEER;                                           \
+                prefill_context.closeGrpcConnection();                                                          \
+            } else if (error_msg.find("Connection timed out") != std::string::npos) {                           \
+                new_error_code = ErrorCode::CONNECT_TIMEOUT;                                                    \
+                prefill_context.closeGrpcConnection();                                                          \
+            }  else if (error_msg.find("Deadline Exceeded") != std::string::npos) {                             \
+                new_error_code = ErrorCode::DEADLINE_EXCEEDED;                                                  \
+                prefill_context.closeGrpcConnection();                                                          \
             }                                                                                                   \
             new_error_msg += error_msg;                                                                         \
             if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                  \
@@ -152,7 +161,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         return;
     }
     prefill_context.decode_addr = decode_addr;
-    prefill_context.stub = connect_status.value().stub;
+    prefill_context.grpc_connection = connect_status.value();
+    
     FT_LOG_DEBUG("request:[%ld] get rpc connection done", prefill_context.request_id);
 }
 
@@ -188,7 +198,8 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 
     auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(min_timeout_ms);
     prefill_context.client_context->set_deadline(deadline);
-    prefill_context.client_stream = std::move(prefill_context.stub->RemoteGenerate(prefill_context.client_context.get()));
+    prefill_context.client_stream = std::move(
+        prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto& client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
@@ -199,10 +210,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_allocated_input(new_request);
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, client_stream->Write(alloc_request),
-                            ErrorCode::REMOTE_ALLOCATE_RESOURCE_FAILED);
+                            ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, client_stream->Read(&allocate_response),
-                            ErrorCode::REMOTE_ALLOCATE_RESOURCE_FAILED);
+                            ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
     FT_LOG_DEBUG("request:[%ld] remote allocate resource done", prefill_context.request_id);
 }
 
@@ -295,6 +306,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }   
     }
     auto status = prefill_context.closeGrpcStream();
+    // TODO(xinfei.sxf) fix new call
     if (!status.ok()) {
         prefill_context.stream->setStop(ErrorCode::RPC_FINISH_FAILED, status.error_message());
         prefill_context.error_info = ErrorInfo(ErrorCode::REMOTE_GENERATE_FAILED,

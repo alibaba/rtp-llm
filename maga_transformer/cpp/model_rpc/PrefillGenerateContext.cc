@@ -98,6 +98,12 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
     return grpc::Status::OK;
 }
 
+void PrefillGenerateContext::closeGrpcConnection() {
+    if (!decode_addr.empty()) {
+        resource->rpc_pool.removeConnection(decode_addr);
+    }
+}
+
 void PrefillGenerateContext::reset() {
     GenerateContext::reset();
     grpc_stream_closed = false;

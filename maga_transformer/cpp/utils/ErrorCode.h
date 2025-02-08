@@ -24,13 +24,16 @@ enum class ErrorCode {
     GET_HOST_FAILED = 8200,
     GET_CONNECTION_FAILED = 8201,
     CONNECT_FAILED = 8202,
-    CONNECTION_RESET_BY_PEER = 8203,
-    REMOTE_ALLOCATE_RESOURCE_FAILED = 8204,
-    REMOTE_LOAD_KV_CACHE_FAILED = 8205,
-    REMOTE_GENERATE_FAILED = 8206,
-    RPC_FINISH_FAILED = 8207,
-    DECODE_MALLOC_FAILED = 8208,
-    LOAD_KV_CACHE_FAILED = 8209,
+    CONNECT_TIMEOUT = 8203,
+    DEADLINE_EXCEEDED = 8204,
+    CONNECTION_RESET_BY_PEER = 8205,
+    REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED = 8206,
+    REMOTE_ALLOCATE_RESOURCE_READ_FAILED = 8207,
+    REMOTE_LOAD_KV_CACHE_FAILED = 8208,
+    REMOTE_GENERATE_FAILED = 8209,
+    RPC_FINISH_FAILED = 8210,
+    DECODE_MALLOC_FAILED = 8211,
+    LOAD_KV_CACHE_FAILED = 8212,
 
     // cache store error
     LOAD_CACHE_TIMEOUT = 8300,
@@ -58,28 +61,46 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "NONE_ERROR";
         case ErrorCode::LONG_PROMPT_ERROR:
             return "LONG_PROMPT_ERROR";
-        case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
-            return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::UNKNOWN_ERROR:
             return "UNKNOWN_ERROR";
         case ErrorCode::MALLOC_FAILED:
             return "MALLOC_FAILED";
         case ErrorCode::GENERATE_TIMEOUT:
             return "GENERATE_TIMEOUT";
+        case ErrorCode::ERROR_GENERATE_CONFIG_FORMAT:
+            return "ERROR_GENERATE_CONFIG_FORMAT";
         case ErrorCode::INVALID_PARAMS:
             return "INVALID_PARAMS";
+        case ErrorCode::EXECUTION_EXCEPTION:
+            return "EXECUTION_EXCEPTION";
         case ErrorCode::CANCELLED:
             return "CANCELLED";
+        case ErrorCode::OUT_OF_VOCAB_RANGE:
+            return "OUT_OF_VOCAB_RANGE";
+        case ErrorCode::OUTPUT_QUEUE_FULL:
+            return "OUTPUT_QUEUE_FULL";
+        case ErrorCode::OUTPUT_QUEUE_IS_EMPTY:
+            return "OUTPUT_QUEUE_IS_EMPTY";
+        case ErrorCode::FINISHED:
+            return "FINISHED";
+        case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
+            return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GET_HOST_FAILED:
             return "GET_HOST_FAILED";
         case ErrorCode::GET_CONNECTION_FAILED:
             return "GET_CONNECTION_FAILED";
         case ErrorCode::CONNECT_FAILED:
             return "CONNECT_FAILED";
+        case ErrorCode::CONNECT_TIMEOUT:
+            return "CONNECT_TIMEOUT";
+        case ErrorCode::DEADLINE_EXCEEDED:
+            return "DEADLINE_EXCEEDED";
         case ErrorCode::CONNECTION_RESET_BY_PEER:
             return "CONNECTION_RESET_BY_PEER";
-        case ErrorCode::REMOTE_ALLOCATE_RESOURCE_FAILED:
-            return "REMOTE_ALLOCATE_RESOURCE_FAILED";
+        case ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED:
+            return "REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED";
+        case ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED:
+            return "REMOTE_ALLOCATE_RESOURCE_READ_FAILED";
         case ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED:
             return "REMOTE_LOAD_KV_CACHE_FAILED";
         case ErrorCode::REMOTE_GENERATE_FAILED:
