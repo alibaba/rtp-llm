@@ -202,7 +202,7 @@ class GpuImpl(DeviceBase):
         processed_scalses = torch.stack(processed_scalses, dim=0)
         return processed_weights, processed_zeros, processed_scalses
 
-    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, align: list, is_gate: bool = False) -> torch.Tensor:
+    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
         return x
 
 class CudaImpl(GpuImpl):
@@ -318,8 +318,10 @@ class RocmImpl(GpuImpl):
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
         return os.environ.get('SPECIFY_GPU_ARCH', "900")
-    
-    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, align: list, is_gate: bool = False) -> torch.Tensor:
+
+    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
+        is_gate = "moe_weights.intermediate_weight.kernel" in name
+        align = [0, 512, 0] if is_gate else [0, 0, 512]
         if len(align) != len(x.shape):
             logging.error(f'Data type for moe weight is not supported: {datatype}')
             return x
@@ -340,7 +342,7 @@ class RocmImpl(GpuImpl):
                     dim = 1)
             else:
                 x_ = torch.nn.functional.pad(x_, tuple(padding), mode='constant', value=0)
-            logging.info(f'Padding shape {[ele for ele in x.shape]} with {padding} to {[ele for ele in x_.shape]}')
+            # logging.info(f'Moe padding shape {[ele for ele in x.shape]} with {padding} to {[ele for ele in x_.shape]}')
         b_: int = x_.shape[0]
         n_: int = x_.shape[1]
         k_: int = x_.shape[2]

@@ -603,11 +603,6 @@ class ModelWeightsLoader:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
 
         after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(convert_type)
-        if layer_id in self._weights_info.moe_layer_index_:
-            if "moe_weights.intermediate_weight" in weight_info.name:
-                is_gate = "moe_weights.intermediate_weight.kernel" in weight_info.name
-                align = [0, 512, 0] if is_gate else [0, 0, 512]
-                after_merge_tensor = self._exported_device.shuffle_moe_weight(after_merge_tensor, datatype, align, is_gate)
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):
@@ -615,6 +610,8 @@ class ModelWeightsLoader:
 
     def _split_tensor(self, name: str, tensor: torch.Tensor, bits=4) -> torch.Tensor:
         if self._tp_size <= 1:
+            if ("moe_weights.intermediate_weight" in name):
+                return self._exported_device.shuffle_moe_weight(tensor, self._data_type, name)
             return tensor
         if (not self._tp_split_emb_and_lm_head and
             name in [W.lm_head, W.lm_head_b, W.embedding, W.positional_embedding, W.token_type_embedding]):
@@ -637,6 +634,8 @@ class ModelWeightsLoader:
                        size_per_head=self._weights_info._size_per_head,
                        bits=bits
                        )
+        if ("moe_weights.intermediate_weight" in name):
+                return self._exported_device.shuffle_moe_weight(ts, self._data_type, name)
         return ts
 
     # 避免被 storage 影响多用显存

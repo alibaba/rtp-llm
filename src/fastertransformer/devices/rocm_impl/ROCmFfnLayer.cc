@@ -22,12 +22,16 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto  weights_type  = weights.moe_down_weight->kernel->type();
     const auto  num_token     = hidden.shape()[0];
     const auto  model_dim     = hidden.shape()[1];
-    const auto  num_expert    = moe_conf.expert_num;
+    const auto  num_expert    = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto  inter_dim     = weights.moe_gate_weight->kernel->shape()[1];  //(size_t)moe_conf.moe_inter_padding_size;
     const auto  top_k         = moe_conf.top_k;
     const int   fused_quant   = (params.qscheme == QScheme::NoQuantize) ? 0 : 1;
-    const int   gate_only     = (inter_dim == weights.moe_down_weight->kernel->shape()[1]) ? 1 : 0;
+    const int   gate_only     = (inter_dim == weights.moe_down_weight->kernel->shape()[2]) ? 1 : 0;
     const auto  inter_dim_per = inter_dim / (gate_only ? 1 : 2);
+    // RUNTIME_ASSERT_OP_ARG(weights.moe_down_weight->kernel->shape()[2] == inter_dim_per,
+    //                       "Intermedate_size not the same for gate (%d) and down(%d).",
+    //                       inter_dim_per,
+    //                       weights.moe_down_weight->kernel->shape()[1]);
 
     // TODO: cuda version also not init this
     MOEParallelismConfig parallelism_config;
