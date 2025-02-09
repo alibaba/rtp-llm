@@ -89,6 +89,13 @@ class WeightConverter:
         env_params = copy.deepcopy(self.env_params)
         env_params.update({"WORLD_RANK": world_rank,})
         logging.info(f"begin convert model rank:{world_rank}")
+
+        try:
+            cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
+            env_params.update({"LOCAL_WORLD_SIZE" : len(cuda_device_list)})
+        except Exception as _:
+            logging.info(f"no GPU device, load to mem")
+
         model_config = ModelConfig(
             model_type=self.model_type,
             ckpt_path=self.model_path,
@@ -101,7 +108,14 @@ class WeightConverter:
         paralle_info = ParallelInfo.from_params(env_params)
         config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
         model = self.model_cls.from_config(config, paralle_info)
-        model.dump_weights(output_dir_base)
+        for i in range(10):
+            try:
+                model.dump_weights(output_dir_base)
+                logging.info(f"dump rank:[{world_rank}] done")
+                break
+            except Exception as _:
+                logging.warn(f"dump rank:[{world_rank}] failed, retry {i} times")
+                continue
         logging.info(f"convert model rank:{world_rank} done")
 
 

@@ -21,6 +21,9 @@ class BaseDatabase:
     def load_tensor(self, name: str, datatype: Optional[torch.dtype] = torch.float16) -> List[torch.Tensor]:
         raise NotImplementedError
 
+    def get_tensor_order(self, name: str) -> List[int]:
+        raise NotImplementedError
+
 class CkptDatabase(BaseDatabase):
 
     PretrainFileList : List[CkptFileInfo]
@@ -127,6 +130,18 @@ class CkptDatabase(BaseDatabase):
                 tensors.append(ckpt_file.load_tensor(name, datatype))
 
         return tensors
+
+    def get_tensor_order(self, name: str) -> List[int]:
+        orders = []
+        for ckpt_file in self.PretrainFileList:
+            if name in ckpt_file.get_tensor_names():
+                orders.append((ckpt_file.file_name, ckpt_file.get_tensor_read_order(name)))
+
+        for ckpt_file in self.FinetuneFileList:
+            if name in ckpt_file.get_tensor_names():
+                orders.append((ckpt_file.file_name, ckpt_file.get_tensor_read_order(name)))
+
+        return orders 
 
     def load_tensors_by_prefix(self, prefix_list: List[str], device: str) -> dict[str, List[torch.Tensor]]:
         res = {}

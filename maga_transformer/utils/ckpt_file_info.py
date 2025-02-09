@@ -83,6 +83,51 @@ class CkptFileInfo:
     def get_metadata(self) -> Dict[str, Any]:
         return self.metadata
 
+    def get_tensor_read_order(self, name: str) -> List[str]:
+        """
+        获取推荐的张量读取顺序，基于物理存储位置优化I/O效率
+        
+        返回:
+            List[str]: 按实际存储位置排序的张量名称列表
+            
+        抛出:
+            RuntimeError: 如果文件元数据未正确加载
+        """
+        if not hasattr(self, '_sorted_tensor_cache'):
+            # 延迟初始化排序缓存
+            self._sorted_tensor_cache = self._build_sorted_tensor_list()
+        
+        return self._sorted_tensor_cache.index(name)
+    
+    def _build_sorted_tensor_list(self) -> List[str]:
+        """构建按物理存储位置排序的张量列表"""
+        if not self.metadata:
+            raise RuntimeError("元数据未加载，请先调用 _load_meta")
+            
+        if self.is_safetensor():
+            # 对safetensors按文件偏移量排序
+            return self._safetensors_read_order()
+        else:
+            # 对其他格式使用文件中的自然顺序
+            return self.get_tensor_names()
+    
+    def _safetensors_read_order(self) -> List[str]:
+        """处理safetensors的物理存储顺序"""
+        # 提取带偏移量的元组列表 (tensor_name, offset)
+        tensor_offsets = [
+            (name, self.metadata[name]) 
+            for name in self.metadata
+            if isinstance(self.metadata[name], int)
+        ]
+        
+        # 按偏移量升序排列
+        sorted_tensors = sorted(
+            tensor_offsets, 
+            key=lambda x: x[1]
+        )
+        
+        return [name for name, _ in sorted_tensors]
+
     def _load_meta(self, file: str) -> Dict[str, Any]:
         # https://huggingface.co/docs/safetensors/metadata_parsing
         if self.is_safetensor():

@@ -380,6 +380,44 @@ class ModelWeightsLoader:
             return w.name in W.groupwise_quant_params or w.name in W.quant_w
         return False
 
+
+    def _sort_layer_weight_by_read_order(self, layer_weights, layer_id):
+        # 创建文件名到权重的映射
+        weighted_entries = []
+        # 创建文件名到权重的映射
+        # 生成排序键的辅助逻辑
+        def get_key(file_name):
+            # 将文件名拆分为字母和数字部分
+            parts = re.split(r'(\d+)', file_name)
+            # 将数字部分转为整数，其他部分保持小写
+            return tuple(int(p) if p.isdigit() else p.lower() for p in parts if p)
+
+        for weight in layer_weights:
+            file_keys = []
+            file_indices = []
+            orig_orders = []
+            for ckpt_weight in weight.weights:
+                tensor_name = ckpt_weight.tensor_name(layer_id)
+                file_name, idx = self._database.get_tensor_order(tensor_name)[0]
+                if file_name:  # 过滤无效文件名
+                    file_keys.append(get_key(file_name))
+                    file_indices.append(idx)
+
+            # 生成主排序键（取最小文件键）
+            main_key = min(file_keys) if file_keys else (float('inf'),)
+            main_idx = file_indices[file_keys.index(main_key)] if file_keys else 0
+            
+            weighted_entries.append( (main_key, main_idx, weight) )
+        
+        # 执行三级排序
+        sorted_weights = sorted(
+            weighted_entries,
+            key=lambda x: (x[0], x[1], get_key(x[2].name))  # 文件名 > 索引 > 权重名
+        )
+        
+        return [entry[2] for entry in sorted_weights]
+        
+
     def _load_layer_weight(self, layer_id: int, device: str):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
         results = []
@@ -389,6 +427,9 @@ class ModelWeightsLoader:
             layer_weights = self._model_weights_info.layer_weights
         if self._weights_info.moe_style_ == 2 and layer_id not in self._weights_info.moe_layer_index_:
             layer_weights = self._trunc_layer_weights_for_partial_moe(layer_weights)
+
+        layer_weights = self._sort_layer_weight_by_read_order(layer_weights, layer_id)
+
         for weight in layer_weights:
             try:
                 if self._is_quant_weight(weight):
