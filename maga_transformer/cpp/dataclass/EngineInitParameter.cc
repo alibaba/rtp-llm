@@ -5,9 +5,6 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/models/W.h"
 #include <memory>
-#if defined(__aarch64__)
-#include "src/fastertransformer/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
-#endif
 using namespace std;
 using namespace fastertransformer;
 
@@ -86,14 +83,6 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
     if (map.count(scales_key) == 0) {
         dense_weights->kernel = mayFindBuffer(map, kernel_key);
     } else {
-#if defined(__aarch64__)
-        // input: qweight int8, scale fp16
-        // output: packed weight
-        auto kernel = mayFindBuffer(map, kernel_key);
-        auto scales = mayFindBuffer(map, scales_key);
-
-        dense_weights->kernel = prepareGemmOptForGPTQInt4(kernel, scales, kernel_key);
-#else
         auto kernel = mayFindBuffer(map, kernel_key);
         auto shape = kernel->shape();
         auto dtype = kernel->type();
@@ -115,7 +104,6 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                 new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
                             std::move(scalesBuffer),
                             std::move(zerosBuffer)));
-#endif
         FT_LOG_DEBUG("quant_method:%d, kernel_key:%s have scale use Qbuffer, kernel:%s",
                         quant_algo_.getQuantMethod(), kernel_key.c_str(), kernel->debugString().c_str());
 

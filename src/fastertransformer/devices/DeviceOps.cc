@@ -162,4 +162,8 @@ std::vector<torch::Tensor> DeviceOps::symmetricQuantizeLastAxisOfBatchedMatrix(t
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+torch::Tensor DeviceOps::preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 } // namespace fastertransformer

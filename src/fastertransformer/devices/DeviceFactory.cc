@@ -149,8 +149,8 @@ void registerDeviceOps(py::module& m) {
         .def("preprocess_gemm_weight_by_key", &DeviceExporter::preprocessGemmWeightByKey)
         .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4)
         .def("preprocess_weights_for_mixed_gemm", &DeviceExporter::preprocessWeightsForMixedGemm)
-        .def("symmetric_quantize_last_axis_of_batched_matrix", &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix);
-
+        .def("symmetric_quantize_last_axis_of_batched_matrix", &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix)
+        .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale);
     pybind11::enum_<DeviceType>(m, "DeviceType")
         .value("Cpu", DeviceType::Cpu)
         .value("Cuda", DeviceType::Cuda)

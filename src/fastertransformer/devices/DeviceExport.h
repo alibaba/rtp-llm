@@ -26,6 +26,7 @@ public:
     virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight) = 0;
     virtual torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type) = 0;
     virtual std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, py::object quant_type) = 0;
+    virtual torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) = 0;
 
 protected:
     fastertransformer::DeviceInitParams device_params_;
@@ -54,7 +55,9 @@ public:
         const auto dtype = torch::python::detail::py_object_to_dtype(quant_type);
         return Device::symmetricQuantizeLastAxisOfBatchedMatrix(weight, dtype);
     }
-
+    torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
+        return Device::preprocessWeightScale(weight, scale);
+    }
 };
 
 } // namespace torch_ext

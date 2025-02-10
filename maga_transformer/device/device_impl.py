@@ -46,7 +46,7 @@ class ArmCpuImpl(CpuImpl):
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
         packer = self.exported_device.pack_int8_tensor_to_packed_int4
-        preprocessor = self.exported_device.preprocess_weights_for_mixed_gemm
+        preprocess_weight_scale = self.exported_device.preprocess_weight_scale
         is_int8 = weight_bits == 8
         if is_int8:
             zero_shift = 128
@@ -64,7 +64,7 @@ class ArmCpuImpl(CpuImpl):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
-        qweight_interleaved = preprocessor(qweight, quant_type)
+        qweight_interleaved = preprocess_weight_scale(qweight, scales_fp16)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
         # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq

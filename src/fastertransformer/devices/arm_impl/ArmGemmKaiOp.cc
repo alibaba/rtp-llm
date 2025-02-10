@@ -172,7 +172,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
         const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_quant_pack_bf16p8x4_f32_neon(m, k, mr, kr, sr);
         lhs_packed = new uint8_t[lhs_packed_size];
 
-        #pragma omp parallel for
+	#pragma omp parallel for if (m > 1)
         for (int m_start = 0; m_start < m; m_start += m_step) {
             const size_t lhs_offset = kai_get_lhs_offset_lhs_quant_pack_bf16p8x4_f32_neon(m_start, lhs_stride);
             const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_bf16p8x4_f32_neon(m_start, k, mr, kr, sr);
@@ -191,7 +191,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
         const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_pack_bf16p8x4_f16_neon(m, k, mr, kr, sr);
         lhs_packed = new uint8_t[lhs_packed_size];
 
-        #pragma omp parallel for
+	#pragma omp parallel for if (m > 1)
         for (int m_start = 0; m_start < m; m_start += m_step) {
             const size_t lhs_offset = kai_get_lhs_offset_lhs_pack_bf16p8x4_f16_neon(m_start, lhs_stride);
             const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_pack_bf16p8x4_f16_neon(m_start, k, mr, kr, sr);
@@ -384,7 +384,7 @@ BufferPtr ArmCpuDevice::gemm_kai_a8w4(const GemmParams& params) {
     int m_step = mr;
     // LHS packing
     if (params.A.type() == DataType::TYPE_FP32) {
-        #pragma omp parallel for
+	#pragma omp parallel for if (m > 1)
         for (int m_start = 0; m_start < m; m_start += m_step) {
             const size_t lhs_offset = kai_get_lhs_offset_lhs_quant_pack_qsi8d32p_f32(m_start, lhs_stride);
             const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qsi8d32p_f32(m_start, k, bl, mr, kr, sr);
@@ -397,7 +397,7 @@ BufferPtr ArmCpuDevice::gemm_kai_a8w4(const GemmParams& params) {
                 ((uint8_t*)lhs_packed_mtx_qs8d32 + lhs_packed_offset));
         }
     } else if (params.A.type() == DataType::TYPE_FP16) {
-        #pragma omp parallel for
+	#pragma omp parallel for if (m > 1)
         for (int m_start = 0; m_start < m; m_start += m_step) {
             const size_t lhs_offset = kai_get_lhs_offset_lhs_quant_pack_qsi8d32p_f16(m_start, k * sizeof(float16_t));
             const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qsi8d32p_f16(m_start, k, bl, mr, kr, sr);

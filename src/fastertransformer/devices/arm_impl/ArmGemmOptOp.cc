@@ -17,8 +17,7 @@ namespace fastertransformer {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
-//        return gemm_opt(params);
-    if (params.B.type() == DataType::TYPE_UINT8)
+    if (params.B.type() == DataType::TYPE_QINT4X2)
             return gemm_kai_a8w4(params);
     return (this->*gemmFunc)(params);
 }

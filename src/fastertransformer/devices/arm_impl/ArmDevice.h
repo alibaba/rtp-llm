@@ -48,6 +48,7 @@ public:
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type);
+    static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
 private:
     std::unique_ptr<IAllocator> allocator_;
