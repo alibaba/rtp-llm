@@ -482,7 +482,7 @@ class CustomChatRenderer():
                                  status: StreamStatusSync,
                                  all_probs: torch.Tensor,
                                  output_ids: torch.Tensor) -> Optional[ChatCompletionTokenLogprob]:
-        if (status.request.logprobs == None):
+        if not status.request.logprobs:
             return None
         prob_return_num = status.request.top_logprobs or 1
         all_probs = all_probs
