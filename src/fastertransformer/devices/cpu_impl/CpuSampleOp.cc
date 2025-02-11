@@ -400,7 +400,7 @@ void batchTopPSampling(int*         output_ids,
     }
 }
 
-void CpuDevice::sampleGreedy(const GreedyParams& params) {
+GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits            = params.logits;
     const auto  batch_size        = logits.shape()[0];
     const auto  vocab_size_padded = logits.shape()[1];
@@ -552,6 +552,7 @@ void CpuDevice::sampleGreedy(const GreedyParams& params) {
                       runtime_top_p,
                       skip_top_p_decode,
                       rand_nums);
+    return GreedyOutput{};
 }
 
 }  // namespace fastertransformer

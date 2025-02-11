@@ -58,6 +58,7 @@ message GenerateConfigPB {
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
     bool return_softmax_probs = 30;
+    bool return_cum_log_probs = 31;
 }
 
 message MMPreprocessConfigPB {

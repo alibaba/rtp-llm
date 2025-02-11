@@ -81,6 +81,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     }
     checkUseMultiBlockMode();
     checkUseGroupGemm();
+    checkUseFlashinferSampleKernel();
 
     // Initialize custom all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
@@ -362,6 +363,20 @@ bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
     }
 #endif
     return false;
+}
+
+void CudaDevice::checkUseFlashinferSampleKernel() {
+    char* flashinfer_sample_env = std::getenv("ENABLE_FLASHINFER_SAMPLE_KERNEL");
+    if (flashinfer_sample_env && std::string(flashinfer_sample_env) == "OFF") {
+        FT_LOG_WARNING("Flashinfer sample is disabled for by env");
+        return;
+    }
+    if(CompileConfig::cudart_version < 12000) {
+        FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
+        return;
+    }
+    FT_LOG_INFO("use Flashinfer sample kernel");
+    use_flashinfer_sample_kernel = true;
 }
 
 

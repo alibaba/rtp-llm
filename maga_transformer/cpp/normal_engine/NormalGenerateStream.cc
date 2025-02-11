@@ -42,7 +42,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
-        if (generate_input_->generate_config->return_logits && update_info.logits) {
+        if (returnLogits() && update_info.logits) {
             ft::BufferPtr host_logits;
             if (update_info.logits->shape()[0] == 1) {
                 host_logits = device_->clone({*update_info.logits, ft::AllocationType::HOST});

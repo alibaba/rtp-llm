@@ -27,7 +27,7 @@ public:
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
     FfnLayerOutput ffnLayer(const FfnLayerParams& params);
-    void sampleGreedy(const GreedyParams& params);
+    GreedyOutput sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);
     AllReduceOutput allReduce(const AllReduceParams& params);
@@ -37,4 +37,3 @@ private:
 };
 
 } // namespace fastertransformer
-

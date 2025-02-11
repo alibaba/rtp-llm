@@ -201,7 +201,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-
     return model_input;
 }
 
@@ -221,6 +220,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     setCommonSamplerInputs(sampler_inputs, all_streams);
 
     int batch_idx   = 0;
+    bool return_logits = false;
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
@@ -233,20 +233,25 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
                    seq_len * sizeof(int));
             batch_idx += 1;
         }
-
+        return_logits |= stream->returnLogits();
         FT_LOG_DEBUG("stream [%d], complete token ids = [%s]", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
         FT_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]", stream->streamId(), sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
 
     auto vocab_size = model_output.logits->shape()[1];
-    sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
     if (return_all_probs) {
         sampler_inputs.all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
     }
 
     batch_idx = 0;
-    device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
+    // need copy logits when has tile or return logits
+    if (return_logits || (context_streams.size() && total_batch_size > all_streams.size())) {
+        sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+        device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
+    } else {
+        sampler_inputs.logits = model_output.logits;
+    }
     batch_idx += total_decode_batch_size;
     size_t logits_offset = batch_idx;
     for (auto& stream : context_streams) {
@@ -284,7 +289,9 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.repetition_penalty = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.min_lengths   = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.no_repeat_ngram_size = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    if (stream_groups.needReturnCumLogProbs()) {
+        sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    }
     sampler_inputs.token_ids = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
     return sampler_inputs;
@@ -310,10 +317,10 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
         } else {
             current_batch_size = stream->scoreLen();
         }
-        const auto& cum_log_probs      = stream->cumLogProbs();
-
-        memcpy(sampler_inputs.cum_log_probs->dataWithOffset<float>(batch_idx), cum_log_probs->data(), cum_log_probs->sizeBytes());
-
+        if (sampler_inputs.cum_log_probs) {
+            const auto& cum_log_probs      = stream->cumLogProbs();
+            memcpy(sampler_inputs.cum_log_probs->dataWithOffset<float>(batch_idx), cum_log_probs->data(), cum_log_probs->sizeBytes());
+        }
         for (int i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
             beam_search_sequence_lengths[batch_idx]  = stream->seqLength();
@@ -353,16 +360,22 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int offset = 0;
     int token_offset = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
+    ft::BufferPtr new_tokens_all = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)total_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
+
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
             continue;
         }
         auto current_batch_size = stream->tileNum();
+        auto new_tokens = new_tokens_all->slice(batch_idx, current_batch_size);
         auto token_size = stream->currentExecuteTokenSize();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->slice(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
-        auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
+        BufferPtr batch_cum_log_probs;
+        if (sampler_output.cum_log_probs) {
+            batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
+        }
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
         BufferPtr loss = nullptr;
         BufferPtr beam_index = (sampler_output.beam_index == nullptr) ? nullptr : sampler_output.beam_index->slice(batch_idx, current_batch_size);
@@ -378,16 +391,17 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             current_softmax_result = device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
             batch_softmax_result = device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
         }
-        ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             if (stream->calculateSoftmaxProbs()) {
                 device_->copy({(*current_softmax_result)[i], (*batch_softmax_result)[i].view(*(new_tokens->dataWithOffset<int32_t>(i)), 1)});
             }
+            if (sampler_output.success && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx)))) {
+                stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+            }
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-
         if (stream->numBeams() > 1 && beam_index != nullptr) {
             StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
                     current_softmax_result, batch_cum_log_probs, all_probs, loss};

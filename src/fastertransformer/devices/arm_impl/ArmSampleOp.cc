@@ -203,7 +203,7 @@ void topk_sampling(int    batch_size,
     });
 }
 
-void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
+GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
@@ -231,7 +231,7 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
 
     auto default_top_k = top_k.data<uint32_t>()[0];
     auto default_top_p = top_p.data<float>()[0];
-    
+
     if (default_top_k == 0) {
         default_top_k = 1;
     }
@@ -354,6 +354,6 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                   skip_top_k_decode_buf->data<bool>(),
                   step + 1);
 
-    return;
+    return GreedyOutput{};
 }
 }; // namespace fastertransformer

@@ -83,6 +83,8 @@ public:
     int numReturnSequences() const;
     bool calculateLoss() const;
     bool calculateSoftmaxProbs() const;
+    bool returnLogits() const;
+    bool returnCumLogProbs() const;
 
     bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;

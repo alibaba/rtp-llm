@@ -58,3 +58,17 @@ void BatchPrefillWithRaggedKVCacheSM90Run(
     at::Tensor qo_indptr, at::Tensor kv_indptr, std::optional<at::Tensor> maybe_qk_indptr,
     at::Tensor o, unsigned int layout, int32_t window_left, float logits_soft_cap, float sm_scale,
     float rope_scale, float rope_theta, std::optional<at::Tensor> maybe_lse, int64_t cuda_stream);
+
+void top_k_sampling_from_probs(at::Tensor probs, at::Tensor uniform_samples, at::Tensor samples,
+                               at::Tensor success, std::optional<at::Tensor> maybe_top_k_arr,
+                               unsigned int top_k_val, bool deterministic, int64_t cuda_stream);
+
+void top_p_sampling_from_probs(at::Tensor probs, at::Tensor uniform_samples, at::Tensor samples,
+                               at::Tensor success, std::optional<at::Tensor> maybe_top_p_arr,
+                               double top_p_val, bool deterministic, int64_t cuda_stream);
+
+void top_k_top_p_sampling_from_probs(at::Tensor probs, at::Tensor uniform_samples,
+                                     at::Tensor samples, at::Tensor success,
+                                     std::optional<at::Tensor> maybe_top_k_arr, double top_k_val,
+                                     std::optional<at::Tensor> maybe_top_p_arr, double top_p_val,
+                                     bool deterministic, int64_t cuda_stream);

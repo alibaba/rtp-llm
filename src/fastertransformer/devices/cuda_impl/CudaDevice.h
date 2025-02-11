@@ -115,11 +115,17 @@ private:
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
     void checkSupportTrtFp8FMHA();
+    void checkUseFlashinferSampleKernel();
     bool useFp8Fmha(const DevicePrepParams& params) const;
     void initMoeRunner(const DataType compute_type, const DataType weights_type);
     void checkUseGroupGemm();
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
+    bool checkUseFlashinferSampleGreedy(const GreedyParams& params);
+    GreedyOutput flashinferSampleGreedy(const Buffer& logits, const Buffer& top_k,
+                         const Buffer& top_p, const Buffer& temperature,
+                         Buffer& token_ids);
+    void completeSampleGreedy(const GreedyParams& params);
 
 public:
     cudaStream_t getStream() {return stream_;}
@@ -145,7 +151,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
-    void sampleGreedy(const GreedyParams& params) override;
+    GreedyOutput sampleGreedy(const GreedyParams& params) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
@@ -218,7 +224,7 @@ protected:
     bool use_group_gemm             = false;
     bool support_trt_fp8_fmha       = false;
     bool use_fp8_fmha_              = false;
-
+    bool use_flashinfer_sample_kernel      = false;
 };
 
 } // namespace fastertransformer

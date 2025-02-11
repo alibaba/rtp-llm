@@ -526,6 +526,12 @@ struct GreedyParams {
     OptionalBufferRef output_all_probs;
 };
 
+struct GreedyOutput {
+    BufferPtr success;
+    // BufferPtr new_tokens;
+};
+
+
 struct BeamSearchParams {
     const Buffer& logits;
     Buffer& token_ids;
@@ -534,7 +540,6 @@ struct BeamSearchParams {
     Buffer& cum_log_probs;
     Buffer& beam_index;
 };
-
 
 struct BroadcastParams {
     const std::vector<BufferPtr>& buffers;

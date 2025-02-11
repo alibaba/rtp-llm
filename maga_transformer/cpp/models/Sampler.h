@@ -61,6 +61,7 @@ public:
     ft::BufferPtr cum_log_probs;
     ft::BufferPtr all_probs;
     ft::BufferPtr beam_index;
+    ft::BufferPtr success;
 };
 
 // Sampler would split logits into appropriate groups (mostly, based on beam size)

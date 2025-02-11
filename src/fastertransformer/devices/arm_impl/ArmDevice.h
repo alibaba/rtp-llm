@@ -34,7 +34,7 @@ public:
     BufferPtr softmax(const SoftmaxParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
-    void sampleGreedy(const GreedyParams& params) override;
+    GreedyOutput sampleGreedy(const GreedyParams& params) override;
     void sampleBeamSearch(const BeamSearchParams& params) override;
     void broadcast(const BroadcastParams& params) override;
     void allReduceSum(const AllReduceParams& params);
@@ -77,4 +77,3 @@ private:
 extern ConstBufferPtr (*armPrepareWeightFunc)(ConstBufferPtr input, bool isTranspose, bool isForceF32Out);
 
 } // namespace fastertransformer
-

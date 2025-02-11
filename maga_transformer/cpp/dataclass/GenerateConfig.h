@@ -30,8 +30,8 @@ public:
 
     int                  num_beams            = 1;
     int                  num_return_sequences = 1;
-    int                  top_k                = 1;
-    float                top_p                = 0.0;
+    int                  top_k                = 0;
+    float                top_p                = 1.0;
     float                temperature          = 1.0;
     float                repetition_penalty   = 1.0;
     std::optional<int>   no_repeat_ngram_size;
@@ -46,6 +46,7 @@ public:
     std::vector<std::string> select_tokens_str;
     int                 calculate_loss       = 0;
     bool                return_logits        = false;
+    bool                return_cum_log_probs = false;
     bool                return_incremental   = false;
     bool                return_hidden_states = false;
     bool                return_output_ids    = false;

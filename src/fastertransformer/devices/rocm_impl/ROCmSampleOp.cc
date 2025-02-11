@@ -18,7 +18,7 @@ using SamplerT = float;
 // where "x" are skipped.
 // topk should has higher proirity than topp.
 
-void ROCmDevice::sampleGreedy(const GreedyParams& params) {
+GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
@@ -311,6 +311,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
     sync_check_cuda_error();
+    return GreedyOutput{};
 }
 
 } // namespace fastertransformer

@@ -20,7 +20,7 @@ class GenerateConfig(BaseModel):
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
     num_return_sequences: int = 0
     top_k: Union[List[int], int] = 0
-    top_p: Union[List[float], float] = 0.95
+    top_p: Union[List[float], float] = 1.0
     temperature: Union[List[float], float] = 1.0
     repetition_penalty: Union[List[float], float] = 1.0
     min_new_tokens: Union[List[int], int] = 0
@@ -56,6 +56,7 @@ class GenerateConfig(BaseModel):
     sp_advice_prompt_token_ids: List[int] = []
     sp_edit: bool = False
     force_disable_sp_run: bool = False
+    return_cum_log_probs: bool = False
     return_all_probs: bool = False
     return_softmax_probs: bool = False
     can_use_pd_separation: bool = True

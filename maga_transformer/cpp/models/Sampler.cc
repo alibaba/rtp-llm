@@ -30,7 +30,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto current_beam_size = beam_sizes[0];
 
     const auto& input_tokens = *inputs.token_ids;
-
+    auto success = device_->allocateBuffer({DataType::TYPE_BOOL, {inputs.batch_size}, AllocationType::HOST});
     do {
         while (sample_to_batch_idx + 1 < inputs.batch_size &&
                beam_sizes[sample_to_batch_idx + 1] == current_beam_size)
@@ -52,9 +52,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                             min(sample_batch_size, decoder_batch_size - from_batch_idx))
             : Buffer::emptyBuffer();
 
-        auto sample_cum_log_probs = device_->allocateBuffer(
-            {inputs.cum_log_probs->type(), {sample_seq_num}});
-        device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
+        BufferPtr sample_cum_log_probs;
+        if (inputs.cum_log_probs) {
+            sample_cum_log_probs = device_->allocateBuffer(
+                    {inputs.cum_log_probs->type(), {sample_seq_num}});
+            device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
+        }
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
         (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
@@ -65,7 +68,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
             auto no_repeat_ngram_size = MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size);
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx, sample_seq_num) : Buffer::emptyBuffer());
-            device_->sampleGreedy({
+            auto greedy_output = device_->sampleGreedy({
                 sample_logits,
                 input_lengths,
                 sequence_lengths,
@@ -79,10 +82,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                 *eos_ids_,
                 inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
-                *sample_cum_log_probs,
+                inputs.cum_log_probs ? (OptionalBufferRef)*sample_cum_log_probs : nullopt,
                 nullopt, // output_log_probs
                 inputs.all_probs ? (OptionalBufferRef) all_probs: nullopt
             });
+            if (greedy_output.success) {
+                device_->copy({success->view(from_seq_idx, sample_seq_num), *greedy_output.success});
+            } else {
+                std::fill(success->dataWithOffset<bool>(from_seq_idx),
+                          success->dataWithOffset<bool>(from_seq_idx) + sample_seq_num,
+                          true);
+            }
         } else {
             size_t beam_batch_size = (size_t)(sample_batch_size / current_beam_size);
             FT_LOG_DEBUG("current_beam_size is %d", current_beam_size);
@@ -137,9 +147,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             sample_cum_log_probs->updateShape(org_sample_cum_log_probs_shape);
             input_lengths.updateShape(org_input_lengths_shape);
             beam_index.updateShape(org_beam_index_shape);
+            std::fill(success->dataWithOffset<bool>(from_seq_idx),
+                      success->dataWithOffset<bool>(from_seq_idx) + sample_seq_num,
+                      true);
         }
-
-        device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
+        if (inputs.cum_log_probs) {
+            device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
+        }
 
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
@@ -149,7 +163,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     return SamplerOutput({move(inputs.token_ids),
                           move(inputs.cum_log_probs),
                           move(inputs.all_probs),
-                          move(inputs.beam_index)});
+                          move(inputs.beam_index),
+                          move(success)});
 }
 
 } // namespace rtp_llm

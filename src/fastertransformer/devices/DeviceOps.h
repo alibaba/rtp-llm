@@ -48,7 +48,7 @@ public:
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
 
     // for sampler
-    virtual void sampleGreedy(const GreedyParams& params);
+    virtual GreedyOutput sampleGreedy(const GreedyParams& params);
     virtual void sampleBeamSearch(const BeamSearchParams& params);
 
     // for device communication

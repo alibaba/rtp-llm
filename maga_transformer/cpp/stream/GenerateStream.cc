@@ -200,6 +200,14 @@ bool GenerateStream::calculateSoftmaxProbs() const {
     return generate_input_->generate_config->return_softmax_probs;
 }
 
+bool GenerateStream::returnLogits() const {
+    return generate_input_->generate_config->return_logits;
+}
+
+bool GenerateStream::returnCumLogProbs() const {
+    return generate_input_->generate_config->return_cum_log_probs;
+}
+
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
     if (system_prompt) {
         auto prefix_param = system_prompt->getPromptParams(*generate_input_->generate_config);

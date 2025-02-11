@@ -46,6 +46,7 @@ public:
         initTestDevices();
         initTestDataDir();
         torch::manual_seed(114514);
+        setenv("SAMPLE_TEST", "1", 1);
     }
 
     virtual void initTestDevices() {

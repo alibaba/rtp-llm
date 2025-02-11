@@ -7,12 +7,121 @@
 #include "src/fastertransformer/kernels/banRepeatNgram.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#if USING_CUDA12 == 1
+#include "3rdparty/flashinfer/flashinfer.h"
+#endif
+#include <memory>
 
 using namespace std;
 
 namespace fastertransformer {
 
 using SamplerT = float;
+
+
+bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
+    const auto batch_size = params.logits.shape()[0];
+    if ((!use_flashinfer_sample_kernel) ||
+        // params.random_seed.has_value() ||
+        params.cum_log_probs.has_value() ||
+        params.output_all_probs.has_value() ||
+        params.output_log_probs.has_value()) {
+        return false;
+    }
+    if (params.repetition_penalty.has_value() &&
+        std::any_of(params.repetition_penalty.value().get().data<float>(),
+                    params.repetition_penalty.value().get().data<float>() + batch_size,
+                    [&](auto t) { return std::abs(t - 1.0f) > 1e-5; })) {
+        return false;
+    }
+    if (params.min_lengths.has_value() &&
+        std::any_of(params.min_lengths.value().get().data<int32_t>(),
+                    params.min_lengths.value().get().data<int32_t>() + batch_size,
+                    [&](auto t) { return t != 0; })) {
+        return false;
+    }
+    if (params.no_repeat_ngram_size.has_value() &&
+        std::any_of(params.no_repeat_ngram_size.value().get().data<int32_t>(),
+                    params.no_repeat_ngram_size.value().get().data<int32_t>() + batch_size,
+                    [&](auto t) { return t != 0; })) {
+        return false;
+    }
+    return true;
+}
+
+
+GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buffer& top_k,
+                                 const Buffer& top_p, const Buffer& temperature,
+                                 Buffer& token_ids) {
+    auto device_tokens = clone({token_ids});
+    auto transposed_tokens = transpose({*device_tokens});
+    const auto batch_size = logits.shape()[0];
+    const auto vocab_size_padded = logits.shape()[1];
+    auto logits_ref = make_shared<Buffer>(logits.where(), logits.type(), logits.shape(), logits.data());
+    if (std::any_of(temperature.data<float>(),
+                    temperature.data<float>() + batch_size,
+                    [&](auto t) { return std::abs(t - 1.0f) > 1e-5; }))
+    {
+        BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+        copy({*temperature_buf, temperature});
+        invokeBatchApplyTemperaturePenalty(
+            logits_ref->data<float>(),
+            (float *)nullptr, // embedding_bias
+            temperature_buf->data<float>(),
+            batch_size,
+            vocab_size_padded,
+            vocab_size_padded,
+            stream_);
+    }
+    auto probs = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
+    auto success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
+    auto samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+    torch::TensorOptions options = torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
+    bool deterministic = true;
+    if (!std::getenv("SAMPLE_TEST")) {
+        std::random_device rd;
+        std::mt19937_64 gen(rd());
+        std::uniform_int_distribution<std::int64_t> distrib(0, std::numeric_limits<std::int64_t>::max());
+        torch::manual_seed(distrib(gen));
+        deterministic = false;
+    }
+    auto uniform_samples = torch::rand({32, (int)batch_size}, options);
+    torch::Tensor probs_t = Buffer2torchTensor(probs, false);
+    torch::Tensor samples_t = Buffer2torchTensor(samples, false);
+    torch::Tensor success_t = Buffer2torchTensor(success, false);
+    torch::Tensor top_k_t = Buffer2torchTensor(top_k, false);
+    torch::Tensor top_p_t = Buffer2torchTensor(top_p, false);
+    if (std::all_of(top_k.data<uint32_t>(),
+                    top_k.data<uint32_t>() + batch_size,
+                    [&](auto t) { return t <= 0; })) {
+        top_p_sampling_from_probs(probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)stream_);
+    }
+    else if (std::all_of(top_p.data<float>(),
+                    top_p.data<float>() + batch_size,
+                         [&](auto t) { return std::abs(t - 1.0f) < 1e-5; })) {
+        std::transform(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, top_k.data<uint32_t>(), [&](auto t) { return t <= 0 ? 1 << 30 : t;});
+        top_k_sampling_from_probs(probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)stream_);
+    } else {
+        std::transform(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, top_k.data<uint32_t>(), [&](auto t) { return t <= 0 ? 1 << 30 : t;});
+        top_k_top_p_sampling_from_probs(probs_t, uniform_samples, samples_t, success_t, top_k_t, 1.0, top_p_t, 1.0, deterministic, (int64_t)stream_);
+    }
+    auto output_tokens = transpose({*transposed_tokens});
+    copy({token_ids, *output_tokens});
+    sync_check_cuda_error();
+    return {success};
+}
+
+GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
+#if USING_CUDA12 == 1
+    if (checkUseFlashinferSampleGreedy(params)) {
+        return flashinferSampleGreedy(params.logits, params.top_k, params.top_p, params.temperature, params.token_ids);
+    }
+#endif
+
+    completeSampleGreedy(params);
+    return GreedyOutput{};
+}
 
 // batch sampling explained:
 // topk = [4, 0, 4]. topp = [0.0, 0.5, 0.5]
@@ -21,7 +130,7 @@ using SamplerT = float;
 // where "x" are skipped.
 // topk should has higher proirity than topp.
 
-void CudaDevice::sampleGreedy(const GreedyParams& params) {
+void CudaDevice::completeSampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
@@ -310,7 +419,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                     nullptr, // id_vals
                                     nullptr, // offsets_buf
                                     nullptr, // begin_offset_buf
-                                    nullptr, /// curandstate
+                                    nullptr, // curandstate
                                     batch_size,
                                     vocab_size_padded,
                                     nullptr,
@@ -347,8 +456,10 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     }
 
     auto output_tokens = transpose({*transposed_tokens});
+
     copy({params.token_ids, *output_tokens});
     sync_check_cuda_error();
 }
+
 
 } // namespace fastertransformer

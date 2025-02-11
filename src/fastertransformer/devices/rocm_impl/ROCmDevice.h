@@ -63,7 +63,7 @@ public:
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
-    void sampleGreedy(const GreedyParams& params) override;
+    GreedyOutput sampleGreedy(const GreedyParams& params) override;
     MemoryStatus getDeviceMemoryStatus() override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     void syncCommunication(bool timeout = true) override;

@@ -116,6 +116,21 @@ public:
         return false;
     }
 
+    bool needReturnCumLogProbs() const {
+        // beam kernel need cum log probs input, tmp set true
+        for (auto& stream : context_streams_) {
+            if (stream->returnCumLogProbs() || stream->numBeams() > 1) {
+                return true;
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            if (stream->returnCumLogProbs() || stream->numBeams() > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::list<GenerateStreamPtr> allStreams() const {
         std::list<GenerateStreamPtr> all_streams = decode_streams_;
         all_streams.splice(all_streams.end(), std::list<GenerateStreamPtr>(context_streams_));

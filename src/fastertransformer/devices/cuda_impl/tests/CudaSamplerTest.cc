@@ -11,6 +11,223 @@ public:
 protected:
 };
 
+TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
+    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+
+    size_t batch_size = 4;
+    BufferPtr logits = createBuffer<float>({batch_size, 10}, {
+        0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
+        0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+    });
+    size_t step = 5; // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
+    });
+
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+
+    auto top_k = createBuffer<uint32_t>({4}, {1, 1, 0, 2}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {1.0, 10.0, 1.0, 10.0}, AllocationType::HOST);
+
+    GreedyParams params({
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
+        *top_k, *top_p, *temperture, nullopt,
+        nullopt, nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt,
+    });
+    auto greedy_output = device_->sampleGreedy(params);
+    sync_check_cuda_error();
+    ASSERT_TRUE(greedy_output.success != nullptr);
+    ASSERT_EQ(greedy_output.success->size(), 4);
+    // printbuffer<int32_t>(*output_token_ids, "output_token_ids");
+    auto success_buffer = device_->clone({*greedy_output.success, AllocationType::HOST});
+    auto success = success_buffer->data<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], (bool)expect_success[i]);
+    }
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 0);
+    ASSERT_EQ(output_token_ids_host[23], 8);
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
+    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    size_t batch_size = 4;
+    BufferPtr logits = createBuffer<float>({batch_size, 10}, {
+        0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
+        0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+    });
+    size_t step = 5; // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
+    });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+
+    auto top_k = createBuffer<uint32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {0.1, 0.1, 0.6, 0.8}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {1.0, 10.0, 1.0, 10.0}, AllocationType::HOST);
+
+    GreedyParams params({
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
+        *top_k, *top_p, *temperture, nullopt,
+        nullopt, nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt,
+    });
+    auto greedy_output = device_->sampleGreedy(params);
+    sync_check_cuda_error();
+    ASSERT_TRUE(greedy_output.success != nullptr);
+    ASSERT_EQ(greedy_output.success->size(), 4);
+
+    // printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    auto success_buffer = device_->clone({*greedy_output.success, AllocationType::HOST});
+    auto success = success_buffer->data<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 0);
+    ASSERT_EQ(output_token_ids_host[23], 1);
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
+    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+
+    size_t batch_size = 4;
+    BufferPtr logits = createBuffer<float>({batch_size, 10}, {
+        0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
+        0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+    });
+    size_t step = 5; // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
+    });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
+    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+
+    auto top_k = createBuffer<uint32_t>({4}, {1, 0, 0, 2}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {0.2, 0.2, 0.6, 0.6}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {1.0, 10.0, 1.0, 10.0}, AllocationType::HOST);
+
+    GreedyParams params({
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
+        *top_k, *top_p, *temperture, *rand_seed,
+        nullopt, nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt,
+    });
+    auto greedy_output = device_->sampleGreedy(params);
+    sync_check_cuda_error();
+    ASSERT_TRUE(greedy_output.success != nullptr);
+    ASSERT_EQ(greedy_output.success->size(), 4);
+
+    // printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    auto success_buffer = device_->clone({*greedy_output.success, AllocationType::HOST});
+    auto success = success_buffer->data<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 0);
+    ASSERT_EQ(output_token_ids_host[23], 8);
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
+    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+
+    size_t batch_size = 4;
+    BufferPtr logits = createBuffer<float>({batch_size, 10}, {
+        0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
+        0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+    });
+    size_t step = 5; // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
+    });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
+    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+
+    auto top_k = createBuffer<uint32_t>({4}, {1, 2, 2, 2}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.6, 0.2}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {1.0, 10.0, 1.0, 10.0}, AllocationType::HOST);
+
+    GreedyParams params({
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
+        *top_k, *top_p, *temperture, *rand_seed,
+        nullopt, nullopt, nullopt, nullopt,
+        nullopt, nullopt, nullopt,
+    });
+    auto greedy_output = device_->sampleGreedy(params);
+    sync_check_cuda_error();
+
+    ASSERT_TRUE(greedy_output.success != nullptr);
+    ASSERT_EQ(greedy_output.success->size(), 4);
+
+    // printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    auto success_buffer = device_->clone({*greedy_output.success, AllocationType::HOST});
+    auto success = success_buffer->data<bool>();
+    vector<bool> expect_success{false, false, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    ASSERT_EQ(output_token_ids_host[17], 7);
+    ASSERT_EQ(output_token_ids_host[23], 8);
+}
+
 TEST_F(CudaSamplerTest, testTopK) {
     size_t batch_size = 4;
     BufferPtr logits = createBuffer<float>({batch_size, 10}, {
@@ -248,9 +465,9 @@ TEST_F(CudaSamplerTest, testRandom) {
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
-    for (int i = 0; i < vocab_size; i++) {
-        printf("counts[%d] = %ld\n", i, counts[i]);
-    }
+    // for (int i = 0; i < vocab_size; i++) {
+    //     printf("counts[%d] = %ld\n", i, counts[i]);
+    // }
     std::unordered_set<size_t> expected = {2, 9};
     for (int i = 0; i < vocab_size; i++) {
         if (expected.find(i) != expected.end()) {
@@ -271,9 +488,9 @@ TEST_F(CudaSamplerTest, testRandom) {
         counts[output_token_ids_host[5]]++;
     }
 
-    for (int i = 0; i < vocab_size; i++) {
-        printf("counts[%d] = %ld\n", i, counts[i]);
-    }
+    // for (int i = 0; i < vocab_size; i++) {
+    //     printf("counts[%d] = %ld\n", i, counts[i]);
+    // }
     expected = {0, 1, 2, 9};
     for (int i = 0; i < vocab_size; i++) {
         if (expected.find(i) != expected.end()) {
@@ -319,7 +536,7 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
     std::vector<uint64_t> output_ids_ptrs(batch_size);
     for (int i = 0; i < batch_size; i++) {
         output_ids_ptrs[i] = (uint64_t)(output_token_ids->data<int32_t>() + i * (step + 1));
-        printf("output_ids_ptrs[%d] = %p\n", i, (void*)output_ids_ptrs[i]);
+        // printf("output_ids_ptrs[%d] = %p\n", i, (void*)output_ids_ptrs[i]);
     }
     auto output_ids_ptrs_device = createBuffer<uint64_t>({batch_size}, output_ids_ptrs);
 
@@ -353,4 +570,3 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
     }
 
 }
-

@@ -71,6 +71,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(input_py.generate_config.sp_advice_prompt_token_ids)
+    generate_config_pb.return_cum_log_probs = input_py.generate_config.return_cum_log_probs
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
     generate_config_pb.return_softmax_probs = input_py.generate_config.return_softmax_probs
     generate_config_pb.can_use_pd_separation = input_py.generate_config.can_use_pd_separation

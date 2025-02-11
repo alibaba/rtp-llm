@@ -110,7 +110,7 @@ LoraLinearOutput DeviceOps::loraLinear(const LoraLinearParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::sampleGreedy(const GreedyParams& params) {
+GreedyOutput DeviceOps::sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
