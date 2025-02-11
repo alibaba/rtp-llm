@@ -8,6 +8,7 @@
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include <random>
 #if USING_CUDA12 == 1
 #include "3rdparty/flashinfer/flashinfer.h"
 #endif
@@ -54,6 +55,7 @@ bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
 GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buffer& top_k,
                                  const Buffer& top_p, const Buffer& temperature,
                                  Buffer& token_ids) {
+#if USING_CUDA12 == 1
     auto device_tokens = clone({token_ids});
     auto transposed_tokens = transpose({*device_tokens});
     const auto batch_size = logits.shape()[0];
@@ -110,6 +112,9 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
     copy({token_ids, *output_tokens});
     sync_check_cuda_error();
     return {success};
+#else
+    return {};
+#endif
 }
 
 GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
