@@ -481,6 +481,8 @@ GptModelOutputs GptModel::forwardPostLayers(
     printBufferData(*hidden, "final_hidden");
 
     const auto& lm_head = weights_.lm_head;
+    // in case host buffer destruct before async clone finished
+    device_->syncAndCheck();
     if (lm_head) {
         // gen last token hidden
         auto last_hidden = has_context_request && !need_all_logits

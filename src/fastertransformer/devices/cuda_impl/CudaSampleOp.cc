@@ -143,6 +143,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    BufferPtr output_ids_ptrs;
     if (decoder_batch_size) {
         auto sequence_lengths = clone({params.sequence_lengths});
         auto input_lengths = clone({params.input_lengths});
@@ -167,7 +168,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                        [](auto s) { return s != 0; }))
             {
                 auto no_repeat_ngram_size_buf = clone({no_repeat_ngram_size});
-                auto output_ids_ptrs = allocateBuffer({DataType::TYPE_UINT64, {decoder_batch_size}, AllocationType::HOST});
+                output_ids_ptrs = allocateBuffer({DataType::TYPE_UINT64, {decoder_batch_size}, AllocationType::HOST});
                 for (int i = 0; i < decoder_batch_size; i++) {
                     output_ids_ptrs->data<uint64_t>()[i] = (uint64_t)(device_tokens->data<int32_t>() + i * (step + 1));
                 }

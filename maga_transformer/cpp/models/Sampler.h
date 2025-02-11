@@ -75,6 +75,7 @@ public:
 private:
     ft::DeviceBase* device_;
     ft::BufferPtr eos_ids_;
+    ft::BufferPtr eos_ids_host_;
 };
 
 }  // namespace rtp_llm

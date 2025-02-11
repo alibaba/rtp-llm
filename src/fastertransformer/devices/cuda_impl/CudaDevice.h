@@ -31,6 +31,12 @@ struct FlashInferAttnParams {
     BufferPtr int_workspace;
     BufferPtr int_host_workspace;
 
+    BufferPtr batch_indice_host;
+    BufferPtr positions_host;
+    BufferPtr paged_kv_last_page_len_host;
+    BufferPtr paged_kv_last_page_len_1_host;
+    BufferPtr page_indice_host;
+
     BufferPtr batch_indice;
     BufferPtr positions;
     BufferPtr paged_kv_last_page_len; // w/o current

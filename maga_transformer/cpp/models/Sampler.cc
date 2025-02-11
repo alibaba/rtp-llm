@@ -12,12 +12,12 @@ Sampler::Sampler(const SamplerInitParams& params)
     {
         FT_LOG_INFO("sampler max_batch_size: %ld", params.max_batch_size);
         const auto max_batch_size = params.max_batch_size;
-        auto eos_ids_host = device_->allocateBuffer(
+        eos_ids_host_ = device_->allocateBuffer(
             {DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});
-        std::fill_n(eos_ids_host->data<int32_t>(), max_batch_size, params.eos_id);
+        std::fill_n(eos_ids_host_->data<int32_t>(), max_batch_size, params.eos_id);
         eos_ids_ = device_->allocateBuffer(
             {DataType::TYPE_INT32, {max_batch_size}, AllocationType::DEVICE}, {"eos_id"});
-        device_->copy({*eos_ids_, *eos_ids_host});
+        device_->copy({*eos_ids_, *eos_ids_host_});
     };
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {

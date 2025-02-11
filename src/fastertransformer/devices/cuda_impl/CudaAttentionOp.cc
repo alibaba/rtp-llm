@@ -77,19 +77,19 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
     params->page_indptr_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}, AllocationType::HOST}, {"page_indptr_host"});
     params->qo_indptr_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}, AllocationType::HOST}, {"qo_indptr_host"});
 
-    auto batch_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"batch_indice_host"});
-    auto positions_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"positions_host"});
-    auto paged_kv_last_page_len = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"paged_kv_last_page_len"});
-    auto paged_kv_last_page_len_1 = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"paged_kv_last_page_len_1"});
+    params->batch_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"batch_indice_host"});
+    params->positions_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"positions_host"});
+    params->paged_kv_last_page_len_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"paged_kv_last_page_len_host"});
+    params->paged_kv_last_page_len_1_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"paged_kv_last_page_len_1_host"});
 
     vector<int> page_indice_vec;
     params->qo_indptr_host->data<int>()[0] = 0;
     params->page_indptr_host->data<int>()[0] = 0;
     for (int i = 0; i < int(batch_size); i++) {
-        batch_indice_host->data<int>()[i] = i;
-        paged_kv_last_page_len->data<int>()[i] = sequence_lengths_host->data<int>()[i] %  tokens_per_block;
-        paged_kv_last_page_len_1->data<int>()[i] = paged_kv_last_page_len->data<int>()[i] + 1;
-        positions_host->data<int>()[i] = sequence_lengths_host->data<int>()[i];
+        params->batch_indice_host->data<int>()[i] = i;
+        params->paged_kv_last_page_len_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] %  tokens_per_block;
+        params->paged_kv_last_page_len_1_host->data<int>()[i] = params->paged_kv_last_page_len_host->data<int>()[i] + 1;
+        params->positions_host->data<int>()[i] = sequence_lengths_host->data<int>()[i];
 
         int page_nums = (sequence_lengths_host->data<int>()[i] + tokens_per_block) / tokens_per_block;
         for (int j = 0; j < page_nums; j++) {
@@ -100,16 +100,16 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
         params->qo_indptr_host->data<int>()[i + 1] = i + 1;
     }
 
-    auto page_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {size_t(page_indice_vec.size())}, AllocationType::HOST}, {"page_indice_host"});
-    std::copy(page_indice_vec.begin(), page_indice_vec.end(), page_indice_host->data<int>());
+    params->page_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {size_t(page_indice_vec.size())}, AllocationType::HOST}, {"page_indice_host"});
+    std::copy(page_indice_vec.begin(), page_indice_vec.end(), params->page_indice_host->data<int>());
 
-    params->batch_indice = device->clone({*batch_indice_host, AllocationType::DEVICE});
-    params->positions = device->clone({*positions_host, AllocationType::DEVICE});
-    params->paged_kv_last_page_len = device->clone({*paged_kv_last_page_len, AllocationType::DEVICE});
-    params->paged_kv_last_page_len_1 = device->clone({*paged_kv_last_page_len_1, AllocationType::DEVICE});
+    params->batch_indice = device->clone({*params->batch_indice_host, AllocationType::DEVICE});
+    params->positions = device->clone({*params->positions_host, AllocationType::DEVICE});
+    params->paged_kv_last_page_len = device->clone({*params->paged_kv_last_page_len_host, AllocationType::DEVICE});
+    params->paged_kv_last_page_len_1 = device->clone({*params->paged_kv_last_page_len_1_host, AllocationType::DEVICE});
     params->page_indptr = device->clone({*params->page_indptr_host, AllocationType::DEVICE});
     params->qo_indptr = device->clone({*params->qo_indptr_host, AllocationType::DEVICE});
-    params->page_indice = device->clone({*page_indice_host, AllocationType::DEVICE});
+    params->page_indice = device->clone({*params->page_indice_host, AllocationType::DEVICE});
 
     params->float_workspace_t = Buffer2torchTensor(params->float_workspace, false);
     params->int_workspace_t = Buffer2torchTensor(params->int_workspace, false);
