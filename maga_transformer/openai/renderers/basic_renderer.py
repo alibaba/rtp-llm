@@ -91,13 +91,13 @@ class BasicRenderer(CustomChatRenderer):
         except:
             pass
 
-        try:
-            if tokenizer.added_tokens_decoder != None:
-                for token_id, added_token in tokenizer.added_tokens_decoder.items():
-                    logging.info(f"added token [{token_id}]({added_token}) added as stop words.")
-                    self.add_extra_stop_word_ids([[token_id]])
-        except:
-            pass
+        # try:
+        #     if tokenizer.added_tokens_decoder != None:
+        #         for token_id, added_token in tokenizer.added_tokens_decoder.items():
+        #             logging.info(f"added token [{token_id}]({added_token}) added as stop words.")
+        #             self.add_extra_stop_word_ids([[token_id]])
+        # except:
+        #     pass
 
         logging.info(f"found chat template to use: {self.chat_template}")
         self.default_template_key = os.environ.get("DEFAULT_CHAT_TEMPLATE_KEY", "default")
@@ -147,7 +147,7 @@ class BasicRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         template = self._get_template(request)
-        request_dict = json.loads(request.model_dump_json(exclude_none=True))        
+        request_dict = json.loads(request.model_dump_json(exclude_none=True))
         render_args = {
             "messages": request_dict['messages'],
             "json": json,
