@@ -103,8 +103,10 @@ private:
         MultimodalOutputsPB output_pb;
         grpc::ClientContext context;
         auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
-        auto res = QueryConverter::transMMOutput(&output_pb);
-        return res;
+        if (!status.ok()) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+        }
+        return QueryConverter::transMMOutput(&output_pb);;
     }
 
 };

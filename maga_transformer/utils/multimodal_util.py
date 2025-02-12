@@ -102,5 +102,5 @@ class MMDataCache(object):
         with self.cache_lock:
             self.mm_data_cache[url] = features
 
-vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '10')))
+vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '0')))
 url_data_cache_ = MMDataCache(100)
