@@ -30,8 +30,8 @@ if os.environ.get('FT_SERVER_TEST') is None:
 
 if not file_logger_init_success:
     logging.basicConfig(level=LOGLEVEL,
-                    format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-                    datefmt='%m/%d/%Y %H:%M:%S')
+                    format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S")
 
 
 # try auto set alog config path

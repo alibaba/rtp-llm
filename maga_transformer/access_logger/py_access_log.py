@@ -52,7 +52,9 @@ class PyAccessLog:
         self.response = response
         self.id = id
         if log_time is None:
-            log_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            current_time = time.time()
+            local_time = time.localtime(current_time)
+            log_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{int((current_time % 1) * 1000):03d}"
         self.log_time = log_time
 
     @classmethod

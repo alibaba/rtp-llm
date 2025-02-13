@@ -4,8 +4,8 @@ LOGGING_CONFIG = {
     "disable_existing_loggers": False,
     "formatters": {
         "default": {
-            "format": "[%(name)s][%(asctime)s][%(process)d][%(threadName)s][%(pathname)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
+            "format": "[%(name)s][%(asctime)s.%(msecs)03d][%(process)d][%(threadName)s][%(pathname)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",  # 只包含到秒，毫秒在 fmt 中处理
         },
     },
     "handlers": {
