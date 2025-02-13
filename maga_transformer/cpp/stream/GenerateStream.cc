@@ -56,11 +56,11 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
 
-    generate_status_.status = GenerateState::WAITING;
+    generate_status_.status = StreamState::WAITING;
     sub_generate_status_.clear();
     sub_generate_status_.resize(tileNum());
     for (int i = 0; i < tileNum(); ++i) {
-        sub_generate_status_[i].status = GenerateState::WAITING;
+        sub_generate_status_[i].status = StreamState::WAITING;
     }
 
     stream_cache_resource_.init(tileNum());
@@ -114,9 +114,9 @@ void GenerateStream::cancel() {
 }
 
 absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reserve_step) {
-    if (generate_status_.status == GenerateState::WAITING) {
+    if (generate_status_.status == StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    } else if (generate_status_.status == GenerateState::PAUSED) {
+    } else if (generate_status_.status == StreamState::PAUSED) {
         pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }
     return stream_cache_resource_.initKVBlock(token_capacity, reserve_step);
@@ -430,9 +430,9 @@ void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string&
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     FT_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
                     "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
-                    streamId(), error_msg.c_str(), GenerateStateToString(generate_status_.status).c_str(),
+                    streamId(), error_msg.c_str(), StreamStateToString(generate_status_.status).c_str(),
                     inputLength(), seqLength(), getTimeoutMs(), cost_time_ms);
-    generate_status_.status     = GenerateState::STOPPED;
+    generate_status_.status     = StreamState::STOPPED;
     generate_status_.error_info = ErrorInfo(error_code, error_msg);
 }
 
@@ -458,7 +458,7 @@ void GenerateStream::setPaused() {
         return;
     }
     is_context_stream_      = true;
-    generate_status_.status = GenerateState::PAUSED;
+    generate_status_.status = StreamState::PAUSED;
     last_pause_us_          = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
@@ -467,34 +467,34 @@ bool GenerateStream::setRunning() {
     if (stoppedWithoutLock()) {
         return false;
     }
-    generate_status_.status = GenerateState::RUNNING;
+    generate_status_.status = StreamState::RUNNING;
     return true;
 }
 
 void GenerateStream::setFinishedWithoutLock() {
-    generate_status_.status = GenerateState::FINISHED;
+    generate_status_.status = StreamState::FINISHED;
     for (int i = 0; i < tileNum(); ++i) {
-        sub_generate_status_[i].status = GenerateState::FINISHED;
+        sub_generate_status_[i].status = StreamState::FINISHED;
     }
 }
 
 bool GenerateStream::stoppedWithoutLock() {
-    return generate_status_.status == GenerateState::STOPPED;
+    return generate_status_.status == StreamState::STOPPED;
 }
 
 bool GenerateStream::stopped() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_.status == GenerateState::STOPPED;
+    return generate_status_.status == StreamState::STOPPED;
 }
 
 bool GenerateStream::waiting() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_.status == GenerateState::WAITING;
+    return generate_status_.status == StreamState::WAITING;
 }
 
 bool GenerateStream::paused() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_.status == GenerateState::PAUSED;
+    return generate_status_.status == StreamState::PAUSED;
 }
 
 std::string GenerateStream::stopReason() {
@@ -503,30 +503,30 @@ std::string GenerateStream::stopReason() {
 }
 
 bool GenerateStream::finishedWithoutLock() {
-    return generate_status_.status == GenerateState::FINISHED;
+    return generate_status_.status == StreamState::FINISHED;
 }
 
 bool GenerateStream::running() {
-    return generate_status_.status == GenerateState::RUNNING;
+    return generate_status_.status == StreamState::RUNNING;
 }
 
 void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (generate_status_.status == GenerateState::WAITING
-            || generate_status_.status == GenerateState::REMOTE_RUNNING) {
+    if (generate_status_.status == StreamState::WAITING
+            || generate_status_.status == StreamState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
         FT_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
             streamId(), "cancel stream in waiting or remote running",
             inputLength(), seqLength(),
             getTimeoutMs(), cost_time_ms);
-        generate_status_.status = GenerateState::STOPPED;
+        generate_status_.status = StreamState::STOPPED;
         generate_status_.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting or remote running");
     }
 }
 
 bool GenerateStream::finished() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_.status == GenerateState::FINISHED;
+    return generate_status_.status == StreamState::FINISHED;
 }
 
 bool GenerateStream::needRemoteGenerate() const {
@@ -534,7 +534,7 @@ bool GenerateStream::needRemoteGenerate() const {
 }
 
 void GenerateStream::setRemoteGenerate() {
-    generate_status_.status = GenerateState::REMOTE_RUNNING;
+    generate_status_.status = StreamState::REMOTE_RUNNING;
 }
 
 size_t GenerateStream::iterCount() const {
@@ -571,11 +571,11 @@ bool GenerateStream::needFinishBySPTokens() {
     matchStopWordsList();
     // num beams, finished by batch 0
     if (numBeams() != 1) {
-        return sub_generate_status_[0].status == GenerateState::FINISHED;
+        return sub_generate_status_[0].status == StreamState::FINISHED;
     }
     // num sequence, finished by all batch
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](GenerateStatus& generate_status) {
-        return generate_status.status == GenerateState::FINISHED;
+        return generate_status.status == StreamState::FINISHED;
     });
 }
 
@@ -587,7 +587,7 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if (complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id_)) {
-        sub_generate_status_[batch_id].status = GenerateState::FINISHED;
+        sub_generate_status_[batch_id].status = StreamState::FINISHED;
     }
 }
 
@@ -617,7 +617,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
         }
     }
     if (match) {
-        sub_generate_status_[batch_id].status = GenerateState::FINISHED;
+        sub_generate_status_[batch_id].status = StreamState::FINISHED;
     }
 }
 
@@ -643,14 +643,6 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 }
-
-
-// void GenerateStream::update(const GptModelOutputs& model_outputs,
-//                             SamplerOutput&   sampler_output)
-// {
-//     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-// }
-
 
 // beam_idx: [beam_width] int, the element must less than beam_width.
 void GenerateStream::beamSearchKvCacheUpdate(ft::BufferPtr beam_idx) {
@@ -708,6 +700,8 @@ void GenerateStream::reportMetric() {
             collector.pause_latency_us       = pause_time_us_;
             collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
             collector.fallback_times         = fallback_times_;
+            collector.batch_with_prefill_times = batch_with_prefill_times_;
+            collector.batch_with_prefill_len   = batch_with_prefill_len_;
             if (timeout) {
                 collector.timeout_latency_us = getTimeoutMs() * 1000;
             }
@@ -783,6 +777,14 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
 
 bool GenerateStream::queryPdSep() const {
     return generate_input_->generate_config->pd_separation;
+}
+
+void GenerateStream::incBatchWithPrefillTimes(int32_t times) {
+    batch_with_prefill_times_ += times;
+}
+
+void GenerateStream::incBatchWithPrefillLen(int32_t len) {
+    batch_with_prefill_len_ += len;
 }
 
 }  // namespace rtp_llm

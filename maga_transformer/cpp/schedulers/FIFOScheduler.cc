@@ -209,6 +209,18 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     return new_streams;
 }
 
+void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_streams,
+                                        const list<GenerateStreamPtr>& running_streams) {
+    size_t total_prefill_len = 0;
+    for (auto& stream : new_streams) {
+        total_prefill_len += stream->currentExecuteTokenSize();
+    }
+    for (auto& stream : running_streams) {
+        stream->incBatchWithPrefillTimes(new_streams.size());
+        stream->incBatchWithPrefillLen(total_prefill_len);
+    }
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
     unique_lock<mutex> lock(lock_);
     cond_.wait(lock, [this]{
@@ -221,8 +233,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);
-    auto new_stream = scheduleNew(reserve_step);
-    running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
+    auto new_streams = scheduleNew(reserve_step);
+    accountBatchMetrics(new_streams, running_streams_);
+    running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics(fallback_streams);
     return running_streams_;
 }

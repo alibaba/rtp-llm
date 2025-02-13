@@ -67,7 +67,7 @@ protected:
     int64_t                          begin_time_;
     std::condition_variable          cond_;
     std::mutex                       lock_;
-    GenerateState                    generate_state_;
+    StreamState                      stream_state_;
     size_t                           begin_time_us_    = 0;
     size_t                           wait_time_us_     = 0;
     kmonitor::MetricsReporterPtr     metrics_reporter_ = nullptr;

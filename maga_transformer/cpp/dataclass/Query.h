@@ -131,7 +131,7 @@ public:
     int64_t                     request_id;
 };
 
-enum class GenerateState {
+enum class StreamState {
     WAITING,
     RUNNING,
     PAUSED,
@@ -140,19 +140,19 @@ enum class GenerateState {
     REMOTE_RUNNING
 };
 
-inline std::string GenerateStateToString(GenerateState state) {
+inline std::string StreamStateToString(StreamState state) {
     switch (state) {
-        case GenerateState::WAITING:
+        case StreamState::WAITING:
             return "WAITING";
-        case GenerateState::RUNNING:
+        case StreamState::RUNNING:
             return "RUNNING";
-        case GenerateState::PAUSED:
+        case StreamState::PAUSED:
             return "PAUSED";
-        case GenerateState::STOPPED:
+        case StreamState::STOPPED:
             return "STOPPED";
-        case GenerateState::FINISHED:
+        case StreamState::FINISHED:
             return "FINISHED";
-        case GenerateState::REMOTE_RUNNING:
+        case StreamState::REMOTE_RUNNING:
             return "REMOTE_RUNNING";
         default:
             return "Error: Unrecognized Generate State";
@@ -160,8 +160,8 @@ inline std::string GenerateStateToString(GenerateState state) {
 }
 
 struct GenerateStatus {
-    GenerateState status = GenerateState::WAITING;
-    ErrorInfo     error_info;
+    StreamState status = StreamState::WAITING;
+    ErrorInfo   error_info;
 };
 
 void registerMultimodalInput(const py::module& m);

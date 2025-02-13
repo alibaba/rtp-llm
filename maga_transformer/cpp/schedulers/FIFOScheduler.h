@@ -38,6 +38,7 @@ private:
     void evaluateRunningRemote();
     int  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams, const std::list<GenerateStreamPtr>& running_streams);
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
 
 private:

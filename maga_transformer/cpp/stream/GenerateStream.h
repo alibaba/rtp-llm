@@ -48,10 +48,6 @@ public:
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void update(const StreamUpdateInfo& update_info);
 
-    // void update(const GptModelOutputs& gpt_model_outputs,
-    //             SamplerOutput&   sampler_output);
-
-
     virtual size_t scoreLen() const {
         return 1;
     }
@@ -244,6 +240,9 @@ public:
 
     std::vector<int> getLatestTokens(size_t token_num);
 
+    void incBatchWithPrefillTimes(int32_t times);
+    void incBatchWithPrefillLen(int32_t len);
+
 public:
     struct TimeInfo {
         int64_t begin_time_us;
@@ -293,6 +292,10 @@ protected:
     bool                                last_block_aligned_     = false;
     bool                                need_remote_generate_   = false;
     bool                                use_cache_store_        = false;
+
+    // The number of times this stream has been interfered by prefills
+    int32_t                             batch_with_prefill_times_ = 0;
+    int32_t                             batch_with_prefill_len_ = 0;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     ft::SpecialTokens                   special_tokens_;

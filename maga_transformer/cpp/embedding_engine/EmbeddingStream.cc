@@ -14,7 +14,7 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
     begin_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
     device_           = ft::DeviceFactory::getDefaultDevice();
     embedding_output_ = make_shared<EmbeddingOutput>();
-    generate_state_   = GenerateState::WAITING;
+    stream_state_   = StreamState::WAITING;
     begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
@@ -48,7 +48,7 @@ int64_t EmbeddingStream::inputLength() const {
 
 void EmbeddingStream::waitFinish() {
     unique_lock<mutex> lock(lock_);
-    while (generate_state_ != GenerateState::FINISHED && generate_state_ != GenerateState::STOPPED) {
+    while (stream_state_ != StreamState::FINISHED && stream_state_ != StreamState::STOPPED) {
         cond_.wait_for(lock, std::chrono::milliseconds(5));
     }
     if (!embedding_output_->error_info.ok()) {
@@ -68,19 +68,19 @@ void EmbeddingStream::reportMetrics() {
 
 void EmbeddingStream::setError(const std::string& error_info) {
     embedding_output_->setError(error_info);
-    generate_state_ = GenerateState::STOPPED;
+    stream_state_ = StreamState::STOPPED;
     reportMetrics();
 }
 
 void EmbeddingStream::setStart() {
     wait_time_us_   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    generate_state_ = GenerateState::RUNNING;
+    stream_state_ = StreamState::RUNNING;
 }
 
 void EmbeddingStream::updateTensorOutput(torch::Tensor t) {
     lock_guard<mutex> lock(lock_);
     embedding_output_->setTensorOutput(t);
-    generate_state_ = GenerateState::FINISHED;
+    stream_state_ = StreamState::FINISHED;
     reportMetrics();
     cond_.notify_all();
 }
@@ -88,7 +88,7 @@ void EmbeddingStream::updateTensorOutput(torch::Tensor t) {
 void EmbeddingStream::updateMapOutput(std::vector<std::map<std::string, torch::Tensor>>& map) {
     lock_guard<mutex> lock(lock_);
     embedding_output_->setMapOutput(map);
-    generate_state_ = GenerateState::FINISHED;
+    stream_state_ = StreamState::FINISHED;
     reportMetrics();
     cond_.notify_all();
 }
