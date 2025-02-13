@@ -53,7 +53,12 @@ namespace rtp_llm {
                 new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                               \
             }                                                                                                   \
         } else {                                                                                                \
-            new_error_msg += "server disconnected with status::ok";                                             \
+            if (prefill_context.client_stream)  {                                                               \
+                new_error_msg += "server disconnected with status::ok";                                         \
+            }                                                                                                   \
+        }                                                                                                       \
+        if (prefill_context.stream) {                                                                           \
+            prefill_context.stream->setStop(new_error_code, new_error_msg);                                     \
         }                                                                                                       \
         prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                  \
         prefill_context.error_status = serializeErrorMsg(                                                       \
@@ -173,11 +178,8 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     prefill_context.generate_input = input;
 
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        if (!mm_res.ok()) {
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
-            return;
-        }
+        auto result = mm_processor_->updateMultimodalFeatures(input);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
 
         auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
         mutable_request->clear_token_ids();
@@ -305,15 +307,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             return;
         }   
     }
-    auto status = prefill_context.closeGrpcStream();
-    // TODO(xinfei.sxf) fix new call
-    if (!status.ok()) {
-        prefill_context.stream->setStop(ErrorCode::RPC_FINISH_FAILED, status.error_message());
-        prefill_context.error_info = ErrorInfo(ErrorCode::REMOTE_GENERATE_FAILED,
-                "decode addr is " + prefill_context.decode_addr + ", " + status.error_message());
-        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
-        return;
-    }
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
     prefill_context.stream->setFinishedWithoutLock();
 }
 

@@ -85,7 +85,7 @@ void PrefillGenerateContext::stopStream() {
 
 grpc::Status PrefillGenerateContext::closeGrpcStream() {
     if (grpc_stream_closed) {
-        return grpc::Status::OK;
+        return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
     if (cancelled() && client_context) {
@@ -93,9 +93,11 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
     }
     if (client_stream) {
         client_stream->WritesDone();
-        return client_stream->Finish();
+        last_grpc_stream_closed_status = client_stream->Finish();
+        return last_grpc_stream_closed_status;
     }
-    return grpc::Status::OK;
+    last_grpc_stream_closed_status = grpc::Status::OK;
+    return last_grpc_stream_closed_status;
 }
 
 void PrefillGenerateContext::closeGrpcConnection() {
@@ -107,6 +109,7 @@ void PrefillGenerateContext::closeGrpcConnection() {
 void PrefillGenerateContext::reset() {
     GenerateContext::reset();
     grpc_stream_closed = false;
+    last_grpc_stream_closed_status = grpc::Status::OK;
 }
 
 void PrefillGenerateContext::nextStage() {

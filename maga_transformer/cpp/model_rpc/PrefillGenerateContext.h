@@ -83,6 +83,7 @@ public:
     std::shared_ptr<grpc::ClientContext>    client_context;
     std::shared_ptr<ClientStream>           client_stream;
     bool                                    grpc_stream_closed = false;
+    grpc::Status                            last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                         stat_info;
     int64_t                                 loading_cache_requests  = 0;
 
