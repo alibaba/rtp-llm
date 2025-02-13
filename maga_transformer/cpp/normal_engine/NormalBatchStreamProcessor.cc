@@ -164,7 +164,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                         mm_feature_index++;
                     }
                     for (auto& mm_feature: mm_features) {
-                        gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
+                        auto feature_buffer = torchTensor2Buffer(mm_feature);
+                        if (feature_buffer->where() != ft::MemoryType::MEMORY_GPU) {
+                            gathered_mm_features.emplace_back(device_->clone({*feature_buffer}));
+                        } else {
+                            gathered_mm_features.emplace_back(feature_buffer);
+                        }
+                        
                     }
                     auto text_token_mask = stream->textTokensMask();
                     memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));

@@ -667,7 +667,7 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
                     device->allocateBuffer(
                         {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
                          {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                         ft::AllocationType::HOST}));
+                         ft::AllocationType::DEVICE}));
             }
             inputs.multimodal_features = std::move(mm_features);
         }
@@ -687,6 +687,7 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     buffers.emplace_back(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         buffers.emplace_back(inputs.combo_position_ids);
+        std::cout << device->getDeviceProperties().tp_rank << " pos_id: " << inputs.combo_position_ids->where() << " ===" << std::endl;
     }
     buffers.emplace_back(inputs.lora_ids);
     buffers.emplace_back(inputs.lora_input_lengths);
