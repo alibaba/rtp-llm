@@ -6,6 +6,7 @@ import logging
 # make sure so init
 from dataclasses import dataclass, field, fields
 from enum import Enum
+from maga_transformer.utils.util import str_to_bool, closest_power_of_2
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
@@ -14,27 +15,8 @@ from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_c
 
 updated_params: Set[str] = set()
 
-def closest_power_of_2(x):
-    if x < 1:
-        return 1
-    power = 1
-    while power * 2 <= x:
-        power *= 2
-    return power
-
-
 def get_pad_size(size: int , align_size: int):
     return (align_size - (size % align_size)) % align_size
-
-def str_to_bool(s: str):
-    true_values = ('yes', 'true', '1')
-    false_values = ('no', 'false', '0')
-    if s.lower() in true_values:
-        return True
-    elif s.lower() in false_values:
-        return False
-    else:
-        raise ValueError("Cannot covert {} to a bool".format(s))
 
 class DataClassBase:
     @classmethod
@@ -427,6 +409,9 @@ class GptInitModelParameters:
         else:
             self.special_tokens.stop_words_str_list = self.special_tokens.stop_words_str_list + env_stop_words_str_list
             self.special_tokens.stop_words_id_list = self.special_tokens.stop_words_id_list + env_stop_words_id_list
+
+        logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
+                        f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

@@ -8,6 +8,7 @@ import json
 from functools import partial
 
 from transformers import PreTrainedTokenizerBase
+from maga_transformer.utils.util import str_to_bool
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from transformers import PreTrainedTokenizerBase
 from maga_transformer.models.base_model import BaseModel
@@ -82,7 +83,8 @@ class OpenaiEndopoint():
             self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
         
-            logging.info(f"use stop_words_list [{self.stop_words_str_list}]")
+        logging.info(f"use stop_words_str_list [{self.stop_words_str_list}], " \
+                    f"stop_words_id_list [{self.stop_words_id_list}]")
 
     async def list_models(self):
         global model_args

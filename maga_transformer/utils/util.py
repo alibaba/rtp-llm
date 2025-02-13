@@ -144,3 +144,21 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 def check_with_info(condition: bool, error_msg: str):
     if not condition:
         raise Exception(error_msg)
+    
+def str_to_bool(s: str):
+    true_values = ('yes', 'true', '1')
+    false_values = ('no', 'false', '0')
+    if s.lower() in true_values:
+        return True
+    elif s.lower() in false_values:
+        return False
+    else:
+        raise ValueError("Cannot covert {} to a bool".format(s))
+    
+def closest_power_of_2(x):
+    if x < 1:
+        return 1
+    power = 1
+    while power * 2 <= x:
+        power *= 2
+    return power
