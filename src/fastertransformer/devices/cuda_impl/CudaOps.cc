@@ -51,6 +51,7 @@ void CudaDevice::copy(const CopyParams& params) {
 
     if (copyType == cudaMemcpyDeviceToHost) {
         cudaStreamSynchronize(stream_);
+        check_cuda_error(cudaGetLastError());
     }
 
     sync_check_cuda_error();
