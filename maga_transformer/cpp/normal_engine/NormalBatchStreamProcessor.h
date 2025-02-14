@@ -35,12 +35,12 @@ public:
         scale_block_size_(cache_config.kv_scale_block_stride),
         warm_up_(warm_up),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
-    virtual absl::Status                   dispatch(const StreamGroups&                  stream_groups,
-                                            const MergedOutput& merge_outputs) const;
+    virtual absl::Status                   dispatch(const StreamGroups& stream_groups,
+                                                    const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
-                                                      const GptModelInputs&  model_inputs,
-                                                      const GptModelOutputs& model_output) const;
+                                                              const GptModelInputs&  model_inputs,
+                                                              const GptModelOutputs& model_output) const;
 
 
 protected:

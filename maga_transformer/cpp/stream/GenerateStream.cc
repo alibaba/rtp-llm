@@ -277,6 +277,10 @@ int GenerateStream::reuseLength() const {
     return reuse_length_;
 }
 
+int GenerateStream::initialReuseLength() const {
+    return initial_reuse_length_;
+}
+
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
     if (generate_input_->mm_locs) {
@@ -687,6 +691,7 @@ void GenerateStream::reportMetric() {
         collector.qps        = true;
         collector.cancel_qps = cancelled;
         collector.error_qps  = stopped() && !cancelled;
+        collector.is_streaming_qps = generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
             collector.reuse_length           = reuse_length_;
             collector.input_token_length     = inputLength();

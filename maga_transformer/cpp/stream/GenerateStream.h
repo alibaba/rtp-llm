@@ -95,6 +95,7 @@ public:
     int prefixLength() const;
     int inputPrefixLength() const;
     int reuseLength() const;
+    int initialReuseLength() const;
     size_t maxTokenNum() const;
     void setReuseLength(int reuse_length);
     int fallbackPrefixLength() const;

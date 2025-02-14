@@ -25,7 +25,8 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
     if (params_.warm_up_ && (!params_.is_multimodal_)) {
         // warm up
-        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
+        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
+                params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
         warm_up_result = warmUp(params);
         FT_LOG_INFO("warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
                     warm_up_result->max_used_memory,
@@ -52,7 +53,8 @@ NormalEngine::~NormalEngine() {
     (void)stop();
 }
 
-absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
+absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(
+    const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
     auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
     if (mode == preRunMode::warm_up) {
         stream->setPerfTest(true);
@@ -66,7 +68,8 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+    fake_input->input_ids = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
@@ -86,7 +89,8 @@ WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
 void NormalEngine::initLoadBalance() {
     FT_LOG_INFO("init load balance start");
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
+    fake_input->input_ids                     = device_->allocateBuffer(
+                                                {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->generate_config->max_new_tokens = 3;
@@ -97,7 +101,8 @@ void NormalEngine::initLoadBalance() {
         FT_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
-    FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)", step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
+    FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
+            step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
@@ -112,7 +117,9 @@ absl::Status NormalEngine::initSystemPrompt() {
 
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get(), device_->getDeviceProperties().tp_rank == 0));
+        CHECK_AND_RETURN_REF(system_prompt_param,
+                SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get(),
+                device_->getDeviceProperties().tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
     
@@ -167,7 +174,8 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, params_, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+        input, params_, resource_context_, metrics_reporter_);
     return stream;
 }
 
@@ -176,7 +184,8 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, params_, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+        input, params_, resource_context_, metrics_reporter_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }

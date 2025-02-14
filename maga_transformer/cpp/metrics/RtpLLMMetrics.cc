@@ -95,6 +95,7 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_framework_qps");
     REGISTER_QPS_MUTABLE_METRIC(error_qps_metric, "rtp_llm_framework_error_qps");
     REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_cancel_qps");
+    REGISTER_QPS_MUTABLE_METRIC(is_streaming_qps_metric, "rtp_llm_is_streaming_qps");
 
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
@@ -119,6 +120,7 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_QPS(qps);
     REPORT_QPS(cancel_qps);
     REPORT_QPS(error_qps);
+    REPORT_QPS(is_streaming_qps);
 
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
@@ -204,20 +206,37 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(generate_batch_size_metric, "rtp_llm_generate_batch_size");
     REGISTER_GAUGE_MUTABLE_METRIC(context_batch_size_when_has_context_metric, "rtp_llm_context_batch_size_when_has_context");
     REGISTER_GAUGE_MUTABLE_METRIC(generate_batch_size_when_has_context_metric, "rtp_llm_generate_batch_size_when_has_context");
+    REGISTER_GAUGE_MUTABLE_METRIC(execute_token_size_when_has_context_metric, "rtp_llm_execute_token_size_when_has_context");
+    REGISTER_GAUGE_MUTABLE_METRIC(max_seq_len_when_has_context_metric, "rtp_llm_max_seq_len_when_has_context");
     REGISTER_GAUGE_MUTABLE_METRIC(execute_token_size_metric, "rtp_llm_execute_token_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_seq_len, "rtp_llm_max_seq_len");
+    REGISTER_GAUGE_MUTABLE_METRIC(max_seq_len_metric, "rtp_llm_max_seq_len");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(gather_model_input_us_metric, "rtp_llm_gather_model_input_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(tp_sync_input_us_metric, "rtp_llm_tp_sync_input_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(model_forward_us_metric, "rtp_llm_model_forward_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(sample_input_us_metric, "rtp_llm_sample_input_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
+
     return true;
 }
 
 void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExecutorMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(context_batch_size_metric, collector->context_batch_size);
-    REPORT_MUTABLE_METRIC(generate_batch_size_metric, collector->generate_batch_size);
+    REPORT_GAUGE(context_batch_size);
+    REPORT_GAUGE(generate_batch_size);
     if (collector->context_batch_size != 0) {
-        REPORT_MUTABLE_METRIC(context_batch_size_when_has_context_metric, collector->context_batch_size_when_has_context);
-        REPORT_MUTABLE_METRIC(generate_batch_size_when_has_context_metric, collector->generate_batch_size_when_has_context);
+        REPORT_GAUGE(context_batch_size_when_has_context);
+        REPORT_GAUGE(generate_batch_size_when_has_context);
+        REPORT_GAUGE(execute_token_size_when_has_context);
+        REPORT_GAUGE(max_seq_len_when_has_context);
     }
-    REPORT_MUTABLE_METRIC(execute_token_size_metric, collector->execute_token_size);
-    REPORT_MUTABLE_METRIC(max_seq_len, collector->max_seq_len);
+    REPORT_GAUGE(execute_token_size);
+    REPORT_GAUGE(max_seq_len);
+
+    REPORT_GAUGE(gather_model_input_us);
+    REPORT_GAUGE(tp_sync_input_us);
+    REPORT_GAUGE(model_forward_us);
+    REPORT_GAUGE(sample_input_us);
+    REPORT_GAUGE(dispatch_output_us);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager *manager) {

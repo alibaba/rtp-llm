@@ -148,7 +148,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                         const GenerateStreamPtr&       new_stream) const {
+                                          const GenerateStreamPtr&       new_stream) const {
     if (!enable_fast_gen_) {
         int max_token_size = new_stream->contextLength();
         for (auto& stream : streams) {

@@ -286,6 +286,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     FT_LOG_DEBUG("request:[%ld] start to poll remote output", prefill_context.request_id);
     auto& request_id = prefill_context.request_id;
     GenerateOutputsPB response;
+    auto initial_reuse_len = prefill_context.stream->initialReuseLength();
+    auto first_token_rt_us = prefill_context.stream->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.server_context->IsCancelled()) {
             FT_LOG_WARNING("request:[%ld] cancel by user", request_id);
@@ -299,6 +301,12 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }
         for (size_t i = 0; i < response.generate_outputs_size(); i++) {
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_pd_sep(true);
+        }
+        int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
+        for (size_t i = 0; i < response.generate_outputs_size(); i++) {
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(first_token_rt_us);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_reuse_len(initial_reuse_len);
         }
         prefill_context.remote_cost_time_us = response.generate_outputs(0).aux_info().cost_time_us();
         if (!prefill_context.rpc_context.writer->Write(response)) {

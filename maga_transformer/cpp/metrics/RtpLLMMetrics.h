@@ -93,6 +93,7 @@ public:
     bool qps        = false;
     bool cancel_qps = false;
     bool error_qps  = false;
+    bool is_streaming_qps = false;
 
     int64_t total_latency_us       = 0;
     int64_t first_token_latency_us = 0;
@@ -123,6 +124,8 @@ public:
     kmonitor::MutableMetric* qps_metric                    = nullptr;
     kmonitor::MutableMetric* cancel_qps_metric             = nullptr;
     kmonitor::MutableMetric* error_qps_metric              = nullptr;
+    kmonitor::MutableMetric* is_streaming_qps_metric       = nullptr;
+
     kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;
     kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
@@ -306,8 +309,15 @@ public:
     int64_t generate_batch_size                     = 0;
     int64_t context_batch_size_when_has_context     = 0;
     int64_t generate_batch_size_when_has_context    = 0;
+    int64_t execute_token_size_when_has_context     = 0;
+    int64_t max_seq_len_when_has_context            = 0;
     int64_t execute_token_size                      = 0;
     int64_t max_seq_len                             = 0;
+    int64_t gather_model_input_us                   = 0;
+    int64_t tp_sync_input_us                        = 0;
+    int64_t model_forward_us                        = 0;
+    int64_t sample_input_us                         = 0;
+    int64_t dispatch_output_us                      = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -320,8 +330,16 @@ public:
     kmonitor::MutableMetric* generate_batch_size_metric                     = nullptr;
     kmonitor::MutableMetric* context_batch_size_when_has_context_metric     = nullptr;
     kmonitor::MutableMetric* generate_batch_size_when_has_context_metric    = nullptr;
+    kmonitor::MutableMetric* execute_token_size_when_has_context_metric     = nullptr;
+    kmonitor::MutableMetric* max_seq_len_when_has_context_metric            = nullptr;
     kmonitor::MutableMetric* execute_token_size_metric                      = nullptr;
-    kmonitor::MutableMetric* max_seq_len                                    = nullptr;
+    kmonitor::MutableMetric* max_seq_len_metric                             = nullptr;
+
+    kmonitor::MutableMetric* gather_model_input_us_metric                   = nullptr;
+    kmonitor::MutableMetric* tp_sync_input_us_metric                        = nullptr;
+    kmonitor::MutableMetric* model_forward_us_metric                        = nullptr;
+    kmonitor::MutableMetric* sample_input_us_metric                         = nullptr;
+    kmonitor::MutableMetric* dispatch_output_us_metric                      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

@@ -19,7 +19,9 @@ public:
                             const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
                             bool warm_up = false);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
-    void         reportMetrics(const StreamGroups& stream_groups);
+    void reportMetrics(const StreamGroups& stream_groups,
+                       RtpLLMExecutorMetricsCollector& executor_collector,
+                       RtpLLMTokenPSMetricsCollector& tps_collector);
 
     void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);
