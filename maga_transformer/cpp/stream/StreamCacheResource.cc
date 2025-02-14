@@ -104,6 +104,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
         stream_->setReuseLength(match_info.reuse_length);
+        stream_->setInitialReuseLength(match_info.reuse_length);
         if (!match_info.loss.empty()) {
             auto loss = ft::vector2Buffer<float>(match_info.loss);
             stream_->setLoss(*loss);

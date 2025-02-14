@@ -98,6 +98,7 @@ public:
     int initialReuseLength() const;
     size_t maxTokenNum() const;
     void setReuseLength(int reuse_length);
+    void setInitialReuseLength(int initial_reuse_length);
     int fallbackPrefixLength() const;
     void setFallbackPrefixLength(int fallback_prefix_length);
     void incLastOutputPos();
@@ -270,6 +271,7 @@ protected:
     bool                                is_context_stream_      = true;
     size_t                              iter_count_             = 0;
     size_t                              last_output_pos_        = 0;
+    int                                 initial_reuse_length_   = 0;
     int                                 reuse_length_           = 0;
     int                                 reuse_mm_length_        = 0;
     int                                 fallback_blocks_        = 0;

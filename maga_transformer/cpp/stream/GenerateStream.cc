@@ -294,6 +294,10 @@ void GenerateStream::setReuseLength(int reuse_length) {
     }
 }
 
+void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
+    initial_reuse_length_ = initial_reuse_length;
+}
+
 int GenerateStream::fallbackPrefixLength() const {
     return fallback_prefix_length_;
 }
@@ -693,7 +697,7 @@ void GenerateStream::reportMetric() {
         collector.error_qps  = stopped() && !cancelled;
         collector.is_streaming_qps = generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
-            collector.reuse_length           = reuse_length_;
+            collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
