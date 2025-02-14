@@ -177,14 +177,15 @@ class ModelWeightsLoader:
         return current_device if free_mem * 0.8 > free_mem else "cpu"
         
     def prepare_weights_from_scratch(self, device): 
-        for id in range(self._num_layers):
-            results, logs, lora_logs =  self._load_layer_weight(id, device)
-            self._weight_log.update(logs)
-            if self._merge_lora:
-                self._lora_log.update(lora_logs)
-            for (layer_id, name, tensor) in results:
-                tensor = self._exported_device.maybe_rewrite_weight_by_key(name, tensor)
-                yield (layer_id, name, tensor)
+        if self._vit_separation != 1:
+            for id in range(self._num_layers):
+                results, logs, lora_logs =  self._load_layer_weight(id, device)
+                self._weight_log.update(logs)
+                if self._merge_lora:
+                    self._lora_log.update(lora_logs)
+                for (layer_id, name, tensor) in results:
+                    tensor = self._exported_device.maybe_rewrite_weight_by_key(name, tensor)
+                    yield (layer_id, name, tensor)
 
         for weight in self._model_weights_info.weights:
             tensor = self._load_and_convert_tensor(weight, datatype=self._data_type, device=device)

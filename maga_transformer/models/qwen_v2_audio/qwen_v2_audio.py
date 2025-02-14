@@ -16,9 +16,8 @@ class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
 
     def _get_weight_info(self):
-        qwen_weight = super()._get_weight_info() if self.vit_separation != 1 else ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
-        if self.vit_separation != 2:
-            self._get_vit_info(qwen_weight)
+        qwen_weight = super()._get_weight_info()
+        qwen_weight = self._get_vit_info(qwen_weight)
         return qwen_weight
 
 class QWenV2Audio(QWenV2, MultiModalMixin):

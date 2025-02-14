@@ -41,10 +41,8 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         BaseMultiModalWeightInfo.__init__(self, config)
     
     def _get_weight_info(self):
-        weights = self._get_hf_weight_info() if self.vit_separation != 1 else \
-                    ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
-        if self.vit_separation != 2:
-            self._get_vit_info(weights)
+        weights = self._get_hf_weight_info()
+        weights = self._get_vit_info(weights)
         return weights
     
     def _get_hf_weight_info(self):

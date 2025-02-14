@@ -12,16 +12,13 @@ class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
     
     def _get_weight_info(self):
         llava_weight = ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
-        if self.vit_separation != 1:
-            llava_weight = super()._get_weight_info()
-            
-            # for llava-next
-            for weight in llava_weight.layer_weights:
-                if weight.name == W.attn_o_b:
-                    llava_weight.layer_weights.remove(weight)
-                    break
+        llava_weight = super()._get_weight_info()
+        
+        # for llava-next
+        for weight in llava_weight.layer_weights:
+            if weight.name == W.attn_o_b:
+                llava_weight.layer_weights.remove(weight)
+                break
 
-        if self.vit_separation != 2:
-            self._get_vit_info(llava_weight)
-
+        llava_weight = self._get_vit_info(llava_weight)
         return llava_weight

@@ -16,7 +16,7 @@ from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalT
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 from maga_transformer.utils.database import CkptDatabase
-from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
+from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity, ModelWeightInfo
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 
 from maga_transformer.ops.comm.nccl_op import NcclOp
@@ -64,14 +64,20 @@ class BaseMultiModalWeightInfo:
     def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
         # After supporting TP mm network, we will remove the check here.
-        if self.vit_weights is not None and g_parallel_info.tp_rank == 0:
-            weight_names = self.vit_weights.weight_names
-            ckpt_prefix = self.vit_weights.ckpt_prefix
+        if self.vit_separation == 1:
+            llm_weights = ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
 
-            for w in weight_names:
-                w_name = ckpt_prefix + w
-                llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
-                llm_weights.tp_strategy[w_name] = sp_id
+        if self.vit_separation != 2:
+            if self.vit_weights is not None and g_parallel_info.tp_rank == 0:
+                weight_names = self.vit_weights.weight_names
+                ckpt_prefix = self.vit_weights.ckpt_prefix
+
+                for w in weight_names:
+                    w_name = ckpt_prefix + w
+                    llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
+                    llm_weights.tp_strategy[w_name] = sp_id
+
+        return llm_weights
 
 # 继承MultiModalMixin时，需要把声明写在GPT前以正确顺序构造，详情看super().__init__含义
 class MultiModalMixin:
