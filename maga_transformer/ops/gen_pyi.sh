@@ -1,0 +1,1 @@
+cd ../../bazel-bin && PYTHONPATH=. LD_LIBRARY_PATH=/usr/local/cuda-12.4/targets/x86_64-linux/lib ~/.local/bin/pybind11-stubgen libth_transformer

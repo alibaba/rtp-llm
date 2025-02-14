@@ -124,6 +124,8 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         output->set_finished(response.finished);
         auto aux_info = output->mutable_aux_info();
         aux_info->set_cost_time_us(response.aux_info.cost_time_us);
+        aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
+        aux_info->set_wait_time_us(response.aux_info.wait_time_us);
         aux_info->set_iter_count(response.aux_info.iter_count);
         aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
         aux_info->set_fallback_times(response.aux_info.fallback_times);
@@ -133,7 +135,6 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_output_len(response.aux_info.output_len);
         aux_info->set_step_output_len(response.aux_info.step_output_len);
         aux_info->set_pd_sep(response.aux_info.pd_sep);
-        aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
         if (response.aux_info.cum_log_probs.has_value()) {
             transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }

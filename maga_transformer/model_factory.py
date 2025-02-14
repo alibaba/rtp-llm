@@ -90,14 +90,15 @@ class ModelFactory:
         return config_json
 
     @staticmethod
-    def from_model_config(model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
+    def from_model_config(model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None) -> AsyncModel:
         model = ModelFactory._create_model(model_config)
-        if model_config.model_type != 'fake_model': # for test
-            propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(model.config, propose_model_config)
-            model = AsyncModel(model, propose_model)
-            if propose_model:
-                logging.info("create propose model done")
-            logging.info("create rpc model done")
+        if model_config.model_type == 'fake_model':
+            return model
+        propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(model.config, propose_model_config)
+        model = AsyncModel(model, propose_model)
+        if propose_model:
+            logging.info("create propose model done")
+        logging.info("create rpc model done")
         return model
 
     @staticmethod

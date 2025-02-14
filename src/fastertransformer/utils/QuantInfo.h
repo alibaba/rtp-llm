@@ -59,10 +59,17 @@ public:
     int64_t getWeightBits() const {
         return weight_bits_;
     }
+    int64_t getActivationBits() const {
+        if (quant_method_ == None || quant_method_ == WeightOnlyPerCol || quant_method_ == Awq || quant_method_ == GptQ) {
+            return 16;
+        } else {
+            return weight_bits_;
+        }
+    }
     void setQuantAlgo(const std::string &method, int64_t bits, int64_t group_size);
 private:
     QuantMethod quant_method_ = None;
-    int64_t weight_bits_ = 0;
+    int64_t weight_bits_ = 16;
     int64_t group_size_ = 0;
 };
 

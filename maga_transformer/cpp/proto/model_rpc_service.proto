@@ -98,8 +98,9 @@ message AuxInfoPB {
     TensorPB cum_log_probs = 9;
     int32 step_output_len = 10;
     bool pd_sep = 11;
-    int32 first_token_cost_time_us = 12;
+    int32 first_token_cost_time_us = 12;    
     TensorPB softmax_probs = 13;
+    int32 wait_time_us = 14;
 }
 
 message GenerateOutputPB {

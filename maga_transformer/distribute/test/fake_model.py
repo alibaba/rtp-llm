@@ -18,6 +18,10 @@ class FakeConfig(object):
         self.eos_token_id = 1
 
 class FakeModel(BaseModel):
+    @property
+    def model_runtime_meta(self) -> str:
+        return ""
+
     def load_tokenizer(self):
         self.tokenizer = FakeTokenizer()
 

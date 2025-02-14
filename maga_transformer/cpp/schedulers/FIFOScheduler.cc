@@ -53,6 +53,11 @@ void FIFOScheduler::evaluateRunningRemote() {
     }
 }
 
+int64_t FIFOScheduler::lastScheduleTime() {
+    lock_guard<mutex> lock(lock_);
+    return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
+}
+
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
@@ -194,7 +199,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             FT_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxSeqLen()) {
-                stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN, 
+                stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                     "input len " + std::to_string(stream->inputLength()) +
                     " is greater than kv cache max seq len " + std::to_string(cache_manager_->maxSeqLen()));
             } else {
@@ -237,6 +242,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics(fallback_streams);
+    last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
 }
 

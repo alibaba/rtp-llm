@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import logging.config
+from functools import cached_property
 from typing_extensions import override
 import uvicorn
 from uvicorn import Server, Config
@@ -147,11 +148,14 @@ class InferenceApp(object):
             check_shutdown()
             load_balance_version = 0
             load_balance_info = self.inference_server.get_load_balance_info()
+            engine_schedule_info = self.inference_server.get_engine_schedule_info()
             available_concurrency = self.inference_server._controller.get_available_concurrency()
+
             if int(os.environ.get('LOAD_BALANCE', 0)) and load_balance_info.step_per_minute > 0 and load_balance_info.step_latency_us > 0:
                 available_concurrency = load_balance_info.step_per_minute
                 # when use new version available_concurrency need set new load_balance_version
                 load_balance_version = 1
+
             return {
                 "available_concurrency": available_concurrency,
                 "available_kv_cache": load_balance_info.available_kv_cache,
@@ -161,6 +165,18 @@ class InferenceApp(object):
                 "iterate_count": load_balance_info.iterate_count,
                 "version": load_balance_version,
                 "alive": True,
+                "running_task_list": [{
+                    "request_id": task.request_id,
+                    "prefix_length": task.prefix_length,
+                    "input_length": task.input_length
+                } for task in engine_schedule_info.running_task_info_list],
+                "finished_task_list": [{
+                    "request_id": task.request_id,
+                    "prefix_length": task.prefix_length,
+                    "input_length": task.input_length
+                } for task in engine_schedule_info.finished_task_info_list],
+                "last_schedule_delta": engine_schedule_info.last_schedule_delta,
+                "machine_info": self.inference_server.model_runtime_meta()
             }
 
         # entry for worker RANK != 0
@@ -241,6 +257,12 @@ class InferenceApp(object):
         @check_is_master()
         async def encode(req: Union[str,Dict[Any, Any]]):
             return self.inference_server.tokenizer_encode(req)
+
+                # entry for worker RANK == 0
+        @app.post("/tokenize")
+        @check_is_master()
+        async def encode(req: Union[str,Dict[Any, Any]]):
+            return self.inference_server.tokenize(req)
 
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str,Dict[Any, Any]]):

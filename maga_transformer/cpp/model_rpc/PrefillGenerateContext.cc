@@ -70,13 +70,21 @@ PrefillGenerateContext::~PrefillGenerateContext() {
     stopStream();
 }
 
-void PrefillGenerateContext::stopStream() {
+void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
     if (stream) {
+        stream_ = stream;
+        meta->enqueue(request_id, stream_);
+    }
+}
+
+void PrefillGenerateContext::stopStream() {
+    if (stream_) {
         // if is waiting, cancel it
-        stream->cancelIfNotRunning();
+        meta->dequeue(request_id, stream_);
+        stream_->cancelIfNotRunning();
         // if is running, waiting util done
-        while (stream->running()) {
-            FT_LOG_DEBUG("waiting prefill stream [%d] running done to cancel", stream->generateInput()->request_id);
+        while (stream_->running()) {
+            FT_LOG_DEBUG("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
         }
         markRequestEnd();
@@ -146,9 +154,9 @@ void PrefillGenerateContext::markRequestEnd() {
 
 // for debug, will delete in future
 void PrefillGenerateContext::printTime() {
-    if (!stream) return;
+    if (!stream_) return;
 
-    auto first_token_rt_us = stream->getTimeInfo().first_token_rt_us;
+    auto first_token_rt_us = stream_->getTimeInfo().first_token_rt_us;
     auto load_cost_time = response.load_done_time() - response.start_load_time();
     auto compute_cost_time = response.compute_done_time() - response.begin_compute_time();
 

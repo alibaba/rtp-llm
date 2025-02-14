@@ -23,8 +23,8 @@ namespace rtp_llm {
         string new_error_msg = "decode addr is " + prefill_context.decode_addr + ", ";                          \
         new_error_msg += "execute time is " + std::to_string(prefill_context.executeTimeMs()) + "ms, ";         \
         new_error_msg += "request timeout is " + std::to_string(prefill_context.request_timeout_ms) + "ms, ";   \
-        if (prefill_context.stream) {                                                                           \
-            auto first_token_rt_ms = prefill_context.stream->getTimeInfo().first_token_rt_us / 1000;            \
+        if (prefill_context.getStream()) {                                                                           \
+            auto first_token_rt_ms = prefill_context.getStream()->getTimeInfo().first_token_rt_us / 1000;            \
             if (first_token_rt_ms) {                                                                            \
                 new_error_msg += " stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";     \
             }                                                                                                   \
@@ -69,6 +69,7 @@ namespace rtp_llm {
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
                                     py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+    meta_.reset(new PrefillRpcServerRuntimeMeta());
     FT_CHECK_WITH_INFO(maga_init_params.gpt_init_parameter.pd_separation_, "prefill's pd_separation must be true");
     auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
@@ -100,8 +101,8 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
         uint32_t remote_port = maga_init_params_.gpt_init_parameter.remote_rpc_server_port_;
         FT_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
 
-        docode_cluster_name_ = "LOCAL";
-        LocalNodeJsonize node1(docode_cluster_name_, remote_ip, remote_port);
+        decode_cluster_name_ = "LOCAL";
+        LocalNodeJsonize node1(decode_cluster_name_, remote_ip, remote_port);
         LocalSubscribeServiceConfig local_config;
         local_config.nodes.push_back(node1);
         subscribe_config.local_configs.push_back(local_config);
@@ -116,7 +117,7 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
         } catch (autil::legacy::ExceptionBase &e) {
             FT_CHECK_WITH_INFO("create json from str[%s] failed", decode_cm2_config_str.c_str());
         }
-        docode_cluster_name_ = decode_cm2_config.cluster_name;
+        decode_cluster_name_ = decode_cm2_config.cluster_name;
         CM2SubscribeServiceConfig cm2_service_config;
         cm2_service_config.zk_host = decode_cm2_config.zk_host;
         cm2_service_config.zk_path = decode_cm2_config.zk_path;
@@ -150,10 +151,10 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] get rpc connection", prefill_context.request_id);
-    auto host = load_balancer_->chooseHost(docode_cluster_name_);
+    auto host = load_balancer_->chooseHost(decode_cluster_name_);
     if (!host || host->ip.empty()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_HOST_FAILED,
-                "get host for decode cluster " + docode_cluster_name_ + " failed");
+                "get host for decode cluster " + decode_cluster_name_ + " failed");
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
@@ -225,13 +226,13 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
         prefill_context.generate_input->generate_config->adapter_name);
     FT_LOG_DEBUG("request:[%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
-    prefill_context.stream = stream;
+    prefill_context.setStream(stream);    
     FT_LOG_DEBUG("request:[%ld] enqueue success", prefill_context.request_id);
 }
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] remote load cache", prefill_context.request_id);
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.stream);
+    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
@@ -248,14 +249,14 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] start to poll local output", prefill_context.request_id);
     auto first_status = pollStreamOutput(prefill_context.server_context, prefill_context.request_key,
-                                         prefill_context.rpc_context.writer, prefill_context.stream);
+                                         prefill_context.rpc_context.writer, prefill_context.getStream());
     if (!first_status.ok()) {
         prefill_context.error_status = first_status;
         return;
     }
     FT_LOG_DEBUG("request:[%ld] poll local output end", prefill_context.request_id);
 
-    if (prefill_context.stream->finished()) {
+    if (prefill_context.getStream()->finished()) {
         prefill_context.finished = true;
         prefill_context.error_status = grpc::Status::OK;
     }
@@ -273,7 +274,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request:[%ld] start to remote generate", prefill_context.request_id);
-    auto first_token = prefill_context.stream->currentExecuteTokens()[0];
+    auto first_token = prefill_context.getStream()->currentExecuteTokens()[0];
     GenerateRequestPB generate_request;
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
@@ -314,10 +315,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             FT_LOG_WARNING("request:[%ld] write outputs pb failed", request_id);
             prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
             return;
-        }   
+        }
     }
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
-    prefill_context.stream->setFinishedWithoutLock();
+    prefill_context.getStream()->setFinishedWithoutLock();
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -325,6 +326,14 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
     EXECUTE_STAGE_FUNC(multimodalProcess, prefill_context);
     EXECUTE_STAGE_FUNC(remoteAllocateResource, prefill_context);
     return grpc::Status::OK;
+}
+
+EngineScheduleInfo PrefillRpcServer::getEngineScheduleInfo() {
+    auto info = meta_->getEngineScheduleInfo();
+    auto last_schedule_time = engine_->getLastScheduleTime();
+    // in case last_schedule_delta is negative
+    info.last_schedule_delta = std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
+    return info;
 }
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
@@ -342,7 +351,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
     RPCContext rpc_context{request, writer};
     auto prefill_context = PrefillGenerateContext(&this->resource(),
-            rpc_context, request->generate_config().timeout_ms(), server_context, metrics_reporter_);
+            rpc_context, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
     prefill_context.onflight_requests       = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
     auto max_retry_times = maga_init_params_.gpt_init_parameter.prefill_retry_times_;
@@ -365,6 +374,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
+        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
         EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
         EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
@@ -392,7 +402,7 @@ bool PrefillRpcServer::ready() {
         FT_LOG_INFO("load balance is nullptr, server is not ready");
         return false;
     }
-    auto ret = load_balancer_->isReady(docode_cluster_name_);
+    auto ret = load_balancer_->isReady(decode_cluster_name_);
     if (!ret) {
         FT_LOG_INFO("load balancer is not ready now");
     }

@@ -1,4 +1,5 @@
 import torch
+import logging
 from typing import Optional, Dict
 
 from maga_transformer.models.propose_model.propose_model import ProposeModel
@@ -9,14 +10,16 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
-from maga_transformer.ops import LoadBalanceInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
 
+from maga_transformer.utils.gemm_utils.device_map import get_device    
 
 class AsyncModel:
     def __init__(self, model: BaseModel, propose_model: Optional[ProposeModel] = None) -> None:
         self.model = model
         self.propose_model = propose_model
         self.config = model.config
+        self.model_runtime_meta = self._model_runtime_meta()
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
@@ -25,6 +28,17 @@ class AsyncModel:
 
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
+    
+    def _model_runtime_meta(self) -> str:        
+        try:
+            device_name = torch.cuda.get_device_name(0)
+            manchine_name = get_device(device_name).upper()
+        except Exception as e:
+            logging.info(f"error get device name with error: {e}")
+            manchine_name = "unknown"
+        parallel_info = f"TP{g_parallel_info.tp_size}_PP{g_parallel_info.pp_size}_EP{g_parallel_info.ep_size}"
+        weight_info = f"W{self.config.gpt_init_params.quant_algo.getWeightBits()}A{self.config.gpt_init_params.quant_algo.getActivationBits()}"
+        return "_".join([manchine_name, parallel_info, weight_info])
 
     @property
     def default_generate_config(self) -> GenerateConfig:
@@ -55,3 +69,6 @@ class AsyncModel:
 
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return self.decoder_engine_.get_load_balance_info()
+
+    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+        return self.decoder_engine_.get_engine_schedule_info()

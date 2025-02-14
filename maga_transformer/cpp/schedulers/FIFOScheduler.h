@@ -36,6 +36,7 @@ private:
                             const GenerateStreamPtr& new_stream, size_t reserve_step);
     std::tuple<int, int> evaluateRunningNext(size_t reserve_step);
     void evaluateRunningRemote();
+    int64_t lastScheduleTime() override;
     int  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams, const std::list<GenerateStreamPtr>& running_streams);
@@ -46,7 +47,8 @@ private:
     std::list<GenerateStreamPtr>        running_streams_;
     std::list<GenerateStreamPtr>        remote_running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
-    size_t                              max_seq_len_        = 0;
+    std::atomic<int64_t>                last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                              max_seq_len_                 = 0;
     size_t                              max_context_batch_size_ = 1;
     int                                 reserve_block_num_  = 0;
     bool                                enable_partial_fallback_ = false;

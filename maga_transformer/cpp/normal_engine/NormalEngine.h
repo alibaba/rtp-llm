@@ -32,6 +32,7 @@ public:
     LoadBalanceInfo                 getLoadBalanceInfo() override;
     absl::Status step();
     absl::Status startLoop();
+    int64_t getLastScheduleTime() override;
     const ft::GptInitParameter gptInitParameter() const;
     void reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {

@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import AsyncGenerator, Any, Dict
 from pydantic import BaseModel
-from maga_transformer.ops import LoadBalanceInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
 
 
 class BaseEngine:
@@ -26,4 +26,8 @@ class BaseEngine:
 
     @abstractmethod
     def get_load_balance_info(self) -> LoadBalanceInfo:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_engine_schedule_info(self) -> EngineScheduleInfo:
         raise NotImplementedError()

@@ -221,9 +221,7 @@ class OpenaiEndopoint():
             generate_config=gen_config
         )
 
-    def chat_completion(
-            self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
-    ) -> CompleteResponseAsyncGenerator:
+    def render_chat(self, chat_request: ChatCompletionRequest):
         renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
@@ -233,8 +231,13 @@ class OpenaiEndopoint():
         if prepopulate_str != "":
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
-        input_ids = rendered_input.input_ids
+        return rendered_input
 
+    def chat_completion(
+            self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+    ) -> CompleteResponseAsyncGenerator:
+        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
@@ -249,7 +252,7 @@ class OpenaiEndopoint():
             if chat_request.debug_info else None
         choice_generator = renderer.generate_choice(
             request_id,
-            input_ids,
+            rendered_input.input_ids,
             mm_inputs,
             generate_config,
             self.model,

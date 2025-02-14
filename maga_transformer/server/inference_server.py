@@ -16,9 +16,9 @@ import functools
 import threading
 
 from fastapi import Request as RawRequest
-from maga_transformer.ops import LoadBalanceInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
 from maga_transformer.utils.time_util import Timer, current_time_ms
-from maga_transformer.utils.util import AtomicCounter
+from maga_transformer.utils.util import AtomicCounter, check_with_info
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.metrics import kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -81,6 +81,9 @@ class InferenceServer(object):
                             self._openai_endpoint.tokenizer,
                             self._openai_endpoint.chat_renderer)
                     self._lora_manager = LoraManager(self._inference_worker.model)
+
+    def model_runtime_meta(self) -> str:
+        return "unknown" if self._inference_worker is None else self._inference_worker.model_runtime_meta
 
     def stop(self):
         self._inference_worker.stop()
@@ -145,8 +148,13 @@ class InferenceServer(object):
         if isinstance(req, str):
             req = json.loads(req)
         assert isinstance(req, dict)
-
         req[request_id_field_name] = self._request_count.increment()
+        if 'master_info' in req:
+            request_id = req['master_info'].get("request_id")
+            check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
+            req[request_id_field_name] = request_id
+        else:
+            req[request_id_field_name] = self._request_count.increment()
 
         def generate_call():
             assert self._inference_worker is not None
@@ -162,7 +170,11 @@ class InferenceServer(object):
         return rep
 
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
-        request_id = self._request_count.increment()
+        if request.master_info is not None:
+            request_id = request.master_info.get("request_id")
+            check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
+        else:
+            request_id = self._request_count.increment()
         def generate_call():
             assert (self._openai_endpoint != None)
             response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
@@ -246,7 +258,7 @@ class InferenceServer(object):
                                     step_output_len += info.get('step_output_len', 1)
                             elif isinstance(x.aux_info, dict):
                                 step_output_len = max(x.aux_info.get('step_output_len', 1), step_output_len)
-                        
+
                         kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, (end_time - last_iterate_time) / step_output_len)
                     kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
                     last_iterate_time = end_time
@@ -296,6 +308,22 @@ class InferenceServer(object):
         complete_response = await self._collect_complete_response_and_record_access_log(req, res)
         return ORJSONResponse(content=complete_response)
 
+    def tokenize(self, req: Dict[str, Any]):
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            if ChatCompletionRequest.is_openai_request(req):
+                chat_request = ChatCompletionRequest(**req)
+                token_ids = self._openai_endpoint.render_chat(chat_request).input_ids
+            else:
+                prompt = req.pop('prompt')
+                token_ids = self._inference_worker.pipeline.encode(prompt)
+            return ORJSONResponse({
+                "token_ids": token_ids
+            })
+        except Exception as e:
+            return ORJSONResponse(format_exception(e), status_code=500)
+
     def tokenizer_encode(self, req: Union[str,Dict[Any, Any]]):
         try:
             if isinstance(req, str):
@@ -314,17 +342,19 @@ class InferenceServer(object):
             return ORJSONResponse(format_exception(e), status_code=500)
 
     def get_load_balance_info(self) -> LoadBalanceInfo:
-        assert self._inference_worker
-        if self._inference_worker.model:
-            return self._inference_worker.model.get_load_balance_info()
-        else:
+        if self._inference_worker.model is None:
             return LoadBalanceInfo()
+        return self._inference_worker.model.get_load_balance_info()
+
+    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+        if self._inference_worker.model is None:
+            return EngineScheduleInfo()
+        return self._inference_worker.model.get_engine_schedule_info()
 
     def set_log_level(self, req: Union[str,Dict[Any, Any]]) -> None:
         if isinstance(req, str):
             req = json.loads(req)
         return torch.ops.fastertransformer.set_log_level(req['log_level'])
-
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()

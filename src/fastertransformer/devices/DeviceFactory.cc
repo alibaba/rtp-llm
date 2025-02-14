@@ -143,6 +143,14 @@ void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
 }
 
 void registerDeviceOps(py::module& m) {
+    pybind11::enum_<DeviceType>(m, "DeviceType")
+        .value("Cpu", DeviceType::Cpu)
+        .value("Cuda", DeviceType::Cuda)
+        .value("Yitian", DeviceType::Yitian)
+        .value("ArmCpu", DeviceType::ArmCpu)
+        .value("ROCm", DeviceType::ROCm)
+        .value("Ppu", DeviceType::Ppu);
+
     pybind11::class_<DeviceExporter, std::shared_ptr<DeviceExporter>>(m, "DeviceExporter")
         .def("get_device_type", &DeviceExporter::getDeviceType)
         .def("get_device_id", &DeviceExporter::getDeviceId)
@@ -151,13 +159,6 @@ void registerDeviceOps(py::module& m) {
         .def("preprocess_weights_for_mixed_gemm", &DeviceExporter::preprocessWeightsForMixedGemm)
         .def("symmetric_quantize_last_axis_of_batched_matrix", &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix)
         .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale);
-    pybind11::enum_<DeviceType>(m, "DeviceType")
-        .value("Cpu", DeviceType::Cpu)
-        .value("Cuda", DeviceType::Cuda)
-        .value("Yitian", DeviceType::Yitian)
-        .value("ArmCpu", DeviceType::ArmCpu)
-        .value("ROCm", DeviceType::ROCm)
-        .value("Ppu", DeviceType::Ppu);
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
 }

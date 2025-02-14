@@ -10,7 +10,7 @@ from maga_transformer.async_decoder_engine.base_engine import BaseEngine
 from maga_transformer.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.utils.token_processor import TokenProcessor
-from maga_transformer.ops import LoadBalanceInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
 
 class RPCEngine(BaseEngine):
     def __init__(self,
@@ -48,3 +48,7 @@ class RPCEngine(BaseEngine):
     @override
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return self.rtp_llm_op_.get_load_balance_info()
+
+    @override
+    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+        return self.rtp_llm_op_.get_engine_schedule_info()

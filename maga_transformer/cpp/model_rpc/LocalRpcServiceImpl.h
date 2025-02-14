@@ -32,6 +32,10 @@ public:
         return local_server_->getLoadBalanceInfo();
     }
 
+    EngineScheduleInfo getEngineScheduleInfo() {
+        return local_server_->getEngineScheduleInfo();
+    }
+
     void addLora(const std::string& adapter_name,
                  const ft::lora::loraLayerWeightsMap& lora_a_weights,
                  const ft::lora::loraLayerWeightsMap& lora_b_weights) {

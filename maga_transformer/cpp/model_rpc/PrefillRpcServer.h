@@ -1,6 +1,7 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
+#include "maga_transformer/cpp/model_rpc/PrefillRpcServerRuntimeMeta.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "maga_transformer/cpp/model_rpc/RemoteRpcServer.h"
@@ -26,6 +27,8 @@ public:
                                EmptyPB* response);
     bool ready();
 
+    EngineScheduleInfo getEngineScheduleInfo() override;
+
 private:
     void initLoadBalancer();
     LoadBalancerInitParams makeConfig();
@@ -43,7 +46,8 @@ private:
 
 private:
     std::shared_ptr<BaseLoadBalancer> load_balancer_;
-    std::string docode_cluster_name_;
+    std::string decode_cluster_name_;
+    std::shared_ptr<PrefillRpcServerRuntimeMeta> meta_;
 };
 
 }

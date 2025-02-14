@@ -402,7 +402,7 @@ class CustomChatRenderer():
                 aux_info.reuse_len))
         return await self._generate_stream_response(output_items)
 
-    async def _generate_final(self, buffer_list: List[StreamStatus]):
+    async def _generate_final(self, buffer_list: List[StreamStatus], request: ChatCompletionRequest):
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
@@ -422,6 +422,7 @@ class CustomChatRenderer():
             if i == 0:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
+                aux_info = buffer.output.aux_info if request.aux_info else None
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
             choices=[ChatCompletionResponseStreamChoice(
@@ -467,7 +468,7 @@ class CustomChatRenderer():
                 break
         if index != 0:
             yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming)
-            yield await self._generate_final(status_list)
+            yield await self._generate_final(status_list, request)
 
     def _create_empty_delta_sync(self, input_len, output_len, reuse_len):
         return OutputDelta(

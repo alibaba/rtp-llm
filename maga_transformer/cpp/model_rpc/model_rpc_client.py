@@ -1,4 +1,3 @@
-
 import sys
 from typing import Any, Optional, AsyncGenerator
 import asyncio
@@ -23,8 +22,6 @@ from maga_transformer.distribute.worker_info import g_worker_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
-request_counter = AtomicCounter()
-
 MAX_GRPC_TIMEOUT_SECONDS = 60 * 3
 
 def trans_option(pb_object, py_object, name):
@@ -37,8 +34,7 @@ def trans_option_cast(pb_object, py_object, name, func):
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
-    # The stream id cannot use the request id because the request may contain prompt batch.
-    input_pb.request_id = request_counter.increment()
+    input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
 
     trans_multimodal_input(input_py, input_pb)
@@ -116,6 +112,8 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
         output_py = GenerateOutput()
         output_py.finished = output_pb.finished
         output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_us / 1000.0,
+                                    first_token_cost_time=output_pb.aux_info.first_token_cost_time_us / 1000.0,
+                                    wait_time=output_pb.aux_info.wait_time_us / 1000.0,
                                     iter_count=output_pb.aux_info.iter_count,
                                     input_len=output_pb.aux_info.input_len,
                                     reuse_len=output_pb.aux_info.reuse_len,
@@ -124,9 +122,7 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     step_output_len=output_pb.aux_info.step_output_len,
                                     fallback_tokens=output_pb.aux_info.fallback_tokens,
                                     fallback_times=output_pb.aux_info.fallback_times,
-                                    pd_sep=output_pb.aux_info.pd_sep,
-                                    first_token_cost_time=output_pb.aux_info.first_token_cost_time_us / 1000.0
-                                    )
+                                    pd_sep=output_pb.aux_info.pd_sep)
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
         if output_pb.aux_info.HasField('cum_log_probs'):
             output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()

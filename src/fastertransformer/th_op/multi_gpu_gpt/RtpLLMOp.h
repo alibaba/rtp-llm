@@ -28,6 +28,7 @@ public:
     void removeLora(const std::string& adapter_name);
     bool ready();
     rtp_llm::LoadBalanceInfo getLoadBalanceInfo();
+    rtp_llm::EngineScheduleInfo getEngineScheduleInfo();
 
 private:
     void _init(int64_t model_rpc_port,

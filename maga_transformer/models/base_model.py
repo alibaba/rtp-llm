@@ -80,6 +80,7 @@ class AuxInfo(PyBaseModel):
     fallback_tokens: int = 0
     fallback_times: int = 0
     first_token_cost_time: float = 0
+    wait_time: float = 0
     pd_sep: bool = False
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []

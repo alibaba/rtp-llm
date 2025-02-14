@@ -5,6 +5,7 @@ cc_library(
     hdrs = glob([
         "*.h",
     ]),
+    srcs = glob(["*.cc"]),
     deps = [
         "@com_google_googletest//:gtest",
         "//maga_transformer/cpp:cache",

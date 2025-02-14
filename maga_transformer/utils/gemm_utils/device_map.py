@@ -1,7 +1,7 @@
 import glob
 import os
 from collections import defaultdict
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 
 class LutInfo(object):
@@ -22,10 +22,12 @@ class DeviceMap(object):
         self._device_map: Dict[str, List[str]] = {}
         self._lut_map: Dict[str, Dict[str, LutInfo]] = defaultdict(dict)
 
-    def register(self, key: str, value: List[str], lut_dir_path: str):
+    def register(self, key: str, value: List[str], lut_dir_path: Optional[str] = None):
         if key in self._device_map:
             raise Exception(f"device {key} registered multi times")
         self._device_map[key] = value
+        if not lut_dir_path:
+            return
         for quant_info in self.ALL_QUANT_INFOS:
             file_pattern = self._generate_file_pattern(key, quant_info, lut_dir_path)
             self._lut_map[key][quant_info] = LutInfo(file_pattern)
@@ -51,7 +53,7 @@ class DeviceMap(object):
 _DEVICE_MAP = DeviceMap()
 
 
-def register_device(key: str, value: List[str], path: str):
+def register_device(key: str, value: List[str], path: Optional[str] = None):
     global _DEVICE_MAP
     _DEVICE_MAP.register(key, value, path)
 
@@ -67,3 +69,5 @@ _LUT_PATH = os.path.join(CUR_PATH, "luts")
 register_device("A10", ["NVIDIA A10"], _LUT_PATH)
 register_device("A100", ["NVIDIA A800-SXM4-80GB", "NVIDIA A100-SXM4-80GB"], _LUT_PATH)
 register_device("V100", ["Tesla V100S-PCIE-32GB"], _LUT_PATH)
+register_device("H20", ["NVIDIA H20"], None)
+register_device("L40S", ["NVIDIA L40S"],None)

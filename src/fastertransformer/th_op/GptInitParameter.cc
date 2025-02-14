@@ -138,6 +138,20 @@ RopeConfig GptInitParameter::getRopeConfig() const {
 
 void registerGptInitParameter(py::module m) {
 
+#define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
+
+#define REGISTER_PROPERTYS                      \
+    DEF_PROPERTY(token_ids)                     \
+    DEF_PROPERTY(eos_token_ids)
+
+    pybind11::class_<RoleSpecialTokens>(m, "RoleSpecialTokens")
+    .def(pybind11::init<>()) REGISTER_PROPERTYS;
+
+
+#undef DEF_PROPERTY
+#undef REGISTER_PROPERTYS
+
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &SpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \
@@ -157,19 +171,6 @@ void registerGptInitParameter(py::module m) {
 #undef DEF_PROPERTY
 #undef REGISTER_PROPERTYS
 
-#define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
-
-#define REGISTER_PROPERTYS                      \
-    DEF_PROPERTY(token_ids)                     \
-    DEF_PROPERTY(eos_token_ids)
-
-    pybind11::class_<RoleSpecialTokens>(m, "RoleSpecialTokens")
-    .def(pybind11::init<>()) REGISTER_PROPERTYS;
-
-
-#undef DEF_PROPERTY
-#undef REGISTER_PROPERTYS
-
     pybind11::class_<QuantAlgo>(m, "QuantAlgo")
     .def(pybind11::init<>())  // quant_pre_scales
     .def("setQuantAlgo", &QuantAlgo::setQuantAlgo)
@@ -184,10 +185,11 @@ void registerGptInitParameter(py::module m) {
     .def("isGroupwise", &QuantAlgo::isGroupwise)
     .def("getGroupSize", &QuantAlgo::getGroupSize)
     .def("getWeightBits", &QuantAlgo::getWeightBits)
+    .def("getActivationBits", &QuantAlgo::getActivationBits)
     .def(py::pickle(
         [](const QuantAlgo& quant_algo) {
             return py::make_tuple(int(quant_algo.getQuantMethod()),
-                    int(quant_algo.getWeightBits()), int(quant_algo.getGroupSize()));
+                    int(quant_algo.getWeightBits()), int(quant_algo.getGroupSize()), int(quant_algo.getActivationBits()));
         }
         , [](py::tuple t){
             return QuantAlgo(QuantMethod(t[0].cast<int>()), t[1].cast<int>(), t[2].cast<int>());

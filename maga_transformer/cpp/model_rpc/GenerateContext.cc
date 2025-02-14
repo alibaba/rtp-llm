@@ -3,8 +3,8 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream && !stream->finished() && !stream->stopped()) {
-        stream->cancel();
+    if (stream_ && !stream_->finished() && !stream_->stopped()) {
+        stream_->cancel();
     }
     reportTime();
 }
@@ -47,6 +47,14 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
     if (metrics_reporter) {
         metrics_reporter->report<RpcMetrics, RpcMetricsCollector>(nullptr, &collector);
     }
+}
+
+void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    stream_ = stream;
+}
+
+std::shared_ptr<GenerateStream>& GenerateContext::getStream() {
+    return stream_;
 }
 
 }  // namespace rtp_llm

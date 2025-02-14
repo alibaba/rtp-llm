@@ -41,6 +41,7 @@ def fake_load_balance_info(*args, **kwargs):
 InferenceWorker.__init__ = fake_init
 InferenceWorker.inference = fake_inference
 InferenceServer.get_load_balance_info = fake_load_balance_info
+InferenceServer.model_runtime_meta = lambda x: "fake_model"
 
 OpenaiEndopoint.__init__ = fake_init
 OpenaiEndopoint.chat_completion = fake_inference
@@ -126,6 +127,10 @@ class ConcurrencyLimitTest(TestCase):
             "iterate_count": load_balance_info.iterate_count,
             "version": 1,
             "alive": True,
+            'finished_task_list': [],
+            'last_schedule_delta': 0,
+            'running_task_list': [],
+            'machine_info': 'fake_model',
         })
 
     def test_openai(self):

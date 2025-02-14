@@ -39,22 +39,16 @@ static const std::string DEFAULT_DEVICE = "CPU";
         ASSERT_NEAR(x[i], y[i], abs_error) << "Vectors x and y differ at index " << i;                                 \
     }
 
-class DeviceTestBase: public ::testing::Test {
+class EngineBaseTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        initTestDevices();
         initTestDataDir();
         torch::manual_seed(114514);
         setenv("SAMPLE_TEST", "1", 1);
     }
 
-    virtual void initTestDevices() {
-        autil::EnvUtil::setEnv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(device_reserve_memory_size_));
-        autil::EnvUtil::setEnv("HOST_RESERVE_MEMORY_BYTES", std::to_string(host_reserve_memory_size_));
-        ft::DeviceFactory::initDevices(GptInitParameter());
-        device_ = ft::DeviceFactory::getDefaultDevice();
-    }
+    virtual void initTestDevices() {}
 
     void initTestDataDir() {
         const auto test_src_dir = getenv("TEST_SRCDIR");
@@ -75,6 +69,26 @@ public:
         std::cout << "test_work_space [" << test_work_space << "]" << std::endl;
         std::cout << "test_binary [" << test_binary << "]" << std::endl;
         std::cout << "test using data path [" << test_data_path_ << "]" << std::endl;
+    }
+
+    void TearDown() override {}
+protected:
+    std::string test_data_path_;
+};
+
+class DeviceTestBase: public EngineBaseTest {
+public:
+    void SetUp() override {
+        EngineBaseTest::SetUp();
+        initTestDevices();
+        torch::manual_seed(114514);
+    }
+
+    virtual void initTestDevices() {
+        autil::EnvUtil::setEnv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(device_reserve_memory_size_));
+        autil::EnvUtil::setEnv("HOST_RESERVE_MEMORY_BYTES", std::to_string(host_reserve_memory_size_));
+        ft::DeviceFactory::initDevices(GptInitParameter());
+        device_ = ft::DeviceFactory::getDefaultDevice();
     }
 
     void TearDown() override {}
@@ -378,7 +392,6 @@ protected:
 
 protected:
     ft::DeviceBase* device_ = nullptr;
-    std::string test_data_path_;
     double rtol_ = 1e-03;
     double atol_ = 1e-03;
     rtp_llm::CacheManagerPtr cache_manager_;
@@ -390,9 +403,3 @@ protected:
     TEST_F(test_class, case_name) {                         \
         case_name(__VA_ARGS__);                             \
     }
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    rtp_llm::initLogger();
-    return RUN_ALL_TESTS();
-}

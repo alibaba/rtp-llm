@@ -27,6 +27,8 @@ public:
     void reportTime();
     void collectBasicMetrics(RpcMetricsCollector& collector);
     void reportMetrics(RpcMetricsCollector& collector);
+    virtual void setStream(const std::shared_ptr<GenerateStream>& stream);
+    virtual std::shared_ptr<GenerateStream>& getStream();
 
 public:
     int64_t                         request_id;
@@ -40,8 +42,10 @@ public:
     ErrorInfo                       error_info;
     grpc::Status                    error_status            = grpc::Status::OK;
     grpc::ServerContext*            server_context;
-    std::shared_ptr<GenerateStream> stream;
     kmonitor::MetricsReporterPtr    metrics_reporter;
+
+protected:
+    std::shared_ptr<GenerateStream> stream_;
 };
 
 #define CHECK_ERROR_STATUS(generate_context)                                    \

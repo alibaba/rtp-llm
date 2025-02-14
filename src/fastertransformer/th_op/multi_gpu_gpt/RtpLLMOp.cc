@@ -102,6 +102,10 @@ rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo() {
     return model_rpc_service_->getLoadBalanceInfo();
 }
 
+rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo() {
+    return model_rpc_service_->getEngineScheduleInfo();
+}
+
 void RtpLLMOp::initRPCServer(
                      const rtp_llm::EngineInitParams maga_init_params,
                      py::object mm_process_engine,
@@ -189,7 +193,6 @@ RtpLLMOp::~RtpLLMOp() {
 }
 
 void registerRtpLLMOp(const py::module& m) {
-    rtp_llm::registerLoadBalanceInfo(m);
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
         .def("init",                  &torch_ext::RtpLLMOp::init)
@@ -197,6 +200,7 @@ void registerRtpLLMOp(const py::module& m) {
         .def("add_lora",              &torch_ext::RtpLLMOp::addLora)
         .def("remove_lora",           &torch_ext::RtpLLMOp::removeLora)
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
+        .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop)
         .def("ready", &torch_ext::RtpLLMOp::ready);
 }

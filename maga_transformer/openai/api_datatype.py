@@ -129,6 +129,11 @@ class ChatCompletionRequest(BaseModel):
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
+    master_info: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def is_openai_request(request: Dict[str, Any]):
+        return 'messages' in request
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None

@@ -15,6 +15,7 @@
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "maga_transformer/cpp/dataclass/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 
@@ -47,6 +48,10 @@ public:
 
     bool ready() {
         return true;
+    }
+
+    virtual EngineScheduleInfo getEngineScheduleInfo() {
+        return EngineScheduleInfo();
     }
 
 public:

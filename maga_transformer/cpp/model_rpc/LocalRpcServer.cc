@@ -115,11 +115,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     FT_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    generate_context.stream = engine_->enqueue(input);
+    generate_context.setStream(engine_->enqueue(input));
     FT_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
     generate_context.error_status = pollStreamOutput(
-            context, generate_context.request_key, writer, generate_context.stream);
+            context, generate_context.request_key, writer, generate_context.getStream());
     return generate_context.error_status;
 }
 

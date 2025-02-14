@@ -93,7 +93,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     FT_LOG_DEBUG("request:[%s] start to allocate resource", decode_context.request_key.c_str());
     auto input            = QueryConverter::transQuery(&decode_context.allocate_request.input());
     auto generate_stream  = engine_->makeStream(input);
-    decode_context.stream = generate_stream;
+    decode_context.setStream(generate_stream);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
     auto status = generate_stream->initKVBlock(0);
     if (!status.ok()) {
@@ -131,7 +131,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     FT_LOG_DEBUG("request:[%s] start to local generate", decode_context.request_key.c_str());
     auto& grpc_stream = decode_context.rpc_context.grpc_stream;
-    auto& generate_stream = decode_context.stream;
+    auto& generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
     GRPC_RET_IF_ERROR(decode_context, grpc_stream->Read(&generate_request),
                         grpc::StatusCode::INTERNAL, "poll generate request failed");
@@ -187,7 +187,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 }
 
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
-    auto& generate_stream = decode_context.stream;
+    auto* generate_stream = decode_context.getStream().get();
     auto& cache_keys = generate_stream->cacheKeys(0);
     auto& block_ids  = generate_stream->kvCache().blocks(0);
     if (cache_keys.size() != block_ids.size()) {

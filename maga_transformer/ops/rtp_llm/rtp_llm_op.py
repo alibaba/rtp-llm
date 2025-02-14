@@ -4,7 +4,7 @@ from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.utils.token_processor import TokenProcessor
-from maga_transformer.ops import LoadBalanceInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
 
 
 class RtpLLMOp():
@@ -38,3 +38,6 @@ class RtpLLMOp():
 
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return self.ft_op.get_load_balance_info() # type: ignore
+
+    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+        return self.ft_op.get_engine_schedule_info() # type: ignore

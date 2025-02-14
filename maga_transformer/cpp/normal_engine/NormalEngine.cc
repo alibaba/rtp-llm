@@ -66,6 +66,10 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(
     return stream;
 }
 
+int64_t NormalEngine::getLastScheduleTime() {
+    return scheduler_->lastScheduleTime();
+}
+
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids = device_->allocateBuffer(

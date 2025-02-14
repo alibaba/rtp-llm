@@ -49,7 +49,7 @@ def multi_rank_start():
                                             g_parallel_info.world_rank + local_world_size)):
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(cuda_device_list)
         os.environ['WORLD_RANK'] = str(world_rank)
-        proc = multiprocessing.Process(target=local_rank_start)
+        proc = Process(target=local_rank_start)
         proc.start()
         procs.append(proc)
     if os.environ.get('FAKE_GANG_ENV', None) is not None:

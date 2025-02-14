@@ -85,6 +85,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.finished              = sub_generate_status_[i].status == StreamState::FINISHED;
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
+        generate_output.aux_info.wait_time_us = wait_time_us_;
         generate_output.aux_info.input_len    = generate_input_->promptLength();
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
