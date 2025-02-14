@@ -23,6 +23,13 @@ bool SimpleHttpClient::get(const std::string&   address,
     return send(address, route, body, HttpMethodType::GET, http_call_back);
 }
 
+bool SimpleHttpClient::post(const std::string&   address,
+                           const std::string&   route,
+                           const std::string&   body,
+                           const HttpCallBack&& http_call_back) {
+    return send(address, route, body, HttpMethodType::POST, http_call_back);
+}
+
 bool SimpleHttpClient::send(const std::string&    address,
                             const std::string&    route,
                             const std::string&    body,
@@ -31,6 +38,8 @@ bool SimpleHttpClient::send(const std::string&    address,
     ::anet::HTTPPacket* requestPacket = new ::anet::HTTPPacket();
     requestPacket->setURI(route.c_str());
     requestPacket->setBody(body.c_str(), body.size());
+    requestPacket->addHeader("host", "unknown");
+    requestPacket->setKeepAlive(true);
     requestPacket->setPacketType(::anet::HTTPPacket::PT_REQUEST);
     requestPacket->setVersion(::anet::HTTPPacket::HTTP_1_1);
 

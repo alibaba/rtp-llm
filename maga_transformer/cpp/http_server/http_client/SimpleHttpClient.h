@@ -28,6 +28,11 @@ public:
              const std::string&   body,
              const HttpCallBack&& http_call_back);
 
+    bool post(const std::string&   address,
+             const std::string&   route,
+             const std::string&   body,
+             const HttpCallBack&& http_call_back);
+
 private:
     enum class HttpMethodType {
         GET,

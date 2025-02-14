@@ -1,6 +1,6 @@
 #include "gtest/gtest.h"
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
-#include "maga_transformer/cpp/api_server/HealthService.h"
+#include "maga_transformer/cpp/api_server/common/HealthService.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {

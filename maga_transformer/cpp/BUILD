@@ -409,6 +409,7 @@ cc_library(
         ":embedding_arpc_deps",
         "@havenask//aios/autil:net",
         "@havenask//aios/autil:time",
+        "//maga_transformer/cpp/api_server/common:common_service"
     ],
     visibility = ["//visibility:public"]
 )

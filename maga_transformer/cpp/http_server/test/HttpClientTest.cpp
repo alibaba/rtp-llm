@@ -126,15 +126,13 @@ TEST_F(HttpClientTest, testRequestInvalidRoute) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    auto address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
-    auto server  = initServer(address);
-    ASSERT_TRUE(server != nullptr);
+    auto address = http_servers_.begin()->first;
 
     std::mutex mutex;
     mutex.lock();
     HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
         ASSERT_FALSE(ok);
-        ASSERT_TRUE(response_body == "");
+        ASSERT_TRUE(response_body == std::string("http route not found: [GET: /worker_status_invalid]"));
         mutex.unlock();
     };
 
@@ -147,12 +145,11 @@ TEST_F(HttpClientTest, testRecycleConnectionInHandlePacket) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    auto address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
-    auto server  = initServer(address);
-    ASSERT_TRUE(server != nullptr);
+    auto address = http_servers_.begin()->first;    
     std::mutex mutex;
     mutex.lock();
     HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
+        sleep(2);
         ASSERT_TRUE(ok);
         processResponse(response_body);
         mutex.unlock();

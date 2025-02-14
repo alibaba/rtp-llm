@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/api_server/HealthService.h"
+#include "maga_transformer/cpp/api_server/common/HealthService.h"
 #include "maga_transformer/cpp/api_server/test/mock/MockHttpResponseWriter.h"
 
 using namespace ::testing;

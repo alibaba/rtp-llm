@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/api_server/HttpApiServer.h"
-#include "maga_transformer/cpp/api_server/HealthService.h"
+#include "maga_transformer/cpp/api_server/common/HealthService.h"
 #include "maga_transformer/cpp/api_server/WorkerStatusService.h"
 #include "maga_transformer/cpp/api_server/ModelStatusService.h"
 #include "maga_transformer/cpp/api_server/SysCmdService.h"
@@ -124,27 +124,7 @@ bool HttpApiServer::registerHealthService() {
     }
 
     health_service_.reset(new HealthService());
-    auto raw_resp_callback = [health_service = health_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                                                const http_server::HttpRequest& request) -> void {
-        health_service->healthCheck(writer, request);
-    };
-
-    auto json_resp_callback = [health_service =
-                                   health_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                                    const http_server::HttpRequest&                  request) -> void {
-        health_service->healthCheck2(writer, request);
-    };
-
-    return http_server_->RegisterRoute("GET", "/health",                    raw_resp_callback) &&
-           http_server_->RegisterRoute("POST", "/health",                   raw_resp_callback) &&
-           http_server_->RegisterRoute("GET", "/GraphService/cm2_status",   raw_resp_callback) &&
-           http_server_->RegisterRoute("POST", "/GraphService/cm2_status",  raw_resp_callback) &&
-           http_server_->RegisterRoute("GET", "/SearchService/cm2_status",  raw_resp_callback) &&
-           http_server_->RegisterRoute("POST", "/SearchService/cm2_status", raw_resp_callback) &&
-           http_server_->RegisterRoute("GET", "/status",                    raw_resp_callback) &&
-           http_server_->RegisterRoute("POST", "/status",                   raw_resp_callback) &&
-           http_server_->RegisterRoute("POST", "/health_check",             raw_resp_callback) &&
-           http_server_->RegisterRoute("GET", "/",                         json_resp_callback);
+    return registerHealthServiceStatic(*http_server_, health_service_);
 }
 
 bool HttpApiServer::registerWorkerStatusService() {

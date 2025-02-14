@@ -11,7 +11,7 @@ public:
 
 public:
     bool                        init(const LoadBalancerInitParams& params) override;
-    std::shared_ptr<const Host> chooseHost(const std::string& biz) const override;
+    std::shared_ptr<const Host> chooseHost(const std::string& biz) override;
 };
 
 }  // namespace rtp_llm

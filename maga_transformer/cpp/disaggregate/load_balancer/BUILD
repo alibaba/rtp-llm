@@ -7,13 +7,15 @@ cc_library(
         "BaseLoadBalancer.cpp",
         "RRLoadBalancer.cpp",
         "WRRLoadBalancer.cpp",
-        "HeartbeatSynchronizer.cpp"
+        "HeartbeatSynchronizer.cpp",
+        "WorkerAwaredLoadBalancer.cpp"
     ],
     hdrs = [
         "BaseLoadBalancer.h",
         "RRLoadBalancer.h",
         "WRRLoadBalancer.h",
-        "HeartbeatSynchronizer.h"
+        "WorkerAwaredLoadBalancer.h",
+        "HeartbeatSynchronizer.h",
     ],
     deps = [
         "@havenask//aios/autil:log",

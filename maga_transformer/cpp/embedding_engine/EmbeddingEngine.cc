@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/utils/Logger.h"
+#include <exception>
 
 using namespace std;
 namespace rtp_llm {

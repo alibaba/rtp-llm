@@ -68,10 +68,13 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
         }
     }
     if (!waitDone(sync_cnt, total_host_cnt, timeout_ms)) {
-        FT_LOG_WARNING("sync work status timeout, sync_worker_status_interval_ms:%d, sync_cnt:%d, total_cnt:%d",
-                       timeout_ms,
-                       sync_cnt->load(),
-                       total_host_cnt);
+        auto sync_cnt_value = sync_cnt->load();
+        if (total_host_cnt > 0 && sync_cnt_value * 1.0 / total_host_cnt < 0.9) {
+            FT_LOG_WARNING("sync work status timeout, sync_worker_status_interval_ms:%d, sync_cnt:%d, total_cnt:%d",
+                           timeout_ms,
+                           sync_cnt_value,
+                           total_host_cnt);
+        }
     }
     {
         std::unique_lock<std::shared_mutex> lock(*mutex);
@@ -93,6 +96,11 @@ void HeartbeatSynchronizer::processWorkerStatusResponse(
             std::unique_lock<std::shared_mutex> lock(*sync_result_map_mutex);
             (*sync_result_map)[spec] = worker_status_response;
         }
+    } catch (const std::exception& e) {
+        FT_LOG_WARNING("response deserialize failed, address:%s, response: %s, error: %s",
+                       spec.c_str(),
+                       response_body.c_str(),
+                       e.what());
     } catch (...) {
         FT_LOG_WARNING("response deserialize failed, address:%s, response: %s", spec.c_str(), response_body.c_str());
     }

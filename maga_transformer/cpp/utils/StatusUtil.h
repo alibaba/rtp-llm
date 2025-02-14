@@ -2,6 +2,13 @@
 
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 
+#define RETURN_IF_NOT_SUCCESS(success)                                                                                 \
+    do {                                                                                                               \
+        if (!(success)) {                                                                                              \
+            return false;                                                                                              \
+        }                                                                                                              \
+    } while (0)
+
 #define RETURN_IF_STATUS_OR_ERROR(status_or)                                                                           \
     do {                                                                                                               \
         auto&& _status_or = (status_or);                                                                               \

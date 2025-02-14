@@ -51,6 +51,8 @@ public:
         return resource_context_;
     }
 
+    virtual int64_t getLastScheduleTime() { return autil::TimeUtility::currentTimeInMilliSeconds(); }
+
 protected:
     ft::DeviceBase*                      device_;
     ResourceContext                      resource_context_;

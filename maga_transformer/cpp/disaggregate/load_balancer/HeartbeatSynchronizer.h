@@ -8,6 +8,24 @@
 
 namespace rtp_llm {
 
+class WorkerTaskStatus: public autil::legacy::Jsonizable {
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("prefix_length", prefix_length);
+        json.Jsonize("input_length", input_length);
+        int64_t request_id;
+        json.Jsonize("request_id", request_id);
+        task_id = std::to_string(request_id);
+    }
+
+public:
+    WorkerTaskStatus() = default;
+    WorkerTaskStatus(int prefix_length, int input_length, std::string task_id):
+        prefix_length(prefix_length), input_length(input_length), task_id(task_id) {}
+    int         prefix_length;
+    int         input_length;
+    std::string task_id;
+};
+
 class WorkerStatusResponse: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
@@ -18,12 +36,20 @@ public:
         json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
         json.Jsonize("iterate_count", load_balance_info.iterate_count);
         json.Jsonize("alive", alive);
+        json.Jsonize("running_task_list", running_task_list, {});
+        json.Jsonize("finished_task_list", finished_task_list, {});
+        json.Jsonize("last_schedule_delta", last_schedule_delta, 0);
+        json.Jsonize("machine_info", machine_info, "");
     }
 
 public:
-    int             available_concurrency;
-    LoadBalanceInfo load_balance_info;
-    bool            alive;
+    int                           available_concurrency;
+    LoadBalanceInfo               load_balance_info;
+    bool                          alive;
+    int64_t                       last_schedule_delta;
+    std::vector<WorkerTaskStatus> running_task_list;
+    std::vector<WorkerTaskStatus> finished_task_list;
+    std::string                   machine_info;
 };
 
 class HeartbeatSynchronizer {
