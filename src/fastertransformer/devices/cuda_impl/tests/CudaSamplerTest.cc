@@ -142,7 +142,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
-    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<uint32_t>({4}, {1, 0, 0, 2}, AllocationType::HOST);
     auto top_p = createBuffer<float>({4}, {0.2, 0.2, 0.6, 0.6}, AllocationType::HOST);
@@ -150,7 +149,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
 
     GreedyParams params({
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
-        *top_k, *top_p, *temperture, *rand_seed,
+        *top_k, *top_p, *temperture, nullopt,
         nullopt, nullopt, nullopt, nullopt,
         nullopt, nullopt, nullopt,
     });
@@ -198,15 +197,14 @@ TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
     BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
-    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<uint32_t>({4}, {1, 2, 2, 2}, AllocationType::HOST);
-    auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.6, 0.2}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {-1.0, -1.0, 0.6, 0.2}, AllocationType::HOST);
     auto temperture = createBuffer<float>({4}, {1.0, 10.0, 1.0, 10.0}, AllocationType::HOST);
 
     GreedyParams params({
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
-        *top_k, *top_p, *temperture, *rand_seed,
+        *top_k, *top_p, *temperture, nullopt,
         nullopt, nullopt, nullopt, nullopt,
         nullopt, nullopt, nullopt,
     });

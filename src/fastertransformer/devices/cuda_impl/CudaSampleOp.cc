@@ -24,7 +24,7 @@ using SamplerT = float;
 bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
     const auto batch_size = params.logits.shape()[0];
     if ((!use_flashinfer_sample_kernel) ||
-        // params.random_seed.has_value() ||
+        params.random_seed.has_value() ||
         params.cum_log_probs.has_value() ||
         params.output_all_probs.has_value() ||
         params.output_log_probs.has_value()) {
@@ -33,7 +33,7 @@ bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
     if (params.repetition_penalty.has_value() &&
         std::any_of(params.repetition_penalty.value().get().data<float>(),
                     params.repetition_penalty.value().get().data<float>() + batch_size,
-                    [&](auto t) { return std::abs(t - 1.0f) > 1e-5; })) {
+                    [&](auto t) { return std::abs(t - 1.0f) > 1e-7; })) {
         return false;
     }
     if (params.min_lengths.has_value() &&
@@ -60,12 +60,13 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
     auto transposed_tokens = transpose({*device_tokens});
     const auto batch_size = logits.shape()[0];
     const auto vocab_size_padded = logits.shape()[1];
-    auto logits_ref = make_shared<Buffer>(logits.where(), logits.type(), logits.shape(), logits.data());
+    auto logits_ref = logits.slice(0, logits.shape()[0]);
+    BufferPtr temperature_buf;
     if (std::any_of(temperature.data<float>(),
                     temperature.data<float>() + batch_size,
-                    [&](auto t) { return std::abs(t - 1.0f) > 1e-5; }))
+                    [&](auto t) { return std::abs(t - 1.0f) > 1e-7; }))
     {
-        BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+        temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
         copy({*temperature_buf, temperature});
         invokeBatchApplyTemperaturePenalty(
             logits_ref->data<float>(),
@@ -94,6 +95,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
     torch::Tensor success_t = Buffer2torchTensor(success, false);
     torch::Tensor top_k_t = Buffer2torchTensor(top_k, false);
     torch::Tensor top_p_t = Buffer2torchTensor(top_p, false);
+    std::transform(top_p.data<float>(), top_p.data<float>() + batch_size, top_p.data<float>(), [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t;});
     if (std::all_of(top_k.data<uint32_t>(),
                     top_k.data<uint32_t>() + batch_size,
                     [&](auto t) { return t <= 0; })) {
@@ -101,7 +103,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
     }
     else if (std::all_of(top_p.data<float>(),
                     top_p.data<float>() + batch_size,
-                         [&](auto t) { return std::abs(t - 1.0f) < 1e-5; })) {
+                         [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
         std::transform(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, top_k.data<uint32_t>(), [&](auto t) { return t <= 0 ? 1 << 30 : t;});
         top_k_sampling_from_probs(probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)stream_);
     } else {

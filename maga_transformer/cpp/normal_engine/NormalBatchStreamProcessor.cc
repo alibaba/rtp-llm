@@ -221,6 +221,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
 
     int batch_idx   = 0;
     bool return_logits = false;
+    bool calculate_softmax_probs = false;
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
@@ -234,6 +235,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
             batch_idx += 1;
         }
         return_logits |= stream->returnLogits();
+        calculate_softmax_probs |= stream->calculateSoftmaxProbs();
         FT_LOG_DEBUG("stream [%d], complete token ids = [%s]", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
         FT_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]", stream->streamId(), sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
@@ -246,7 +248,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
 
     batch_idx = 0;
     // need copy logits when has tile or return logits
-    if (return_logits || (context_streams.size() && total_batch_size > all_streams.size())) {
+    if (return_logits || calculate_softmax_probs || (context_streams.size() && total_batch_size > all_streams.size())) {
         sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
         device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
     } else {
@@ -310,6 +312,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
     int* beam_search_sequence_lengths = sampler_inputs.beam_search_sequence_lengths->data<int32_t>();
 
     int batch_idx   = 0;
+    bool has_random_seed = false;
     for (auto& stream : all_streams) {
         int        current_batch_size;
         if (!score_batch) {
@@ -333,6 +336,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
             min_lengths[batch_idx]        = stream->generateConfig()->min_new_tokens;
             if (stream->generateConfig()->random_seed.has_value()) {
                 random_seeds[batch_idx]   = stream->generateConfig()->random_seed.value();
+                has_random_seed = true;
             } else {
                 std::random_device rd;
                 std::mt19937_64 gen(rd());
@@ -343,7 +347,9 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
             batch_idx += 1;
         }
     }
-
+    if (!has_random_seed) {
+        sampler_inputs.random_seeds.reset();
+    }
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
