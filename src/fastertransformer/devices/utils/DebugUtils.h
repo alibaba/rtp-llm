@@ -9,4 +9,5 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName);
 
+torch::Tensor loadTensorFromFile(const std::string& fileName);
 }

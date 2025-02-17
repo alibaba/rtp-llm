@@ -312,4 +312,25 @@ void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::
     fout.close();
 }
 
+torch::Tensor loadTensorFromFile(const std::string& fileName) {
+    // Open the file
+    std::ifstream fin(fileName, std::ios::in | std::ios::binary);
+    if (!fin) {
+        throw std::runtime_error("Failed to open file: " + fileName);
+    }
+
+    // Get the file size
+    fin.seekg(0, std::ios::end);
+    size_t fileSize = fin.tellg();
+    fin.seekg(0, std::ios::beg);
+
+    // Read the file content into a vector
+    std::vector<char> pickledData(fileSize);
+    fin.read(pickledData.data(), fileSize);
+    fin.close();
+
+    // Deserialize the Tensor
+    return torch::pickle_load(pickledData).toTensor();
+}
+
 }  // namespace fastertransformer
