@@ -156,7 +156,7 @@ bool cufmha::initOpenSourceFmhaAndCheckSupport()
     return (kv_head_num_ != 0 && head_num_ % kv_head_num_ == 0) &&
            (mtype_ == AttentionMaskType::causalMask ||
             mtype_ == AttentionMaskType::noMask) &&
-           ((size_per_head_ == 64) || (size_per_head_ == 96) || (size_per_head_ == 128));
+           ((size_per_head_ == 64) || (size_per_head_ == 96) || (size_per_head_ == 128) || (size_per_head_ == 192));
 }
 
 void cufmha::runTrtV2FmhaPaged(void*  input,

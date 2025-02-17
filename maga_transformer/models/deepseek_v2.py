@@ -270,4 +270,4 @@ class DeepSeekV2(BaseModel):
         return DeepSeekV2Weight
 
 register_model('deepseek2', DeepSeekV2, ["DeepseekV2ForCausalLM"])
-register_model('deepseek3', DeepSeekV2, ["DeepseekV3ForMaskedLM"])
+register_model('deepseek3', DeepSeekV2, ["DeepseekV3ForCausalLM"])

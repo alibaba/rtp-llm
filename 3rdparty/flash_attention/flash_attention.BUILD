@@ -20,12 +20,16 @@ cc_library(
 cc_library(
     name = "flash_attention2_impl",
     srcs = glob([
+        "csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu",
+        "csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim96_bf16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim96_fp16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+        "csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu",
+        "csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu",
         "csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_sm80.cu",
