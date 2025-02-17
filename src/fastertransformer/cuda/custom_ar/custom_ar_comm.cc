@@ -209,7 +209,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
     }
 
     // check whether world size is valid
-    std::unordered_set<size_t> available_world_sizes = {2, 4, 8};
+    std::unordered_set<size_t> available_world_sizes = {2, 4, 8, 16};
     if (available_world_sizes.find(world_size) == available_world_sizes.end()) {
         FT_LOG_INFO("Disable custom ar for invalid world size %d", world_size);
         return false;

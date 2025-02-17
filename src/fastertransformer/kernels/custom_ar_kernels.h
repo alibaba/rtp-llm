@@ -30,7 +30,7 @@
 
 #define MAX_ALL_REDUCE_BLOCKS 24
 #define FLAG(a) ((uint32_t)((a) % 0x146))
-#define MAX_RANKS_PER_NODE 8
+#define MAX_RANKS_PER_NODE 16
 #define WARP_SIZE 32
 #define DEFAULT_BLOCK_SIZE 1024
 

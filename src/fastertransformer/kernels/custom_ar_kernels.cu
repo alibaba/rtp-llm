@@ -421,7 +421,11 @@ void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, uint32_t ba
         case 8:
             invokeCustomAllReduceKernel<T, 8>(param, barrier_flag, stream);
             break;
+        case 16:
+            invokeCustomAllReduceKernel<T, 16>(param, barrier_flag, stream);
+            break;
         default:
+	    throw std::runtime_error("not support custom ar world size: " + std::to_string(param->elts_per_rank));
             break;
     }
 }
@@ -436,6 +440,8 @@ void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, uint32_t ba
     template void invokeCustomAllReduceKernel<T, 4>(                                                                   \
         CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);                                \
     template void invokeCustomAllReduceKernel<T, 8>(                                                                   \
+        CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);                                \
+    template void invokeCustomAllReduceKernel<T, 16>(                                                                  \
         CustomAllReduceParameters * param, uint32_t barrier_flag, cudaStream_t stream);
 
 // Template instantiation
