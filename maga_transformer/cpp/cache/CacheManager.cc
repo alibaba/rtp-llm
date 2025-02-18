@@ -47,9 +47,9 @@ void CacheManager::regUserMr() {
         if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.k_block_stride + config_.v_block_stride)) {
             FT_FAIL("register user mr failed");
         }
-        auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
+        mr_cost_time_ms_ = (currentTimeUs() - start_time_us) / 1000;
         FT_LOG_INFO("register user mr success: cost %ld ms, cache base address %p, len %lu, end address %p",
-            cost_time_ms, cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
+            mr_cost_time_ms_, cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
         kvcache_reg_mr_ = true;
     }
 }
@@ -96,6 +96,7 @@ void CacheManager::reportMetricsLoop() {
                 collector.kv_cache_available_blocks = available_blocks;
                 collector.kv_cache_free_blocks = freeBlockNums();
                 collector.kv_cache_used_ratio = 100.0 * (totalBlocks() - available_blocks) / totalBlocks();
+                collector.mr_cost_time_ms = mr_cost_time_ms_;
             }
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
@@ -255,7 +256,7 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
     return kv_cache_;
 }
 
-CacheManager::MatchInfo CacheManager::mallocWithCache(const MallocInfo& malloc_info) {
+CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& malloc_info) {
     auto match_begin_time_us = currentTimeUs();
     auto match_info = matchImpl(malloc_info);
     auto match_cost_time_us = currentTimeUs() - match_begin_time_us;
@@ -273,7 +274,7 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const MallocInfo& malloc_i
     return match_info;
 }
 
-CacheManager::MatchInfo CacheManager::matchImpl(const MallocInfo& malloc_info) {
+CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc_info) {
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num = std::min(match_result.matched_len, static_cast<size_t>((malloc_info.token_ids.size()) - 1) / config_.seq_size_per_block);
@@ -325,27 +326,30 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     }
 }
 
-std::tuple<bool, KVCacheResource> CacheManager::malloc(int64_t request_id, int nums) {
+std::tuple<bool, KVCacheResource> CacheManager::malloc(const SimpleMallocInfo& malloc_info) {
     std::lock_guard<std::mutex> guard(mutex_);
-    auto [success, block_indices] = mallocIndex(request_id, nums);
+    auto [success, block_indices] = mallocIndex(malloc_info);
     return {success, {block_indices}};
 }
 
-std::tuple<bool, std::vector<int>> CacheManager::mallocIndex(int64_t request_id, int nums) {
-    maybeFreeBlockFromCache(nums);
-    return mallocImpl(request_id, nums);
+std::tuple<bool, std::vector<int>> CacheManager::mallocIndex(const SimpleMallocInfo& malloc_info) {
+    maybeFreeBlockFromCache(malloc_info.block_nums);
+    return mallocImpl(malloc_info);
 }
 
-std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int64_t request_id, int nums) {
-    if (free_blocks_index_.size() < static_cast<size_t>(nums)) {
-        std::string error_msg = "request " + std::to_string(request_id) + " failed to malloc " + std::to_string(nums)
-                                + " blocks, only " + std::to_string(free_blocks_index_.size()) + " blocks left";
-        FT_LOG_ERROR("%s", error_msg.c_str());
+std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(const SimpleMallocInfo& malloc_info) {
+    if (free_blocks_index_.size() < static_cast<size_t>(malloc_info.block_nums)) {
+        if (malloc_info.verbose) {
+            std::string error_msg = "request " + std::to_string(malloc_info.request_id)
+                                    + " failed to malloc " + std::to_string(malloc_info.block_nums)
+                                    + " blocks, only " + std::to_string(free_blocks_index_.size()) + " blocks left";
+            FT_LOG_ERROR("%s", error_msg.c_str());
+        }
         return {false, {}};
     } else {
         std::vector<int> result;
-        result.reserve(nums);
-        for (int i = 0; i < nums; ++i) {
+        result.reserve(malloc_info.block_nums);
+        for (int i = 0; i < malloc_info.block_nums; ++i) {
             int block = *free_blocks_index_.begin();
             free_blocks_index_.erase(free_blocks_index_.begin());
             result.push_back(block);

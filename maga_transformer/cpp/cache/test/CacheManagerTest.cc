@@ -39,10 +39,10 @@ protected:
             need_block_num = token_ids.size();
         }
         auto cache_keys = constructCacheKey(cache_manager, token_ids);
-        CacheManager::MallocInfo malloc_info(request_id, token_ids, cache_keys, mm_bounds, need_loss);
+        CacheManager::AdvancedMallocInfo malloc_info(request_id, token_ids, cache_keys, mm_bounds, need_loss);
         auto match_info = cache_manager.mallocWithCache(malloc_info);
         if (match_info.cache_blocks.size() < need_block_num) {
-            auto [success, index] = cache_manager.mallocIndex(request_id, need_block_num - match_info.cache_blocks.size());
+            auto [success, index] = cache_manager.mallocIndex({request_id, uint32_t(need_block_num - match_info.cache_blocks.size())});
             if (success) {
                 match_info.cache_blocks.insert(match_info.cache_blocks.end(), index.begin(), index.end());
             } else {
@@ -77,13 +77,13 @@ TEST_F(CacheManagerTest, testSimple) {
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 1);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 1});
     ASSERT_TRUE(success1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
 
-    auto [success2, index2] = cache_manager.mallocIndex(request_id, 2);
+    auto [success2, index2] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_TRUE(success2);
-    auto [success3, _] = cache_manager.mallocIndex(request_id, 1);
+    auto [success3, _] = cache_manager.mallocIndex({request_id, 1});
     ASSERT_FALSE(success3);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
@@ -114,7 +114,7 @@ TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
 
-    auto [success2, index2] = cache_manager.mallocIndex(request_id, 2);
+    auto [success2, index2] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index2, std::vector<int>({1, 2}));
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -141,7 +141,7 @@ TEST_F(CacheManagerTest, testLossCache) {
 
     // test malloc with loss
     // pop cache item
-    auto [success, index] = cache_manager.mallocIndex(request_id, 3);
+    auto [success, index] = cache_manager.mallocIndex({request_id, 3});
     ASSERT_EQ(index, std::vector<int>({1, 2, 3}));
     freeWithCache(cache_manager, index, {1000, 2000, 3000}, {0.1, 0.2});
     ASSERT_EQ(cache_manager.freeBlockNums(), 1);
@@ -156,7 +156,7 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
     CacheManager cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 2);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -204,7 +204,7 @@ TEST_F(CacheManagerTest, testAllocateWithMultimodalReuse) {
     CacheManager cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 9);
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 4);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 4});
     ASSERT_EQ(index1, std::vector<int>({1, 2, 3, 4}));
     ASSERT_EQ(cache_manager.cacheItemNum(), 0);
 
@@ -327,7 +327,7 @@ TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
     // malloc cache item 1
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 2);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_TRUE(success1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -404,7 +404,7 @@ TEST_F(CacheManagerTest, testPopWithResident) {
     ASSERT_EQ(cache_manager.freeBlockNums(), 5);
 
     // Insert resident cache item
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 2);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -440,7 +440,7 @@ TEST_F(CacheManagerTest, testResident) {
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc for resident block
-    auto [success1, index1] = cache_manager.mallocIndex(request_id, 2);
+    auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
@@ -595,7 +595,7 @@ TEST_F(CacheManagerTest, testBlockCacheHoldBlockNums) {
     ASSERT_EQ(cache_manager.availableBlockNums(), 9);
     ASSERT_EQ(cache_manager.freeBlockNums(), 9);
 
-    auto [success4, blocks4] = cache_manager.malloc(request_id, 3);
+    auto [success4, blocks4] = cache_manager.malloc({request_id, 3});
     ASSERT_EQ(blocks4.block_id, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(cache_manager.availableBlockNums(), 6);
     cache_manager.free(blocks4.block_id);

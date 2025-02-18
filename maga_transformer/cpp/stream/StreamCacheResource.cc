@@ -98,7 +98,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         auto common_cache_keys = stream_->cacheKeys(0);
         auto mm_bounds_vec = stream_->multimodalIntervals();
         // TODO(xinfei.sxf) fix need loss param
-        CacheManager::MallocInfo malloc_info(stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec);
+        CacheManager::AdvancedMallocInfo malloc_info(stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec);
         auto match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
@@ -134,8 +134,11 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
     auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
 
-    auto [success, kv_cache_resource] = resource_context_.cache_manager->malloc(stream_->streamId(), common_blocks_nums);
+    bool verbose = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    auto [success, kv_cache_resource] = resource_context_.cache_manager->malloc(
+        {stream_->streamId(), (uint32_t)common_blocks_nums, verbose});
     if (!success) {
+        malloc_failed_times_++;
         return absl::InternalError("malloc failed");
     }
     batch_resource_.appendClone(kv_cache_resource, resource_context_.cache_manager);
@@ -147,7 +150,8 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
 
     auto batch_size  = stream_->tileNum();
     auto total_blocks = batch_size * extra_blocks_num;
-    std::tie(success, kv_cache_resource) = resource_context_.cache_manager->malloc(stream_->streamId(), total_blocks);
+    std::tie(success, kv_cache_resource) = resource_context_.cache_manager->malloc(
+        {stream_->streamId(), (uint32_t)total_blocks, verbose});
     if (success) {
         const auto& all_blocks = kv_cache_resource.block_id;
         std::vector<KVCacheResource> resource;
@@ -158,6 +162,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         }
         batch_resource_.append(resource);
     } else {
+        malloc_failed_times_++;
         return absl::InternalError("malloc failed");
     }
 

@@ -52,20 +52,31 @@ public:
         void* v_scale_addr = nullptr;
     };
 
-    struct MallocInfo {
-        MallocInfo(int64_t request_id,
-                   const std::vector<int32_t>& token_ids,
-                   const std::vector<int64_t>& cache_keys,
-                   const std::vector<std::vector<int32_t>>& mm_bounds = {},
-                   bool need_loss = false)
-                   : request_id(request_id), token_ids(token_ids),
-                     cache_keys(cache_keys), mm_bounds(mm_bounds), need_loss(need_loss) {}
+    struct SimpleMallocInfo {
+        SimpleMallocInfo(int64_t request_id, uint32_t block_nums, bool verbose = false)
+                        : request_id(request_id), block_nums(block_nums), verbose(verbose) {}
+
+        int64_t request_id;
+        uint32_t block_nums;
+        bool verbose = false;
+    };
+
+    struct AdvancedMallocInfo {
+        AdvancedMallocInfo(int64_t request_id,
+                        const std::vector<int32_t>& token_ids,
+                        const std::vector<int64_t>& cache_keys,
+                        const std::vector<std::vector<int32_t>>& mm_bounds = {},
+                        bool need_loss = false,
+                        bool verbose = false)
+                        : request_id(request_id), token_ids(token_ids),
+                        cache_keys(cache_keys), mm_bounds(mm_bounds), need_loss(need_loss), verbose(verbose) {}
 
         int64_t request_id;
         const std::vector<int32_t>& token_ids;
         const std::vector<int64_t>& cache_keys;
         const std::vector<std::vector<int32_t>> mm_bounds = {};
         bool need_loss = false;
+        bool verbose = false;
     };
 
     struct FreeInfo {
@@ -97,10 +108,10 @@ public:
     uint32_t               maxSeqLen() const;
     const KVCacheBuffer&   kvCacheBuffer() const;
 
-    std::tuple<bool, KVCacheResource>   malloc(int64_t request_id, int nums);
-    MatchInfo                           mallocWithCache(const MallocInfo& malloc_info);
+    std::tuple<bool, KVCacheResource>   malloc(const SimpleMallocInfo& malloc_info);
+    MatchInfo                           mallocWithCache(const AdvancedMallocInfo& malloc_info);
     void                                reserveBlocks(int nums);
-    void                                incrRefCounter(const std::vector<int>& blocks);
+    void                                incrRefCounter(const std::vector<int>& blocks_index);
 
     void free(const std::vector<KVCacheResource>& resource);
     void free(const std::vector<int>& indice);
@@ -130,10 +141,10 @@ protected:
     void                                    initKvCache();
     void                                    initKvCacheNormal();
     void                                    initKvCacheMla();
-    MatchInfo                               matchImpl(const MallocInfo& malloc_info);
+    MatchInfo                               matchImpl(const AdvancedMallocInfo& malloc_info);
     void                                    deregUserMr();
-    std::tuple<bool, std::vector<int>>      mallocIndex(int64_t request_id, int nums = 1);
-    std::tuple<bool, std::vector<int>>      mallocImpl(int64_t request_id, int nums);
+    std::tuple<bool, std::vector<int>>      mallocIndex(const SimpleMallocInfo& malloc_info);
+    std::tuple<bool, std::vector<int>>      mallocImpl(const SimpleMallocInfo& malloc_info);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);
@@ -167,9 +178,10 @@ protected:
 
     bool            stop_ = false;
     std::thread     metrics_reporter_thread_;
-    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    kmonitor::MetricsReporterPtr metrics_reporter_;
 
-    bool kvcache_reg_mr_ = false;
+    bool kvcache_reg_mr_        = false;
+    int64_t mr_cost_time_ms_    = 0;
 
     std::mutex mutex_;
 };

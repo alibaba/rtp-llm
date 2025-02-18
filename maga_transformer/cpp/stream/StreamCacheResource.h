@@ -91,6 +91,7 @@ private:
     ResourceContext                 resource_context_;
     bool                            last_block_aligned_ = false;
     bool                            need_release_resource_ = true;
+    int                             malloc_failed_times_ = 0;
 };
 
 }  // namespace rtp_llm

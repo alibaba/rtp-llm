@@ -147,10 +147,9 @@ class ModelRpcClient(object):
         logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
 
-    async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
-        input_pb = trans_input(input)
-        response_iterator = None
-        request_timeout_ms = input.generate_config.timeout_ms
+
+    async def enqueue(self, input_py: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
+        request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = self.model_config.max_rpc_timeout_ms \
                             if self.model_config.max_rpc_timeout_ms > 0 else MAX_GRPC_TIMEOUT_SECONDS
         if request_timeout_ms == None or request_timeout_ms <= 0:

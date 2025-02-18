@@ -93,7 +93,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
     auto status                       = generate_stream->initKVBlock(0);
     if (!status.ok()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed";
+        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         FT_LOG_ERROR(error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;

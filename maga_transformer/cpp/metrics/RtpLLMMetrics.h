@@ -352,6 +352,7 @@ public:
     int64_t kv_cache_available_blocks = 0;
     int64_t kv_cache_left_seq = 0;
     float kv_cache_used_ratio = 0;
+    int64_t mr_cost_time_ms = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {
@@ -365,6 +366,7 @@ public:
     kmonitor::MutableMetric* kv_cache_available_blocks_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_left_seq_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_used_ratio_metric = nullptr;
+    kmonitor::MutableMetric* mr_cost_time_ms_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
