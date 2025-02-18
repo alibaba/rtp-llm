@@ -57,8 +57,8 @@ namespace rtp_llm {
                 new_error_msg += "server disconnected with status::ok";                                         \
             }                                                                                                   \
         }                                                                                                       \
-        if (prefill_context.stream) {                                                                           \
-            prefill_context.stream->setStop(new_error_code, new_error_msg);                                     \
+        if (prefill_context.getStream()) {                                                                           \
+            prefill_context.getStream()->setStop(new_error_code, new_error_msg);                                     \
         }                                                                                                       \
         prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                  \
         prefill_context.error_status = serializeErrorMsg(                                                       \
@@ -269,7 +269,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     FT_LOG_DEBUG("request:[%ld] remote load cache done", prefill_context.request_id);
-    prefill_context.stream->releaseResource();
+    prefill_context.getStream()->releaseResource();
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
@@ -288,8 +288,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     FT_LOG_DEBUG("request:[%ld] start to poll remote output", prefill_context.request_id);
     auto& request_id = prefill_context.request_id;
     GenerateOutputsPB response;
-    auto initial_reuse_len = prefill_context.stream->initialReuseLength();
-    auto first_token_rt_us = prefill_context.stream->getTimeInfo().first_token_rt_us;
+    auto initial_reuse_len = prefill_context.getStream()->initialReuseLength();
+    auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.server_context->IsCancelled()) {
             FT_LOG_WARNING("request:[%ld] cancel by user", request_id);
