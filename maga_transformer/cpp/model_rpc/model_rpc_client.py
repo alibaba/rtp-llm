@@ -150,12 +150,14 @@ class ModelRpcClient(object):
     async def enqueue(self, input_py: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = self.model_config.max_rpc_timeout_ms \
-                            if self.model_config.max_rpc_timeout_ms > 0 else MAX_GRPC_TIMEOUT_SECONDS
+                            if self.model_config.max_rpc_timeout_ms > 0 else MAX_GRPC_TIMEOUT_SECONDS * 1000
         if request_timeout_ms == None or request_timeout_ms <= 0:
-            grpc_timeout_seconds = rpc_timeout_ms
+            grpc_timeout_seconds = rpc_timeout_ms / 1000
         else:
             grpc_timeout_seconds = request_timeout_ms / 1000
-
+        input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
+        input_pb = trans_input(input_py)
+        response_iterator = None
         try:
             async with grpc.aio.insecure_channel(self._addresses[request_counter.increment() % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
@@ -164,7 +166,7 @@ class ModelRpcClient(object):
                 count = 0
                 async for response in response_iterator.__aiter__():
                     count += 1
-                    yield trans_output(input, response)
+                    yield trans_output(input_py, response)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
