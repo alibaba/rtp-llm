@@ -321,36 +321,36 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     }
 }
 
-    /// @brief   basic gemm ops
-    /// @details D = alpha * op(A) * op(B) + beta * C
-    ///          A [b, ..., m, k]
-    ///          B [b, ..., k, n]
-    ///          C [b, ..., m, n]
-    BufferPtr CudaDevice::gemm(const GemmParams& params) {
-        params.check();
-        CudaGemmArguments arguments(params);
+/// @brief   basic gemm ops
+/// @details D = alpha * op(A) * op(B) + beta * C
+///          A [b, ..., m, k]
+///          B [b, ..., k, n]
+///          C [b, ..., m, n]
+BufferPtr CudaDevice::gemm(const GemmParams& params) {
+    params.check();
+    CudaGemmArguments arguments(params);
 
-        BufferPtr output;
-        if (params.D) {
-            output = params.D;
-            RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
-                                  "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
-                                  arguments.DDtype,
-                                  autil::StringUtil::toString(arguments.Dshape).c_str(),
-                                  params.D->debugString().c_str());
-        } else {
-            output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
-        }
+    BufferPtr output;
+    if (params.D) {
+        output = params.D;
+        RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
+                                "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+                                arguments.DDtype,
+                                autil::StringUtil::toString(arguments.Dshape).c_str(),
+                                params.D->debugString().c_str());
+    } else {
+        output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    }
 
-        if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
-            InvokeSmoothQaunt(params, arguments, output);
-        } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
-            InvokeWeightOnlyGemm(params, arguments, output);
-        } else {
-            InvokeGeneralGemm(params, arguments, output);
-        }
-        sync_check_cuda_error();
-        return output;
+    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
+        InvokeSmoothQaunt(params, arguments, output);
+    } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
+        InvokeWeightOnlyGemm(params, arguments, output);
+    } else {
+        InvokeGeneralGemm(params, arguments, output);
+    }
+    sync_check_cuda_error();
+    return output;
 }
 
 } // namespace fastertransformer

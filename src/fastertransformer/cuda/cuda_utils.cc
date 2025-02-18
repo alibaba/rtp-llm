@@ -63,12 +63,12 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error) {
 template<typename T>
 void check(T result, const char* const file, int const line) {
     if (result) {
-        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
-                     + std::to_string(line) + " \n");
+        std::string error_str = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
+                     + std::to_string(line);
+        FT_LOG_ERROR(error_str);
         fflush(stdout);
         fflush(stderr);
-        throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+        throw std::runtime_error(error_str);
     }
 }
 

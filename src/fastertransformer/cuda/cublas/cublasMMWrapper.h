@@ -39,7 +39,7 @@ protected:
 
     cudaStream_t   stream_;
     cublasAlgoMap* cublas_algo_map_;
-    std::mutex*    mu_;
+    std::mutex*    mutex_;
 
     IAllocator* allocator_        = nullptr;
     void*       cublas_workspace_ = nullptr;
@@ -58,6 +58,27 @@ protected:
                    const void*   alpha,
                    const int     mode,
                    const bool    per_column_scaling);
+
+    void cublasLtGemm(cublasHandle_t handle,
+                    cublasOperation_t transa,
+                    cublasOperation_t transb,
+                    int m,
+                    int n,
+                    int k,
+                    const void* alpha, /* host or device pointer */
+                    const void* A,
+                    cudaDataType Atype,
+                    int lda,
+                    const void* B,
+                    cudaDataType Btype,
+                    int ldb,
+                    const void* beta, /* host or device pointer */
+                    void* C,
+                    cudaDataType Ctype,
+                    int ldc,
+                    bool is_fp16_computeType,
+                    cublasLtMatmulAlgo_info info,
+                    bool findAlgo);
 
 public:
     cublasMMWrapper(cublasHandle_t   cublas_handle_,

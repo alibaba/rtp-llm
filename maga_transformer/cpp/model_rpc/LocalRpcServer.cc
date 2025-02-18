@@ -108,7 +108,6 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto input = QueryConverter::transQuery(request);
 
     // need to check client has buffer at first
-    // todo: catch python exception, such as download timeout
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {

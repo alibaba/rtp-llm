@@ -32,7 +32,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
     cublaslt_handle_(cublaslt_handle),
     stream_(stream),
     cublas_algo_map_(cublas_algo_map),
-    mu_(mu),
+    mutex_(mu),
     allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
@@ -42,7 +42,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
 
 cublasMMWrapper::~cublasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mu_ = nullptr;
+    mutex_ = nullptr;
     if (allocator_ != nullptr) {
         allocator_->free((void**)(&cublas_workspace_));
         allocator_ = nullptr;
@@ -54,7 +54,7 @@ cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
     cublaslt_handle_(wrapper.cublaslt_handle_),
     stream_(wrapper.stream_),
     cublas_algo_map_(wrapper.cublas_algo_map_),
-    mu_(wrapper.mu_),
+    mutex_(wrapper.mutex_),
     allocator_(wrapper.allocator_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
@@ -78,6 +78,167 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta);                            
 }
 
+void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
+                                cublasOperation_t transa,
+                                cublasOperation_t transb,
+                                int m,
+                                int n,
+                                int k,
+                                const void* alpha, /* host or device pointer */
+                                const void* A,
+                                cudaDataType Atype,
+                                int lda,
+                                const void* B,
+                                cudaDataType Btype,
+                                int ldb,
+                                const void* beta, /* host or device pointer */
+                                void* C,
+                                cudaDataType Ctype,
+                                int ldc,
+                                bool is_fp16_computeType,
+                                cublasLtMatmulAlgo_info info,
+                                bool findAlgo) {
+    struct ResourceManager {
+        cublasLtMatrixLayout_t Adesc;
+        cublasLtMatrixLayout_t Bdesc;
+        cublasLtMatrixLayout_t Cdesc;
+        cublasLtMatrixLayout_t Ddesc;
+        cublasLtMatmulDesc_t operationDesc;
+        cublasLtMatmulPreference_t preference;
+
+        ~ResourceManager() {
+            check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+            check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+            check_cuda_error(cublasLtMatrixLayoutDestroy(Cdesc));
+            check_cuda_error(cublasLtMatrixLayoutDestroy(Ddesc));
+            check_cuda_error(cublasLtMatmulDescDestroy(operationDesc));
+            check_cuda_error(cublasLtMatmulPreferenceDestroy(preference));
+        }
+    } resource;
+
+    cudaDataType_t         scaleType;
+#if (CUDART_VERSION >= 11000)
+    cublasComputeType_t computeType;
+#else
+    cudaDataType_t computeType;
+#endif
+
+    if (is_fp16_computeType) {
+#if (CUDART_VERSION >= 11000)
+        computeType = CUBLAS_COMPUTE_16F;
+#else
+        computeType = CUDA_R_16F;
+#endif
+        scaleType = CUDA_R_16F;
+    } else {
+#if (CUDART_VERSION >= 11000)
+        computeType = CUBLAS_COMPUTE_32F;
+#else
+        computeType = CUDA_R_32F;
+#endif
+        scaleType = CUDA_R_32F;
+    }
+
+    // --------------------------------------
+    // Create descriptors for the original matrices
+    check_cuda_error(cublasLtMatrixLayoutCreate(&resource.Adesc, Atype, 
+            transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda));
+    check_cuda_error(cublasLtMatrixLayoutCreate(&resource.Bdesc, Btype,
+            transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb));
+    check_cuda_error(cublasLtMatrixLayoutCreate(&resource.Cdesc, Ctype, m, n, ldc));
+    check_cuda_error(cublasLtMatrixLayoutCreate(&resource.Ddesc, Btype, m, n, ldc));
+#if (CUDART_VERSION >= 11000)
+    check_cuda_error(cublasLtMatmulDescCreate(&resource.operationDesc, computeType, scaleType));
+#else
+    check_cuda_error(cublasLtMatmulDescCreate(&resource.operationDesc, computeType));
+#endif
+
+    check_cuda_error(cublasLtMatmulDescSetAttribute(resource.operationDesc,
+            CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t)));
+    check_cuda_error(cublasLtMatmulDescSetAttribute(resource.operationDesc,
+            CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t)));
+
+    cublasLtMatmulAlgo_t algo;
+    void*                workSpace     = cublas_workspace_;
+    uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+    if (findAlgo) {
+        if (info.workspaceSize > workspaceSize) {
+            findAlgo = 0;
+        } else {
+            check_cuda_error(cublasLtMatmulAlgoInit(
+                cublaslt_handle_, computeType, scaleType, Atype, Btype, Ctype, Ctype, info.algoId, &algo));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(info.customOption), sizeof(info.customOption)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &(info.tile), sizeof(info.tile)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &(info.splitK_val), sizeof(info.splitK_val)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &(info.swizzle), sizeof(info.swizzle)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(&algo,
+                                                    CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
+                                                    &(info.reductionScheme),
+                                                    sizeof(info.reductionScheme)));
+
+#if (CUDART_VERSION >= 11000)
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(info.stages), sizeof(info.stages)));
+#endif
+
+#if (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH >= 3)
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &(info.inner_shapeId), sizeof(info.inner_shapeId)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(&algo,
+                                                    CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID,
+                                                    &(info.cluster_shapeId),
+                                                    sizeof(info.cluster_shapeId)));
+#elif (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH < 3)
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_MMA_SHAPE_ID, &(info.mma_shapeId), sizeof(info.mma_shapeId)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_CGA_SHAPE_ID, &(info.cga_shapeId), sizeof(info.cga_shapeId)));
+            check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                &algo, CUBLASLT_ALGO_CONFIG_SCHEDULING_MODE, &(info.sche_mode), sizeof(info.sche_mode)));
+#endif
+        }
+    }
+
+    
+    cublasLtMatmulHeuristicResult_t heuristicResult = {};
+    check_cuda_error(cublasLtMatmulPreferenceCreate(&resource.preference));
+    check_cuda_error(cublasLtMatmulPreferenceSetAttribute(resource.preference,
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+
+    // we just need the best available heuristic to try and run matmul. There is no guarantee this will work, e.g. if A
+    // is badly aligned, you can request more (e.g. 32) algos and try to run them one by one until something works
+    int returnedResults = 0;
+    cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_, 
+        resource.operationDesc, resource.Adesc, resource.Bdesc, resource.Cdesc, resource.Ddesc,
+        resource.preference, 1, &heuristicResult, &returnedResults);
+    // if (returnedResults == 0) {
+    //     check_cuda_error(CUBLAS_STATUS_NOT_SUPPORTED);
+    // }
+
+    check_cuda_error(cublasLtMatmul(cublaslt_handle_,
+                    resource.operationDesc,
+                    alpha,
+                    A,
+                    resource.Adesc,
+                    B,
+                    resource.Bdesc,
+                    beta,
+                    C,
+                    resource.Cdesc,
+                    C,
+                    resource.Cdesc,
+                    (findAlgo == 1 ? (&algo) : NULL),
+                    workSpace,
+                    workspaceSize,
+                    stream_));
+
+    sync_check_cuda_error();
+}
+
 void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            cublasOperation_t transb,
                            const int         m,
@@ -96,12 +257,13 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            float             f_alpha,
                            float             f_beta) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    std::lock_guard<std::mutex> lock(*mutex_);
+
     half h_alpha = (half)(f_alpha);
     half h_beta  = (half)(f_beta);
 
-    mu_->lock();
     // TODO: default cublas libs
-    int  is_fp16_computeType = computeType == CUDA_R_16F ? 1 : 0;
+    bool  is_fp16_computeType = computeType == CUDA_R_16F ? true : false;
     bool using_cublasLt      = (Atype == CUDA_R_16F || Atype == CUDA_R_8F_E4M3) ? true : false;
     int  batch_count         = 1;
     // fp32 use cublas as default
@@ -113,162 +275,66 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
     cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype));
     if (findAlgo) {
+        FT_LOG_DEBUG("Using pre-tuned cublasLt algorithm");
         if (info.stages != -1) {
             using_cublasLt = true;
         } else {
             using_cublasLt = false;
         }
-    }
-
-    if (using_cublasLt) {
-        cublasLtMatmulDesc_t   operationDesc = NULL;
-        cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL, Ddesc = NULL;
-        cudaDataType_t         scaleType;
-#if (CUDART_VERSION >= 11000)
-        cublasComputeType_t computeType;
-#else
-        cudaDataType_t computeType;
-#endif
-
-        if (is_fp16_computeType) {
-#if (CUDART_VERSION >= 11000)
-            computeType = CUBLAS_COMPUTE_16F;
-#else
-            computeType = CUDA_R_16F;
-#endif
-            scaleType = CUDA_R_16F;
-        } else {
-#if (CUDART_VERSION >= 11000)
-            computeType = CUBLAS_COMPUTE_32F;
-#else
-            computeType = CUDA_R_32F;
-#endif
-            scaleType = CUDA_R_32F;
-        }
-
-        // --------------------------------------
-        // Create descriptors for the original matrices
-        cublasLtMatrixLayoutCreate(&Adesc, Atype, transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda);
-        cublasLtMatrixLayoutCreate(&Bdesc, Btype, transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb);
-        cublasLtMatrixLayoutCreate(&Cdesc, Ctype, m, n, ldc);
-        cublasLtMatrixLayoutCreate(&Ddesc, Btype, m, n, ldc);
-#if (CUDART_VERSION >= 11000)
-        cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
-#else
-        cublasLtMatmulDescCreate(&operationDesc, computeType);
-#endif
-
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t));
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t));
-
-        cublasLtMatmulAlgo_t algo;
-        void*                workSpace     = cublas_workspace_;
-        int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
-        if (findAlgo) {
-            if (info.workspaceSize > workspaceSize) {
-                findAlgo = 0;
-            } else {
-                cublasLtMatmulAlgoInit(
-                    cublaslt_handle_, computeType, scaleType, Atype, Btype, Ctype, Ctype, info.algoId, &algo);
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(info.customOption), sizeof(info.customOption));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &(info.tile), sizeof(info.tile));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &(info.splitK_val), sizeof(info.splitK_val));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &(info.swizzle), sizeof(info.swizzle));
-                cublasLtMatmulAlgoConfigSetAttribute(&algo,
-                                                     CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
-                                                     &(info.reductionScheme),
-                                                     sizeof(info.reductionScheme));
-
-#if (CUDART_VERSION >= 11000)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(info.stages), sizeof(info.stages));
-#endif
-
-#if (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH >= 3)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &(info.inner_shapeId), sizeof(info.inner_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(&algo,
-                                                     CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID,
-                                                     &(info.cluster_shapeId),
-                                                     sizeof(info.cluster_shapeId));
-#elif (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH < 3)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_MMA_SHAPE_ID, &(info.mma_shapeId), sizeof(info.mma_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_CGA_SHAPE_ID, &(info.cga_shapeId), sizeof(info.cga_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_SCHEDULING_MODE, &(info.sche_mode), sizeof(info.sche_mode));
-#endif
-            }
-        }
-
-        int returnedResults                             = 0;
-        cublasLtMatmulHeuristicResult_t heuristicResult = {};
-        cublasLtMatmulPreference_t preference;
-        cublasLtMatmulPreferenceCreate(&preference);
-        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize));
-
-        // we just need the best available heuristic to try and run matmul. There is no guarantee this will work, e.g. if A
-        // is badly aligned, you can request more (e.g. 32) algos and try to run them one by one until something works
-        cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference, 1, &heuristicResult, &returnedResults);
-        // if (returnedResults == 0) {
-        //     check_cuda_error(CUBLAS_STATUS_NOT_SUPPORTED);
-        // }
-
-        cublasLtMatmul(cublaslt_handle_,
-                       operationDesc,
-                       alpha,
-                       A,
-                       Adesc,
-                       B,
-                       Bdesc,
-                       beta,
-                       C,
-                       Cdesc,
-                       C,
-                       Cdesc,
-                       (findAlgo == 1 ? (&algo) : NULL),
-                       workSpace,
-                       workspaceSize,
-                       stream_);
-
-        cublasLtMatmulDescDestroy(operationDesc);
-        cublasLtMatrixLayoutDestroy(Adesc);
-        cublasLtMatrixLayoutDestroy(Bdesc);
-        cublasLtMatrixLayoutDestroy(Cdesc);
-        cublasLtMatrixLayoutDestroy(Ddesc);
-        cublasLtMatmulPreferenceDestroy(preference);
-        sync_check_cuda_error();
     } else {
-        int cublasAlgo = info.algoId;
-        check_cuda_error(cublasGemmEx(cublas_handle_,
-                                      transa,
-                                      transb,
-                                      m,
-                                      n,
-                                      k,
-                                      alpha,
-                                      A,
-                                      Atype,
-                                      lda,
-                                      B,
-                                      Btype,
-                                      ldb,
-                                      beta,
-                                      C,
-                                      Ctype,
-                                      ldc,
-                                      computeType,
-                                      static_cast<cublasGemmAlgo_t>(cublasAlgo)));
-        sync_check_cuda_error();
+        FT_LOG_DEBUG("Fallback to default cublas algorithm");
     }
-    mu_->unlock();    
-}
 
+    try {
+        if (using_cublasLt) {
+            cublasLtGemm(cublas_handle_,
+                        transa,
+                        transb,
+                        m,
+                        n,
+                        k,
+                        alpha,
+                        A,
+                        Atype,
+                        lda,
+                        B,
+                        Btype,
+                        ldb,
+                        beta,
+                        C,
+                        Ctype,
+                        ldc,
+                        is_fp16_computeType,
+                        info,
+                        findAlgo);
+        } else {
+            int cublasAlgo = info.algoId;
+            check_cuda_error(cublasGemmEx(cublas_handle_,
+                                        transa,
+                                        transb,
+                                        m,
+                                        n,
+                                        k,
+                                        alpha,
+                                        A,
+                                        Atype,
+                                        lda,
+                                        B,
+                                        Btype,
+                                        ldb,
+                                        beta,
+                                        C,
+                                        Ctype,
+                                        ldc,
+                                        computeType,
+                                        static_cast<cublasGemmAlgo_t>(cublasAlgo)));
+        }
+        sync_check_cuda_error();
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("cublasMMWrapper::Gemm exception %s", e.what());
+        throw;
+    }
+}
 
 void cublasMMWrapper::setFP32GemmConfig() {
     Atype_       = CUDA_R_32F;
@@ -376,44 +442,44 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtMatmulAlgo_t algo;
 
     void*                workSpace     = cublas_workspace_;
-    int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+    uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
 
     if (findAlgo && info.stages != -1 && info.workspaceSize <= workspaceSize) {
-        cublasLtMatmulAlgoInit(cublaslt_handle_, computeType, scaleType, Atype_,
-                             Btype_, Ctype_, Ctype_, info.algoId, &algo);
-        cublasLtMatmulAlgoConfigSetAttribute(
+        check_cuda_error(cublasLtMatmulAlgoInit(cublaslt_handle_, computeType, scaleType, Atype_,
+                             Btype_, Ctype_, Ctype_, info.algoId, &algo));
+        check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
           &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(info.customOption),
-          sizeof(info.customOption));
-        cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID,
-                                           &(info.tile), sizeof(info.tile));
-        cublasLtMatmulAlgoConfigSetAttribute(
+          sizeof(info.customOption)));
+        check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID,
+                                           &(info.tile), sizeof(info.tile)));
+        check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
           &algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &(info.splitK_val),
-          sizeof(info.splitK_val));
-        cublasLtMatmulAlgoConfigSetAttribute(
+          sizeof(info.splitK_val)));
+        check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
           &algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &(info.swizzle),
-          sizeof(info.swizzle));
-        cublasLtMatmulAlgoConfigSetAttribute(
+          sizeof(info.swizzle)));
+        check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
           &algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &(info.reductionScheme),
-          sizeof(info.reductionScheme));
+          sizeof(info.reductionScheme)));
 #if (CUDART_VERSION >= 11000)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(info.stages), sizeof(info.stages));
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(info.stages), sizeof(info.stages)));
 #endif
 
 #if (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH >= 3)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &(info.inner_shapeId), sizeof(info.inner_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(&algo,
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &(info.inner_shapeId), sizeof(info.inner_shapeId)));
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(&algo,
                                                      CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID,
                                                      &(info.cluster_shapeId),
-                                                     sizeof(info.cluster_shapeId));
+                                                     sizeof(info.cluster_shapeId)));
 #elif (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH < 3)
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_MMA_SHAPE_ID, &(info.mma_shapeId), sizeof(info.mma_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_CGA_SHAPE_ID, &(info.cga_shapeId), sizeof(info.cga_shapeId));
-                cublasLtMatmulAlgoConfigSetAttribute(
-                    &algo, CUBLASLT_ALGO_CONFIG_SCHEDULING_MODE, &(info.sche_mode), sizeof(info.sche_mode));
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_MMA_SHAPE_ID, &(info.mma_shapeId), sizeof(info.mma_shapeId)));
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_CGA_SHAPE_ID, &(info.cga_shapeId), sizeof(info.cga_shapeId)));
+                check_cuda_error(cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_SCHEDULING_MODE, &(info.sche_mode), sizeof(info.sche_mode)));
 #endif
     } else {
         findAlgo = false;
@@ -422,22 +488,29 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtMatmulDesc_t   operationDesc = NULL;
     cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
     cublasLtEpilogue_t     epi = CUBLASLT_EPILOGUE_BIAS;
-    cublasLtMatrixLayoutCreate(&Adesc, Atype, (transa == CUBLAS_OP_N) ? m : k, (transa == CUBLAS_OP_N) ? k : m, lda);
-    cublasLtMatrixLayoutCreate(&Bdesc, Btype, (transb == CUBLAS_OP_N) ? k : n, (transb == CUBLAS_OP_N) ? n : k, ldb);
-    cublasLtMatrixLayoutCreate(&Cdesc, Ctype, m, n, ldc);
+    check_cuda_error(cublasLtMatrixLayoutCreate(
+        &Adesc, Atype, (transa == CUBLAS_OP_N) ? m : k, (transa == CUBLAS_OP_N) ? k : m, lda));
+    check_cuda_error(cublasLtMatrixLayoutCreate(
+        &Bdesc, Btype, (transb == CUBLAS_OP_N) ? k : n, (transb == CUBLAS_OP_N) ? n : k, ldb));
+    check_cuda_error(cublasLtMatrixLayoutCreate(
+        &Cdesc, Ctype, m, n, ldc));
 
-    cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t));
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t));
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epi, sizeof(cublasLtEpilogue_t));
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(const void*));
+    check_cuda_error(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
+    check_cuda_error(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t)));
+    check_cuda_error(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t)));
+    check_cuda_error(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epi, sizeof(cublasLtEpilogue_t)));
+    check_cuda_error(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(const void*)));
     check_cuda_error(cublasLtMatmul(cublaslt_handle_, operationDesc, alpha, A,
                                     Adesc, B, Bdesc, beta, C, Cdesc, C, Cdesc,
                                     (findAlgo == 1 ? (&algo) : NULL), workSpace, workspaceSize, stream_));
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
-    cublasLtMatmulDescDestroy(operationDesc);
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Cdesc));
+    check_cuda_error(cublasLtMatmulDescDestroy(operationDesc));
     sync_check_cuda_error();
 }
 #endif
@@ -462,10 +535,11 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const int         batch_count,
                                          const float       f_alpha,
                                          const float       f_beta) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 
-    mu_->lock();
     int         is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
     const void* alpha =
         is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<const void*>(&f_alpha);
@@ -495,8 +569,6 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                                 batch_count,
                                                 computeType_,
                                                 static_cast<cublasGemmAlgo_t>(info.algoId)));
-
-    mu_->unlock();
 }
 
 void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
@@ -513,13 +585,14 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   const int          batch_count,
                                   const float        alpha,
                                   const float        beta) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+                
     float f_alpha = static_cast<float>(alpha);
     float f_beta  = static_cast<float>(beta);
 
     half h_alpha = (half)alpha;
     half h_beta  = (half)beta;
 
-    mu_->lock();
     int is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
 
     const void* r_alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
@@ -546,7 +619,6 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                          batch_count,
                                          computeType_,
                                          static_cast<cublasGemmAlgo_t>(info.algoId)));
-    mu_->unlock();
 }
 
 bool cublasMMWrapper::isFuseBatchGemm(const int batch_count, const int m, const int k, const int n) {
@@ -580,8 +652,8 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
 #else
     size_t returnSize;
     int32_t pointer_mode;
-    cublasLtMatmulDescGetAttribute(
-        computeDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode), &returnSize);
+    check_cuda_error(cublasLtMatmulDescGetAttribute(
+        computeDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode), &returnSize));
 
     std::vector<cublasLtMatmulHeuristicResult_t> heuristics(200);
     cublasLtMatmulPreference_t preference;
@@ -614,11 +686,12 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
     for (const auto& heuristic : heuristics) {
         cublasLtMatmulAlgo_t algo = heuristic.algo;
         int32_t algo_id;
-        cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof(algo_id), &returnSize);
+        check_cuda_error(cublasLtMatmulAlgoConfigGetAttribute(
+            &algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof(algo_id), &returnSize));
 
         cudaEvent_t start_event, stop_event;
-        cudaEventCreate(&start_event);
-        cudaEventCreate(&stop_event);
+        check_cuda_error(cudaEventCreate(&start_event));
+        check_cuda_error(cudaEventCreate(&stop_event));
 
         for (int i = 0; i < 11; i++) {
             float duration_ms;
@@ -653,7 +726,8 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
     for (const auto& heuristic : heuristics) {
         cublasLtMatmulAlgo_t algo = heuristic.algo;
         int32_t algo_id;
-        cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof(algo_id), &returnSize);
+        check_cuda_error(cublasLtMatmulAlgoConfigGetAttribute(
+            &algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof(algo_id), &returnSize));
         const auto& results = algo_results[algo_id];
 
         if (results.size() > 0 && results[5] < best_time) {
@@ -670,14 +744,14 @@ cublasMMWrapper::MatrixLayout cublasMMWrapper::createMatrixLayout(cublasLtMatrix
     size_t       returnSize;
     MatrixLayout m_layout;
 
-    cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, &std::get<0>(m_layout), sizeof(std::get<0>(m_layout)), &returnSize);
-    cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &std::get<1>(m_layout), sizeof(std::get<1>(m_layout)), &returnSize);
-    cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, &std::get<2>(m_layout), sizeof(std::get<2>(m_layout)), &returnSize);
-    cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_COLS, &std::get<3>(m_layout), sizeof(std::get<3>(m_layout)), &returnSize);
+    check_cuda_error(cublasLtMatrixLayoutGetAttribute(
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, &std::get<0>(m_layout), sizeof(std::get<0>(m_layout)), &returnSize));
+    check_cuda_error(cublasLtMatrixLayoutGetAttribute(
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &std::get<1>(m_layout), sizeof(std::get<1>(m_layout)), &returnSize));
+    check_cuda_error(cublasLtMatrixLayoutGetAttribute(
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, &std::get<2>(m_layout), sizeof(std::get<2>(m_layout)), &returnSize));
+    check_cuda_error(cublasLtMatrixLayoutGetAttribute(
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_COLS, &std::get<3>(m_layout), sizeof(std::get<3>(m_layout)), &returnSize));
 
     return m_layout;
 }
@@ -757,7 +831,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     FT_FAIL("CUBLAS version too low.");
 #else
 
-    mu_->lock();
+    std::lock_guard<std::mutex> lock(*mutex_);
     const auto op_a = CUBLAS_OP_T;
     const auto op_b = CUBLAS_OP_N;
     const auto dataType = CUDA_R_8I;
@@ -802,7 +876,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     }
 
     void* workSpace = cublas_workspace_;
-    int workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+    uint64_t workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
 
     sync_check_cuda_error();
     auto ret = cublasLtMatmulWrapper(cublaslt_handle_,
@@ -824,12 +898,11 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     check_cuda_error(ret);
     sync_check_cuda_error();
 
-    cublasLtMatmulDescDestroy(operationDesc);
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
+    check_cuda_error(cublasLtMatmulDescDestroy(operationDesc));
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+    check_cuda_error(cublasLtMatrixLayoutDestroy(Cdesc));
     sync_check_cuda_error();
-    mu_->unlock();
 #endif
 }
 
