@@ -320,7 +320,7 @@ class RocmImpl(GpuImpl):
         return os.environ.get('SPECIFY_GPU_ARCH', "900")
 
     def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
-        is_gate = "moe_weights.intermediate_weight.kernel" in name
+        is_gate = name == W.moe_w1
         align = [0, 512, 0] if is_gate else [0, 0, 512]
         if len(align) != len(x.shape):
             logging.error(f'Data type for moe weight is not supported: {datatype}')

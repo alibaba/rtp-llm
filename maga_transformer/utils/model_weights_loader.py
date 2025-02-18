@@ -610,7 +610,7 @@ class ModelWeightsLoader:
 
     def _split_tensor(self, name: str, tensor: torch.Tensor, bits=4) -> torch.Tensor:
         if self._tp_size <= 1:
-            if ("moe_weights.intermediate_weight" in name):
+            if name in [W.moe_w1, W.moe_w2]:
                 return self._exported_device.shuffle_moe_weight(tensor, self._data_type, name)
             return tensor
         if (not self._tp_split_emb_and_lm_head and
@@ -634,7 +634,7 @@ class ModelWeightsLoader:
                        size_per_head=self._weights_info._size_per_head,
                        bits=bits
                        )
-        if ("moe_weights.intermediate_weight" in name):
+        if name in [W.moe_w1, W.moe_w2]:
                 return self._exported_device.shuffle_moe_weight(ts, self._data_type, name)
         return ts
 
