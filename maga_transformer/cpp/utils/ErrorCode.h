@@ -53,6 +53,7 @@ enum class ErrorCode {
     MM_PROCESS_ERROR = 903,
     MM_EMPTY_ENGINE_ERROR = 904,
     MM_NOT_SUPPORTED_ERROR = 905,
+    MM_DOWNLOAD_FAILED = 906,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {

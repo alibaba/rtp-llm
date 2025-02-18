@@ -53,7 +53,11 @@ private:
                 }
                 return mm_embedding_res;
             } catch (py::error_already_set &e) {
-                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, std::string(e.what()));
+                std::string error_msg = e.what();
+                if (error_msg.find("download failed") != std::string::npos) {
+                    return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
+                }
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error_msg);
             }
         } else {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");

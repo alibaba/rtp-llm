@@ -58,6 +58,7 @@ class ExceptionType(IntEnum):
     MM_PROCESS_ERROR = 903
     MM_EMPTY_ENGINE_ERROR = 904
     MM_NOT_SUPPORTED_ERROR = 905
+    MM_DOWNLOAD_FAILED = 906
 
     @classmethod
     def from_value(cls, value):
