@@ -225,7 +225,9 @@ class QwenToolRenderer(CustomChatRenderer):
     def _extract_tool_calls_from_complete_message(
         self,
         original_text: str,
-    ) -> Tuple[List[ToolCall], str]:
+        tool_call_begin_tag: str = "<tool_call>",
+        tool_call_end_tag: str = "</tool_call>",
+    ) -> Tuple[Optional[List[ToolCall]], str]:
         """
         从文本中提取所有被 <tool_call> </tool_call> 标签包围的内容,并解析成 ToolCall 对象列表,
         同时从原文本中删除这些标签及其内容
@@ -238,16 +240,20 @@ class QwenToolRenderer(CustomChatRenderer):
         """
         tool_calls: List[ToolCall] = []
 
-        # 用 <tool_call> 分割
-        parts = original_text.split("<tool_call>\n")
+        parts = original_text.split(tool_call_begin_tag)
 
         # 保存第一部分(标签之前的内容)
         result_text = parts[0]
 
         # 处理剩余部分
-        for index, part in enumerate(parts[1:]):
-            # 用 </tool_call> 分割
-            tool_parts = part.split("</tool_call>")
+
+        index = 0
+        for part in parts[1:]:
+            if tool_call_end_tag not in part:
+                result_text += tool_call_begin_tag + part
+                continue
+
+            tool_parts = part.split(tool_call_end_tag)
             content = tool_parts[0].strip()
 
             if content:
@@ -265,15 +271,25 @@ class QwenToolRenderer(CustomChatRenderer):
                         type="function",
                         function=function_call,
                     )
+                    index += 1
                     tool_calls.append(tool_call)
-                except (json.JSONDecodeError, KeyError) as e:
-                    logging.error(f"json loads error: {e}")
+                except Exception as e:
+                    logging.error(
+                        f"Extract function call from complete message error: {e}"
+                    )
+                    result_text += tool_call_begin_tag + part
+                    continue
 
             # 如果有剩余文本，添加到结果中
-            if len(tool_parts) > 1 and tool_parts[1] != "\n":
+            if len(tool_parts) > 1:
                 result_text += tool_parts[1]
 
-        return tool_calls, result_text
+        if tool_calls:
+            # 如果只有\n在result_text中, 则去掉
+            result_text = result_text.strip()
+            return tool_calls, result_text
+        else:
+            return None, result_text
 
     async def _handle_streaming_case(
         self,
@@ -356,7 +372,7 @@ class QwenToolRenderer(CustomChatRenderer):
                 FunctionCall(name=function_name, arguments=function_args),
                 extracted_text,
             )
-        except (json.JSONDecodeError, KeyError) as e:
+        except Exception as e:
             # json提取失败的时候, 返回原始文本
             logging.error(f"qwen tool extract function call error: {str(e)}")
             return None, text
@@ -381,6 +397,8 @@ class QwenToolRenderer(CustomChatRenderer):
             raise ValueError(f"Invalid JSON format: {str(e)}")
         except KeyError as e:
             raise ValueError(f"Missing required field: {str(e)}")
+        except Exception as e:
+            raise ValueError(f"Unknown error: {str(e)}")
 
 
 register_renderer("qwen_tool", QwenToolRenderer)
