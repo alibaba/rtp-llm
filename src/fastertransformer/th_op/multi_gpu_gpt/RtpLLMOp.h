@@ -22,7 +22,11 @@ public:
               py::object propose_model,
               py::object token_processor);
     void stop();
-    void startHttpServer(py::object tokenizer, py::object render);
+    void startHttpServer(py::object model_weights_loader,
+                         py::object lora_infos,
+                         py::object gang_info,
+                         py::object tokenizer,
+                         py::object render);
 
     void addLora(const std::string& adapter_name, py::object lora_a_weights, py::object lora_b_weights);
     void removeLora(const std::string& adapter_name);

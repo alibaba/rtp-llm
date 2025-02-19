@@ -89,6 +89,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":dataclass",
+        ":stream",
         ":utils",
         ":cache",
     ],
@@ -406,6 +407,7 @@ cc_library(
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp:multimodal_processor",
         "//maga_transformer/cpp/http_server:http_server",
+        "//maga_transformer/cpp/http_server:http_client",
         ":embedding_arpc_deps",
         "@havenask//aios/autil:net",
         "@havenask//aios/autil:time",

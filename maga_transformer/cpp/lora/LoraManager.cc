@@ -1,10 +1,14 @@
 #include "LoraManager.h"
-
 #include <chrono>
+#include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 namespace ft = fastertransformer;
 namespace rtp_llm {
 namespace lora {
+
+LoraManager::LoraManager() {
+    max_lora_model_size_ = autil::EnvUtil::getEnv("MAX_LORA_MODEL_SIZE", -1);
+}
 
 ft::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
     std::unique_lock<std::mutex> scoped_lock(mutex_);
@@ -67,7 +71,6 @@ void LoraManager::removeLora(const std::string& adapter_name) {
         // one for var resource, another for lora_map_
         cv_.wait(scoped_lock, [&resource]{ return resource.use_count() == 2; });
     }
-
     {
         std::unique_lock<std::mutex> scoped_lock(mutex_);
         lora_map_.erase(lora_id);
@@ -110,6 +113,35 @@ ft::lora::LoraModelInputPtr LoraManager::makeLoraModelInput(ft::BufferPtr lora_i
     }
     return std::make_shared<ft::lora::LoraModelInput>(lora_input_lengths, result, use_same_lora);
 }
+
+std::optional<std::string> LoraManager::checkLoraInfoSize(const std::map<std::string, std::string>& lora_infos) const {
+    bool err = max_lora_model_size_ != -1 && lora_infos.size() > max_lora_model_size_;
+    if (!err) {
+        return std::nullopt;
+    } else {
+        auto formatMapToString = [](const std::map<std::string, std::string>& map) {
+            std::ostringstream oss;
+            bool first = true;
+            for (const auto& pair : map) {
+                if (!first) {
+                    oss << ", ";
+                }
+                first = false;
+                oss << "'" << pair.first << "': '" << pair.second << "'";
+            }
+            return oss.str();
+        };
+        std::ostringstream err;
+        err << "lora_infos[{"
+            << formatMapToString(lora_infos)
+            << "}]'s size exceed MAX_LORA_MODEL_SIZE["
+            << max_lora_model_size_
+            << "]";
+        FT_LOG_WARNING("%s", err.str().c_str());
+        return err.str();
+    }
+}
+
 
 }  // namespace lora
 }  // namespace rtp_llm

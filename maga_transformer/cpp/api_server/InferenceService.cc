@@ -64,8 +64,20 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, Infe
     // TODO: adapter_name
     for (int i = 0; i < pr.input_texts.size(); i++) {
         if (req.generate_config.has_value()) {
+            const auto& config = req.generate_config.value();
+            if (config.adapter_name.size() > 0 && pr.input_texts.size() != 1) {
+                throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
+                        "adapter_name is not alignment");
+            }
+            if (config.adapter_names.size() > 0 && pr.input_texts.size() != config.adapter_names.size()) {
+                throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
+                        "adapter_name is not alignment");
+            }
             // copy constructor
             pr.generate_configs.push_back(std::make_shared<GenerateConfig>(req.generate_config.value()));
+            if (config.adapter_names.size() > 0) {
+                pr.generate_configs[i]->adapter_name = config.adapter_names[i];
+            }
         } else {
             pr.generate_configs.push_back(std::make_shared<GenerateConfig>());
         }

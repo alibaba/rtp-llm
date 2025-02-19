@@ -113,7 +113,7 @@ inline std::string formatException(const T& e) {
     } else {
         res = ErrorResponse::CreateErrorResponseJsonString(
                 HttpApiServerException::UNKNOWN_ERROR,
-                std::string("inference failed, exception occurred: ") + e.what());
+                std::string("http api server failed, exception occurred: ") + e.what());
     }
     return res;
 }
@@ -148,9 +148,13 @@ inline void WriteExceptionResponse(const std::unique_ptr<http_server::HttpRespon
     if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
         status_code = he->getType();
     }
+    if (status_code >= 600) {
+        status_code = 500;
+    }
     writer->SetStatus(status_code, "Internal Server Error");
 
     writer->Write(formatException(e));
+    return;
 }
 
 }  // namespace rtp_llm

@@ -1,5 +1,6 @@
 #pragma once
 #include "src/fastertransformer/devices/LoraWeights.h"
+#include "maga_transformer/cpp/stream/StreamGroups.h"
 #include <condition_variable>
 
 namespace ft = fastertransformer;
@@ -15,20 +16,19 @@ private:
     std::unordered_map<int64_t, ft::lora::LoraModelPtr> lora_map_;
     std::unordered_map<std::string, int64_t> adapter_map_;
     int64_t count_ = 0;
+    int32_t max_lora_model_size_ = -1;
 
 public:
-
-    LoraManager() = default;
-    ~LoraManager() = default;
+    LoraManager();
+    virtual ~LoraManager() = default;
     LoraManager(LoraManager& other) = delete;
     LoraManager(LoraManager&& other) = delete;
 
-    void addLora(const std::string& adapter_name,
-                 const ft::lora::loraLayerWeightsMap& lora_a_weights,
-                 const ft::lora::loraLayerWeightsMap& lora_b_weights);
-
-
-    void removeLora(const std::string& adapter_name);
+    // virtual for test
+    virtual void addLora(const std::string& adapter_name,
+                         const ft::lora::loraLayerWeightsMap& lora_a_weights,
+                         const ft::lora::loraLayerWeightsMap& lora_b_weights);
+    virtual void removeLora(const std::string& adapter_name);
 
     int getLoraId(const std::string& adapter_name);
 
@@ -46,6 +46,7 @@ public:
     // helper function
     ft::lora::LoraModelInputPtr makeLoraModelInput(ft::BufferPtr lora_ids, ft::BufferPtr lora_input_lengths);
 
+    std::optional<std::string> checkLoraInfoSize(const std::map<std::string, std::string> &lora_infos) const;
 };
 
 

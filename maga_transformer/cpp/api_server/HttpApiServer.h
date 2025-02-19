@@ -16,6 +16,7 @@
 #include "maga_transformer/cpp/api_server/ChatService.h"
 #include "maga_transformer/cpp/api_server/InferenceService.h"
 #include "maga_transformer/cpp/api_server/EmbeddingService.h"
+#include "maga_transformer/cpp/api_server/LoraService.h"
 
 namespace rtp_llm {
 
@@ -68,7 +69,11 @@ public:
 public:
     bool        start();
     bool        start(const std::string& address);
-    bool        start(py::object tokenizer, py::object render);
+    bool        start(py::object model_weights_loader,
+                      py::object lora_infos,
+                      py::object gang_info,
+                      py::object tokenizer,
+                      py::object render);
     void        stop();
     bool        isStoped() const;
     std::string getListenAddr() const {
@@ -88,6 +93,7 @@ private:
     bool registerChatService();
     bool registerInferenceService();
     bool registerEmbedingService();
+    bool registerLoraService();
 
 private:
     bool                                  is_embedding_;
@@ -111,6 +117,9 @@ private:
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
     kmonitor::MetricsReporterPtr             metrics_reporter_;
+    std::shared_ptr<GangServer>              gang_server_;
+    std::shared_ptr<WeightsLoader>           weights_loader_;
+    std::map<std::string, std::string>       lora_infos_;
 
     std::shared_ptr<HealthService>           health_service_;
     std::shared_ptr<WorkerStatusService>     worker_status_service_;
@@ -120,6 +129,7 @@ private:
     std::shared_ptr<ChatService>             chat_service_;
     std::shared_ptr<InferenceService>        inference_service_;
     std::shared_ptr<EmbeddingService>        embedding_service_;
+    std::shared_ptr<LoraService>             lora_service_;
 };
 
 class CounterGuard {

@@ -41,6 +41,7 @@ public:
     std::optional<int>   top_p_reset_ids;
     std::optional<std::string>   task_id;
     std::string          adapter_name = "";
+    std::vector<std::string> adapter_names;
 
     std::vector<int>         select_tokens_id;
     std::vector<std::string> select_tokens_str;
@@ -149,7 +150,19 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
-        JSONIZE(adapter_name);
+        try {
+            std::string adapter_name_;
+            json.Jsonize("adapter_name", adapter_name_);
+            adapter_name = adapter_name_;
+        } catch (autil::legacy::ExceptionBase &e) {
+            try {
+                std::vector<std::string> adapter_names_;
+                json.Jsonize("adapter_name", adapter_names_);
+                adapter_names = adapter_names_;
+            } catch (autil::legacy::ExceptionBase &e) {
+                // noop
+            }
+        }
         JSONIZE(select_tokens_id);
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);

@@ -469,6 +469,7 @@ TEST_F(InferenceServiceTest, ExtractRequest_PromptBatch) {
     ASSERT_EQ(req.input_urls.size(), 3);
     ASSERT_EQ(req.generate_configs.size(), 3);
 }
+
 TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
     std::string jsonStr = R"({"prompt": "prompt1"})";
     auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
@@ -477,6 +478,19 @@ TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
     ASSERT_EQ(req.input_texts.size(), 1);
     ASSERT_EQ(req.input_urls.size(), 1);
     ASSERT_EQ(req.generate_configs.size(), 1);
+}
+
+TEST_F(InferenceServiceTest, ExtractRequest_AdapterName) {
+    std::string jsonStr = R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"], "generate_config": {"adapter_name": ["test0", "test1", "test2"]}})";
+    auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    ASSERT_EQ(req.batch_infer, true);
+    ASSERT_EQ(req.is_streaming, false);
+    ASSERT_EQ(req.input_texts.size(), 3);
+    ASSERT_EQ(req.input_urls.size(), 3);
+    ASSERT_EQ(req.generate_configs.size(), 3);
+    ASSERT_EQ(req.generate_configs[0]->adapter_name, "test0");
+    ASSERT_EQ(req.generate_configs[1]->adapter_name, "test1");
+    ASSERT_EQ(req.generate_configs[2]->adapter_name, "test2");
 }
 
 }  // namespace rtp_llm

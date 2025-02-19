@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/api_server/SysCmdService.h"
 #include "maga_transformer/cpp/api_server/TokenizerService.h"
 #include "maga_transformer/cpp/api_server/Exception.h"
+#include "maga_transformer/cpp/api_server/GangServer.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -51,7 +52,16 @@ bool HttpApiServer::start() {
     return start(addr_);
 }
 
-bool HttpApiServer::start(py::object tokenizer, py::object render) {
+bool HttpApiServer::start(py::object model_weights_loader,
+                          py::object lora_infos,
+                          py::object gang_info,
+                          py::object tokenizer,
+                          py::object render) {
+    if (lora_infos.is_none() == false) {
+        lora_infos_ = lora_infos.cast<std::map<std::string, std::string>>();
+    }
+    weights_loader_.reset(new WeightsLoader(model_weights_loader));
+    gang_server_.reset(new GangServer(gang_info));
     tokenizer_.reset(new Tokenizer(tokenizer));
     render_.reset(new ChatRender(render));
     return start(addr_);
@@ -110,6 +120,13 @@ bool HttpApiServer::registerServices() {
     // POST / /v1/embeddings /v1/embeddings/similarity /v1/classifier /v1/rerank
     if (is_embedding_ && !registerEmbedingService()) {
         FT_LOG_WARNING("HttpApiServer register embeding service failed.");
+        return false;
+    }
+
+    // add uri:
+    // POST: //add_lora_internal /remove_lora_internal /update
+    if (!registerLoraService()) {
+        FT_LOG_WARNING("HttpApiServer register lora service failed.");
         return false;
     }
 
@@ -212,7 +229,7 @@ bool HttpApiServer::registerChatService() {
             FT_LOG_WARNING("chat completion failed, found python exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("called chat completion route but found exception: [%s]", e.what());
+            FT_LOG_WARNING("chat completion failed, found cpp exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
@@ -303,6 +320,69 @@ bool HttpApiServer::registerEmbedingService() {
            http_server_->RegisterRoute("POST", "/v1/classifier",            callback) &&
            http_server_->RegisterRoute("POST", "/v1/reranker",              callback) &&
            http_server_->RegisterRoute("POST", "/",                         callback);
+}
+
+bool HttpApiServer::registerLoraService() {
+    lora_service_.reset(new LoraService(engine_, gang_server_, weights_loader_, lora_infos_, metric_reporter_));
+    auto add_lora_internal_callback = [lora_service = lora_service_,
+                                       request_counter = request_counter_,
+                                       metric_reporter = metric_reporter_](
+                                           std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                           const http_server::HttpRequest& request) -> void {
+        auto request_id = request_counter->incAndReturn();
+        try {
+            lora_service->addLoraInternal(writer, request);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("add lora internal failed, found python exception: [%s]", e.what());
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("add lora internal failed, found cpp exception: [%s]", e.what());
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        }
+    };
+
+    auto remove_lora_internal_callback = [lora_service = lora_service_,
+                                          request_counter = request_counter_,
+                                          metric_reporter = metric_reporter_](
+                                              std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                              const http_server::HttpRequest& request) -> void {
+        auto request_id = request_counter->incAndReturn();
+        try {
+            lora_service->removeLoraInternal(writer, request);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("remove lora internal failed, found python exception: [%s]", e.what());
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("remove lora internal failed, found cpp exception: [%s]", e.what());
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        }
+    };
+
+    auto update_callback = [lora_service = lora_service_,
+                            request_counter = request_counter_,
+                            metric_reporter = metric_reporter_](
+                                std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                const http_server::HttpRequest& request) -> void {
+        auto request_id = request_counter->incAndReturn();
+        try {
+            lora_service->update(writer, request);
+        } catch (const py::error_already_set& e) {
+            FT_LOG_WARNING("update lora failed, found python exception: [%s]", e.what());
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        } catch (const std::exception& e) {
+            FT_LOG_WARNING("update lora failed, found cpp exception: [%s]", e.what());
+            metric_reporter->reportErrorUpdateTargetQpsMetric();
+            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
+        }
+    };
+    return http_server_->RegisterRoute("POST", "/add_lora_internal",    add_lora_internal_callback) &&
+           http_server_->RegisterRoute("POST", "/remove_lora_internal", remove_lora_internal_callback) &&
+           http_server_->RegisterRoute("POST", "/update",               update_callback);
 }
 
 void HttpApiServer::stop() {

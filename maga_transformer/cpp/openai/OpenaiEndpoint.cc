@@ -101,26 +101,6 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     return std::make_shared<GenerateConfig>(config);
 }
 
-/*
-def _get_debug_info(self, renderer: CustomChatRenderer,
-                    renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
-    if renderered_input.rendered_prompt != "":
-        prompt = renderered_input.rendered_prompt
-    else:
-        prompt = self.tokenizer.decode(renderered_input.input_ids)
-    return DebugInfo(
-        input_prompt=prompt,
-        input_ids=renderered_input.input_ids,
-        input_urls=[mm_input.url for mm_input in renderered_input.multimodal_inputs],
-        tokenizer_info=str(self.tokenizer),
-        max_seq_len=self.max_seq_len,
-        eos_token_id=self.eos_token_id,
-        stop_word_ids_list=self.stop_words_id_list,
-        stop_words_list=self.stop_words_str_list,
-        renderer_info=renderer.get_renderer_info(),
-        generate_config=gen_config
-    )
-*/
 std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_request,
                                          const RenderedInputs& rendered_input) {
     std::vector<std::string> input_urls;

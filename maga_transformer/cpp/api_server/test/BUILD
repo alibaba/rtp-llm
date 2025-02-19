@@ -41,10 +41,10 @@ py_test(
     deps = [
         ":api_server_unittest_pylib",
     ],
-    # data = [
-    #     "testdata/annocation",
-    #     "testdata/parallel.json",
-    # ],
+    data = [
+        "testdata/annocation",
+        "testdata/parallel.json",
+    ],
     imports = [
         ".",
     ],
@@ -85,7 +85,10 @@ cc_library(
         "mock/MockEmbeddingEndpoint.h",
         "mock/MockChatRender.h",
         "mock/MockTokenizer.h",
+        "mock/MockGangServer.h",
         "mock/MockOpenaiEndpoint.h",
+        "mock/MockLoraManager.h",
+        "mock/MockWeightsLoader.h",
         "ErrorResponseTest.cc",
         "HealthServiceTest.cc",
         "HttpApiServerTest.cc",
@@ -101,6 +104,8 @@ cc_library(
         "InferenceDataTypeTest.cc",
         "ConcurrencyControllerTest.cc",
         "ChatServiceTest.cc",
+        "GangServerTest.cc",
+        "LoraServiceTest.cc",
         "TestMain.cc",
     ],
     deps = test_deps + [

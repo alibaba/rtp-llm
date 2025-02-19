@@ -152,12 +152,16 @@ bool RtpLLMOp::ready() {
     return model_rpc_service_->ready();
 }
 
-void RtpLLMOp::startHttpServer(py::object tokenizer, py::object render) {
+void RtpLLMOp::startHttpServer(py::object model_weights_loader,
+                               py::object lora_infos,
+                               py::object gang_info,
+                               py::object tokenizer,
+                               py::object render) {
     if (http_server_ == nullptr) {
         FT_FAIL("normal HTTP Server nullptr error.");
         return;
     }
-    if (http_server_->start(tokenizer, render)) {
+    if (http_server_->start(model_weights_loader, lora_infos, gang_info, tokenizer, render)) {
         FT_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {
         FT_FAIL("normal HTTP Server start fail.");
