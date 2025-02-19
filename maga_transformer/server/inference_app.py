@@ -258,17 +258,20 @@ class InferenceApp(object):
         async def encode(req: Union[str,Dict[Any, Any]]):
             return self.inference_server.tokenizer_encode(req)
 
-                # entry for worker RANK == 0
+        # entry for worker RANK == 0
         @app.post("/tokenize")
         @check_is_master()
         async def encode(req: Union[str,Dict[Any, Any]]):
             return self.inference_server.tokenize(req)
 
+        # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str,Dict[Any, Any]]):
             try:
-                self.inference_server.set_log_level(req)
-                return {"status": "ok"}
+                if self.inference_server.set_log_level(req):
+                    return {"status": "ok"}
+                else:
+                    return {"status": "set log level failed"}
             except Exception as e:
                 return {"error": str(e)}
 

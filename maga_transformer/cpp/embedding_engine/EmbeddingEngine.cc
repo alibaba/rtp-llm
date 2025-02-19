@@ -70,7 +70,7 @@ absl::Status EmbeddingEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     CHECK_AND_RETURN_REF(streams, scheduler_->scheduleNew());
     if (streams.empty()) {
-        FT_LOG_WARNING("no query run and sleep");
+        FT_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
     }
     try {
