@@ -133,6 +133,8 @@ def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor
 
 def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, **kwargs: Any) -> torch.Tensor:
     if ep > 1:
+        # tp = 1
+        # tp_rank = 0
         tp = int(tp / ep)
         tp_rank = int(tp_rank / ep)
     t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
@@ -144,6 +146,8 @@ def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, *
 def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **kwargs: Any) -> torch.Tensor:
     # [expert_num, 2*n, k]
     if ep > 1:
+        # tp = 1
+        # tp_rank = 0
         tp = int(tp / ep)
         tp_rank = int(tp_rank / ep)
     t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
@@ -432,6 +436,9 @@ class W:
     moe_w2   = 'partial_moe_weights.intermediate_weight2.kernel'
     moe_b2   = 'partial_moe_weights.intermediate_weight2.bias'
     moe_gate = 'partial_moe_weights.gate.kernel'
+
+    # deepseek3 noaux_tc
+    e_score_correction_b = 'partial_moe_weights.e_score_correction_bias'
 
     # cross attn
     cross_attn_pre_ln_gamma = 'cross_attention_weights_pre_layernorm.gamma'
@@ -827,6 +834,10 @@ class W:
         ffn_b2,
     ]
 
+    fp32_weights_list = [
+        e_score_correction_b,
+    ]
+
     skip_weights_list = [
         attn_qkv_w,
         attn_qkv_b,
@@ -1003,6 +1014,7 @@ class ModelWeightInfo:
 class ModelDeployWeightInfo:
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+        self.config = config
         self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size
@@ -1213,49 +1225,22 @@ class ModelWeights:
 
     def get_global_weight(self, name: str):
         return self.global_weights.get(name, None)
-    
-    def steal_global_weight(self, name: str): 
+
+    def steal_global_weight(self, name: str):
         if name not in self.global_weights:
             return None
         tensor = self.global_weights[name]
         del self.global_weights[name]
-        return tensor        
+        return tensor
 
     @property
     def dtype(self):
         return self._dtype
 
     @staticmethod
-    def layer_weight_prefix(tp_rank:int):
+    def layer_weight_prefix(tp_rank:int, ep_rank: int):
         return f"rank_{tp_rank:02d}.layers."
 
     @staticmethod
-    def global_weight_prefix(tp_rank:int):
+    def global_weight_prefix(tp_rank:int, ep_rank: int):
         return f"rank_{tp_rank:02d}.global."
-
-    def dump_to_safetensors(self, tp_rank:int, filename: str):
-        # 使用 OrderedDict 确保保存顺序，优化读取速度
-        tensor_dict = OrderedDict()
-        layer_weight_prefix = self.layer_weight_prefix(tp_rank)
-        global_weight_prefix = self.global_weight_prefix(tp_rank)
-        # 保存每一层的权重
-        for layer_id, layer_dict in enumerate(self.weights):
-            logging.info(f"layer_id:{layer_id}, layer_dict:{list(layer_dict.keys())}")
-            for name, tensor in layer_dict.items():
-                # 将张量移动到 CPU，确保文件大小最小化
-                tensor_name = f"{layer_weight_prefix}{layer_id}.{name}"
-                logging.debug(f"layer_id:{layer_id}, layer_weight_name:{name}, tensor_name:{tensor_name}, tensor_shape:{tensor.shape}")
-                tensor_dict[tensor_name] = tensor.cpu()
-        # 保存全局权重
-        for name, tensor in self.global_weights.items():
-            logging.debug(f"global_weight_name:{name}, tensor_shape:{tensor.shape}")
-            tensor_name = f"{global_weight_prefix}{name}"
-            tensor_dict[tensor_name] = tensor.cpu()
-        # Ensure the directory exists before saving
-        dirname = os.path.dirname(filename)
-        if dirname and not os.path.exists(dirname):
-            logging.info(f"Created directory: {dirname}")
-            os.makedirs(dirname, exist_ok=True)
-
-        # 使用 safetensors 库保存张量
-        safetensors.torch.save_file(tensor_dict, filename)

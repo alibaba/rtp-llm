@@ -22,6 +22,7 @@ from safetensors import safe_open
 
 
 CUR_PATH: str = os.path.dirname(os.path.abspath(__file__))
+ONE_MB = 1024 **2
 
 class WeightConverter:
     def __init__(self, model_path: str, model_type: Optional[str], env_params: Dict[str,str]) -> None:
@@ -50,16 +51,20 @@ class WeightConverter:
         output_dir_base = fetch_remote_file_to_local(output_dir_base, MountRwMode.RWMODE_RW)
         # 确定并发进程数，不超过tp_size
         pool_size = self._estimate_convert_parallel_num()
+        logging.info(f"now start [{pool_size}] process tor convert")
+        args_list = [
+            (tp_rank, dp_rank, tp_rank + dp_rank * self.tp_size, output_dir_base)
+                for dp_rank in range(self.dp_size)
+                    for tp_rank in range(self.tp_size)
+        ]
+        logging.info(f'args : {args_list}')
         if pool_size > 1:
             ctx = multiprocessing.get_context('spawn')
             with ctx.Pool(processes=pool_size) as pool:
-                # 准备参数列表
-                args_list = [(world_rank, output_dir_base) for world_rank in range(self.tp_size)]
-                # 使用starmap并行执行_convert方法
                 pool.starmap(self._convert, args_list)
         else:
-            for world_rank in range(self.tp_size):
-                self._convert(world_rank, output_dir_base)
+            for (tp_rank, dp_rank, world_rank, _) in args_list:
+                self._convert(tp_rank, dp_rank, world_rank, output_dir_base)
         # copy other files:
         self._save_converted(self.model_path, output_dir_base)
 
@@ -69,32 +74,65 @@ class WeightConverter:
     def tp_size(self):
         return int(self.env_params.get("TP_SIZE", "1"))
 
+    @property
+    def dp_size(self):
+        return int(self.env_params.get("DP_SIZE", "1"))
+
     @staticmethod
     def get_free_mem_MB():
         import psutil
         memory_info = psutil.virtual_memory()
-        free_memory = memory_info.free/1024/1024
+        free_memory = memory_info.free/ONE_MB
         return free_memory
 
     def _estimate_convert_parallel_num(self):
-        free_mb = self.get_free_mem_MB() * 0.8
-        refactor = self.tp_size/1.25 if self.tp_size > 1 else 1
-        if self.model_basic_info.model_size:
-            model_size_mb_1tp = self.model_basic_info.model_size/1024/1024/refactor
-            return int(min(free_mb / model_size_mb_1tp, self.tp_size))
-        return 1
+        try:
+            cuda_count = torch.cuda.device_count()
+            assert(cuda_count > 1)
+            return cuda_count
+        except Exception as _:
+            logging.info("no cuda device convert by cpu")
+            free_mb = self.get_free_mem_MB() * 0.8
+            dump_buffer_size_mb = 10 * 1024  # 10G dump once
+            if self.model_basic_info.model_size:
+                model_size_mb = self.model_basic_info.model_size/ONE_MB
+
+                env_params = copy.deepcopy(self.env_params)
+                model_config = ModelConfig(
+                    model_type=self.model_type,
+                    ckpt_path=self.model_path,
+                    weight_type=get_weight_type_from_env(env_params),
+                    act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
+                    ptuning_path=None,
+                    max_seq_len=0,
+                    tokenizer_path=self.model_path
+                )
+                paralle_info = ParallelInfo.from_params(env_params)
+                config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
+                
+                one_layer_model_size_mb = model_size_mb/config.layer_num
+                if model_size_mb < dump_buffer_size_mb:
+                    need_size_mb = model_size_mb
+                else:
+                    need_size_mb = dump_buffer_size_mb + one_layer_model_size_mb
+                if free_mb // need_size_mb > self.tp_size:
+                    return int(free_mb // need_size_mb)
+                else:
+                    return int(free_mb // need_size_mb if free_mb // need_size_mb > 1 else 1)
+            return 1
 
     @timer_wrapper('convert 1 tp')
-    def _convert(self, world_rank: int, output_dir_base: str):
+    def _convert(self, tp_rank:int, dp_rank:int, world_rank: int, output_dir_base: str):
         env_params = copy.deepcopy(self.env_params)
-        env_params.update({"WORLD_RANK": world_rank,})
-        logging.info(f"begin convert model rank:{world_rank}")
-
         try:
             cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
-            env_params.update({"LOCAL_WORLD_SIZE" : len(cuda_device_list)})
+            if len(cuda_device_list) > 0:
+                env_params.update({"LOCAL_WORLD_SIZE" : min(len(cuda_device_list), self.tp_size)})
         except Exception as _:
             logging.info(f"no GPU device, load to mem")
+        env_params.update({"WORLD_RANK": world_rank})
+        env_params.update({"DP_RANK": dp_rank})
+        env_params.update({"TP_RANK": tp_rank})
 
         model_config = ModelConfig(
             model_type=self.model_type,
@@ -106,15 +144,20 @@ class WeightConverter:
             tokenizer_path=self.model_path
         )
         paralle_info = ParallelInfo.from_params(env_params)
+        logging.info(f"begin convert model rank:{paralle_info}")
         config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
-        model = self.model_cls.from_config(config, paralle_info)
-        for i in range(10):
+        model = self.model_cls(config)
+        max_retry_times = 3
+        for i in range(max_retry_times):
             try:
-                model.dump_weights(output_dir_base)
+                model.dump_weights(paralle_info, output_dir_base)
                 logging.info(f"dump rank:[{world_rank}] done")
                 break
-            except Exception as _:
-                logging.warn(f"dump rank:[{world_rank}] failed, retry {i} times")
+            except Exception as e:
+                logging.warn(f"dump rank:[{world_rank}] failed, {str(e)}, retry {i} times")
+                if i == max_retry_times -1:
+                    logging.error(f"dump rank:[{world_rank}] retry {i} times, but still failed")
+                    raise RuntimeError(f"Failed after 10 retries: {str(e)}") from e
                 continue
         logging.info(f"convert model rank:{world_rank} done")
 

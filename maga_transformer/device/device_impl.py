@@ -112,7 +112,7 @@ class GpuImpl(DeviceBase):
         return reorder_tensor
 
     @property
-    def specify_gpu_arch(self) -> int:
+    def specify_gpu_arch(self):
         return os.environ.get('SPECIFY_GPU_ARCH', "")
 
     def apply_int8(self, tensor: torch.Tensor, device: str):

@@ -17,11 +17,12 @@ class ParallelInfo(object):
             world_size: int, world_rank: int,
             local_world_size: int
     ):
-        self.tp_size = tp_size
-        self.ep_size = ep_size
-        self.pp_size = pp_size
-        self.world_size = world_size
-        self.world_rank = world_rank
+        self.tp_size = int(tp_size)
+        self.ep_size = int(ep_size)
+        self.pp_size = int(pp_size)
+        self.dp_size = int(world_size / tp_size)
+        self.world_size = int(world_size)
+        self.world_rank = int(world_rank)
         self.local_world_size = local_world_size
 
         if torch.cuda.is_available():
@@ -37,6 +38,11 @@ class ParallelInfo(object):
     @property
     def ep_rank(self) -> int:
         return self.tp_rank % self.ep_size
+
+    @property
+    def dp_rank(self) -> int:
+        return int(self.world_rank / self.tp_size) % self.dp_size
+        
 
     @property
     def local_rank(self) -> int:
@@ -64,7 +70,7 @@ class ParallelInfo(object):
             raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
-            raise Exception("not support info.world_size mod info.local_world_size != 0")
+            raise Exception(f"not support info.world_size:[{info.world_size}] mod info.local_world_size:[{info.local_world_size}] != 0")
 
         if torch.cuda.is_available():
             torch.cuda.set_device(info.local_rank)
@@ -81,7 +87,7 @@ class ParallelInfo(object):
         self.local_world_size=new_info.local_world_size
 
     def __str__(self):
-        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ]"
+        return f"ParallelInfo:[tp_rank={self.tp_rank} tp_size={self.tp_size} dp_rank={self.dp_rank} dp_size={self.dp_size} ep_rank={self.ep_rank} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ]"
 
 g_parallel_info = ParallelInfo.from_env()
 

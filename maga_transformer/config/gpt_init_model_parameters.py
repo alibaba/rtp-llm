@@ -9,7 +9,7 @@ from enum import Enum
 from maga_transformer.utils.util import str_to_bool, closest_power_of_2
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
-from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
 from maga_transformer.ops import GptInitParameter
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
@@ -151,14 +151,9 @@ class GptInitModelParameters:
         self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
         self.worker_port_offset = WORKER_INFO_PORT_NUM
 
-        self.tp_size = g_parallel_info.tp_size
-        self.tp_rank = g_parallel_info.tp_rank
-        self.ep_size = g_parallel_info.ep_size
-        self.ep_rank = g_parallel_info.ep_rank
         self.add_special_tokens = True
         self.template_type = TemplateType.chat
         self.build_position_ids = False
-        self.local_rank = g_parallel_info.local_rank
         self.routed_scaling_factor = 1.0
         self.vit_run_batch = False
         self.is_ft_style_weight = False
@@ -277,11 +272,17 @@ class GptInitModelParameters:
                       data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
-                      tp_size: int,
-                      ep_size: int,
                       gen_num_per_circle: int,
                       ref_module: Optional[torch.nn.Module] = None,
-                      ref_dict: Dict[str, torch.Tensor] = {}):
+                      ref_dict: Dict[str, torch.Tensor] = {},
+                      parallel_info: ParallelInfo=g_parallel_info):
+
+        self.tp_size = parallel_info.tp_size
+        self.tp_rank = parallel_info.tp_rank
+        self.ep_size = parallel_info.ep_size
+        self.ep_rank = parallel_info.ep_rank
+        self.local_rank = parallel_info.local_rank
+
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
@@ -299,7 +300,7 @@ class GptInitModelParameters:
         logging.info(f'max_seq_len: {self.max_seq_len}')
 
         self.update_config_with_sparse_config(ckpt_path)
-        self.update_inter_padding_size(tp_size, ep_size)
+        self.update_inter_padding_size(self.tp_size, self.ep_size)
         self.update_task_prompt_config()
         self.update_task_type_use_kvcache()
         self.update_weight_style(ckpt_path)

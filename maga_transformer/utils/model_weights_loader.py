@@ -89,7 +89,7 @@ class ModelWeightsLoader:
                 if self._merge_lora:
                     static_lora_config: LoraConfig = list(self._database.LoraCkpt.LoraFileList.keys())[0]
                     self._static_lora_adapter_name = static_lora_config.name if self._merge_lora else None
-                
+
         else:
             raise Exception("Unknown database class")
         logging.info(f"merge lora is enable ? : {self._merge_lora}")
@@ -118,8 +118,8 @@ class ModelWeightsLoader:
 
     def load_from_ft_style_weight(self, device):
         model_weights = ModelWeights(self._num_layers, device, self._data_type)
-        layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank)
-        global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank)
+        layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank, self._ep_rank)
+        global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank, self._ep_rank)
         # 清空现有的权重
         weights = [ {} for id in range(self._num_layers)]
         global_weights = {}
@@ -144,36 +144,54 @@ class ModelWeightsLoader:
         return model_weights
 
     @timer_wrapper(description="load_weights_from_scratch")
-    def load_weights_from_scratch(self, device: str, num_process: int=1):
+    def load_weights_from_scratch(self, device: str):
         if self._is_ft_style_weight:
             return self.load_from_ft_style_weight(device)
-        weights = ModelWeights(self._num_layers, device, self._data_type)
-        if num_process > 1:
-            with multiprocessing.pool.ThreadPool(num_process) as pool:
-                all_results = pool.starmap(
-                    self._load_layer_weight,
-                    zip(range(self._num_layers),
-                        repeat(device)))
-        else:
-            all_results = [self._load_layer_weight(id, device)
-                           for id in range(self._num_layers)]
+        weights = self.create_model_weights(device)
+        convert_device = self._choose_weight_convert_device(device)  # choose convert device to avoid out of mem
+        for (layer_id, name, tensor) in self.prepare_weights_from_scratch(convert_device):
+            if convert_device != device:
+                tensor = tensor.to(device)
+            if layer_id is not None:
+                weights.set_layer_weight(layer_id, name, tensor)
+            else:
+                weights.set_global_weight(name, tensor)
 
-        while (len(all_results)):
-            results, logs, lora_logs = all_results.pop(0)
+        return weights
+
+
+    def _choose_weight_convert_device(self, current_device):
+        model_size = self._weights_info.config.eval_model_size()
+        device_mem_info = self._exported_device.get_mem_info()
+        if device_mem_info is None:
+            import psutil
+            vmem = psutil.virtual_memory()
+            free_mem = vmem.free / (1024.0 ** 2) / self._tp_size
+            return "cpu"
+        else:
+            free_mem = device_mem_info.free / (1024.0 ** 2)
+        model_mem = model_size / self._tp_size / (1024.0 ** 2)
+        return current_device if free_mem * 0.8 > free_mem else "cpu"
+        
+    def prepare_weights_from_scratch(self, device): 
+        for id in range(self._num_layers):
+            results, logs, lora_logs =  self._load_layer_weight(id, device)
             self._weight_log.update(logs)
             if self._merge_lora:
                 self._lora_log.update(lora_logs)
             for (layer_id, name, tensor) in results:
                 tensor = self._exported_device.maybe_rewrite_weight_by_key(name, tensor)
-                weights.set_layer_weight(layer_id, name, tensor)
+                yield (layer_id, name, tensor)
+
         for weight in self._model_weights_info.weights:
-            tensor = self._load_and_convert_tensor(weight, datatype=self._data_type)
+            tensor = self._load_and_convert_tensor(weight, datatype=self._data_type, device=device)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
             tensor = self._exported_device.maybe_rewrite_weight_by_key(weight.name, tensor)
             tensor = tensor.to(device)
-            weights.set_global_weight(weight.name, tensor)
+            yield (None, weight.name, tensor)
 
-        return weights
+    def create_model_weights(self, device):
+        return ModelWeights(self._num_layers, device, self._data_type)
 
     def load_lora_weights_from_scratch(self, lora_name: str, lora_path: str, device: str, num_process=1):
         lora_weights = LoRAWeights(self._num_layers)
@@ -398,25 +416,29 @@ class ModelWeightsLoader:
             orig_orders = []
             for ckpt_weight in weight.weights:
                 tensor_name = ckpt_weight.tensor_name(layer_id)
-                file_name, idx = self._database.get_tensor_order(tensor_name)[0]
-                if file_name:  # 过滤无效文件名
-                    file_keys.append(get_key(file_name))
-                    file_indices.append(idx)
+                try:
+                    file_name, idx = self._database.get_tensor_order(tensor_name)[0]
+                    if file_name:  # 过滤无效文件名
+                        file_keys.append(get_key(file_name))
+                        file_indices.append(idx)
+                except Exception as e:
+                    logging.warning(f'layer: {layer_id} load tensor :{tensor_name} file meta failed')
 
-            # 生成主排序键（取最小文件键）
-            main_key = min(file_keys) if file_keys else (float('inf'),)
-            main_idx = file_indices[file_keys.index(main_key)] if file_keys else 0
-            
-            weighted_entries.append( (main_key, main_idx, weight) )
-        
+            if file_keys:
+                # 生成主排序键（取最小文件键）
+                main_key = min(file_keys) if file_keys else (float('inf'),)
+                main_idx = file_indices[file_keys.index(main_key)] if file_keys else 0
+
+                weighted_entries.append( (main_key, main_idx, weight) )
+
         # 执行三级排序
         sorted_weights = sorted(
             weighted_entries,
             key=lambda x: (x[0], x[1], get_key(x[2].name))  # 文件名 > 索引 > 权重名
         )
-        
+
         return [entry[2] for entry in sorted_weights]
-        
+
 
     def _load_layer_weight(self, layer_id: int, device: str):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
@@ -434,12 +456,12 @@ class ModelWeightsLoader:
             try:
                 if self._is_quant_weight(weight):
                     continue
-                tensor = self._load_and_convert_tensor(weight, layer_id=layer_id, datatype=self._data_type)
+                tensor = self._load_and_convert_tensor(weight, layer_id=layer_id, datatype=self._data_type, device=device)
 
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)
 
-                tensor = self._split_and_sanitize_tensor(tensor, weight).to(device)
+                tensor = self._split_and_sanitize_tensor(tensor, weight)
 
                 if use_fp32:
                     tensor = tensor.float()
@@ -561,14 +583,18 @@ class ModelWeightsLoader:
 
         return after_merge_tensor.to(datatype)
 
-    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: torch.dtype = torch.float16):
+    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: torch.dtype = torch.float16, device='cpu'):
         convert_type = datatype if weight_info.data_type is None else weight_info.data_type
         before_merge_tensors = []
         self._weight_log.record_loaded_tensor(weight_info.name)
+
+        if weight_info.name in W.fp32_weights_list:
+            convert_type = torch.float32
+
         for ckpt_weight in weight_info.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
-                before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(name, convert_type)))
+                before_merge_tensors.append(ckpt_weight.merge_fun([x.to(device) for x in self.load_tensor(name, convert_type)]))
             except Exception as e:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
 
@@ -606,34 +632,6 @@ class ModelWeightsLoader:
     def _sanitize(self, t):
         return t.contiguous().clone()
 
-def estimate_load_parallel_num(config, tp_size):
-    parallel_num = os.environ.get('LOAD_CKPT_NUM_PROCESS', None)
-    if parallel_num is None:
-        return 1
-    parallel_num = int(parallel_num)
-    if parallel_num > 0:
-        logging.info(f'load weights by {parallel_num} process from env')
-        return parallel_num
-    model_size = config.eval_model_size()
-    cuda_runtime_mem = 2
-    weight_compute_mem = 2
-    device_mem_info = get_current_device().get_mem_info()
-    if device_mem_info is None:
-        # 使用虚拟内存加载数据
-        import psutil
-        vmem = psutil.virtual_memory()
-        free_mem = vmem.free / (1024.0 ** 3) / tp_size 
-    else:
-        free_mem = device_mem_info.free / (1024.0 ** 3)
-    model_mem = model_size / tp_size / (1024.0 ** 3)
-    parallel_num = int((free_mem - model_mem) / (weight_compute_mem + cuda_runtime_mem))
-    parallel_num = min(max(parallel_num, 1), 4) # 以防并发太多影响 io 效率
-    # hippo mount 最大并发是16， 超过16就会file not found
-    parallel_num = min(parallel_num, 16 // g_parallel_info.local_world_size)
-    if model_mem < 1:
-        parallel_num = 1 # 单元测试
-    logging.info(f'free_mem: {free_mem:.2f} model_mem: {model_mem:.2f}, load weights by {parallel_num} process')
-    return parallel_num
 
 def get_model_weights_loader(weights_info: ModelDeployWeightInfo, database: CkptDatabase, compute_dtype):
     if weights_info._head_num % weights_info.tp_size != 0:

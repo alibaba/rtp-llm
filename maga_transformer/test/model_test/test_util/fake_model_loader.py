@@ -58,8 +58,6 @@ class FakeModelLoader(object):
             data_type=model_config.act_type,
             max_seq_len=self.max_seq_len,
             seq_size_per_block=8,
-            tp_size=1,
-            ep_size=1,
             gen_num_per_circle=1,
             ptuning_path=None
         )

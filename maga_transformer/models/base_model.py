@@ -3,6 +3,7 @@ import torch
 import json
 import logging
 import math
+import gc
 
 
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
+import safetensors.torch
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
@@ -20,12 +22,13 @@ from maga_transformer.models.downstream_modules.utils import create_custom_modul
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo
-from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
+from maga_transformer.utils.model_weights_loader import get_model_weights_loader, ModelWeightsLoader
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
+from collections import OrderedDict
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -229,13 +232,12 @@ class BaseModel(object):
             data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,
-            tp_size=parallel_info.tp_size,
-            ep_size=parallel_info.ep_size,
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
             ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict,
+            parallel_info=parallel_info
         )
         return config
 
@@ -320,11 +322,9 @@ class BaseModel(object):
             self.database.dump_lora_info()
 
     def load_model_weight(self):
-        load_parallel_num = estimate_load_parallel_num(
-            self.config, self.parallel_info.tp_size)
         weights_info = self.get_weight_cls()(self.config, self.parallel_info.tp_size, self.parallel_info.tp_rank)
         self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        self.weight = self.model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num, device=self.device)
+        self.weight = self.model_weights_loader.load_weights_from_scratch(device=self.device)
         self._load_custom_module_weights(self.model_weights_loader)
         if self.static_lora:
             lora_name = list(self.config.lora_infos.keys())[0]
@@ -361,11 +361,6 @@ class BaseModel(object):
 
         if self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
-        
-        if self.weight.is_ft_style_weight:
-            self.linear_bias_slopes = self.weight.get_global_weight(W.linear_bias_slopes)
-            torch.cuda.empty_cache()
-            return
 
         if self.task_type == TaskType.LANGUAGE_MODEL:
             lm_head_w = self.weight.steal_global_weight(W.lm_head)
@@ -432,9 +427,64 @@ class BaseModel(object):
                 attention_mask[b, :, input_length: ]= 0
         return attention_mask
 
-    def dump_weights(self, output_dir: str):
-        output_file = os.path.join(output_dir, f"model-{self.parallel_info.tp_rank:02d}-{self.parallel_info.tp_size:02d}.safetensors")
-        self.weight.dump_to_safetensors(self.parallel_info.tp_rank, output_file)
+    def dump_weights(self, parallel_info, output_dir: str):
+        # dump with out load
+        self.parallel_info = parallel_info
+        self.device = self.parallel_info.device
+
+        self.may_init_multimodal()
+        self.init_misc()
+        self.init_database()
+        self.load_static_lora()
+
+        tp_rank = self.parallel_info.tp_rank
+        ep_rank = self.parallel_info.ep_rank
+        dp_rank = self.parallel_info.dp_rank
+        ep_size = self.parallel_info.ep_size
+        tp_size = self.parallel_info.tp_size
+
+        weights_info = self.get_weight_cls()(self.config, tp_size, tp_rank)
+        self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
+        weights = self.model_weights_loader.create_model_weights(self.device)
+
+        filename_prefix = f"{output_dir}/model-{tp_rank:02d}-"
+        os.makedirs(output_dir, exist_ok=True)
+
+        max_size = 10 * 1024**3  # 10GB
+        part_idx = 0
+        current_size = 0
+        current_dict = OrderedDict()
+
+        def maybe_save():
+            nonlocal current_size, part_idx, current_dict
+            if current_size >= max_size:
+                filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
+                safetensors.torch.save_file(current_dict, filename)
+                logging.info(f"Saved partition {part_idx} ({current_size/1024**3:.2f}GB)")
+                # 显式释放内存
+                del current_dict
+                current_dict = OrderedDict()
+                part_idx += 1
+                current_size = 0
+
+        for (layer_id, name, tensor) in self.model_weights_loader.prepare_weights_from_scratch(self.device):
+            if layer_id is not None:
+                tensor_name = f"{weights.layer_weight_prefix(tp_rank, ep_rank)}{layer_id}.{name}"
+            else:
+                tensor_name = f"{weights.global_weight_prefix(tp_rank, ep_rank)}{name}"
+            tensor_size = tensor.numel() * tensor.element_size()
+            current_dict[tensor_name] = tensor.cpu()
+            current_size += tensor_size
+            maybe_save()
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # 保存最后剩余部分
+        if current_dict:
+            filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
+            safetensors.torch.save_file(current_dict, filename)
+            logging.info(f"Saved final partition {part_idx} ({current_size/1024**3:.2f}GB)")
+            del current_dict
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
