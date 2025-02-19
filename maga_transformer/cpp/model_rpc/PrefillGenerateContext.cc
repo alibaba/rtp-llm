@@ -64,7 +64,6 @@ void PrefillStatInfo::nextStage() {
 }
 
 PrefillGenerateContext::~PrefillGenerateContext() {
-    printTime();
     reportTime();
     closeGrpcStream();
     stopStream();
@@ -150,18 +149,6 @@ void PrefillGenerateContext::markRequestEnd() {
             continue;
         }
     }
-}
-
-// for debug, will delete in future
-void PrefillGenerateContext::printTime() {
-    if (!stream_) return;
-
-    auto first_token_rt_us = stream_->getTimeInfo().first_token_rt_us;
-    auto load_cost_time = response.load_done_time() - response.start_load_time();
-    auto compute_cost_time = response.compute_done_time() - response.begin_compute_time();
-
-    FT_LOG_DEBUG("request_id = [%d], first_token_rt_us = %ld, load_cost_time = %ld, compute_cost_time = %ld",
-            request_id, first_token_rt_us, load_cost_time, compute_cost_time);
 }
 
 void PrefillGenerateContext::reportTime() {

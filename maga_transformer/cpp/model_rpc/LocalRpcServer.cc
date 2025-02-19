@@ -81,19 +81,19 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         QueryConverter::transResponse(&outputs_pb, &(result.value()));
         if (context->IsCancelled()) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%s] cancelled by user", request_key.c_str());
+            FT_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
-            FT_LOG_WARNING("request:[%s] write outputs pb failed", request_key.c_str());
+            FT_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->needRemoteGenerate()) {
             break;
         }
     }
-    FT_LOG_DEBUG("request:[%s] local generate done", request_key.c_str());
+    FT_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
 }

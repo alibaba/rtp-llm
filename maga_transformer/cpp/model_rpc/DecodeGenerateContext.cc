@@ -59,6 +59,9 @@ void DecodeGenerateContext::TimeInfo::updateGenerateBeginTime() {
 void DecodeGenerateContext::TimeInfo::updateGenerateEndTime() {
     generate_end_time_us = currentTimeUs();
 }
+int64_t DecodeGenerateContext::TimeInfo::loadCacheTimeMs() const {
+    return (load_end_time_us - load_begin_time_us) / 1000;
+}
 
 void DecodeGenerateContext::reportTime() {
     RpcMetricsCollector collector;

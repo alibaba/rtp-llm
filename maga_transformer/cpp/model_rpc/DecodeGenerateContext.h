@@ -53,6 +53,8 @@ public:
         void updateLoadEndTime();
         void updateGenerateBeginTime();
         void updateGenerateEndTime();
+        int64_t loadCacheTimeMs() const;
+
         int64_t request_begin_time_us;
         int64_t load_begin_time_us;
         int64_t load_end_time_us;

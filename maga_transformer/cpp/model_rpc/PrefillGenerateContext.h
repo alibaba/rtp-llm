@@ -78,7 +78,6 @@ public:
 
 private:
     void markRequestEnd();
-    void printTime();
     void reportTime();
     void stopStream();
 
@@ -100,10 +99,6 @@ public:
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
-
-    // for debug, will delete in future
-    GenerateOutputsPB response;
-    int64_t           remote_cost_time_us;
 };
 
 }  // namespace rtp_llm

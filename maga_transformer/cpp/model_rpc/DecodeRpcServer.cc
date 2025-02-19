@@ -82,11 +82,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
-    FT_LOG_DEBUG("request:[%s] prepare generate context done", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] prepare generate context done", decode_context.request_key.c_str());
 }
 
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
-    FT_LOG_DEBUG("request:[%s] start to allocate resource", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input           = QueryConverter::transQuery(&decode_context.allocate_request.input());
     auto generate_stream = engine_->makeStream(input);
     decode_context.setStream(generate_stream);
@@ -103,11 +103,11 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 
-    FT_LOG_DEBUG("request:[%s] allocate resource done", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] allocate resource done", decode_context.request_key.c_str());
 }
 
 void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context) {
-    FT_LOG_DEBUG("request:[%s] load cache from prefill", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] load cache from prefill", decode_context.request_key.c_str());
     AtomicGuard       request_guard(loading_cache_requests_);
     auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
     GenerateRequestPB load_request;
@@ -116,17 +116,21 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
-
+    if (!error_info.ok()) {
+        FT_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
+            decode_context.request_key.c_str(), error_info.ToString().c_str(), decode_context.time_info.loadCacheTimeMs());
+    }
+ 
     GenerateOutputsPB load_response;
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
-    FT_LOG_DEBUG("request:[%s] load cache from prefill done", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
-    FT_LOG_DEBUG("request:[%s] start to local generate", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
@@ -150,26 +154,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->incLastOutputPos();
     generate_stream->resetBeginTime(currentTimeUs());
     engine_->enqueue(generate_stream);
-    FT_LOG_DEBUG("request:[%s] enqueue success", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,
                          decode_context.request_key,
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
-    FT_LOG_DEBUG("request:[%s] local generate done", decode_context.request_key.c_str());
+    FT_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
-
-// for debug, will delete in future
-void DecodeRpcServer::writeTime(DecodeGenerateContext& decode_context) {
-    GenerateOutputsPB response;
-    const auto&       time_info = decode_context.time_info;
-    response.set_start_load_time(time_info.load_begin_time_us);
-    response.set_load_done_time(time_info.load_end_time_us);
-    response.set_receive_generate_time(time_info.generate_begin_time_us);
-    response.set_begin_compute_time(time_info.generate_begin_time_us);
-    response.set_compute_done_time(time_info.generate_end_time_us);
-    decode_context.rpc_context.grpc_stream->Write(response);
 }
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
@@ -255,6 +248,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
             }
         }
     }
+
     if (maga_init_params_.gpt_init_parameter.decode_use_async_load_cache_) {
         return loadCacheAsyncForTp(decode_context, load_context);
     } else {
@@ -307,7 +301,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     int64_t     min_response_done_time_us = 1lu << 60;
     int64_t     max_response_done_time_us = 0;
     while (true) {
-        FT_LOG_DEBUG("request:[%s] load cache loop step", decode_context.request_key.c_str());
+        FT_LOG_DEBUG("request [%s] load cache loop step", decode_context.request_key.c_str());
         auto cost_time_ms = (currentTimeUs() - load_cache_begin_time_us) / 1000;
         if (cost_time_ms > total_timeout_ms) {
             error_msg = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
@@ -323,7 +317,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         auto once_deadline =
             std::chrono::system_clock::now()
             + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_kv_cache_step_ms_);
-        FT_LOG_DEBUG("request:[%s] start to execute async next", decode_context.request_key.c_str());
+        FT_LOG_DEBUG("request [%s] start to execute async next", decode_context.request_key.c_str());
         // TODO(xinfei.sxf) There is a problem with complete queue next call delay here, the reason is yet to be
         // investigated
         void* got_tag;
@@ -334,7 +328,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             }
             if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
                 == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                FT_LOG_DEBUG("request:[%s] async next timeout", decode_context.request_key.c_str());
+                FT_LOG_DEBUG("request [%s] async next timeout", decode_context.request_key.c_str());
                 continue;
             }
             each_finished_count[i]++;
@@ -349,7 +343,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             const auto& pb_error_message = response.error_info().error_message();
             min_response_done_time_us    = std::min(min_response_done_time_us, response.done_time_us());
             max_response_done_time_us    = std::max(max_response_done_time_us, response.done_time_us());
-            FT_LOG_DEBUG("request:[%s] load cache for rank [%d] done", decode_context.request_key.c_str(), rank);
+            FT_LOG_DEBUG("request [%s] load cache for rank [%d] done", decode_context.request_key.c_str(), rank);
             if (!status.ok()) {
                 all_success = false;
                 error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
@@ -613,7 +607,6 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         }
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
         EXECUTE_STAGE_FUNC(localGenerate, decode_context);
-        writeTime(decode_context);
         decode_context.stat_info.nextStage();
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";

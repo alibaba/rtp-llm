@@ -49,7 +49,6 @@ private:
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
     void loadCacheFromPrefill(DecodeGenerateContext& decode_context);
     void localGenerate(DecodeGenerateContext& decode_context);
-    void writeTime(DecodeGenerateContext& decode_context);
 
     ErrorInfo loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo loadCacheForAllRank(DecodeGenerateContext& decode_context);
