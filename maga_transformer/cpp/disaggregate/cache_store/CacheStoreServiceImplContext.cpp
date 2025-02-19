@@ -120,7 +120,7 @@ bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<Bloc
 }
 
 void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
-    FT_LOG_DEBUG("run success");
+    FT_LOG_DEBUG("request [%s] run success", request_id_.c_str());
     bool expected = false;
     if (!done_run_.compare_exchange_strong(expected, true)) {
         return;
