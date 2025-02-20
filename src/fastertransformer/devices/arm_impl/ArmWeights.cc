@@ -44,7 +44,7 @@ torch::Tensor ArmCpuDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
 }
 
 
-torch::Tensor ArmCpuDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type) {
+torch::Tensor ArmCpuDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const string &arch) {
     return row_major_quantized_weight;
 }
 
