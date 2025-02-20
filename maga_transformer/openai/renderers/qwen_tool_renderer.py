@@ -21,7 +21,7 @@ from maga_transformer.openai.renderers.custom_renderer import (
     OutputDelta,
 )
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.word_util import is_truncated
+from maga_transformer.utils.word_util import is_truncated, truncate_response_with_stop_words
 from jinja2 import Environment, BaseLoader
 
 """
@@ -313,6 +313,7 @@ class QwenToolRenderer(CustomChatRenderer):
                 if not function_call:
                     # 如果没有提取到工具调用，则把完整的原始文本作为delta输出
                     status.delta_output_string = status.tool_call_responded_string
+                    status.tool_call_responded_string = ""
                 else:
                     status.generating_tool_call = True
                     # 创建工具调用的delta输出
@@ -400,5 +401,25 @@ class QwenToolRenderer(CustomChatRenderer):
         except Exception as e:
             raise ValueError(f"Unknown error: {str(e)}")
 
+
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
+        output_items: List[OutputDelta] = []
+        for buffer in buffer_list:
+            # 解被截断的bad_case
+            # "response":"<tool_call>\n{\"name\": \"get_average_month"
+            if isinstance(buffer, QwenToolStreamStatus) and buffer.tool_call_responded_string:
+                buffer.delta_output_string += buffer.tool_call_responded_string
+
+            if buffer.output is None:
+                raise Exception("last output should not be None")
+            aux_info = buffer.output.aux_info
+            trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str, is_streaming)
+            output_items.append(OutputDelta(
+                trunc_string,
+                await self._generate_log_probs(buffer, buffer.output),
+                aux_info.input_len,
+                aux_info.output_len,
+                aux_info.reuse_len))
+        return await self._generate_stream_response(output_items)
 
 register_renderer("qwen_tool", QwenToolRenderer)
