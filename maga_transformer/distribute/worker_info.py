@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import json
 import socket
 import torch
 import logging
@@ -82,12 +83,26 @@ class ParallelInfo(object):
 
         if torch.cuda.is_available():
             torch.cuda.set_device(info.local_rank)
+
         if os.environ.get("ACCL_SELECT_PATH") == "1":
             select_port = str(info.local_rank % 2)
             os.environ["ACCL_SELECT_PORT"] = select_port
             logging.info(f"local rank {info.local_rank} set accl select port to {select_port} ")
 
-        return info
+        if os.environ.get("ACCL_USE_NICS") == None and os.environ.get("ACCL_NIC_GPU_AFFINITY") != None:
+            content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
+            try:
+                gpu_nic_affinity = json.loads(content)  # 验证内容是否为合法 JSON
+                if str(info.local_rank) in gpu_nic_affinity:
+                    affinity_nic = gpu_nic_affinity[str(info.local_rank)]
+                    os.environ["ACCL_USE_NICS"] = affinity_nic
+                    logging.info(f"local rank {info.local_rank} use cuda device {info.local_rank} set ACCL_USE_NICS to {affinity_nic}")
+                else:
+                    logging.info(f"local rank {info.local_rank} use cuda device {info.local_rank} get affinity nic failed, content is {content}")
+            except json.JSONDecodeError:
+                logging.info(f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}")
+
+        return info        
 
     # used for ut
     def reload(self):
