@@ -297,8 +297,8 @@ class QwenToolRenderer(CustomChatRenderer):
         output: GenerateOutput,
     ) -> Optional[OutputDelta]:
         # 如果是qwen2.5之前的qwen, 可能会提前stream出<tool_call这样的内容
-        status.tool_call_responded_string += status.delta_output_string
-        if "<tool_call>" in status.tool_call_responded_string:
+        if "<tool_call>" in status.tool_call_responded_string or status.delta_output_string == "<tool_call>":
+            status.tool_call_responded_string += status.delta_output_string
             status.delta_output_string = ""
             if "</tool_call>" not in status.tool_call_responded_string:
                 return await self._create_empty_delta(output.aux_info)
