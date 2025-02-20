@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import socket
 import torch
+import logging
 from typing import Any, Dict
 from dataclasses import dataclass
 
@@ -81,6 +82,10 @@ class ParallelInfo(object):
 
         if torch.cuda.is_available():
             torch.cuda.set_device(info.local_rank)
+        if os.environ.get("ACCL_SELECT_PATH") == "1":
+            select_port = str(info.local_rank % 2)
+            os.environ["ACCL_SELECT_PORT"] = select_port
+            logging.info(f"local rank {info.local_rank} set accl select port to {select_port} ")
 
         return info
 
