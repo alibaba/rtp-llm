@@ -407,7 +407,7 @@ class QwenToolRenderer(CustomChatRenderer):
         for buffer in buffer_list:
             # 解被截断的bad_case
             # "response":"<tool_call>\n{\"name\": \"get_average_month"
-            if isinstance(buffer, QwenToolStreamStatus) and buffer.tool_call_responded_string:
+            if isinstance(buffer, QwenToolStreamStatus) and buffer.tool_call_responded_string and "<tool_call>" in buffer.tool_call_responded_string:
                 buffer.delta_output_string += buffer.tool_call_responded_string
 
             if buffer.output is None:
