@@ -25,6 +25,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 from maga_transformer.utils.concurrency_controller import ConcurrencyException, get_global_controller
+from maga_transformer.utils.multimodal_util import maybe_hash_url
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -88,7 +89,7 @@ def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB, g
             resized_shape = generate_config.resized_shape
     for mm_input in input_py.mm_inputs:
         mm_input_pb = MultimodalInputPB()
-        mm_input_pb.multimodal_url = mm_input.url
+        mm_input_pb.multimodal_url = maybe_hash_url(mm_input.url)
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
         mm_preprocess_config_pb.width = mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]

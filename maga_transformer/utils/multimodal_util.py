@@ -8,6 +8,8 @@ from io import BytesIO
 from typing import Any, Callable, Optional
 from PIL import Image
 from dataclasses import dataclass, field
+import hashlib
+import base64
 
 from maga_transformer.utils.lru_dict import LruDict
 from maga_transformer.utils.oss_util import get_bytes_io_from_oss_path
@@ -19,6 +21,8 @@ else:
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
     }
+
+BASE64_PREFIX = 'data:image/jpeg;base64,'
 
 class MMUrlType(IntEnum):
     DEFAULT = 0
@@ -68,6 +72,9 @@ def get_bytes_io_from_url(url: str):
                     raise Exception(f'download failed, error code: {response.status_code}')
             elif url.startswith("oss"):
                 res = get_bytes_io_from_oss_path(url)
+            elif url.startswith(BASE64_PREFIX):
+                url = maybe_unhash_url(url)[len(BASE64_PREFIX):]
+                res = BytesIO(base64.b64decode(url))
             else:
                 # treat url as local path
                 with open(url, "rb") as fh:
@@ -97,11 +104,29 @@ class MMDataCache(object):
             else:
                 return None
 
-    def insert_cache(self, url: str, features: torch.Tensor):
+    def insert_cache(self, url: str, data):
         if self.mm_data_cache == None:
             return
         with self.cache_lock:
-            self.mm_data_cache[url] = features
+            self.mm_data_cache[url] = data
+
+hashed_url_cache_ = MMDataCache(100)
+
+def maybe_hash_url(url: str):
+    if url.startswith(BASE64_PREFIX):
+        hashed_url = url[len(BASE64_PREFIX):]
+        hashed_url = BASE64_PREFIX + hashlib.sha512(hashed_url.encode('utf-8')).hexdigest()
+        hashed_url_cache_.insert_cache(hashed_url, url)
+        return hashed_url
+    return url
+
+def maybe_unhash_url(hashed_url: str):
+    if hashed_url.startswith(BASE64_PREFIX):
+        url = hashed_url_cache_.check_cache(hashed_url)
+        if url is None:
+            return hashed_url
+        return url
+    return hashed_url
 
 vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '0')))
 url_data_cache_ = MMDataCache(100)
