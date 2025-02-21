@@ -285,6 +285,7 @@ class GptInitModelParameters:
         self.ep_rank = parallel_info.ep_rank
         self.dp_size = parallel_info.dp_size
         self.dp_rank = parallel_info.dp_rank
+        self.local_rank = parallel_info.local_rank
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos

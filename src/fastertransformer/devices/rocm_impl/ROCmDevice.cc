@@ -35,7 +35,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
         nccl_param_.rank_       = rank;
         nccl_param_.world_size_ = world_size;
-        auto       tcpStore     = createTcpStore(params.master_ip, params.master_port, world_size, rank);
+        auto       tcpStore     = createTcpStore(params.master_ip, params.tp_master_port, world_size, rank);
         const auto nccl_id      = &(nccl_param_.nccl_uid_);
 
         const std::string tp_group_name = "RTP_LLM_TP_GROUP_";

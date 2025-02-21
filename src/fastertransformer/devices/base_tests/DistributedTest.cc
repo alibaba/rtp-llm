@@ -22,7 +22,7 @@ public:
         params.tp_rank = rank;
         params.tp_size = world_size;
         params.master_ip = "127.0.0.1";
-        params.master_port = port;
+        params.tp_master_port = port;
         auto device = device_creator(params);
 
 #define copy_tensor_to_buffer(t, buf) {        \

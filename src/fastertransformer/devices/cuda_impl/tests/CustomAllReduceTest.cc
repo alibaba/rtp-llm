@@ -81,7 +81,7 @@ DeviceBase* initTestDevices(const size_t rank, const size_t world_size, const si
     params.tp_rank     = rank;
     params.tp_size     = world_size;
     params.master_ip   = "127.0.0.1";
-    params.master_port = port;
+    params.tp_master_port = port;
     return device_creator(params);
 }
 
