@@ -50,7 +50,7 @@ private:
     absl::Status initSystemPrompt();
 
 private:
-    std::thread                    loop_thread_;
+    autil::ThreadPtr               loop_thread_;
     std::atomic<bool>              running_{false};
     std::unique_ptr<Executor>      executor_;
     std::unique_ptr<SchedulerBase> scheduler_;

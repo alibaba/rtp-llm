@@ -156,19 +156,15 @@ absl::Status NormalEngine::startLoop() {
     FT_LOG_INFO("init system prompt done");
     FT_LOG_INFO("start normal engine loop");
     running_ = true;
-    // add thread name
-    loop_thread_ = std::thread(&NormalEngine::loop, this);
+    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
 }
-
 
 absl::Status NormalEngine::stop() {
     FT_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    if (loop_thread_.joinable()) {
-        loop_thread_.join();
-    }
+    loop_thread_->join();
     return absl::OkStatus();
 }
 
