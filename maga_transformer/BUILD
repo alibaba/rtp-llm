@@ -87,6 +87,7 @@ requirement([
     "av",
     "pyrsmi",
     "amdsmi",
+    "yaml",
 ] + tensorrt)
 
 
@@ -417,6 +418,7 @@ whl_reqs = [
     "librosa",
     "matplotlib",
     "av",
+    "yaml",
 ] + whl_deps() + platform_deps() + xft_dep
 
 # target for wheel
