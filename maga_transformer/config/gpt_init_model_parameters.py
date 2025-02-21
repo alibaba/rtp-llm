@@ -141,7 +141,9 @@ class GptInitModelParameters:
         self.tie_word_embeddings = False
         self.need_ffn_act_scale = False
         self.nccl_ip = g_master_info.ip
-        self.nccl_port = g_master_info.gpt_nccl_port
+        self.tp_nccl_port = g_master_info.tp_nccl_port
+        self.dp_nccl_port = g_master_info.dp_nccl_port
+        self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
@@ -200,8 +202,9 @@ class GptInitModelParameters:
             self.layer_inter_size = sparse_config.layer_inter_size
             self.is_sparse_head = True
 
-    def update_inter_padding_size(self, tp_size: int, ep_size: int):
-        tp_size = int(tp_size / ep_size)
+    def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
+        # new tp_size just only for moe
+        tp_size = tp_size * dp_size // ep_size
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
         else:
@@ -276,12 +279,12 @@ class GptInitModelParameters:
                       ref_module: Optional[torch.nn.Module] = None,
                       ref_dict: Dict[str, torch.Tensor] = {},
                       parallel_info: ParallelInfo=g_parallel_info):
-
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
         self.ep_size = parallel_info.ep_size
         self.ep_rank = parallel_info.ep_rank
-        self.local_rank = parallel_info.local_rank
+        self.dp_size = parallel_info.dp_size
+        self.dp_rank = parallel_info.dp_rank
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
@@ -300,7 +303,7 @@ class GptInitModelParameters:
         logging.info(f'max_seq_len: {self.max_seq_len}')
 
         self.update_config_with_sparse_config(ckpt_path)
-        self.update_inter_padding_size(self.tp_size, self.ep_size)
+        self.update_inter_padding_size(self.tp_size, self.ep_size, self.dp_size)
         self.update_task_prompt_config()
         self.update_task_type_use_kvcache()
         self.update_weight_style(ckpt_path)
@@ -364,7 +367,7 @@ class GptInitModelParameters:
         if self.use_cache_store:
             self.cache_store_rdma_mode = bool(int(os.environ.get('CACHE_STORE_RDMA_MODE', 1)))
             logging.info(f'cache_store_rdma_mode: {self.cache_store_rdma_mode}')
-            
+
             self.load_cache_timeout_ms = int(os.environ.get('LOAD_CACHE_TIMEOUT_MS', 0))
             logging.info(f'load_cache_timeout_ms: {self.load_cache_timeout_ms}')
 

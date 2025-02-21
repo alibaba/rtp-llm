@@ -312,7 +312,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, dtype, attention_common_inputs);
     attention_common_inputs.position_ids = combo_position_ids;
 
-    return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype};
+    return {move(hidden), move(pre_decoder_residual), inputs.dp_token_nums, move(attention_common_inputs), dtype};
 }
 
 GptLayerOutputs GptModel::forwardGptLayer(
@@ -422,6 +422,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+                                            inputs.dp_token_nums ? (OptionalConstBufferRef)*inputs.dp_token_nums : nullopt,
                                             act_qscheme,
                                             std::move(ffn_output_buf)});
     if (lora_model_input) {
@@ -429,7 +430,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     }
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     hidden = ffn_output.hidden_states;
-    if (device_props_.tp_size > 1) {
+    if (device_props_.tp_size > 1 && !(device_props_.dp_size > 1 && layer.ffn_weights.moe_gating_weight)) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
         hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
     }
@@ -554,7 +555,20 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                              inputs.need_all_logits, inputs.lm_output_indexes);
 }
 
-void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
+void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
+    if (device->getDeviceProperties().dp_size > 1) {
+        inputs.dp_token_nums = device->allocateBuffer(
+                {ft::DataType::TYPE_UINT32,
+                         {device->getDeviceProperties().dp_size},
+                         ft::AllocationType::HOST});
+        if (device->getDeviceProperties().tp_rank == 0) {
+            *(inputs.dp_token_nums->dataWithOffset<uint32_t>(device->getDeviceProperties().dp_rank)) = inputs.combo_tokens->shape()[0];
+            device->allGather({{inputs.dp_token_nums}, ParallelMode::DP});
+        }
+        if (device->getDeviceProperties().tp_size <= 1) {
+            device->syncCommunication(false);
+        }
+    }
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
@@ -576,7 +590,6 @@ void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
-
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -687,6 +700,9 @@ void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         for (auto& mm_feature: inputs.multimodal_features.value()) {
             buffers.emplace_back(mm_feature);
         }
+    }
+    if (device->getDeviceProperties().dp_size > 1) {
+        buffers.emplace_back(inputs.dp_token_nums);
     }
     device->broadcast({buffers, 0});
     device->syncAndCheck();

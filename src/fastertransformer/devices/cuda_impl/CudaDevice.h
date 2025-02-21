@@ -118,7 +118,10 @@ private:
     void checkUseFlashinferSampleKernel();
     bool useFp8Fmha(const DevicePrepParams& params) const;
     void initMoeRunner(const DataType compute_type, const DataType weights_type);
+    void initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
+                       const std::string& tp_group_name, NcclParam& nccl_param);
     void checkUseGroupGemm();
+    NcclParam getNcclParam(ParallelMode mode);
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
     bool checkUseFlashinferSampleGreedy(const GreedyParams& params);
@@ -129,7 +132,6 @@ private:
 
 public:
     cudaStream_t getStream() {return stream_;}
-    NcclParam getNcclParam() {return nccl_param_;}
     torch::Device getTorchDevice() override { return torch::Device(torch::kCUDA);};
 
 public:
@@ -209,11 +211,14 @@ private:
     std::mutex cublas_wrapper_mutex_;
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
 
-    NcclParam nccl_param_;
+    NcclParam tp_nccl_param_;
+    NcclParam dp_nccl_param_;
+    NcclParam dp_tp_nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
+    std::unique_ptr<CustomAllReduceComm> dp_tp_custom_allreduce_comm_ = nullptr; // for custom dp tp allreduce use
 
 protected:
     bool use_trtv1_fmha             = false;

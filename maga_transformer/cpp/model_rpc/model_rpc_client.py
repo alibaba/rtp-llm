@@ -17,10 +17,13 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import MulitmodalInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputsPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
-from maga_transformer.distribute.worker_info import g_master_info
-from maga_transformer.distribute.worker_info import g_worker_info
+from maga_transformer.distribute.worker_info import g_master_info, WorkerInfo
+from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
+
+request_counter = AtomicCounter()
 
 MAX_GRPC_TIMEOUT_SECONDS = 60 * 3
 
@@ -153,8 +156,14 @@ class ModelRpcClient(object):
         # 创建到服务器的连接
         if not address:
             address = f'localhost:{g_worker_info.rpc_server_port}'
-        logging.info("client connect to rpc address: " + address)
-        self._address = address
+        self._addresses = []
+        if g_parallel_info.dp_size > 1:
+            for member in get_gang_info().members:
+                if member.local_rank % g_parallel_info.tp_size == 0:
+                    self._addresses.append(f'{member.ip}:{member.rpc_server_port}')
+        else:
+            self._addresses = [address]
+        logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
 
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
@@ -169,7 +178,7 @@ class ModelRpcClient(object):
             grpc_timeout_seconds = request_timeout_ms / 1000
 
         try:
-            async with grpc.aio.insecure_channel(self._address) as channel:
+            async with grpc.aio.insecure_channel(self._addresses[request_counter.get() % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(input_pb, timeout=grpc_timeout_seconds)
                 # 调用服务器方法并接收流式响应

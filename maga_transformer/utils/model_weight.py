@@ -131,25 +131,21 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tens
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
-def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, **kwargs: Any) -> torch.Tensor:
+def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, **kwargs: Any) -> torch.Tensor:
     if ep > 1:
-        # tp = 1
-        # tp_rank = 0
-        tp = int(tp / ep)
-        tp_rank = int(tp_rank / ep)
+        tp_rank = (dp_rank * tp + tp_rank) // ep
+        tp = tp * dp // ep
     t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
     if ep > 1:
-        t1 = torch.split(t1, t1.shape[0]// ep, dim=0)[ep_rank]
+        t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
     return t1
 
 
-def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int,  **kwargs: Any) -> torch.Tensor:
+def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, **kwargs: Any) -> torch.Tensor:
     # [expert_num, 2*n, k]
     if ep > 1:
-        # tp = 1
-        # tp_rank = 0
-        tp = int(tp / ep)
-        tp_rank = int(tp_rank / ep)
+        tp_rank = (dp_rank * tp + tp_rank) // ep
+        tp = tp * dp // ep
     t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
     t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
     t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
@@ -1025,6 +1021,8 @@ class ModelDeployWeightInfo:
         self.tp_rank = tp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
+        self.dp_size = config.dp_size
+        self.dp_rank = config.dp_rank
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num

@@ -289,11 +289,15 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(is_causal, is_causal_)                                 \
     DEF_PROPERTY(use_medusa, use_medusa_)                               \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                     \
-    DEF_PROPERTY(nccl_port, nccl_port_)                                 \
+    DEF_PROPERTY(tp_nccl_port, tp_nccl_port_)                           \
+    DEF_PROPERTY(dp_nccl_port, dp_nccl_port_)                           \
+    DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                     \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                       \
     DEF_PROPERTY(http_port, http_port_)                                 \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
+    DEF_PROPERTY(dp_size, dp_size_)                                     \
+    DEF_PROPERTY(dp_rank, dp_rank_)                                     \
     DEF_PROPERTY(cache_store_listen_port, cache_store_listen_port_)     \
     DEF_PROPERTY(cache_store_connect_port, cache_store_connect_port_)   \
     DEF_PROPERTY(cache_store_rdma_connect_port, cache_store_rdma_connect_port_)   \

@@ -15,7 +15,7 @@ public:
 
     static GptModelDescription genModelDescription(const ft::GptInitParameter& params) {
         ft::RopeConfig rope_config = params.getRopeConfig();
-
+        int moe_tp_size = params.tp_size_ * params.dp_size_ / params.ep_size_;
         KvCacheDataType      kv_cache_dtype = loadKvCacheDataTypeFromDataType(params.kv_cache_data_type_);
         ft::AttentionConfigs attention_config{
             params.head_num_ > 1 ? (size_t)params.head_num_ / params.tp_size_ : 1,
@@ -43,10 +43,14 @@ public:
                 (size_t)params.expert_num_,
                 (size_t)params.moe_k_,
                 params.moe_normalize_expert_scale_,
-                params.moe_inter_padding_size_ / (params.tp_size_ / params.ep_size_),
+                params.moe_inter_padding_size_ / moe_tp_size,
                 params.has_moe_norm_,
-                (int)params.ep_size_,
-                (int)params.ep_rank_
+                (size_t)params.ep_rank_,
+                (size_t)params.ep_size_,
+                (size_t)params.tp_rank_,
+                (size_t)params.tp_size_,
+                (size_t)params.dp_rank_,
+                (size_t)params.dp_size_,
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{
             ft::getActivationType(params.activation_type_str_),

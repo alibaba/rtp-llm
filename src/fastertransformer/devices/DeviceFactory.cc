@@ -54,16 +54,22 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
         FT_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
     }
-    auto global_params = getDefaultGlobalDeviceParams();
-    auto& device_params       = global_params.device_params[0].second;
-    device_params.tp_size     = params.tp_size_;
-    device_params.tp_rank     = params.tp_rank_;
-    device_params.device_id   = params.local_rank_;
-    device_params.master_ip   = params.nccl_ip_;
-    device_params.master_port = params.nccl_port_;
-    device_params.tokens_per_block = params.seq_size_per_block_;
-    size_t max_batch_size =
-        params.max_context_batch_size_ + params.max_generate_batch_size_ + std::max((long)0, params.gen_num_per_circle_) * 32;
+    auto  global_params             = getDefaultGlobalDeviceParams();
+    auto& device_params             = global_params.device_params[0].second;
+    device_params.tp_size           = params.tp_size_;
+    device_params.dp_size           = params.dp_size_;
+    device_params.ep_size           = params.ep_size_;
+    device_params.ep_rank           = params.ep_rank_;
+    device_params.tp_rank           = params.tp_rank_;
+    device_params.dp_rank           = params.dp_rank_;
+    device_params.device_id         = params.local_rank_;
+    device_params.master_ip         = params.nccl_ip_;
+    device_params.tp_master_port    = params.tp_nccl_port_;
+    device_params.dp_master_port    = params.dp_nccl_port_;
+    device_params.dp_tp_master_port = params.dp_tp_nccl_port_;
+    device_params.tokens_per_block  = params.seq_size_per_block_;
+    size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
+                            + std::max((long)0, params.gen_num_per_circle_) * 32;
 
     device_params.max_batch_size =
         std::max((size_t)autil::EnvUtil::getEnv("MAX_BATCH_SIZE", 0L), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
@@ -164,4 +170,3 @@ void registerDeviceOps(py::module& m) {
 }
 
 } // namespace fastertransformer
-

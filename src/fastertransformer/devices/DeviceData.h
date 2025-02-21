@@ -24,11 +24,16 @@ struct DeviceInitParams {
     size_t tp_size         = 1;
     size_t ep_rank         = 0;
     size_t ep_size         = 1;
+    size_t dp_rank         = 0;
+    size_t dp_size         = 1;
+
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
     // they are only needed when tp_size > 1.
-    std::string master_ip  = "";
-    int64_t master_port    = 0;
+    std::string master_ip         = "";
+    int64_t     tp_master_port    = 0;
+    int64_t     dp_master_port    = 0;
+    int64_t     dp_tp_master_port = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.
@@ -46,6 +51,9 @@ struct DeviceProperties {
     /* -- distributed properties -- */
     size_t tp_rank = 0;
     size_t tp_size = 1;
+
+    size_t dp_rank = 0;
+    size_t dp_size = 1;
 
     /* -- device implementation detail -- */
     // These two options are prepared for intel cpu device.

@@ -43,29 +43,20 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
 
     if (params.tp_size > 1) {
-        const auto rank = params.tp_rank;
-        const auto world_size = params.tp_size;
-
-        nccl_param_.rank_ = rank;
-        nccl_param_.world_size_ = world_size;
-        auto tcpStore = createTcpStore(
-            params.master_ip, params.master_port, world_size, rank);
-        const auto nccl_id = &(nccl_param_.nccl_uid_);
-
-        const std::string tp_group_name = "RTP_LLM_TP_GROUP_";
-        if (rank == 0) {
-            FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, tp_group_name.c_str());
-            NCCLCHECK(ncclGetUniqueId(nccl_id));
-            setUniqueId(nccl_id, tp_group_name, tcpStore);
-        } else {
-            FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, tp_group_name.c_str());
-            getUniqueId(nccl_id, tp_group_name, tcpStore);
+        auto master_ip = params.master_ip;
+        if (params.dp_size > 1) {
+            master_ip = "127.0.0.1";
         }
-
-        FT_LOG_INFO("Initialize NCCL communicators rank %d of %d.", rank, world_size);
-        NCCLCHECK(ncclGroupStart());
-        NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
-        NCCLCHECK(ncclGroupEnd());
+        initNcclParam(params.tp_rank, params.tp_size, master_ip,
+                      params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
+    }
+    if (params.dp_size > 1 && params.tp_rank == 0) {
+        initNcclParam(params.dp_rank, params.dp_size, params.master_ip,
+                      params.dp_master_port, "RTP_LLM_DP_GROUP_", dp_nccl_param_);
+    }
+    if (params.dp_size > 1) {
+        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank, params.dp_size * params.tp_size, params.master_ip,
+                      params.dp_tp_master_port, "RTP_LLM_DP_TP_GROUP_", dp_tp_nccl_param_);
     }
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
@@ -85,10 +76,17 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 
     // Initialize custom all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
-    if (nccl_param_.world_size_ > 1) {
-        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
-        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
-        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
+    if (tp_nccl_param_.world_size_ > 1) {
+        auto& nccl_param = tp_nccl_param_;
+        FT_LOG_INFO("Initialize tp custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
+        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
+        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+    }
+    if (dp_tp_nccl_param_.world_size_ > 1) {
+        auto& nccl_param = dp_tp_nccl_param_;
+        FT_LOG_INFO("Initialize dp_tp custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
+        std::vector<size_t> dp_tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
+        dp_tp_custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, dp_tp_ranks, stream_);
     }
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
@@ -147,8 +145,14 @@ CudaDevice::~CudaDevice() {
     check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
-    if (nccl_param_.nccl_comm_) {
-        ncclCommDestroy(nccl_param_.nccl_comm_);
+    if (tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(tp_nccl_param_.nccl_comm_);
+    }
+    if (dp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(dp_nccl_param_.nccl_comm_);
+    }
+    if (dp_tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
     }
     cache_store_.reset();
 }
@@ -161,6 +165,29 @@ void CudaDevice::init() {
         {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
 
+void CudaDevice::initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
+                               const string& group_name, NcclParam& nccl_param) {
+    nccl_param.rank_ = rank;
+    nccl_param.world_size_ = world_size;
+    auto tcpStore = createTcpStore(
+            ip, port, world_size, rank);
+    const auto nccl_id = &(nccl_param.nccl_uid_);
+
+    if (rank == 0) {
+        FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
+        NCCLCHECK(ncclGetUniqueId(nccl_id));
+        setUniqueId(nccl_id, group_name, tcpStore);
+    } else {
+        FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, group_name.c_str());
+        getUniqueId(nccl_id, group_name, tcpStore);
+    }
+
+    FT_LOG_INFO("Initialize NCCL communicators [%s] rank %d of %d.", group_name.c_str(), rank, world_size);
+    NCCLCHECK(ncclGroupStart());
+    NCCLCHECK(ncclCommInitRank(&nccl_param.nccl_comm_, world_size, *nccl_id, rank));
+    NCCLCHECK(ncclGroupEnd());
+}
+
 void CudaDevice::syncAndCheck() {
     syncCommunication();
     cudaDeviceSynchronize();
@@ -168,9 +195,17 @@ void CudaDevice::syncAndCheck() {
 }
 
 void CudaDevice::syncCommunication(bool timeout) {
-    if (nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize NCCL communicators rank %d of %d.", nccl_param_.rank_, nccl_param_.world_size_);
-        ftNcclStreamSynchronize(nccl_param_, stream_, timeout);
+    if (tp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG("Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(tp_nccl_param_, stream_, timeout);
+    }
+    if (dp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG("Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(dp_nccl_param_, stream_, timeout);
+    }
+    if (dp_tp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.", dp_tp_nccl_param_.rank_, dp_tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
 }
 
@@ -180,8 +215,10 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop = new DeviceProperties();
         prop->type = DeviceType::Cuda;
         prop->id = device_id_;
-        prop->tp_rank = nccl_param_.rank_;
-        prop->tp_size = nccl_param_.world_size_;
+        prop->tp_rank = init_params_.tp_rank;
+        prop->tp_size = init_params_.tp_size;
+        prop->dp_rank = init_params_.dp_rank;
+        prop->dp_size = init_params_.dp_size;
     }
     return *prop;
 }

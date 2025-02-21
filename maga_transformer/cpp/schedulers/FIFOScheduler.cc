@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/utils/Logger.h"
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -18,6 +19,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     enable_partial_fallback_(params.enable_partial_fallback_ && params.use_cache_store_ == false),
     enable_whole_fallback_(params.use_cache_store_ == false),
     enable_fast_gen_(params.enable_fast_gen_),
+    need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {}
 
@@ -226,11 +228,21 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
     }
 }
 
+bool FIFOScheduler::waitPredicate() {
+    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
     unique_lock<mutex> lock(lock_);
-    cond_.wait(lock, [this]{
-        return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
-    });
+    if (need_fill_fake_stream_) {
+        cond_.wait_for(lock, std::chrono::milliseconds(10), [this]{
+            return waitPredicate();
+        });
+    } else {
+        cond_.wait(lock, [this]{
+            return waitPredicate();
+        });
+    }
     evaluateRunningRemote();
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);

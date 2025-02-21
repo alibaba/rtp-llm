@@ -41,6 +41,7 @@ public:
     }
 
 private:
+    std::shared_ptr<GenerateStream> enqueueMinFakeQuery();
     WarmUpResult warmUp(const EngineInitParams& params);
     void         initLoadBalance();
     absl::Status trySaveStepError() const;

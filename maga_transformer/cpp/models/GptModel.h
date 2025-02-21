@@ -66,6 +66,7 @@ struct GptModelInputs {
     ft::BufferPtr                             request_id;               // int64, [context_batch_size]
     ft::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
     ft::BufferPtr                             cache_keys;               // [context_batch_size]
+    ft::BufferPtr                             dp_token_nums;
     size_t                                    block_size;
     size_t                                    scale_block_size;
     bool                                      pd_separation = false;
@@ -96,7 +97,7 @@ enum GptModelInputIndex : size_t{
     gptModelInputLength
 };
 
-void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device);
+void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device);
 
 struct GptModelOutputs {
     ft::BufferPtr logits;
@@ -119,6 +120,7 @@ struct GptLayerOutputs {
 struct GptLayerInputs {
     ft::BufferPtr hidden;
     ft::BufferPtr pre_decoder_residual;
+    ft::BufferPtr dp_token_nums;
     ft::AttentionCommonInputs attention_common_inputs;
     const ft::DataType dtype;
 };

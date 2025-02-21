@@ -36,6 +36,14 @@ enum class OpErrorType {
     ERROR_UNKNOWN,
 };
 
+enum class ParallelMode {
+    TP = 0,
+    DP = 1,
+    DP_AND_TP = 2
+    // DATA_PARALLEL = 2,
+    // PIPELINE_PARALLEL = 3
+};
+
 class OpStatus {
 public:
     OpStatus(OpErrorType, const std::string& message = "")
@@ -467,11 +475,15 @@ struct MoeConfigs {
     size_t expert_num;
     size_t top_k;
 
-    bool normalize_expert_scale        = false;
-    int64_t moe_inter_padding_size     = 0;
-    bool has_moe_norm                  = false;
-    int ep_size                       = 1;
-    int ep_rank                       = 0;
+    bool    normalize_expert_scale = false;
+    int64_t moe_inter_padding_size = 0;
+    bool    has_moe_norm           = false;
+    size_t  ep_rank                = 0;
+    size_t  ep_size                = 1;
+    size_t  tp_rank                = 0;
+    size_t  tp_size                = 1;
+    size_t  dp_rank                = 0;
+    size_t  dp_size                = 1;
 };
 
 struct FfnConfigs {
@@ -488,15 +500,18 @@ struct FfnLayerParams {
                    const FfnConfigs&            configs,
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
+                   const OptionalConstBufferRef dp_token_nums = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
                    BufferPtr                    output = nullptr):
-        input(input), configs(configs), weights(weights), residual(residual), qscheme(qscheme), output(std::move(output)){}
+        input(input), configs(configs), weights(weights), residual(residual),
+        dp_token_nums(dp_token_nums), qscheme(qscheme), output(std::move(output)){}
 
     const Buffer& input;
     const FfnConfigs&            configs;
     const FfnLayerWeights&       weights;
 
     const OptionalConstBufferRef residual; // for intel xft
+    const OptionalConstBufferRef dp_token_nums;
 
     const QScheme qscheme;
     BufferPtr                    output;
@@ -544,6 +559,7 @@ struct BeamSearchParams {
 struct BroadcastParams {
     const std::vector<BufferPtr>& buffers;
     const int64_t root;
+    ParallelMode mode = ParallelMode::TP;
 };
 
 enum class ReduceOp {
@@ -558,6 +574,7 @@ enum class ReduceOp {
 struct PrepareAllReduceParams {
     const BufferPtr buffer;
     const ReduceOp op;
+    ParallelMode mode = ParallelMode::TP;
 };
 
 struct PrepareAllReduceOutput {
@@ -567,14 +584,17 @@ struct PrepareAllReduceOutput {
 struct AllReduceParams {
     const BufferPtr buffer;
     const ReduceOp op;
+    ParallelMode mode = ParallelMode::TP;
 };
 
 struct AllReduceOutput {
     const BufferPtr buffer;
+    ParallelMode mode = ParallelMode::TP;
 };
 
 struct AllGatherParams {
     const std::vector<BufferPtr>& buffers;
+    ParallelMode mode = ParallelMode::TP;
 };
 
 // output = act(input) + bias

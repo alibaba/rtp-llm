@@ -45,6 +45,9 @@ def multi_rank_start():
     cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
     cuda_device_list = cuda_devices.split(',') if cuda_devices is not None else \
             [str(i) for i in range(torch.cuda.device_count())]
+    if g_parallel_info.dp_size > 1:
+        # tp must on one device when dp
+        assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
     for _, world_rank in enumerate(range(g_parallel_info.world_rank,
                                             g_parallel_info.world_rank + local_world_size)):
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(cuda_device_list)

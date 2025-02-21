@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
@@ -244,23 +245,42 @@ inline ncclDataType_t getNcclDataType(DataType type) {
     }
 }
 
+NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
+    switch (mode) {
+        case ParallelMode::TP:
+            return tp_nccl_param_;
+        case ParallelMode::DP:
+            return dp_nccl_param_;
+        case ParallelMode::DP_AND_TP:
+            return dp_tp_nccl_param_;
+        default:
+            FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
+            // avoid compile error
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
 void CudaDevice::broadcast(const BroadcastParams& params) {
-    if (nccl_param_.world_size_ < 2) {
+    FT_CHECK_WITH_INFO(params.mode == ParallelMode::TP, "broadcast not support mode [%d]", params.mode);
+    if (tp_nccl_param_.world_size_ < 2) {
         return;
     }
+
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.buffers.size(); ++i) {
         auto& buffer = params.buffers[i];
         auto root = params.root;
         auto nccl_data_type = getNcclDataType(buffer->type());
         NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root,
-                            nccl_param_.nccl_comm_, stream_));
+                            tp_nccl_param_.nccl_comm_, stream_));
     }
     NCCLCHECK(ncclGroupEnd());
 }
 
+
 AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
-    if (nccl_param_.world_size_ < 2) {
+    NcclParam nccl_param = getNcclParam(params.mode);
+    if (nccl_param.world_size_ < 2) {
         return AllReduceOutput{params.buffer};
     }
     auto& buffer = params.buffer;
@@ -268,8 +288,9 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
     // if custom allreduce fails, fallback to the default ncclAllReduce
-    if (custom_allreduce_comm_ && nccl_op == ncclSum
-        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
+    // dp tmp not support custom_allreduce_comm
+    if (params.mode == ParallelMode::TP && custom_allreduce_comm_ && nccl_op == ncclSum
+        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_)) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
         custom_allreduce_comm_->allReduce(
@@ -281,18 +302,19 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
                           "Invalid reduce op: %d", int(params.op));
 
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
-                            nccl_op, nccl_param_.nccl_comm_, stream_));
+                            nccl_op, nccl_param.nccl_comm_, stream_));
     return AllReduceOutput{params.buffer};
 }
 
 PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams& params) {
-    if (nccl_param_.world_size_ < 2) {
+    auto& nccl_param = tp_nccl_param_;
+    if (nccl_param.world_size_ < 2) {
         return PrepareAllReduceOutput{params.buffer};
     }
 
     auto& buffer = params.buffer;
     if (custom_allreduce_comm_ && static_cast<ncclRedOp_t>(params.op) == ncclSum &&
-        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param_.world_size_)) {
+        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_)) {
         void* custom_ar_buf_ptr = custom_allreduce_comm_->peerCommBufferPtr();
         return PrepareAllReduceOutput{
             BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
@@ -305,23 +327,31 @@ PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams
 }
 
 void CudaDevice::allGather(const AllGatherParams& params) {
-    if (nccl_param_.world_size_ < 2) {
-        return;
+    if (params.mode == ParallelMode::DP_AND_TP && dp_nccl_param_.world_size_ != dp_tp_nccl_param_.world_size_) {
+        // 两种实现，一种是先dp gather 然后再tp broast
+        // 还有一种是直接all gather, 然后再transpose，再取第0个
+        // 目前是走第一种
+        allGather({params.buffers, ParallelMode::DP});
+        broadcast({params.buffers, 0, ParallelMode::TP});
+    } else {
+        auto nccl_param = getNcclParam(params.mode);
+        if (nccl_param.world_size_ < 2) {
+            return;
+        }
+        NCCLCHECK(ncclGroupStart());
+        for (auto i = 0; i < params.buffers.size(); ++i) {
+            auto& buffer = params.buffers[i];
+            const auto nccl_data_type = getNcclDataType(buffer->type());
+            const auto data_num = buffer->size() / nccl_param.world_size_;
+            RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == buffer->size(),
+                                  "Buffer size %ld must be divisible by world size %d",
+                                  buffer->size(), nccl_param.world_size_);
+            const auto data_size = data_num * buffer->typeSize();
+            NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param.rank_ * data_size, buffer->data(),
+                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream_));
+        }
+        NCCLCHECK(ncclGroupEnd());
     }
-
-    NCCLCHECK(ncclGroupStart());
-    for (auto i = 0; i < params.buffers.size(); ++i) {
-        auto& buffer = params.buffers[i];
-        const auto nccl_data_type = getNcclDataType(buffer->type());
-        const auto data_num = buffer->size() / nccl_param_.world_size_;
-        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param_.world_size_ == buffer->size(),
-            "Buffer size %ld must be divisible by world size %d",
-            buffer->size(), nccl_param_.world_size_);
-        const auto data_size = data_num * buffer->typeSize();
-        NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param_.rank_ * data_size, buffer->data(),
-                                data_num, nccl_data_type, nccl_param_.nccl_comm_, stream_));
-    }
-    NCCLCHECK(ncclGroupEnd());
 }
 
 } // namespace fastertransformer

@@ -15,7 +15,7 @@ from datetime import timedelta
 import torch.distributed as dist
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info, g_master_info, update_master_info, DEFAULT_START_PORT
-from maga_transformer.distribute.gang_info import get_gang_info, GangInfo, WorkerInfo
+from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 
 # for ut
 from maga_transformer.distribute.gang_test_util import create_store, store_based_barrier
@@ -38,7 +38,7 @@ class GangServer:
     def __init__(self):
         self._initialized: bool = False
         self._gang_status: Dict[str, str] = {}
-        self._gang_info = None
+        self._gang_info: GangInfo = None
         self._request_threadpool = ThreadPoolExecutor(g_parallel_info.world_size)
 
     def _start_server(self):
@@ -191,7 +191,7 @@ class GangServer:
         update_master_info(
             self._gang_info.master.ip,
             self._gang_info.master.server_port)
-        master_url = f"tcp://{g_master_info.ip}:{g_master_info.th_nccl_port}"
+        master_url = f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
         logging.info(f'gang worker {g_parallel_info} exchange done')
         # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group
 

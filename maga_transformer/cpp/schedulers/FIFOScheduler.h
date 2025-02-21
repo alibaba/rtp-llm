@@ -41,6 +41,7 @@ private:
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams, const std::list<GenerateStreamPtr>& running_streams);
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
+    bool waitPredicate();
 
 private:
     std::list<GenerateStreamPtr>        waiting_streams_;
@@ -54,12 +55,12 @@ private:
     bool                                enable_partial_fallback_ = false;
     bool                                enable_whole_fallback_ = true;
     bool                                enable_fast_gen_    = false;
+    const bool                          need_fill_fake_stream_ = false;
     int                                 fast_gen_max_context_len_    = 0;
     int                                 token_capacity_     = 0;
     std::atomic<bool>                   stop_               = false;
     std::mutex                          lock_;
     std::condition_variable             cond_;
-
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
     // TODO @wangyin support different beams run togather
 };

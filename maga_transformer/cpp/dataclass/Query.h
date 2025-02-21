@@ -82,7 +82,7 @@ public:
     ft::BufferPtr                   input_ids;
     int                             lora_id                 = -1;
     bool                            need_release_resource   = true;
-
+    bool                            fake_query              = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;

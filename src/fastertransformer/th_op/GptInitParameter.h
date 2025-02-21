@@ -173,13 +173,18 @@ public:
     bool use_expert_attention_ = false; // true for CogVLM2, false for other models
 
     std::string nccl_ip_        = "";
-    int64_t     nccl_port_      = 0;
+    int64_t     tp_nccl_port_   = 0;
+    int64_t     dp_nccl_port_   = 0;
+    int64_t     dp_tp_nccl_port_= 0;
     int64_t     http_port_      = 0;
     int64_t     model_rpc_port_ = 0;
     int64_t     tp_size_        = 1;
     int64_t     tp_rank_        = 0;
     int64_t     ep_size_        = 1;
     int64_t     ep_rank_        = 0;
+    int64_t     dp_size_        = 1;
+    int64_t     dp_rank_        = 0;
+
 
     // pd speration
     bool        pd_separation_                      = false;
