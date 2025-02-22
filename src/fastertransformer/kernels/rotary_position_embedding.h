@@ -247,10 +247,10 @@ struct assign {
             y        = result.t[1];
             z        = result.t[2];
             w        = result.t[3];
-            a        = result.t[5];
-            b        = result.t[6];
-            c        = result.t[7];
-            d        = result.t[8];
+            a        = result.t[4];
+            b        = result.t[5];
+            c        = result.t[6];
+            d        = result.t[7];
         }
     };
 };
@@ -747,7 +747,7 @@ __device__ inline void context_rope(RopeConfig rope_config,
     if (position_id > 0) {
         seqidx = position_id;
     }
-    
+
     apply_rope<scalar_t, vector_t, ROPE_STYLE>(
             rope_config, q, smem, tidx, seqidx, seq_len);
 
