@@ -51,7 +51,9 @@ public:
                 (size_t)params.tp_size_,
                 (size_t)params.dp_rank_,
                 (size_t)params.dp_size_,
-                (int)params.scoring_func_
+                (int)params.scoring_func_,
+                (int)params.moe_topk_group_,
+                (int)params.moe_n_group_
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{
             ft::getActivationType(params.activation_type_str_),

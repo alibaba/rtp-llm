@@ -332,6 +332,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(nope_head_dim, nope_head_dim_)                         \
     DEF_PROPERTY(rope_head_dim, rope_head_dim_)                         \
     DEF_PROPERTY(v_head_dim, v_head_dim_)                               \
+    DEF_PROPERTY(moe_n_group, moe_n_group_)                             \
+    DEF_PROPERTY(moe_topk_group, moe_topk_group_)                       \
     DEF_PROPERTY(softmax_extra_scale, softmax_extra_scale_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")

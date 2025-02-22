@@ -65,6 +65,10 @@ public:
     int64_t rope_head_dim_ = 0;
     int64_t v_head_dim_    = 0;
 
+    // deepseek moe extra params
+    int64_t moe_n_group_          = 1;
+    int64_t moe_topk_group_       = 1;
+
     // in sparse, those params might vary among layers
     bool                 is_sparse_head_           = false;
     std::vector<int64_t> layer_head_num_           = {};

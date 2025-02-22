@@ -63,8 +63,8 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
 
     if (params.weights.e_score_correction_bias) {
         const int n_routed_experts = num_expert;
-        constexpr int n_group = 8;
-        constexpr int topk_group = 4;
+        const int n_group = moe_conf.n_group;
+        const int topk_group = moe_conf.topk_group;
 
         torch::Tensor gate_tensor = Buffer2torchTensor(gate, false);
         torch::Tensor e_score_correction_bias_tensor = Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);

@@ -244,6 +244,8 @@ class DeepSeekV2(BaseModel):
             config.moe_k = config_json['num_experts_per_tok']
             config.expert_num = config_json['n_routed_experts']
             config.moe_inter_padding_size=config_json['moe_intermediate_size']
+            config.moe_n_group = config_json.get('n_group', 1)
+            config.moe_topk_group = config_json.get('topk_group', 1)
 
             n_shared_experts = config_json['n_shared_experts']
             config.inter_size = n_shared_experts * config.moe_inter_padding_size
