@@ -59,7 +59,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     if (nccl_param_.world_size_ > 1) {
         FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
         std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
-        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
+        // custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();

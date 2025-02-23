@@ -99,7 +99,7 @@ def pipeline_main(model_args, barrier):
 
 
 def pipeline_proc(model_args, barrier):
-    pipeline_main(model_args, barrier)
+    pipeline, tokenizer = pipeline_main(model_args, barrier)
     time.sleep(100000)  # forever
 
 

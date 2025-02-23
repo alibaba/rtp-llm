@@ -64,6 +64,19 @@ test_input_batch_7b = [
     [16, 4096],
 ]
 
+test_input_qwen72B = [
+    [1, 16], 
+    [1, 128],
+    [1, 512],
+    [1, 1024],     
+    [4, 16],
+    [4, 128],
+    [4, 512],
+    [8, 16],
+    [8, 128],
+    [1, 2048],
+]
+
 latency_test('qwen_1b8', '1.8', 'int8', 'Qwen/Qwen-1_8B', test_input_default + test_input_2048)
 latency_test('qwen_1b8', '1.8', 'fp16', 'Qwen/Qwen-1_8B', test_input_default + test_input_2048)
 throughput_test('qwen_1b8', '1.8', 'int8', 'Qwen/Qwen-1_8B')
@@ -81,7 +94,7 @@ throughput_test('llama', '7', 'fp16', 'OpenBuddy/openbuddy-openllama-7b-v12-bf16
 
 latency_test('qwen_2', '7', 'int4', 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4', test_input_default)
 latency_test('qwen_2', '7', 'int4', 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4', test_input_default + test_input_2048 + test_input_long_seq_13b_1 + test_input_long_seq_13b_2, name_suffix='_80G', reserve_mem=4096)
-
+latency_test('qwen_2', '72', 'fp16', 'Qwen/Qwen2-72B-Instruct', test_input_qwen72B)
 
 test_suite(
     name = "all_perf_test",
