@@ -51,51 +51,9 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
                             ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE
                             : tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
 
-    if (moe_conf.scoring_func == 1) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            DataType::TYPE_FP32, invokeSigmoid,
-            gate->data(), gate->size(), 1.0f, stream_
-        );
-    }
-
     auto gate_with_bias = gate;
-    at::Tensor gate_with_bias_tensor;
-
-    if (params.weights.e_score_correction_bias) {
-        const int n_routed_experts = num_expert;
-        const int n_group = moe_conf.n_group;
-        const int topk_group = moe_conf.topk_group;
-
-        torch::Tensor gate_tensor = Buffer2torchTensor(gate, false);
-        torch::Tensor e_score_correction_bias_tensor = Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
-        auto scores_for_choice = gate_tensor.add(e_score_correction_bias_tensor);
-        auto reshaped_scores = scores_for_choice.view({(int)token_num, n_group, -1});
-        auto topk_result = reshaped_scores.topk(2, /*dim=*/-1);
-        auto group_scores = std::get<0>(topk_result).sum(-1);
-        auto group_topk_result = group_scores.topk(
-            /*k=*/topk_group,
-            /*dim=*/-1,
-            /*largest=*/true,
-            /*sorted=*/false
-        );
-        auto group_idx = std::get<1>(group_topk_result);
-        auto group_mask = torch::zeros_like(group_scores);
-        group_mask.scatter_(
-            /*dim=*/1,
-            /*index=*/group_idx,
-            /*src=*/1.0f
-        );
-        int64_t experts_per_group = n_routed_experts / n_group;
-        auto score_mask = group_mask.unsqueeze(-1)
-            .expand({(int)token_num, n_group, experts_per_group})
-            .reshape({(int)token_num, -1});
-        gate_with_bias_tensor = scores_for_choice.masked_fill(
-            torch::logical_not(score_mask.to(torch::kBool)),
-            0.0
-        );
-        gate_with_bias = torchTensor2Buffer(gate_with_bias_tensor);
-        printBufferData(*gate_with_bias, "gate_with_bias");
-    }
+    at::Tensor gate_with_bias_tensor; // hold the tensor to prevent it from being released
+    prepareMoEGate(params, gate, gate_with_bias_tensor, gate_with_bias);
 
     printBufferData(*gate, "MOE gate");
 
@@ -143,6 +101,50 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     printBufferData(*output, "moe_ffn_out");
 
     return FfnLayerOutput({move(output)});
+}
+
+void CudaDevice::prepareMoEGate(const FfnLayerParams& params,
+                                BufferPtr             gate,
+                                torch::Tensor&        gate_with_bias_tensor,
+                                BufferPtr&            gate_with_bias) {
+    auto const& moe_conf   = params.configs.moe_configs.value();
+    const auto& hidden     = params.input;
+    const auto  token_num  = hidden.shape()[0];
+    const auto  num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
+
+    if (moe_conf.scoring_func == 1) {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(DataType::TYPE_FP32, invokeSigmoid, gate->data(), gate->size(), 1.0f, stream_);
+    }
+    if (params.weights.e_score_correction_bias) {
+        const int n_routed_experts = num_expert;
+        const int n_group          = moe_conf.n_group;
+        const int topk_group       = moe_conf.topk_group;
+
+        torch::Tensor gate_tensor = Buffer2torchTensor(gate, false);
+        torch::Tensor e_score_correction_bias_tensor =
+            Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
+        auto scores_for_choice = gate_tensor.add(e_score_correction_bias_tensor);
+        auto reshaped_scores   = scores_for_choice.view({(int)token_num, n_group, -1});
+        auto topk_result       = reshaped_scores.topk(2, /*dim=*/-1);
+        auto group_scores      = std::get<0>(topk_result).sum(-1);
+        auto group_topk_result = group_scores.topk(
+            /*k=*/topk_group,
+            /*dim=*/-1,
+            /*largest=*/true,
+            /*sorted=*/false);
+        auto group_idx  = std::get<1>(group_topk_result);
+        auto group_mask = torch::zeros_like(group_scores);
+        group_mask.scatter_(
+            /*dim=*/1,
+            /*index=*/group_idx,
+            /*src=*/1.0f);
+        int64_t experts_per_group = n_routed_experts / n_group;
+        auto    score_mask =
+            group_mask.unsqueeze(-1).expand({(int)token_num, n_group, experts_per_group}).reshape({(int)token_num, -1});
+        gate_with_bias_tensor = scores_for_choice.masked_fill(torch::logical_not(score_mask.to(torch::kBool)), 0.0);
+        gate_with_bias        = torchTensor2Buffer(gate_with_bias_tensor);
+        printBufferData(*gate_with_bias, "gate_with_bias");
+    }
 }
 
 } // namespace fastertransformer
