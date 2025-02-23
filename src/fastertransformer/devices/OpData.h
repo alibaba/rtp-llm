@@ -504,9 +504,9 @@ struct FfnLayerParams {
                    const FfnConfigs&            configs,
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
-                   const OptionalConstBufferRef dp_token_nums = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
-                   BufferPtr                    output = nullptr):
+                   BufferPtr                    output = nullptr,
+                   const OptionalConstBufferRef dp_token_nums = std::nullopt):
         input(input), configs(configs), weights(weights), residual(residual),
         dp_token_nums(dp_token_nums), qscheme(qscheme), output(std::move(output)){}
 
@@ -520,7 +520,7 @@ struct FfnLayerParams {
     const QScheme qscheme;
     BufferPtr                    output;
 
-    lora::FfnLayerLoraInput lora_input;
+    lora::FfnLayerLoraInput      lora_input;
 };
 
 struct GreedyParams {
@@ -588,6 +588,7 @@ struct PrepareAllReduceOutput {
 struct AllReduceParams {
     const BufferPtr buffer;
     const ReduceOp op;
+    bool overlapped = false;
     ParallelMode mode = ParallelMode::TP;
 };
 

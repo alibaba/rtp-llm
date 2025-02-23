@@ -104,6 +104,10 @@ void DeviceBase::syncCommunication(bool timeout) {
     return;
 }
 
+void DeviceBase::overlappedCommBarrier() {
+    syncCommunication();
+}
+
 DeviceEventPtr DeviceBase::createEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -341,5 +345,12 @@ MultimodalEmbeddingOutput DeviceBase::multimodalEmbedding(const MultimodalEmbedd
     return move(embeddings);
 }
 
+
+AllReduceOutput DeviceBase::allReduce(const AllReduceParams& params) {
+    if (getDeviceProperties().tp_size == 1) {
+        return AllReduceOutput({params.buffer});
+    };
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
 
 } // namespace fastertransformer

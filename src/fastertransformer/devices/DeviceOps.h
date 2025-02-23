@@ -44,8 +44,10 @@ public:
     // Top level model ops
     virtual AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
     virtual FfnLayerOutput ffnLayer(const FfnLayerParams& params);
+    virtual FfnLayerOutput microBatchedFfnLayer(const FfnLayerParams& params);
     virtual FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
+    virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);
 
     // for sampler
     virtual GreedyOutput sampleGreedy(const GreedyParams& params);

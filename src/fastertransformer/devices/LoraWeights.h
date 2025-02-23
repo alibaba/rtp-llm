@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <thread>
 #include <shared_mutex>
+#include <numeric>
 
 namespace fastertransformer {
 
@@ -145,6 +146,13 @@ struct LoraOpInput {
         use_same_lora_ = use_same_lora;
 
     }
+
+    bool isEmpty() const {
+        return std::accumulate(lora_a_.begin(), lora_a_.end(), true,
+                               [](bool a, ConstBufferPtr b) { return a && (b == nullptr); }) &&
+               std::accumulate(lora_b_.begin(), lora_b_.end(), true,
+                               [](bool a, ConstBufferPtr b) { return a && (b == nullptr); });
+    }
 };
 
 using LoraOpInputPtr = std::shared_ptr<LoraOpInput>;
@@ -158,6 +166,12 @@ struct FfnLayerLoraInput {
     LoraOpInputPtr gate_lora_input = nullptr;
     LoraOpInputPtr up_lora_input = nullptr;
     LoraOpInputPtr down_lora_input = nullptr;
+
+    bool isEmpty() const {
+        return (gate_lora_input == nullptr || gate_lora_input->isEmpty()) &&
+               (up_lora_input == nullptr || up_lora_input->isEmpty()) &&
+               (down_lora_input == nullptr || down_lora_input->isEmpty());
+    }
 };
 
 struct LoraModelInput {

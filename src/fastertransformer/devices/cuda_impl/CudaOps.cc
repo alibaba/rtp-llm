@@ -277,11 +277,21 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
     NCCLCHECK(ncclGroupEnd());
 }
 
-
 AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
-    NcclParam nccl_param = getNcclParam(params.mode);
+    const auto nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return AllReduceOutput{params.buffer};
+    }
+
+    const auto stream = params.overlapped ? communication_stream_ : stream_;
+    if (params.overlapped) {
+        // NOTE: before starting communication, we need to make sure that the previous computation
+        // has been finished. Otherwise, the communication may overlap with the computation.
+        // We use cuda event to ensure the computation on main stream has been finished.
+        cudaEvent_t event;
+        check_cuda_error(cudaEventCreate(&event));
+        check_cuda_error(cudaEventRecord(event, stream_));
+        check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
     }
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
@@ -294,7 +304,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
         custom_allreduce_comm_->allReduce(
-            buffer->data(), custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream_);
+            buffer->data(), custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream);
         return AllReduceOutput{custom_ar_res_buf};
     }
 
@@ -302,7 +312,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
                           "Invalid reduce op: %d", int(params.op));
 
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
-                            nccl_op, nccl_param.nccl_comm_, stream_));
+                            nccl_op, nccl_param.nccl_comm_, stream));
     return AllReduceOutput{params.buffer};
 }
 

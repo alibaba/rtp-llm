@@ -105,6 +105,7 @@ public:
 
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
+    void overlappedCommBarrier() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     DeviceEventPtr createEvent() override;
     bool useGroupGemm() const;
@@ -187,6 +188,7 @@ protected:
 protected:
     cudaStream_t stream_;
     cudaStream_t no_block_copy_stream_;
+    cudaStream_t communication_stream_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
 
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;

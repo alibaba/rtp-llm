@@ -29,6 +29,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     check_cuda_error(cudaSetDevice(device_id_));
     stream_ = at::cuda::getCurrentCUDAStream().stream();
     check_cuda_error(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
+    check_cuda_error(cudaStreamCreateWithFlags(&communication_stream_, cudaStreamNonBlocking));
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));
@@ -206,6 +207,17 @@ void CudaDevice::syncCommunication(bool timeout) {
     if (dp_tp_nccl_param_.world_size_ > 1) {
         FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.", dp_tp_nccl_param_.rank_, dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
+    }
+}
+
+void CudaDevice::overlappedCommBarrier() {
+    // NOTE: when all the overlapped communication and computation done,
+    // we need to ensure the communication has been finished before starting the next computation.
+    if (tp_nccl_param_.world_size_ > 1) {
+        cudaEvent_t event;
+        check_cuda_error(cudaEventCreate(&event));
+        check_cuda_error(cudaEventRecord(event, communication_stream_));
+        check_cuda_error(cudaStreamWaitEvent(stream_, event, 0));
     }
 }
 

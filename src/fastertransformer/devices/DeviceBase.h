@@ -35,6 +35,7 @@ public:
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
+    virtual void overlappedCommBarrier();
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
@@ -51,6 +52,7 @@ public:
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
+    AllReduceOutput allReduce(const AllReduceParams& params) override;
     LossOutput loss(const LossParams& params) override;
     MaskOutput attentionMask(const MaskParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;

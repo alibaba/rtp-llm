@@ -44,12 +44,11 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 params.configs,
                 params.weights,
                 params.residual,
-                nullopt,
                 params.qscheme});
         output = moeFfnLayer(moe_ffn_params).hidden_states;
         if (dp_size > 1) {
             BufferPtr reduce_output = output;
-            output = allReduce({output, ReduceOp::Sum, ParallelMode::DP_AND_TP}).buffer;
+            output = allReduce({output, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
             const auto& dp_token_nums = params.dp_token_nums.value().get();
             auto begin_index = std::accumulate(dp_token_nums.data<uint32_t>(), dp_token_nums.dataWithOffset<uint32_t>(dp_rank), 0);
             if (params.output) {
@@ -66,7 +65,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                              params.configs,
                                              *(params.weights.shared_expert),
                                              params.residual,
-                                             nullopt,
                                              params.qscheme});
             ffn_params.lora_input = params.lora_input;
             shared_expert_output = ffnLayer(ffn_params).hidden_states;

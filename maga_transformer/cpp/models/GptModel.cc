@@ -422,9 +422,9 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-                                            inputs.dp_token_nums ? (OptionalConstBufferRef)*inputs.dp_token_nums : nullopt,
                                             act_qscheme,
-                                            std::move(ffn_output_buf)});
+                                            std::move(ffn_output_buf),
+                                            inputs.dp_token_nums ? (OptionalConstBufferRef)*inputs.dp_token_nums : nullopt});
     if (lora_model_input) {
         ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
     }

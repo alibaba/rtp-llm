@@ -102,11 +102,19 @@ FfnLayerOutput DeviceOps::ffnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+FfnLayerOutput DeviceOps::microBatchedFfnLayer(const FfnLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 FfnLayerOutput DeviceOps::moeFfnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 LoraLinearOutput DeviceOps::loraLinear(const LoraLinearParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+LoraLinearOutput DeviceOps::loraLinearWithAllReduce(const LoraLinearParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

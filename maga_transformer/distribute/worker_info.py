@@ -27,6 +27,7 @@ class ParallelInfo(object):
         self.world_size = world_size
         self.world_rank = world_rank
         self.local_world_size = local_world_size
+        logging.info(f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size}]")
         assert ep_size <= world_size and world_size % ep_size == 0
         assert self.world_size == self.tp_size * self.dp_size * self.pp_size
         if torch.cuda.is_available():
@@ -50,7 +51,7 @@ class ParallelInfo(object):
     @property
     def dp_rank(self) -> int:
         return int(self.world_rank / self.tp_size) % self.dp_size
-        
+
 
     @property
     def local_rank(self) -> int:
