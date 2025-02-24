@@ -474,7 +474,7 @@ class BaseModel(object):
             else:
                 tensor_name = f"{weights.global_weight_prefix(tp_rank,dp_rank, ep_rank)}{name}"
             tensor_size = tensor.numel() * tensor.element_size()
-            current_dict[tensor_name] = tensor.cpu()
+            current_dict[tensor_name] = tensor.cpu().contiguous()
             current_size += tensor_size
             maybe_save()
             gc.collect()
