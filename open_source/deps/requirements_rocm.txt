@@ -4,3 +4,4 @@ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torchvision-0.19.0%2Brocm6.3
 -r requirements_base.txt
 pyrsmi
 amdsmi
+pyyaml

@@ -47,13 +47,14 @@ def whl_deps():
     return select({
         "@//:using_cuda12": ["torch==2.1.2+cu121"],
         "@//:using_cuda11": ["torch==2.1.2+cu118"],
-        "@//:using_rocm": ["torch==2.1.2"],
+        "@//:using_rocm": ["torch==2.1.2", "pyyaml"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
 def platform_deps():
     return select({
         "@//:using_arm": [],
+        "@//:using_rocm": ["pyyaml"],
         "//conditions:default": ["decord==0.6.0"],
     })
 

@@ -48,4 +48,3 @@ librosa
 av
 pillow-heif
 pillow-avif-plugin
-yaml

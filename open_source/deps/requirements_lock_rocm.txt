@@ -2110,6 +2110,7 @@ pyyaml==6.0.2 \
     --hash=sha256:f753120cb8181e736c57ef7636e83f31b9c0d1722c516f7e86cf15b7aa57ff12 \
     --hash=sha256:ff3824dc5261f50c9b0dfb3be22b4567a6f938ccce4587b38952d85fd9e9afe4
     # via
+    #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
     #   amdsmi
     #   huggingface-hub
