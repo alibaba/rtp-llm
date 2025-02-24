@@ -271,7 +271,7 @@ class RocmImpl(GpuImpl):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
-        qweight_interleaved = preprocessor(qweight, quant_type)
+        qweight_interleaved = preprocessor(qweight, quant_type, self.specify_gpu_arch)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
         # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
