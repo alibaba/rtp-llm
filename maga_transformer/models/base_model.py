@@ -447,7 +447,7 @@ class BaseModel(object):
         self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
         weights = self.model_weights_loader.create_model_weights(self.device)
 
-        filename_prefix = f"{output_dir}/model-{tp_rank:02d}-"
+        filename_prefix = f"{output_dir}/model-{tp_rank:02d}-{dp_rank:02d}-"
         os.makedirs(output_dir, exist_ok=True)
 
         max_size = 10 * 1024**3  # 10GB
@@ -469,9 +469,9 @@ class BaseModel(object):
 
         for (layer_id, name, tensor) in self.model_weights_loader.prepare_weights_from_scratch(self.device):
             if layer_id is not None:
-                tensor_name = f"{weights.layer_weight_prefix(tp_rank, ep_rank)}{layer_id}.{name}"
+                tensor_name = f"{weights.layer_weight_prefix(tp_rank, dp_rank, ep_rank)}{layer_id}.{name}"
             else:
-                tensor_name = f"{weights.global_weight_prefix(tp_rank, ep_rank)}{name}"
+                tensor_name = f"{weights.global_weight_prefix(tp_rank,dp_rank, ep_rank)}{name}"
             tensor_size = tensor.numel() * tensor.element_size()
             current_dict[tensor_name] = tensor.cpu()
             current_size += tensor_size

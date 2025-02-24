@@ -193,7 +193,7 @@ class GpuImpl(DeviceBase):
             w = torch.squeeze(w).transpose(1, 0).contiguous()
             z = torch.squeeze(z).transpose(1, 0).contiguous()
             s = torch.squeeze(s).transpose(1, 0).contiguous()
-            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq, weight_bits, self.specify_gpu_arch)
+            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq, weight_bits)
             processed_weights.append(p_w)
             processed_zeros.append(p_z)
             processed_scalses.append(p_s)

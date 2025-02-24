@@ -1238,9 +1238,9 @@ class ModelWeights:
         return self._dtype
 
     @staticmethod
-    def layer_weight_prefix(tp_rank:int, ep_rank: int):
-        return f"rank_{tp_rank:02d}.layers."
+    def layer_weight_prefix(tp_rank:int, dp_rank: int, ep_rank: int):
+        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.layers."
 
     @staticmethod
-    def global_weight_prefix(tp_rank:int, ep_rank: int):
-        return f"rank_{tp_rank:02d}.global."
+    def global_weight_prefix(tp_rank:int, dp_rank: int, ep_rank: int):
+        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.global."

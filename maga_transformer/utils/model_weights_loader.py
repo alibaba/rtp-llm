@@ -120,8 +120,8 @@ class ModelWeightsLoader:
 
     def load_from_ft_style_weight(self, device):
         model_weights = ModelWeights(self._num_layers, device, self._data_type)
-        layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank, self._ep_rank)
-        global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank, self._ep_rank)
+        layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank, self._dp_rank, self._ep_rank)
+        global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank, self._dp_rank, self._ep_rank)
         # 清空现有的权重
         weights = [ {} for id in range(self._num_layers)]
         global_weights = {}

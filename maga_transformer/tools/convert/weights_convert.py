@@ -78,6 +78,10 @@ class WeightConverter:
     def dp_size(self):
         return int(self.env_params.get("DP_SIZE", "1"))
 
+    @property
+    def world_size(self):
+        return int(self.env_params.get("WORLD_SIZE", self.tp_size * self.dp_size))
+
     @staticmethod
     def get_free_mem_MB():
         import psutil
@@ -127,7 +131,7 @@ class WeightConverter:
         try:
             cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
             if len(cuda_device_list) > 0:
-                env_params.update({"LOCAL_WORLD_SIZE" : min(len(cuda_device_list), self.tp_size)})
+                env_params.update({"LOCAL_WORLD_SIZE" : min(len(cuda_device_list), self.world_size)})
         except Exception as _:
             logging.info(f"no GPU device, load to mem")
         env_params.update({"WORLD_RANK": world_rank})
