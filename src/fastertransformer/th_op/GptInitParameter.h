@@ -219,6 +219,9 @@ public:
     // 0 for no sep, 1 for server, 2 for client
     int64_t     vit_separation_                     = 0;
 
+    //multi machine
+    std::vector<std::string> worker_addrs_;
+
     GptInitParameter();
 
     GptInitParameter(

@@ -10,6 +10,7 @@ from maga_transformer.utils.util import str_to_bool, closest_power_of_2
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
+from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 from maga_transformer.ops import GptInitParameter
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
@@ -152,6 +153,11 @@ class GptInitModelParameters:
         self.cache_store_rdma_connect_port = g_worker_info.cache_store_rdma_connect_port
         self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
         self.worker_port_offset = WORKER_INFO_PORT_NUM
+ 
+        worker_addrs = []
+        for member in get_gang_info().members:
+            worker_addrs.append(f'{member.ip}:{member.rpc_server_port}')
+            self.worker_addrs = worker_addrs
 
         self.add_special_tokens = True
         self.template_type = TemplateType.chat

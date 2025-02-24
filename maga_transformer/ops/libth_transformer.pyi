@@ -210,6 +210,7 @@ class GptInitParameter:
     warm_up: bool
     warm_up_with_loss: bool
     worker_port_offset: int
+    worker_addrs: list[str]
     def __init__(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> None:
         ...
     def insertMultiTaskPromptTokens(self, arg0: str, arg1: list[int]) -> None:

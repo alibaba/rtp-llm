@@ -179,6 +179,7 @@ message GenerateRequestPB {
     int64 start_time = 4;
     int32 first_generate_token_id = 5;
     GenerateInputPB input = 6;
+    repeated string peer_ips = 7;
 }
 
 // in tp case, decode master broadcast to decode worker

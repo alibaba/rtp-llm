@@ -77,14 +77,17 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.request_id  = allocate_request.request_id();
     decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
 
-    decode_context.peer_ip = extractIP(decode_context.server_context->peer());
-    if (decode_context.peer_ip.empty()) {
-        string error_msg = "request: [" + decode_context.request_key + "] get client ip failed, peer is "
-                            + decode_context.server_context->peer();
-        FT_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        return;
+    for(auto& ip : allocate_request.peer_ips()) {
+        decode_context.peer_ips.push_back(ip);
     }
+    // decode_context.peer_ip = extractIP(decode_context.server_context->peer());
+    // if (decode_context.peer_ip.empty()) {
+    //     string error_msg = "request: [" + decode_context.request_key + "] get client ip failed, peer is "
+    //                         + decode_context.server_context->peer();
+    //     FT_LOG_ERROR(error_msg);
+    //     decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    //     return;
+    // }
 
     FT_LOG_DEBUG("request:[%s] prepare generate context done", decode_context.request_key.c_str());
 }
@@ -171,11 +174,12 @@ void DecodeRpcServer::writeTime(DecodeGenerateContext& decode_context) {
     decode_context.rpc_context.grpc_stream->Write(response);
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext& load_context) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext& load_context, const std::string& peer_ip) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
-    request.set_peer_ip(load_context.peer_ip);
+    request.set_peer_ip(peer_ip);
+
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
@@ -205,7 +209,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     min_timeout_ms = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
 
     LoadKVCacheContext load_context{decode_context.request_id, decode_context.request_key,
-                                    decode_context.peer_ip, cache_keys,
+                                    decode_context.peer_ips[0], cache_keys,
                                     block_ids, generate_stream->reuseBlockSize(),
                                     min_timeout_ms, decode_context.server_context};
 
@@ -227,7 +231,6 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context) {
     int64_t load_cache_begin_time_us = currentTimeUs();
-    BroadcastLoadRequestPB load_request = constructRemoteLoadRequest(load_context);
 
     struct WorkerRpcContext {
         WorkerRpcContext() {
@@ -257,6 +260,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         all_context.push_back(WorkerRpcContext());
         auto& rpc_context = all_context[i];
         rpc_context.stub = connect_status.value().stub;
+        std::string peer_ip = decode_context.peer_ips[i];
+        BroadcastLoadRequestPB load_request = constructRemoteLoadRequest(load_context, peer_ip);
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(
             rpc_context.stub->AsyncRemoteLoad(rpc_context.client_context.get(),
             load_request, &completion_queues[i % completion_queues.size()]));
@@ -360,7 +365,7 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
         return this->loadCache(load_context);
     };
     futures.emplace_back(thread_pool_->async(local_task));
-    BroadcastLoadRequestPB load_request = constructRemoteLoadRequest(load_context);
+
     for (int i = 0; i < resource_.workers.size(); i++) {
         auto& worker = resource_.workers[i];
         auto remote_task = [&]() {
@@ -371,6 +376,8 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             }
             auto                    stub = connect_status.value().stub.get();
             ClientContext           client_context;
+            std::string peer_ip = decode_context.peer_ips[i];
+            BroadcastLoadRequestPB load_request = constructRemoteLoadRequest(load_context, peer_ip);
             BroadcastLoadResponsePB response;
             auto          grpc_status = stub->RemoteLoad(&client_context, load_request, &response);
             const auto& pb_error_code = response.error_info().error_code();

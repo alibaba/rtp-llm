@@ -42,9 +42,9 @@ void RemoteRpcServer::initLocalPeerInfo() {
         return;
     }
     // worker 0 is master (rank 0)
-    for (int i = 0; i < maga_init_params_.gpt_init_parameter.tp_size_; i++) {
-        int port = maga_init_params_.gpt_init_parameter.model_rpc_port_;
-        resource_.workers.push_back("localhost:" + std::to_string((port + i * maga_init_params_.gpt_init_parameter.worker_port_offset_)));
+    for(auto& worker_addr : maga_init_params_.gpt_init_parameter.worker_addrs_) {
+        FT_LOG_INFO("In gpt init params: worker address is %s", worker_addr.c_str());
+        resource_.workers.push_back(worker_addr);
     }
     string worker_info = "worker address is ";
     for (auto& worker : resource_.workers) {

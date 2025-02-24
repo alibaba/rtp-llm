@@ -21,7 +21,6 @@ public:
     bool ready() {
         return true;
     }
-
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t request_id, const std::string& request_key, const std::string& peer_ip,
@@ -54,7 +53,7 @@ private:
     ErrorInfo loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     ErrorInfo loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext& load_context) const;
+    BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext& load_context, const std::string& peer_ip) const;
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;

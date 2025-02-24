@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "maga_transformer/cpp/model_rpc/RemoteServerResource.h"
+#include "maga_transformer/cpp/utils/NetUtil.h"
 
 namespace rtp_llm {
 
@@ -58,7 +59,12 @@ public:
                            int64_t timeout_ms, grpc::ServerContext* server_context,
                            kmonitor::MetricsReporterPtr& metrics_reporter, std::shared_ptr<PrefillRpcServerRuntimeMeta> meta)
                            : GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter),
-                             resource(resource), rpc_context(rpc_context), meta(meta) {}
+                             resource(resource), rpc_context(rpc_context), meta(meta) {
+                                for(auto &worker : resource->workers) {
+                                    std::string ip = extractIP(worker);
+                                    prefill_worker_ips.push_back(ip);
+                                }
+                             }
     ~PrefillGenerateContext();
     void reset() override;
     void setStream(const std::shared_ptr<GenerateStream>& stream) override;
@@ -81,6 +87,7 @@ public:
     std::shared_ptr<PrefillRpcServerRuntimeMeta> meta;
 
     std::string                             decode_addr;
+    std::vector<std::string>                prefill_worker_ips;   
     GrpcConnection                          grpc_connection;
     std::shared_ptr<RpcService::Stub>       stub;
     std::shared_ptr<grpc::ClientContext>    client_context;
