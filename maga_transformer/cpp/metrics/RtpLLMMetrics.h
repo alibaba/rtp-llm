@@ -94,6 +94,7 @@ public:
     bool cancel_qps = false;
     bool error_qps  = false;
     bool is_streaming_qps = false;
+    bool not_streaming_qps = true;
 
     int64_t total_latency_us       = 0;
     int64_t first_token_latency_us = 0;
@@ -125,6 +126,7 @@ public:
     kmonitor::MutableMetric* cancel_qps_metric             = nullptr;
     kmonitor::MutableMetric* error_qps_metric              = nullptr;
     kmonitor::MutableMetric* is_streaming_qps_metric       = nullptr;
+    kmonitor::MutableMetric* not_streaming_qps_metric      = nullptr;
 
     kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;

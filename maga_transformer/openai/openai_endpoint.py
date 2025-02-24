@@ -115,8 +115,7 @@ class OpenaiEndopoint():
             config.random_seed = request.seed
         if request.logprobs != None:
             config.return_all_probs = request.logprobs
-        pd_separation = bool(int(os.environ.get('PD_SEPARATION', 0)))
-        if pd_separation or request.logprobs or request.functions:
+        if request.logprobs or request.functions:
             config.is_streaming = True
         config.add_special_tokens(self.model.config.special_tokens)
         config.convert_select_tokens(self.model.config.vocab_size, self.tokenizer)

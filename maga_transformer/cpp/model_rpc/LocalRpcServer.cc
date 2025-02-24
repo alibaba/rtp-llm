@@ -9,7 +9,6 @@
 
 using namespace std;
 using namespace fastertransformer;
-
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::object mm_process_engine,

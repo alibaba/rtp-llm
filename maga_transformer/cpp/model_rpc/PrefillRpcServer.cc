@@ -26,7 +26,7 @@ namespace rtp_llm {
         if (prefill_context.getStream()) {                                                                           \
             auto first_token_rt_ms = prefill_context.getStream()->getTimeInfo().first_token_rt_us / 1000;            \
             if (first_token_rt_ms) {                                                                            \
-                new_error_msg += " stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";     \
+                new_error_msg += "stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";     \
             }                                                                                                   \
         }                                                                                                       \
         auto status = prefill_context.closeGrpcStream();                                                        \

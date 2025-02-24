@@ -696,6 +696,7 @@ void GenerateStream::reportMetric() {
         collector.cancel_qps = cancelled;
         collector.error_qps  = stopped() && !cancelled;
         collector.is_streaming_qps = generate_input_->generate_config->is_streaming;
+        collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();

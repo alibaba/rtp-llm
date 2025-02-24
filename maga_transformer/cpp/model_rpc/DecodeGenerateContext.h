@@ -64,7 +64,6 @@ public:
 
 public:
     DecodeRpcContext&           rpc_context;
-    //std::string                 peer_ip;
     std::vector<std::string>    peer_addrs; //prefill worker addrs
     GenerateRequestPB           allocate_request;
     DecodeStatInfo              stat_info;

@@ -26,7 +26,6 @@ struct StreamUpdateInfo {
     const ft::BufferPtr cum_log_probs;
     const ft::BufferPtr all_probs;
     const ft::BufferPtr loss;
-    bool update_queue = true;
 };
 
 class GenerateStream {

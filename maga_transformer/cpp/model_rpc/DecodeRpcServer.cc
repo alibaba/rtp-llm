@@ -150,8 +150,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto data           = new_tokens->data<int32_t>();
     auto first_token_id = generate_request.first_generate_token_id();
     *data               = first_token_id;
-    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false});
     generate_stream->incLastOutputPos();
+    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
     generate_stream->resetBeginTime(currentTimeUs());
     engine_->enqueue(generate_stream);
     FT_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
@@ -162,7 +162,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
     FT_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
-}
 }
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,

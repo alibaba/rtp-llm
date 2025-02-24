@@ -153,14 +153,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     //TODO: move it to better position
-    if (!finished_ && generate_input_->generate_config->pd_separation) {
+    if (!finished_ && queryPdSep()) {
         need_remote_generate_ = true;
     }
 
-    if (!isStreaming() && !finished_) {
+    bool pd_sep_first_token = queryPdSep();
+    bool need_update = pd_sep_first_token || isStreaming() || finished_;
+    if (!need_update) {
         return;
     }
-    if (!update_info.update_queue) {
+
+    if (seqLength() - last_output_pos_ == 0) {
         return;
     }
 
