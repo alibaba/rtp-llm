@@ -1,5 +1,7 @@
 package(default_visibility = ["//maga_transformer/cpp/disaggregate/cache_store:__subpackages__"])
+
 load("//:def.bzl", "copts")
+load("//src/fastertransformer/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
 
 cc_library(
     name = "cache_store_test_base",
@@ -35,16 +37,16 @@ cc_test(
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ":cache_store_test_base",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
+    ] + device_impl_target(),
     env = {
         "CACHE_STORE_RDMA_MODE": "0",
         "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
     },
     copts = ["-fno-access-control",] + copts(),
+    linkopts = device_linkopts(),
     exec_properties = {'gpu':'A10'},
     linkstatic = 1,
 )
