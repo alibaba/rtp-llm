@@ -159,7 +159,7 @@ class ModelRpcClient(object):
             grpc_timeout_seconds = request_timeout_ms / 1000
 
         try:
-            async with grpc.aio.insecure_channel(self._addresses[request_counter.get() % len(self._addresses)]) as channel:
+            async with grpc.aio.insecure_channel(self._addresses[request_counter.increment() % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(input_pb, timeout=grpc_timeout_seconds)
                 # 调用服务器方法并接收流式响应
