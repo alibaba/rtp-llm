@@ -609,9 +609,7 @@ class ModelWeightsLoader:
         return self._sanitize(self._split_tensor(weight.name, tensor))
 
     def _split_tensor(self, name: str, tensor: torch.Tensor, bits=4) -> torch.Tensor:
-        if self._tp_size <= 1:
-            if name in [W.moe_w1, W.moe_w2]:
-                return self._exported_device.shuffle_moe_weight(tensor, self._data_type, name)
+        if self._tp_size <= 1 and self._ep_size <= 1 and self._dp_size <= 1:
             return tensor
         if (not self._tp_split_emb_and_lm_head and
             name in [W.lm_head, W.lm_head_b, W.embedding, W.positional_embedding, W.token_type_embedding]):
