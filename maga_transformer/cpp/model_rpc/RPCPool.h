@@ -6,6 +6,7 @@
 #include "grpc++/grpc++.h"
 #include "absl/status/statusor.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
+#include "maga_transformer/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -37,10 +38,10 @@ public:
             }
             auto channel_status = grpc_channel->GetState(true);
             if (channel_status != GRPC_CHANNEL_READY) {
-                bool isChannelReady = grpc_channel->WaitForStateChange(channel_status, gpr_time_add(
-                    gpr_now(GPR_CLOCK_REALTIME),
-                    gpr_time_from_seconds(10, GPR_TIMESPAN)));
-                if (!(isChannelReady && grpc_channel->GetState(true) == GRPC_CHANNEL_READY)) {
+                std::chrono::time_point deadline = std::chrono::system_clock::now() + std::chrono::seconds(10);
+                bool isChannelReady = grpc_channel->WaitForConnected(deadline);
+                if (!(isChannelReady && grpc_channel->GetState(false) == GRPC_CHANNEL_READY)) {
+                    FT_LOG_WARNING("wait channel ready failed channel, isChannelReady %d, current status %ld", isChannelReady, grpc_channel->GetState(false));
                     std::string error_msg = "create grpc channel connection for " + peer + " failed, not ready";
                     return absl::InternalError(error_msg);
                 }
