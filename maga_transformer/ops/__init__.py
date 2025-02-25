@@ -23,6 +23,14 @@ def find_th_transformer(current_dir: str):
                 if file.is_file() and file.name == SO_NAME:
                     return os.path.join(current_dir, subdir.name)
 
+    # 检查更下一级目录中的文件
+    for subdir in dir_path.iterdir():
+        if subdir.is_dir():  # 确保是目录
+            for subsubdir in subdir.iterdir():
+                if subsubdir.is_dir():
+                    for file in subsubdir.iterdir():
+                        if file.is_file() and file.name == SO_NAME:
+                            return os.path.join(os.path.join(current_dir, subdir.name), subsubdir.name)
     raise Exception(f"failed to find {SO_NAME} in {current_dir}")
 
 so_path = os.path.join(libs_path)
