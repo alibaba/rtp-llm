@@ -370,6 +370,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                 request_guard.reset();
                 return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
             }
+    	    return grpc::Status::OK;
         }
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
