@@ -80,7 +80,11 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(messages=[], functions=[GPTFunctionDefinition(**{
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location.",
+            "parameters": {}
+        })])
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0, 314)
         stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
         generate = self.endpoint._complete_stream_response(stream_generator, None)

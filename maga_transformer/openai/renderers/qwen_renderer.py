@@ -57,6 +57,8 @@ class QwenStreamStatus(StreamStatus):
         super().__init__(request)
 
     def update_result(self):
+        self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
+        self.last_output_ids = self.output_ids
         self.responded_string = self.total_output_string[: - len('\nAction:')]
 
     @property
@@ -336,34 +338,18 @@ class QwenRenderer(CustomChatRenderer):
         # if z >= 0:
         #     response = response[z + len("\nFinal Answer: ") :]
 
-    def _process_output_ids_tensor(
-            self, input_length, output_ids_tensor: torch.Tensor, max_new_tokens: int, finished: bool = False
-    ) -> ProcessedOutput:
-        output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
-        # TODO(wangyin): This slicing shouldn't be done here.
-        # model should return output length, ids should be sliced with output length.
-        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
-        finish_reason = self._check_finish_reason(output_ids, input_length, max_new_tokens) if finished else None
-
-        output_length = len(output_ids)
-        output_ids = self._remove_stop_word_ids(output_ids)
-        output_str = self.tokenizer.decode(output_ids)
-        output_str = output_str.strip(u'\uFFFD')
-
-        for stop_word in self.stop_words_str_list:
-            output_str = output_str.replace(stop_word, "")
-        return ProcessedOutput(output_str, output_length, finish_reason)
-
     async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
         if status.request.tools:
             return await self.qwen_tool_renderer._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
 
-        # function call is disabled when logprobs is required.
         if not isinstance(status, QwenStreamStatus):
             return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(output, self._clean_output_ids, functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens), self._remove_stop_word_ids)
+        status.update_output(output,
+                             self._clean_output_ids,
+                             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+                             self._remove_stop_word_ids)
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
             return await self._create_empty_delta(output.aux_info)
@@ -392,12 +378,12 @@ class QwenRenderer(CustomChatRenderer):
 
     #override
     async def _create_status_list(self, n: int, request: ChatCompletionRequest) -> List[StreamStatus]:
-        if request.logprobs:
-            return [StreamStatus(request) for _ in range(n)]
-        else:
-            if request.tools:
-                return [QwenToolStreamStatus(request) for _ in range(n)]
+        if request.tools:
+            return [QwenToolStreamStatus(request) for _ in range(n)]
+        if request.functions and (len(request.functions) > 0):
             return [QwenStreamStatus(request) for _ in range(n)]
+        else:
+            return [StreamStatus(request) for _ in range(n)]
 
     #override
     async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
