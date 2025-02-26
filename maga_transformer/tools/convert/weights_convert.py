@@ -92,7 +92,7 @@ class WeightConverter:
     def _estimate_convert_parallel_num(self):
         try:
             cuda_count = torch.cuda.device_count()
-            assert(cuda_count > 1)
+            assert(cuda_count >= 1)
             return cuda_count
         except Exception as _:
             logging.info("no cuda device convert by cpu")
