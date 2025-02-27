@@ -10,9 +10,7 @@ namespace fastertransformer {
 
 FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(!params.residual, "default FFN implementation does not support residual!");
-
-    BufferPtr output;
-
+    BufferPtr output = params.output ? params.output : allocateBuffer({params.input.type(), params.input.shape()});
 
     if (params.weights.moe_gating_weight) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
@@ -37,6 +35,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             dp_hiddens.clear();
             hidden = hidden_tmp;
         } else {
+            // TODO(wangyin.yx): refact this input processing
             hidden = params.input.slice(0, params.input.shape()[0]);
         }
         BufferPtr shared_expert_output;
@@ -45,18 +44,15 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 params.weights,
                 params.residual,
                 params.qscheme});
-        output = moeFfnLayer(moe_ffn_params).hidden_states;
+        hidden = moeFfnLayer(moe_ffn_params).hidden_states;
         if (dp_size > 1) {
-            BufferPtr reduce_output = output;
-            output = allReduce({output, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
+            allReduce({hidden, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
             const auto& dp_token_nums = params.dp_token_nums.value().get();
             auto begin_index = std::accumulate(dp_token_nums.data<uint32_t>(), dp_token_nums.dataWithOffset<uint32_t>(dp_rank), 0);
-            if (params.output) {
-                copy({*params.output, output->view(begin_index, params.input.shape()[0])});
-                output = params.output;
-            } else {
-                output = clone({output->view(begin_index, params.input.shape()[0])});
-            }
+            copy({*output, hidden->view(begin_index, params.input.shape()[0])});
+        } else {
+            // TODO(wangyin.yx): eliminate this copy
+            copy({*output, *hidden});
         }
 
         // deal with moe layers with parallel dense ffn layer
@@ -77,16 +73,17 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 shared_expert_output = multiply({
                     shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
             }
-        }
-        if (shared_expert_output) {
+
             const auto& moe_conf = params.configs.moe_configs.value();
             if (moe_conf.dp_size > 1 && moe_conf.tp_size > 1) {
                 shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
             }
             // just add bias to output
+            // printBufferData(*output, "ffn out before norm", this, true);
             shared_expert_output = layernorm({
-                    output, nullptr, nullopt, mayGetRef(shared_expert_output)
-                }).output;
+                output, nullptr, nullopt, mayGetRef(shared_expert_output)
+            }).output;
+            // printBufferData(*output, "ffn_out", this, true);
         }
     } else {
         BufferPtr up_output;
