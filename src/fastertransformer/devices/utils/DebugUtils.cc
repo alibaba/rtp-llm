@@ -14,9 +14,10 @@ void printBuffer1d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1 = dims[0];
-    FT_LOG_TRACE("Buffer %s: shape [%d]", hint.c_str(), dim1);
+    FT_LOG(log_level, "Buffer %s: shape [%d]", hint.c_str(), dim1);
     std::stringstream ss;
     ss << "Buffer " << hint << " : ";
     double sum1       = 0;
@@ -33,7 +34,7 @@ void printBuffer1d(const std::string&  hint,
     ss << " ...... ";
     print_func(std::max((size_t)0, dim1 - (column_end - column_start)), dim1);
     ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-    FT_LOG_TRACE(ss.str());
+    FT_LOG(log_level, ss.str());
 }
 
 void printBuffer2d(const std::string&  hint,
@@ -41,10 +42,11 @@ void printBuffer2d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1 = dims[0];
     size_t dim2 = dims[1];
-    FT_LOG_TRACE("Buffer %s: shape [%d %d]", hint.c_str(), dim1, dim2);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d]", hint.c_str(), dim1, dim2);
     size_t line_num = 0;
     for (int i = 0; i < dim1; i++) {
         std::stringstream ss;
@@ -64,7 +66,7 @@ void printBuffer2d(const std::string&  hint,
         ss << " ...... ";
         print_func(std::max((size_t)0, dim2 - (column_end - column_start)), dim2);
         ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-        FT_LOG_TRACE(ss.str());
+        FT_LOG(log_level, ss.str());
         line_num++;
         if (line_num > max_print_lines) {
             return;
@@ -77,12 +79,13 @@ void printBuffer3d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1     = dims[0];
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
     size_t line_num = 0;
-    FT_LOG_TRACE("Buffer %s: shape [%d %d %d]", hint.c_str(), dim1, dim2, dim3);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d]", hint.c_str(), dim1, dim2, dim3);
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             std::stringstream ss;
@@ -102,7 +105,7 @@ void printBuffer3d(const std::string&  hint,
             ss << " ...... ";
             print_func(std::max((size_t)0, dim3 - (column_end - column_start)), dim3);
             ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-            FT_LOG_TRACE(ss.str());
+            FT_LOG(log_level, ss.str());
             line_num++;
             if (line_num > max_print_lines) {
                 return;
@@ -116,13 +119,14 @@ void printBuffer4d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1     = dims[0];
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
     size_t dim4     = dims[3];
     size_t line_num = 0;
-    FT_LOG_TRACE("Buffer %s: shape [%d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4);
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {
@@ -143,7 +147,7 @@ void printBuffer4d(const std::string&  hint,
                 ss << " ...... ";
                 print_func(std::max((size_t)0, dim4 - (column_end - column_start)), dim4);
                 ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-                FT_LOG_TRACE(ss.str());
+                FT_LOG(log_level, ss.str());
                 line_num++;
                 if (line_num > max_print_lines) {
                     return;
@@ -158,14 +162,15 @@ void printBuffer5d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1     = dims[0];
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
     size_t dim4     = dims[3];
     size_t dim5     = dims[4];
     size_t line_num = 0;
-    FT_LOG_TRACE("Buffer %s: shape [%d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5);
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {
@@ -187,7 +192,7 @@ void printBuffer5d(const std::string&  hint,
                     ss << " ...... ";
                     print_func(std::max((size_t)0, dim5 - (column_end - column_start)), dim5);
                     ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-                    FT_LOG_TRACE(ss.str());
+                    FT_LOG(log_level, ss.str());
                     line_num++;
                     if (line_num > max_print_lines) {
                         return;
@@ -203,7 +208,8 @@ void printBuffer6d(const std::string&  hint,
                         std::vector<size_t> dims,
                         size_t              column_start,
                         size_t              column_end,
-                        size_t              max_print_lines) {
+                        size_t              max_print_lines,
+                        int log_level) {
     size_t dim1     = dims[0];
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
@@ -211,7 +217,7 @@ void printBuffer6d(const std::string&  hint,
     size_t dim5     = dims[4];
     size_t dim6     = dims[5];
     size_t line_num = 0;
-    FT_LOG_TRACE("Buffer %s: shape [%d %d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5, dim6);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5, dim6);
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {
@@ -234,7 +240,7 @@ void printBuffer6d(const std::string&  hint,
                         ss << " ...... ";
                         print_func(std::max((size_t)0, dim6 - (column_end - column_start)), dim6);
                         ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
-                        FT_LOG_TRACE(ss.str());
+                        FT_LOG(log_level, ss.str());
                         line_num++;
                         if (line_num > max_print_lines) {
                             return;
@@ -247,6 +253,8 @@ void printBuffer6d(const std::string&  hint,
 }
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print) {
+    const auto log_level = force_print ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_TRACE1;
+
     if (!force_print) {
         if (!rtp_llm::Logger::getEngineLogger().isTraceMode()) {
             return;
@@ -278,19 +286,19 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     if (dims.size() > 6) {
         std::stringstream ss;
         ss << "Buffer " << hint << " : " << tensor;
-        FT_LOG_TRACE("%s", ss.str().c_str());
+        FT_LOG(log_level, "%s", ss.str().c_str());
     } else if (dims.size() == 6) {
-        printBuffer6d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer6d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 5) {
-        printBuffer5d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer5d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 4) {
-        printBuffer4d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer4d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 3) {
-        printBuffer3d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer3d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 2) {
-        printBuffer2d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer2d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 1) {
-        printBuffer1d(hint, tensor, dims, column_start, column_end, max_print_lines);
+        printBuffer1d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     }
 }
 
