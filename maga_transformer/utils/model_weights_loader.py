@@ -152,6 +152,7 @@ class ModelWeightsLoader:
             return self.load_from_ft_style_weight(device)
         weights = self.create_model_weights(device)
         convert_device = self._choose_weight_convert_device(device)  # choose convert device to avoid out of mem
+        logging.info(f"load weight by device: {convert_device}")
         for (layer_id, name, tensor) in self.prepare_weights_from_scratch(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
@@ -174,7 +175,7 @@ class ModelWeightsLoader:
         else:
             free_mem = device_mem_info.free / (1024.0 ** 2)
         model_mem = model_size / self._tp_size / (1024.0 ** 2)
-        return current_device if free_mem * 0.8 > free_mem else "cpu"
+        return current_device if free_mem * 0.8 > model_mem else "cpu"
         
     def prepare_weights_from_scratch(self, device): 
         if self._vit_separation != 1:

@@ -295,10 +295,10 @@ def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Te
     if pad_size != 0 and tp_rank == tp - 1:
         if len(t.shape) == 2:
             return torch.concat([t[tp_rank * per_slice_size:,:],
-                                 torch.zeros([pad_size, t.shape[1]], dtype=t.dtype)], dim=0)
+                                 torch.zeros([pad_size, t.shape[1]], dtype=t.dtype, device=t.device)], dim=0)
         else:
             return torch.concat([t[tp_rank * per_slice_size:,:],
-                                 torch.zeros([pad_size], dtype=t.dtype)], dim=0)
+                                 torch.zeros([pad_size], dtype=t.dtype, device=t.device)], dim=0)
     else:
         if len(t.shape) == 2:
             return t[tp_rank * per_slice_size:(tp_rank + 1) * per_slice_size,:]
