@@ -91,7 +91,7 @@ WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery() {
-    FT_LOG_INFO("enqueue min fake query");
+    FT_LOG_DEBUG("enqueue min fake query");
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer(
                                                 {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
@@ -135,7 +135,7 @@ absl::Status NormalEngine::initSystemPrompt() {
                 device_->getDeviceProperties().tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
-    
+
     return absl::OkStatus();
 }
 
