@@ -431,7 +431,7 @@ class QwenToolRenderer(CustomChatRenderer):
                 == ToolCallMessageExtractStrategy.SKIP_ON_FAILURE
             ):
                 return None, ""
-            return None, extracted_text
+            return None, text
 
     def _generate_random_call_id(self, length: int = 24) -> str:
         """生成随机调用ID"""
