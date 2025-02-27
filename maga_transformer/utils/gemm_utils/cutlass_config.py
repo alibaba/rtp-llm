@@ -6,7 +6,7 @@ from enum import Enum
 from maga_transformer.utils.gemm_utils.device_map import get_device, get_lut_info
 
 def split_config(s):
-    pattern = r'{\{(\d+),(\d+),(\d+)\}, \{CutlassGemmConfig\((CutlassTileConfig::CtaShape[^,)]+),(\d+),(\d+)\),.*?\}\}'
+    pattern = r'\{\{(\d+),(\d+),(\d+)\}, \{CutlassGemmConfig\((CutlassTileConfig::CtaShape[^,)]+),(\d+),(\d+)\),.*?\}\}'
     match = re.search(pattern, s)
 
     if match:

@@ -35,3 +35,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+
+cc_test(
+    name = "moe_test",
+    srcs = [
+        "test/moe_test.cpp",
+    ],
+    copts = copts(),
+    deps = [
+        "@com_google_googletest//:gtest",
+        "//src/fastertransformer/core:buffer_torch",
+        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//src/fastertransformer/devices/cuda_impl:gpu_base",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        ":trt_plugins",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu':'A10'},
+)
