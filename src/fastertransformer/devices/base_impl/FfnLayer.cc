@@ -47,12 +47,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         hidden = moeFfnLayer(moe_ffn_params).hidden_states;
         if (dp_size > 1) {
             allReduce({hidden, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
-            const auto& dp_token_nums = params.dp_token_nums.value().get();
-            auto begin_index = std::accumulate(dp_token_nums.data<uint32_t>(), dp_token_nums.dataWithOffset<uint32_t>(dp_rank), 0);
-            copy({*output, hidden->view(begin_index, params.input.shape()[0])});
-        } else {
-            // TODO(wangyin.yx): eliminate this copy
-            copy({*output, *hidden});
         }
 
         // deal with moe layers with parallel dense ffn layer
@@ -78,13 +72,25 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             if (moe_conf.dp_size > 1 && moe_conf.tp_size > 1) {
                 shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
             }
+        }
+        overlappedCommBarrier();
+
+        if (dp_size > 1) {
+            const auto& dp_token_nums = params.dp_token_nums.value().get();
+            auto begin_index = std::accumulate(dp_token_nums.data<uint32_t>(), dp_token_nums.dataWithOffset<uint32_t>(dp_rank), 0);
+            copy({*output, hidden->view(begin_index, params.input.shape()[0])});
+        } else {
+            // TODO(wangyin.yx): eliminate this copy
+            copy({*output, *hidden});
+        }
+
+        if (shared_expert_output) {
             // just add bias to output
-            // printBufferData(*output, "ffn out before norm", this, true);
-            shared_expert_output = layernorm({
+            layernorm({
                 output, nullptr, nullopt, mayGetRef(shared_expert_output)
             }).output;
-            // printBufferData(*output, "ffn_out", this, true);
         }
+
     } else {
         BufferPtr up_output;
         if (isGatedActivation(params.configs.activation_type)) {

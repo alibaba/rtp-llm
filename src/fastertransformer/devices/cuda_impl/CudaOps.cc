@@ -283,8 +283,11 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         return AllReduceOutput{params.buffer};
     }
 
-    const auto stream = params.overlapped ? communication_stream_ : stream_;
-    if (params.overlapped) {
+    const auto stream = ((params.overlapped || params.mode == ParallelMode::DP_AND_TP)
+                         && init_params_.enable_comm_overlap)
+                      ? communication_stream_
+                      : stream_;
+    if (stream == communication_stream_) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
         // We use cuda event to ensure the computation on main stream has been finished.

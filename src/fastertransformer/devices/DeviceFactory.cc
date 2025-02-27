@@ -84,6 +84,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.host_reserve_memory_bytes = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", (int64_t)(4L * 1024 * 1024 * 1024)); // 4GB
     FT_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
 
+    device_params.enable_comm_overlap = autil::EnvUtil::getEnv("ENABLE_COMM_OVERLAP", 1L);
+
     if (!global_params.device_params.size()) {
         FT_LOG_ERROR("No device is specified to init !");
         abort();

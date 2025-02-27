@@ -41,6 +41,8 @@ struct DeviceInitParams {
     int64_t device_reserve_memory_bytes = 0;
     int64_t host_reserve_memory_bytes   = 0;
     size_t tokens_per_block = 0;
+
+    bool enable_comm_overlap = true;
 };
 
 // immutable device properties. Can not change since device is initialized.
