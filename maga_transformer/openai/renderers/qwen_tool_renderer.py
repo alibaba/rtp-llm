@@ -1,3 +1,4 @@
+from enum import Enum
 import json
 import logging
 from typing import Optional, List, Tuple, Union
@@ -21,7 +22,10 @@ from maga_transformer.openai.renderers.custom_renderer import (
     OutputDelta,
 )
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.word_util import is_truncated, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import (
+    is_truncated,
+    truncate_response_with_stop_words,
+)
 from jinja2 import Environment, BaseLoader
 
 """
@@ -59,10 +63,28 @@ TODO List
 """
 
 
+class ToolCallMessageExtractStrategy(str, Enum):
+    DEFAULT = "default"
+    SKIP_ON_FAILURE = "skip_on_failure"
+    # maybe useful: ERROR_ON_FAILURE
+
+    @classmethod
+    def from_extra_configs(cls, request: ChatCompletionRequest):
+        """从请求配置中提取工具调用消息提取策略"""
+        strategy = cls.DEFAULT
+        if extra_configs := request.extra_configs:
+            if extra_configs.tool_call_message_extract_strategy == cls.SKIP_ON_FAILURE:
+                strategy = cls.SKIP_ON_FAILURE
+        return strategy
+
+
 class QwenToolStreamStatus(StreamStatus):
     generating_tool_call: bool = False
     tool_call_index = 0
     tool_call_responded_string = ""
+    tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = (
+        ToolCallMessageExtractStrategy.DEFAULT
+    )
 
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
@@ -194,6 +216,10 @@ class QwenToolRenderer(CustomChatRenderer):
         output: GenerateOutput,
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
+        status.tool_call_message_extract_strategy = (
+            ToolCallMessageExtractStrategy.from_extra_configs(status.request)
+        )
+
         return await (
             self._handle_streaming_case(status, output)
             if is_streaming
@@ -208,7 +234,10 @@ class QwenToolRenderer(CustomChatRenderer):
         # before: status.delta_output_string = "你好\n<tool_call>\n{"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}</tool_call>"
         # after: status.delta_output_string = "你好\n"
         tool_calls, status.delta_output_string = (
-            self._extract_tool_calls_from_complete_message(status.delta_output_string)
+            self._extract_tool_calls_from_complete_message(
+                status.delta_output_string,
+                status.tool_call_message_extract_strategy,
+            )
         )
         if tool_calls:
             status.generating_tool_call = True
@@ -225,6 +254,7 @@ class QwenToolRenderer(CustomChatRenderer):
     def _extract_tool_calls_from_complete_message(
         self,
         original_text: str,
+        tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = ToolCallMessageExtractStrategy.DEFAULT,
         tool_call_begin_tag: str = "<tool_call>",
         tool_call_end_tag: str = "</tool_call>",
     ) -> Tuple[Optional[List[ToolCall]], str]:
@@ -250,6 +280,13 @@ class QwenToolRenderer(CustomChatRenderer):
         index = 0
         for part in parts[1:]:
             if tool_call_end_tag not in part:
+                # 认为由<tool_call>开始但是没有</tool_call>结束的是一种failure, skip_on_failure情况下, 就不给予解析
+                # 例如 <tool_call>{"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}<tool_call>{"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}</tool_call>的北京就不允许解析
+                if (
+                    tool_call_message_extract_strategy
+                    == ToolCallMessageExtractStrategy.SKIP_ON_FAILURE
+                ):
+                    continue
                 result_text += tool_call_begin_tag + part
                 continue
 
@@ -277,9 +314,16 @@ class QwenToolRenderer(CustomChatRenderer):
                     logging.error(
                         f"Extract function call from complete message error: {e}"
                     )
+                    # begin/end tag之中不是一个正确的json, 也认为是一种failure
+                    # 例如<tool_call>{"name": "get_current_temperature", "arguments": error_args}</tool_call>
+                    if (
+                        tool_call_message_extract_strategy
+                        == ToolCallMessageExtractStrategy.SKIP_ON_FAILURE
+                    ):
+                        continue
+
                     result_text += tool_call_begin_tag + part
                     continue
-
             # 如果有剩余文本，添加到结果中
             if len(tool_parts) > 1:
                 result_text += tool_parts[1]
@@ -297,7 +341,10 @@ class QwenToolRenderer(CustomChatRenderer):
         output: GenerateOutput,
     ) -> Optional[OutputDelta]:
         # 如果是qwen2.5之前的qwen, 可能会提前stream出<tool_call这样的内容
-        if "<tool_call>" in status.tool_call_responded_string or status.delta_output_string == "<tool_call>":
+        if (
+            "<tool_call>" in status.tool_call_responded_string
+            or status.delta_output_string == "<tool_call>"
+        ):
             status.tool_call_responded_string += status.delta_output_string
             status.delta_output_string = ""
             if "</tool_call>" not in status.tool_call_responded_string:
@@ -306,7 +353,8 @@ class QwenToolRenderer(CustomChatRenderer):
                 # 提取和处理工具调用
                 function_call, status.tool_call_responded_string = (
                     self._extract_function_call_from_streaming_message(
-                        status.tool_call_responded_string
+                        status.tool_call_responded_string,
+                        status.tool_call_message_extract_strategy,
                     )
                 )
                 # 设置工具调用状态
@@ -352,7 +400,9 @@ class QwenToolRenderer(CustomChatRenderer):
         return None
 
     def _extract_function_call_from_streaming_message(
-        self, text: str
+        self,
+        text: str,
+        tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = ToolCallMessageExtractStrategy.DEFAULT,
     ) -> Tuple[Optional[FunctionCall], str]:
         tool_call_name_args_str = text[
             text.index("<tool_call>") + len("<tool_call>") : text.index("</tool_call>")
@@ -376,7 +426,12 @@ class QwenToolRenderer(CustomChatRenderer):
         except Exception as e:
             # json提取失败的时候, 返回原始文本
             logging.error(f"qwen tool extract function call error: {str(e)}")
-            return None, text
+            if (
+                tool_call_message_extract_strategy
+                == ToolCallMessageExtractStrategy.SKIP_ON_FAILURE
+            ):
+                return None, ""
+            return None, extracted_text
 
     def _generate_random_call_id(self, length: int = 24) -> str:
         """生成随机调用ID"""
@@ -401,25 +456,41 @@ class QwenToolRenderer(CustomChatRenderer):
         except Exception as e:
             raise ValueError(f"Unknown error: {str(e)}")
 
-
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+    ):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:
             # 解被截断的bad_case
             # "response":"<tool_call>\n{\"name\": \"get_average_month"
-            if isinstance(buffer, QwenToolStreamStatus) and buffer.tool_call_responded_string and "<tool_call>" in buffer.tool_call_responded_string:
+            if (
+                isinstance(buffer, QwenToolStreamStatus)
+                and buffer.tool_call_responded_string
+                and "<tool_call>" in buffer.tool_call_responded_string
+                and buffer.tool_call_message_extract_strategy
+                == ToolCallMessageExtractStrategy.DEFAULT
+            ):
                 buffer.delta_output_string += buffer.tool_call_responded_string
 
             if buffer.output is None:
                 raise Exception("last output should not be None")
             aux_info = buffer.output.aux_info
-            trunc_string = truncate_response_with_stop_words(buffer.delta_output_string, stop_words_str, is_streaming)
-            output_items.append(OutputDelta(
-                trunc_string,
-                await self._generate_log_probs(buffer, buffer.output),
-                aux_info.input_len,
-                aux_info.output_len,
-                aux_info.reuse_len))
+            trunc_string = truncate_response_with_stop_words(
+                buffer.delta_output_string, stop_words_str, is_streaming
+            )
+            output_items.append(
+                OutputDelta(
+                    trunc_string,
+                    await self._generate_log_probs(buffer, buffer.output),
+                    aux_info.input_len,
+                    aux_info.output_len,
+                    aux_info.reuse_len,
+                )
+            )
         return await self._generate_stream_response(output_items)
+
 
 register_renderer("qwen_tool", QwenToolRenderer)
