@@ -333,9 +333,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             response = await generate.gen_complete_response_once()
             print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
-        response.choices[0].message.tool_calls[0].id = "id"
+        target_delta = json.loads(response.choices[0].model_dump_json())
+        target_delta["message"]["tool_calls"][0]["id"] = "id"
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            target_delta,
             {
                 "index": 0,
                 "message": {
