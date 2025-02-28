@@ -11,8 +11,17 @@ from maga_transformer.models.base_model import BaseModel, GenerateOutput, Genera
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
-from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, FinisheReason, \
-    ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
+from maga_transformer.openai.api_datatype import (
+    ChatMessage,
+    GPTToolDefinition,
+    RoleEnum,
+    FinisheReason,
+    ChatCompletionRequest,
+    GPTFunctionDefinition,
+    ContentPart,
+    ContentPartTypeEnum,
+    RendererInfo,
+)
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.openai.renderer_factory import ChatRendererFactory, CustomChatRenderer, RendererParams
@@ -217,6 +226,169 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             "finish_reason": "stop",
             "logprobs": None,
         })
+
+    async def test_parse_qwen_agent_tool_call(self):
+        os.environ["MODEL_TYPE"] = "qwen_agent_tool"
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model)
+        test_ids = [
+            25,
+            220,
+            35946,
+            85106,
+            47872,
+            11622,
+            455,
+            11080,
+            69364,
+            5333,
+            36407,
+            45912,
+            104307,
+            144575,
+            18149,
+            144575,
+            25,
+            633,
+            11080,
+            69364,
+            198,
+            144575,
+            47483,
+            144575,
+            25,
+            5212,
+            2527,
+            788,
+            330,
+            113074,
+            11,
+            10236,
+            122,
+            236,
+            28404,
+            497,
+            330,
+            3843,
+            788,
+            330,
+            69,
+            47910,
+            16707,
+            144575,
+            14098,
+            144575,
+        ]
+        # print(f"===test ids decode {tokenizer.decode(test_ids)}")
+        # print(tokenizer.encode("你好啊✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}\n✿RESULT✿"))
+
+        render_params = RendererParams(
+            model_type="qwen_agent_tool",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        # function call 格式返回，输入有functions
+        functions = [
+            GPTFunctionDefinition(
+                **{
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA",
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["location"],
+                    },
+                }
+            )
+        ]
+        tools = [GPTToolDefinition(function=functions[0])]
+
+        request = ChatCompletionRequest(messages=[], tools=tools)
+        id_generator = fake_output_generator(
+            test_ids, 1024, tokenizer.eos_token_id or 0, 314
+        )
+        stream_generator = chat_renderer.render_response_stream(
+            id_generator, request, GenerateConfig()
+        )
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        # response = [x async for x in generate][-1]
+        # response = await generate.gen_complete_response_once()
+        # print(response.choices[0].model_dump_json())
+        async for x in generate:
+            response = x
+            response = await generate.gen_complete_response_once()
+            print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        response.choices[0].message.tool_calls[0].id = "id"
+        self.assertEqual(
+            json.loads(response.choices[0].model_dump_json()),
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "我需要调用get_current_weather API来获取天气",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "id",
+                            "type": "function",
+                            "function": {
+                                "name": "get_current_weather",
+                                "arguments": '{"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
+                            },
+                        }
+                    ],
+                    "tool_calls": None,
+                    "partial": False,
+                },
+                "finish_reason": "tool_calls",
+                "logprobs": None,
+            },
+        )
+        # 非functioncall 格式返回，输入没有functions
+        request = ChatCompletionRequest(messages=[])
+        id_generator = fake_output_generator(
+            test_ids, 1024, tokenizer.eos_token_id or 0, 314
+        )
+        gen_config = GenerateConfig()
+        stream_generator = chat_renderer.render_response_stream(
+            id_generator, request, gen_config
+        )
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        async for x in generate:
+            response = x
+            response = await generate.gen_complete_response_once()
+            print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        self.assertEqual(
+            json.loads(response.choices[0].model_dump_json()),
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": ': 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
+                    "function_call": None,
+                    "tool_calls": None,
+                    "partial": False,
+                },
+                "finish_reason": "stop",
+                "logprobs": None,
+            },
+        )
 
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"
