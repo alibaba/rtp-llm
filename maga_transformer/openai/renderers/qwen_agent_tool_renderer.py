@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Optional, List, Any, Union
+from typing import Optional, List, Union
 from maga_transformer.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
@@ -21,15 +20,8 @@ from maga_transformer.openai.renderers.qwen_agent.utils.tool_function_converter 
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
-
-@dataclass
-class ProcessedOutput:
-    output_str: str
-    output_token_length: int
-    finish_reason: Optional[FinisheReason]
-
-
 class QwenAgentToolRenderer(QwenAgentRenderer):
+
     # override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         # 转换request从tool协议到function协议
@@ -41,6 +33,7 @@ class QwenAgentToolRenderer(QwenAgentRenderer):
 
         return super().render_chat(function_request)
 
+    # override
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         delta_message = super()._parse_function_response(response)
         if delta_message and delta_message.function_call:
