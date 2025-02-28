@@ -34,7 +34,7 @@ static const std::string HIPPO_SLAVE_IP("HIPPO_SLAVE_IP");
 static const std::string ROLE_TYPE("roleType");
 
 KmonParam::KmonParam()
-    : kmonitorEnableLogFileSink(false), kmonitorManuallyMode(false), kmonitorNormalSamplePeriod(-1) {}
+    : kmonitorEnableLogFileSink(false), kmonitorManuallyMode(false), kmonitorNormalSamplePeriod(1) {}
 
 bool KmonParam::parseKMonitorTags(const string &tagsStr, map<string, string> &tagsMap) {
     auto tagVec = StringUtil::split(tagsStr, KMONITOR_MULTI_SEP);
@@ -79,7 +79,7 @@ bool KmonParam::init() {
     if (!kmonitorTagsStr.empty() && !parseKMonitorTags(kmonitorTagsStr, kmonitorTags)) {
         return false;
     }
-    kmonitorNormalSamplePeriod = autil::EnvUtil::getEnv(KMONITOR_NORMAL_SAMPLE_PERIOD, -1);
+    kmonitorNormalSamplePeriod = autil::EnvUtil::getEnv(KMONITOR_NORMAL_SAMPLE_PERIOD, 1);
 
     return true;
 }
