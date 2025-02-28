@@ -282,8 +282,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             14098,
             144575,
         ]
-        # print(f"===test ids decode {tokenizer.decode(test_ids)}")
-        # print(tokenizer.encode("你好啊✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}\n✿RESULT✿"))
 
         render_params = RendererParams(
             model_type="qwen_agent_tool",
