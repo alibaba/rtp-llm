@@ -191,7 +191,7 @@ TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
     uint32_t    block_size  = 16;
     std::string requestid   = "test-request-id";
     auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
-    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(true));
     store_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
     store_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
@@ -207,7 +207,7 @@ TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
     // mock call from isMemoryMr, then return false in tcp mode
     EXPECT_CALL(*mock_memory_util_, isMemoryMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(false));
-    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(false));
 
     cache_store1_->store(store_cache, store_callback);
@@ -773,7 +773,7 @@ TEST_F(NormalCacheStoreTest, testStoreContext_storeToBufferStoreFailed) {
     uint32_t    block_size  = 16;
     std::string requestid   = "test-request-id";
     auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
-    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(true));
 
     std::vector<std::shared_ptr<RequestBlockBuffer>> store_caches;
@@ -788,7 +788,7 @@ TEST_F(NormalCacheStoreTest, testStoreContext_storeToBufferStoreFailed) {
     // mock call from isMemoryMr, then return false in tcp mode
     EXPECT_CALL(*mock_memory_util_, isMemoryMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(false));
-    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_memory_util_, regUserMr(::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillRepeatedly(::testing::Return(false));
 
     auto store_context = cache_store1_->storeBuffers(store_caches, 1000);

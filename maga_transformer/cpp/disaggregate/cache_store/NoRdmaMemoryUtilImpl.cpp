@@ -5,7 +5,7 @@
 namespace rtp_llm {
 /**************************** NoRdmaMemoryUtilImpl *******************************/
 
-bool NoRdmaMemoryUtilImpl::regUserMr(void* buf, uint64_t size, bool gpu) {
+bool NoRdmaMemoryUtilImpl::regUserMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size) {
     return true;
 }
 

@@ -10,7 +10,7 @@ public:
     MockMemoryUtil(std::shared_ptr<MemoryUtil> impl): impl_(std::move(impl)) {}
 
 public:
-    MOCK_METHOD(bool, regUserMr, (void*, uint64_t, bool), (override));
+    MOCK_METHOD(bool, regUserMr, (void*, uint64_t, bool, uint64_t), (override));
     MOCK_METHOD(bool, isMemoryMr, (void*, uint64_t, bool, bool), (override));
     MOCK_METHOD(bool, findMemoryMr, (void*, void*, uint64_t, bool, bool), (override));
 

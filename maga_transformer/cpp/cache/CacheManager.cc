@@ -44,7 +44,7 @@ void CacheManager::regUserMr() {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         auto start_time_us = currentTimeUs();
-        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true)) {
+        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.kv_block_stride)) {
             FT_FAIL("register user mr failed");
         }
         auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
