@@ -125,7 +125,6 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
     auto buffer_view = buffer->reshape({buffer->size()});
     auto all_data_1d = all_data->reshape({all_data->size()});
     device_->copy({all_data_1d.view(local_size * tp_rank, local_size), buffer_view});
-    device_->syncAndCheck();
     device_->allGather({{all_data}});
     auto ret = device_->transpose({all_data->reshape({tp_size, buffer_shape[0], buffer_shape[1]})});
     ret->updateShape({buffer_shape[0], buffer_shape[1] * tp_size});
@@ -482,8 +481,6 @@ GptModelOutputs GptModel::forwardPostLayers(
     printBufferData(*hidden, "final_hidden");
 
     const auto& lm_head = weights_.lm_head;
-    // in case host buffer destruct before async clone finished
-    device_->syncAndCheck();
     if (lm_head) {
         // gen last token hidden
         auto last_hidden = has_context_request && !need_all_logits
@@ -551,8 +548,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         layer_inputs.pre_decoder_residual = move(layer_outputs.pre_decoder_residual);
     }
 
-    return forwardPostLayers(layer_inputs.hidden, layer_inputs.attention_common_inputs.context_batch_size,
-                             inputs.need_all_logits, inputs.lm_output_indexes);
+    auto outputs = forwardPostLayers(layer_inputs.hidden, layer_inputs.attention_common_inputs.context_batch_size,
+                                     inputs.need_all_logits, inputs.lm_output_indexes);
+    // make sure cpu buffers out lives gpu exec
+    outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
+    return outputs;
 }
 
 void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {

@@ -108,6 +108,7 @@ struct GptModelOutputs {
 
     mutable ft::BufferPtr scatter_logits;
     mutable ft::BufferPtr scatter_hidden_states;
+    std::shared_ptr<void> captured_values;
 };
 
 using LoraMap = std::unordered_map<std::string, ft::ConstBufferPtr>;
