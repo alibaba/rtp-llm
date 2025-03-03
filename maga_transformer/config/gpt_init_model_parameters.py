@@ -296,7 +296,7 @@ class GptInitModelParameters:
         worker_addrs = []
         worker_grpc_addrs = []
         for member in get_gang_info().members:
-            if member.local_rank // self.tp_size == self.dp_rank:
+            if (member.world_rank / self.tp_size) % self.dp_size == self.dp_rank:
                 worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
                 worker_grpc_addrs.append(f'{member.ip}:{member.rpc_server_port}')
                 logging.info(f"append member for pd sep {member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, {member.cache_store_rdma_listen_port} to local rank {self.local_rank}")

@@ -24,6 +24,7 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
             cache_store_rdma_connect_port=-1,
             cache_store_rdma_listen_port=-1,
             local_rank=0,
+            world_rank=0,
             name=info['name'], ip=info['ip'], info=info))
     zone_name = os.environ.get("ZONE_NAME", "")
     if zone_name:
@@ -78,7 +79,7 @@ def get_gang_info() -> GangInfo:
         else:
             members = get_c2_members()
     else:
-        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 'local', None)]
+        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 'local', None)]
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
@@ -99,6 +100,7 @@ def get_gang_info() -> GangInfo:
                 cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
                 cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
                 local_rank=local_rank,
+                world_rank=part_rank * g_parallel_info.local_world_size + local_rank,
                 name=member.name + '_' + str(local_rank),
                 info=member.info)
             all_members.append(new_member)

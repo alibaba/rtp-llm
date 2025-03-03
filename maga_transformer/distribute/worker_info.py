@@ -120,7 +120,7 @@ class ParallelInfo(object):
 g_parallel_info = ParallelInfo.from_env()
 
 class WorkerInfo(object):
-    def __init__(self, ip: str, server_port: int, gang_hb_port: int, http_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, local_rank: int, name: str, info: Any):
+    def __init__(self, ip: str, server_port: int, gang_hb_port: int, http_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, local_rank: int, world_rank: int, name: str, info: Any):
         self.ip = ip
         self.server_port = server_port
         self.gang_hb_port = gang_hb_port
@@ -132,6 +132,7 @@ class WorkerInfo(object):
         self.cache_store_rdma_listen_port = cache_store_rdma_listen_port
         self.cache_store_rdma_connect_port = cache_store_rdma_connect_port
         self.local_rank: int = local_rank
+        self.world_rank: int = world_rank
         self.name = name
         self.info = info
 
@@ -152,6 +153,7 @@ class WorkerInfo(object):
             cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank),
             cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
             local_rank=g_parallel_info.local_rank,
+            world_rank=g_parallel_info.world_rank,
             name='', info=None)
         return info
 
@@ -199,6 +201,7 @@ class WorkerInfo(object):
         self.cache_store_connect_port = new_info.cache_store_connect_port
         self.rpc_server_port = new_info.rpc_server_port
         self.local_rank = new_info.local_rank
+        self.world_rank = new_info.world_rank
         self.name = new_info.name
         self.info = new_info.info
 
@@ -206,7 +209,7 @@ class WorkerInfo(object):
         return f"""
         WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} http_port={self.http_port} rpc_port={self.rpc_server_port} \n
         cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port}
-        local_rank={self.local_rank} name={self.name} info={self.info} ]
+        local_rank={self.local_rank} world_rank={self.world_rank} name={self.name} info={self.info} ]
         """
 
 g_worker_info = WorkerInfo.from_env()
