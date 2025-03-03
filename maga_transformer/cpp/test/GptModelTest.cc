@@ -35,14 +35,14 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.mask_type = AttentionMaskType::causalMask;
 
     const auto cache_block_num = 128;
-    CacheConfig cache_config(
-        weights->layers.size(),
+    CacheConfig cache_config(KVCacheParam({
+        static_cast<uint>(weights->layers.size()),
         cache_block_num,
-        attention_conf.kv_head_num,
-        attention_conf.size_per_head,
-        attention_conf.tokens_per_block,
+        static_cast<uint>(attention_conf.kv_head_num),
+        static_cast<uint>(attention_conf.size_per_head),
+        static_cast<uint>(attention_conf.tokens_per_block),
         DataType::TYPE_FP16
-    );
+    }));
 
     const std::vector<int32_t> input_lengths_vec = {3};
 

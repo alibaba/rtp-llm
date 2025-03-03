@@ -65,7 +65,7 @@ struct CacheConfig {
         kv_block_size = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 
-        // kv_block_stride is the size of a single block in a single layer
+        // k_block_stride/v_block_stride is the size of a single block in a single layer
         k_block_stride = kv_block_size / layer_num;
         v_block_stride = k_block_stride;
         kv_scale_block_stride = kv_scale_block_size / layer_num;

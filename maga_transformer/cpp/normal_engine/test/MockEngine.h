@@ -77,7 +77,7 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
         auto qkv_weights = make_unique<const ft::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, 3 * hidden_units}, data->data());
         auto qkv_weights_b = make_unique<const ft::Buffer>(
-            mem_type, data_type, vector<size_t>{hidden_units, 3, hidden_units}, data->data());
+            mem_type, data_type, vector<size_t>{3 * hidden_units}, data->data());
         auto attention_layernorm =
             make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto attention_layernorm_beta =

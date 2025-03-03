@@ -17,9 +17,8 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
 
     const size_t layer_num = 2;
     const size_t block_num = 1024;
-    CacheConfig cache_conf(
-        layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
-        attention_conf.tokens_per_block, getTensorType<TestType>());
+    CacheConfig cache_conf(rtp_llm::KVCacheParam({layer_num, block_num, static_cast<uint>(attention_conf.kv_head_num), static_cast<uint>(attention_conf.size_per_head),
+        static_cast<uint>(attention_conf.tokens_per_block), getTensorType<TestType>()}));
     testAttentionLayer(cache_conf, attention_conf, {5}, {});
 }
 
@@ -36,8 +35,7 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention2) {
 
     const size_t layer_num = 2;
     const size_t block_num = 1024;
-    CacheConfig cache_conf(
-        layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
-        attention_conf.tokens_per_block, getTensorType<TestType>());
+    CacheConfig cache_conf(rtp_llm::KVCacheParam({layer_num, block_num, static_cast<uint>(attention_conf.kv_head_num), static_cast<uint>(attention_conf.size_per_head),
+        static_cast<uint>(attention_conf.tokens_per_block), getTensorType<TestType>()}));
     testAttentionLayer(cache_conf, attention_conf, {3}, {});
 }

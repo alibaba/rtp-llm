@@ -195,6 +195,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:flash_attn",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -226,7 +227,8 @@ py_test(
     name = "mla_rotary_kvcache_test",
     srcs = [
         "mla/mla_rotary_kvcache_test.py",
-        "mla/test_util.py"
+        "mla/test_util.py",
+        "mla/rotary_util.py"
     ],
     data = [
         "//:th_transformer",

@@ -128,7 +128,7 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config});
+    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config});
 
     auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
@@ -213,7 +213,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP32);
+    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam{1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, ft::TYPE_FP32});
     cache_manager_ = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
@@ -231,7 +231,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config, tokensPerBlock});
+    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokensPerBlock});
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(

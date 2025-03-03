@@ -20,8 +20,8 @@ TEST_F(CpuAttentionLayerTestFP16, testSimpleContextAttention) {
     const size_t layer_num = 1;
     const size_t block_num = 1024;
     CacheConfig cache_conf(
-        layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
-        attention_conf.tokens_per_block, getTensorType<TestType>());
+        KVCacheParam{layer_num, block_num, (uint)attention_conf.kv_head_num, (uint)attention_conf.size_per_head,
+        (uint)attention_conf.tokens_per_block, getTensorType<TestType>()});
 
     testAttentionLayer(cache_conf, attention_conf, {5}, {});
 }

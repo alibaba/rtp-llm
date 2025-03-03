@@ -16,7 +16,7 @@ class CacheManagerTest: public DeviceTestBase {
 protected:
     CacheConfig initConfig() {
         // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-        CacheConfig config(1, 4, 1, 1, 1, ft::TYPE_INT8);
+        CacheConfig config(KVCacheParam({1, 4, 1, 1, 1, ft::TYPE_INT8}));
         return config;
     }
 
@@ -517,7 +517,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
 
 TEST_F(CacheManagerTest, testSetBlockValue) {
     // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-    CacheConfig  cache_config(2, 4, 1, 1, 2, ft::TYPE_INT8);
+    CacheConfig  cache_config(KVCacheParam({2, 4, 1, 1, 2, ft::TYPE_INT8}));
     CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
@@ -542,8 +542,8 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
             auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
             auto host_kbuffer = device_->clone({*kbuffer, AllocationType::HOST});
             auto host_vbuffer = device_->clone({*vbuffer, AllocationType::HOST});
-            ASSERT_EQ(cache_config.kv_block_stride, host_kbuffer->size());
-            ASSERT_EQ(cache_config.kv_block_stride, host_vbuffer->size());
+            ASSERT_EQ(cache_config.k_block_stride, host_kbuffer->size());
+            ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
             for (size_t i = 0; i < host_kbuffer->size(); i++) {
                 ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
                 ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
@@ -558,7 +558,7 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
 
 TEST_F(CacheManagerTest, testBlockCacheHoldBlockNums) {
     // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-    CacheConfig  cache_config(2, 10, 1, 1, 1, ft::TYPE_INT8);
+    CacheConfig  cache_config(KVCacheParam({2, 10, 1, 1, 1, ft::TYPE_INT8}));
     CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 0);
     ASSERT_EQ(cache_manager.availableBlockNums(), 9);

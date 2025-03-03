@@ -80,7 +80,7 @@ public:
 // }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
-    CacheConfig                   cache_config(1, 3, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
+    CacheConfig                   cache_config(KVCacheParam({1, 3, 1, 4, 2, fastertransformer::DataType::TYPE_FP16}));
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
     ResourceContext resource_context;

@@ -23,7 +23,7 @@ namespace rtp_llm {
 class StreamCacheResourceTest: public DeviceTestBase {
 protected:
     CacheConfig init_config() {
-        CacheConfig config(3, 9, 1, 1, 2, TYPE_INT8);
+        CacheConfig config(KVCacheParam({3, 9, 1, 1, 2, TYPE_INT8}));
         return config;
     }
 
