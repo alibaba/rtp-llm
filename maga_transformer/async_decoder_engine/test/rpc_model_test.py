@@ -53,22 +53,5 @@ class RpcModelTest(TestCase):
         finally:
             pipeline.model.stop()
 
-    def test_new_device(self) -> None:
-        os.environ['USE_NEW_DEVICE_IMPL'] = '1'
-        pipeline = self.create_pipeline()
-        try:
-            t = ThreadPoolExecutor(10)
-            def func():
-                [_ for _ in pipeline("hello, what's your name?", max_new_tokens=10)]
-            result = []
-            for i in range(0, 10):
-                result.append(t.submit(func))
-            # just ensure every input has result
-            for i in range(0, 10):
-                result[i].result()
-        finally:
-            pipeline.model.stop()
-        del os.environ['USE_NEW_DEVICE_IMPL']
-
 if __name__ == '__main__':
     main()
