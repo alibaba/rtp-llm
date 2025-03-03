@@ -635,10 +635,16 @@ get_current_weather: Get the current weather in a given location. 输入参数�
                 **{
                     "role": RoleEnum.assistant,
                     "content": None,
-                    "function_call": {
-                        "name": "get_current_weather",
-                        "arguments": '{"location": "Boston, MA"}',
-                    },
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_current_weather",
+                                "arguments": '{"location": "Boston, MA"}',
+                            },
+                        }
+                    ],
                 }
             )
         )
@@ -647,7 +653,6 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             ChatMessage(
                 **{
                     "role": RoleEnum.tool,
-                    "name": "get_current_weather",
                     "content": '{"temperature": "22", "unit": "celsius", "description": "Sunny"}',
                 }
             )
