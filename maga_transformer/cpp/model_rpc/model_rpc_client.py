@@ -26,7 +26,7 @@ from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 
 request_counter = AtomicCounter()
 
-MAX_GRPC_TIMEOUT_SECONDS = 60 * 3
+MAX_GRPC_TIMEOUT_SECONDS = 60 * 5
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
