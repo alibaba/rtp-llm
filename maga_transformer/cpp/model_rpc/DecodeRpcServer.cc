@@ -274,6 +274,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     uint32_t                 cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
     vector<CompletionQueue>  completion_queues(cq_size);
     vector<int>              each_finished_count(cq_size, 0);
+    if(worker_size == 0 || cq_size == 0) {
+        FT_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %d, cq size = %d", decode_context.request_key.c_str(), worker_size, cq_size);
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker size or cq size is 0");
+    }
     auto                     worker_size_per_queue = worker_size / completion_queues.size();
     FT_LOG_DEBUG("request:[%s] start to async remote load for all rank", decode_context.request_key.c_str());
     for (int i = 0; i < worker_size; i++) {
