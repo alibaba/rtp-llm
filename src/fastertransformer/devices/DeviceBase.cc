@@ -114,14 +114,6 @@ DeviceEventPtr DeviceBase::createEvent() {
 
 void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store) {
     cache_store_ = cache_store;
-    const auto host_tracker_allocator = dynamic_cast<TrackerAllocator *>(getHostAllocator());
-    if (host_tracker_allocator && cache_store) {
-        auto memory_util = cache_store->getMemoryUtil();
-        auto chunks = host_tracker_allocator->getChunks();
-        for (auto chunk : chunks) {
-            memory_util->regUserMr(chunk->ptr, chunk->size, false);
-        }
-    }
 }
 
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
