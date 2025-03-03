@@ -98,7 +98,7 @@ bool CacheStoreServiceImplContextTest::initContext() {
         auto block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, '0' + i, true);
         request_block_buffer->addBlock(block);
     }
-    request_ = cache_store1_->messager_client_->makeLoadRequest(request_block_buffer, 1000);
+    request_ = cache_store1_->messager_client_->makeLoadRequest(request_block_buffer, 1000, 1, 0);
     if (request_ == nullptr) {
         return false;
     }

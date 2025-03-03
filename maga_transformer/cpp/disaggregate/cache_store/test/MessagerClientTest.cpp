@@ -88,7 +88,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_Success) {
     };
 
     mutex.lock();
-    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr);
+    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();
@@ -113,7 +113,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_connectFailed) {
     mutex.lock();
 
     client_->stopTcpClient();
-    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr);
+    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();
@@ -135,7 +135,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_sendRequestFailed) {
     };
     mutex.lock();
 
-    client_->load("11.22.33.44", load_cache, load_callback, 1000, nullptr);
+    client_->load("11.22.33.44", load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();

@@ -16,6 +16,8 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     total_block_count_(request_->blocks_size()),
     request_id_(request_->requestid()),
     peer_ip_(request->client_ip()),
+    partition_count_(request->partition_count()),
+    partition_id_(request->partition_id()),
     response_(response),
     collector_(collector),
     done_(done),
@@ -96,12 +98,22 @@ bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<Bloc
         return false;
     }
 
+    auto block_len = block->len / partition_count_;
+    if (block_len != peer_block->len()) {
+        FT_LOG_WARNING("cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
+                       block->key.c_str(),
+                       block_len,
+                       peer_block->len(),
+                       peer_ip_.c_str());
+        return false;
+    }
+
     auto* block_info = response_->add_blocks();
     block_info->set_key(block->key);
-    block_info->set_len(block->len);
+    block_info->set_len(block_len);
     auto block_content = block_info->mutable_content();
-    block_content->assign(std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>(block->addr.get())),
-                          size_t(block->len));
+    block_content->assign(std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>((int64_t)(block->addr.get()) + block_len * partition_id_)),
+                          size_t(block_len));
     return true;
 }
 

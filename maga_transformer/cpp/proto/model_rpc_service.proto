@@ -186,12 +186,15 @@ message GenerateRequestPB {
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
-    string peer_ip = 3;
+    repeated string peer_ips = 3;
     repeated int64 cache_keys = 4;
     repeated int32 block_ids = 5;
     int64 block_num = 6;
     int64 reuse_block_size = 7;
     int64 timeout_ms = 8;
+    int64 dp_rank = 9;
+    int32 partition_count = 10;
+    int32 partition_id = 11;
 }
 
 message BroadcastLoadResponsePB {

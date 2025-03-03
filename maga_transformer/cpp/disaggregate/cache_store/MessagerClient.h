@@ -23,14 +23,15 @@ public:
                       const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
                       CacheStoreLoadDoneCallback                                   callback,
                       uint32_t                                                     timeout_ms,
-                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector);
+                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                      int partition_count, int partition_id);
 
 private:
     bool initTcpClient(bool enable_metric);
     void stopTcpClient();
 
     std::shared_ptr<arpc::RPCChannelBase> openChannel(const std::string& ip);
-    CacheLoadRequest* makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& cache, uint32_t timeout_ms);
+    CacheLoadRequest* makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& cache, uint32_t timeout_ms, int partition_count, int partition_id);
 
 protected:
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip);

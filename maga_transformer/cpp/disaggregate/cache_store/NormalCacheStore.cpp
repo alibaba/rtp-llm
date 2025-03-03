@@ -143,7 +143,9 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
 void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                             CacheStoreLoadDoneCallback                 callback,
                             const std::string&                         ip,
-                            uint32_t                                   timeout_ms) {
+                            uint32_t                                   timeout_ms,
+                            int partition_count,
+                            int partition_id) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         FT_LOG_WARNING("normal cache store run load failed, invalid params");
         callback(false, CacheStoreErrorCode::InvalidParams);
@@ -156,8 +158,8 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     }
 
     auto collector = metrics_reporter_->makeClientLoadMetricsCollector(request_block_buffer->getBlocksCount());
-    auto task      = [this, request_block_buffer, callback, ip, timeout_ms, collector]() {
-        this->runLoadTask(request_block_buffer, callback, ip, timeout_ms, collector);
+    auto task      = [this, request_block_buffer, callback, ip, timeout_ms, collector, partition_count, partition_id]() {
+        this->runLoadTask(request_block_buffer, callback, ip, timeout_ms, collector, partition_count, partition_id);
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
@@ -172,23 +174,27 @@ void NormalCacheStore::runLoadTask(const std::shared_ptr<RequestBlockBuffer>&   
                                    CacheStoreLoadDoneCallback                                   callback,
                                    const std::string&                                           ip,
                                    uint32_t                                                     timeout_ms,
-                                   const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) {
+                                   const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                                   int partition_count,
+                                   int partition_id) {
 
     CacheStoreClientLoadMetricsCollector::markLoadRequestBegin(collector, request_block_buffer->getBlocksCount());
-    messager_client_->load(ip, request_block_buffer, callback, timeout_ms, collector);
+    messager_client_->load(ip, request_block_buffer, callback, timeout_ms, collector, partition_count, partition_id);
 }
 
 std::shared_ptr<LoadContext>
 NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                        const std::string&                                      ip,
                        int64_t                                                 timeout_ms,
-                       LoadContext::CheckCancelFunc                            check_cancel_func) {
+                       LoadContext::CheckCancelFunc                            check_cancel_func,
+                       int partition_count,
+                       int partition_id) {
     if (request_block_buffers.empty() || ip.empty()) {
         return nullptr;
     }
 
     auto load_context = std::make_shared<LoadContext>(shared_from_this(), memory_util_->isRdmaMode());
-    load_context->load(request_block_buffers, ip, timeout_ms, check_cancel_func);
+    load_context->load(request_block_buffers, ip, timeout_ms, check_cancel_func, partition_count, partition_id);
     return load_context;
 }
 

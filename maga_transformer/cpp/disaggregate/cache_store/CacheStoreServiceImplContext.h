@@ -39,6 +39,8 @@ protected:
     const uint32_t          total_block_count_{0};
     const std::string       request_id_;
     const std::string       peer_ip_;
+    const int32_t partition_count_{1};
+    const int32_t partition_id_{0};
 
     std::mutex         response_mutex_;
     CacheLoadResponse* response_;

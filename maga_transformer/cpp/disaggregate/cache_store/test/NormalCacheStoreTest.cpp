@@ -667,7 +667,7 @@ TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
     load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, 'c', true));
     std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
-    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; });
+    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; }, 1, 0);
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();
 
@@ -692,7 +692,7 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {
     load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
     std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
-    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; });
+    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, []() { return false; }, 1, 0);
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();
 
@@ -718,7 +718,7 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadCancel) {
     auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
     auto load_context  = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), 1000, [start_time_ms]() {
         return start_time_ms + 100 < autil::TimeUtility::currentTimeInMilliSeconds();
-    });
+    }, 1, 0);
 
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();

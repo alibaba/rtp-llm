@@ -41,6 +41,8 @@ message CacheLoadRequest {
     repeated RdmaConnectionInfo rdma_connections = 4;
     optional int64 request_send_start_time_us = 5;
     optional string requestid = 6;
+    optional int32 partition_count = 7;
+    optional int32 partition_id = 8;
 }
 
 message CacheLoadResponse {

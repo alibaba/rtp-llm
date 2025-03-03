@@ -54,13 +54,15 @@ public:
     void load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffer,
               const std::string&                                      ip,
               int64_t                                                 timeout_ms,
-              CheckCancelFunc                                         check_cancel_func);
+              CheckCancelFunc                                         check_cancel_func, int partition_count, int partition_id);
 
 protected:
     bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) override;
 
 private:
     std::string peer_ip_;
+    int partition_count_;
+    int partition_id_;
 };
 
 class StoreContext: public SyncContext {

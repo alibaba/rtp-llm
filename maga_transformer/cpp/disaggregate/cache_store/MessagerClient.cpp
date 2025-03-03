@@ -69,7 +69,8 @@ void MessagerClient::load(const std::string&                                    
                           const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
                           CacheStoreLoadDoneCallback                                   callback,
                           uint32_t                                                     timeout_ms,
-                          const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) {
+                          const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                          int partition_count, int partition_id) {
     auto channel = getChannel(ip);
     if (channel == nullptr) {
         FT_LOG_WARNING("messager client get channel failed, ip %s", ip.c_str());
@@ -77,7 +78,7 @@ void MessagerClient::load(const std::string&                                    
         return;
     }
 
-    auto request = makeLoadRequest(request_block_buffer, timeout_ms - 10);  // TODO: 10 is message transfer time
+    auto request = makeLoadRequest(request_block_buffer, timeout_ms - 10, partition_count, partition_id);  // TODO: 10 is message transfer time
     if (request == nullptr) {
         FT_LOG_WARNING("messager client generate load request failed");
         callback(false, CacheStoreErrorCode::LoadSendRequestFailed);
@@ -97,7 +98,8 @@ void MessagerClient::load(const std::string&                                    
 }
 
 CacheLoadRequest* MessagerClient::makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
-                                                  uint32_t                                   timeout_ms) {
+                                                  uint32_t                                   timeout_ms,
+                                                  int partition_count, int partition_id) {
     auto blocks = request_block_buffer->getBlocks();
 
     auto request = new CacheLoadRequest;
@@ -110,6 +112,8 @@ CacheLoadRequest* MessagerClient::makeLoadRequest(const std::shared_ptr<RequestB
     request->set_requestid(request_block_buffer->getRequestId());
     request->set_client_ip(autil::NetUtil::getBindIp());
     request->set_request_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
+    request->set_partition_count(partition_count);
+    request->set_partition_id(partition_id);
     return request;
 }
 
