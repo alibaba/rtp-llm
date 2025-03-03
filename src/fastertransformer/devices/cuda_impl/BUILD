@@ -1,8 +1,9 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins")
+load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps")
 
 cuda_register()
 trt_plugins()
+flashinfer_deps()
 
 cc_library(
     name = "gpu_base",
@@ -14,6 +15,7 @@ cc_library(
         "CudaWeights.cc",
         "CudaAttentionOp.cc",
         "CudaFfnLayer.cc",
+        "CudaMlaAttentionOp.cc",
         "CudaGemmOp.cc",
         "CudaGroupGemmOp.cc",
         "CudaLoraLinearWithActOp.cc",
@@ -32,13 +34,9 @@ cc_library(
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-    ] + select({
-        "@//:using_cuda12": [
-            "//3rdparty/flashinfer:flashinfer",
-            "@flashinfer//:flashinfer",
-        ],
-        "//conditions:default": [],
-    }),
+        ":flashinfer",
+        "//3rdparty/flashinfer:flashinfer",
+    ],
     visibility = ["//visibility:public"],
     copts = copts(),
     alwayslink = 1,
@@ -62,6 +60,7 @@ cc_library(
         "CudaAddBiasOp.cc",
         "CudaEmbeddingLookup.cc",
         "CudaMlaQKVGemm.cc",
+        "CudaMlaContextAttention.cc",
         "CudaLayernorm.cc",
         "CudaOps.cc",
         "CudaQuantizeOp.cc",

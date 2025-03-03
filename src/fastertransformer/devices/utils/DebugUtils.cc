@@ -320,6 +320,14 @@ void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::
     fout.close();
 }
 
+void saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName) {
+    auto tensor_cpu = tensor.contiguous().cpu();
+    auto          pickled = torch::pickle_save(tensor_cpu);
+    std::ofstream fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
+
 torch::Tensor loadTensorFromFile(const std::string& fileName) {
     // Open the file
     std::ifstream fin(fileName, std::ios::in | std::ios::binary);

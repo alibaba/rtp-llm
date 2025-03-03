@@ -397,8 +397,12 @@ class BaseModel(object):
 
         torch.cuda.empty_cache()
 
+    def _initialize_rope(self):
+        pass
+
     def load(self, device: str):
         self._load_weights()
+        self._initialize_rope()
         self._initialize_weights()
 
     def dup_dim0_for_beam_search(self, t: torch.Tensor, beam_width: int) -> torch.Tensor:

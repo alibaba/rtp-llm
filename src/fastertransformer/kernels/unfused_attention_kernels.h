@@ -15,7 +15,7 @@
  */
 #pragma once
 
-#include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 

@@ -16,7 +16,7 @@
  */
 
 #include "src/fastertransformer/utils/utils.h"
-#include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
 #include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"

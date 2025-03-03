@@ -39,7 +39,7 @@ public:
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
-    void writeCacheStore(const AttentionModuleParams& params);
+    void writeCacheStore(const WriteCacheParams& params);
     DeviceInitParams initParams() {
         return init_params_;
     }
@@ -59,6 +59,9 @@ public:
     BufferPtr mhaQKVGemm(const AttentionLayerParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     MultimodalEmbeddingOutput multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
+
+    //mla
+    AttentionLayerOutput mlaAttentionLayer(const AttentionLayerParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

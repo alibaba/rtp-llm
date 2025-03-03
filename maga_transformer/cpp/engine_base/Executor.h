@@ -21,6 +21,7 @@ public:
             params.head_num_ > 1 ? (size_t)params.head_num_ / params.tp_size_ : 1,
             params.head_num_kv_ > 1 ? (size_t)params.head_num_kv_ / params.tp_size_ : 1,
             (size_t)params.size_per_head_,
+            (size_t)params.hidden_size_,
             rope_config,
             (size_t)params.seq_size_per_block_,
             params.is_causal_ ? fastertransformer::AttentionMaskType::causalMask :
@@ -30,6 +31,7 @@ public:
             params.qk_norm_ || (params.rotary_embedding_style_ == 0 && !params.use_kvcache_) ? false : true,
             false,
             params.use_mla_,
+            params.use_mla_ops_,
             (size_t)params.q_lora_rank_,
             (size_t)params.kv_lora_rank_,
             (size_t)params.nope_head_dim_,

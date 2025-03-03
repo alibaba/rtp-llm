@@ -64,6 +64,11 @@ public:
     int64_t nope_head_dim_ = 0;
     int64_t rope_head_dim_ = 0;
     int64_t v_head_dim_    = 0;
+    bool    use_mla_ops_ = false;
+
+    // rope config for deepseek
+    double deepseek_rope_mscale_    = 1.0;
+    double deepseek_mscale_all_dim_ = 1.0;
 
     // deepseek moe extra params
     int64_t moe_n_group_          = 1;

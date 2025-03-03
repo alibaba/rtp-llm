@@ -15,7 +15,7 @@
  */
 
 #include "decoder_masked_multihead_attention.h"
-#include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
 #include "src/fastertransformer/utils/utils.h"
 
 #include <assert.h>

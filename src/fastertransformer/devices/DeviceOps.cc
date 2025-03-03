@@ -94,6 +94,22 @@ AttentionModuleOutput DeviceOps::decoderSelfAttention(const AttentionModuleParam
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+AttentionLayerOutput DeviceOps::mlaAttentionLayer(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+AttentionModuleOutput DeviceOps::mlaContextAttention(const MlaAttentionModuleParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+AttentionModuleOutput DeviceOps::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AttentionLayerOutput DeviceOps::attentionLayer(const AttentionLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

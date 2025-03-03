@@ -346,10 +346,10 @@ struct EmbeddingLookupParams {
 struct KvCacheInfo {
     int layer_num;
     BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
-    BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    BufferPtr k_cache_buffer;   // [block_nums, head, seq_size_per_block, size_per_head]
+    BufferPtr v_cache_buffer;   // [block_nums, head, seq_size_per_block, size_per_head]
+    BufferPtr k_scale_buffer;   // [block_nums, head, seq_size_per_block]
+    BufferPtr v_scale_buffer;   // [block_nums, head, seq_size_per_block]
 };
 
 struct MultimodalEmbeddingParams {
@@ -398,7 +398,8 @@ struct AttentionCommonInputs {
     BufferPtr                                 request_id;               // [context_batch_size]
     BufferPtr                                 request_pd_separation;    // [context_batch_size]
     std::vector<std::string>                  cache_keys;               // [context_batch_size]
-    size_t                                    block_size = 0;
+    size_t                                    k_block_size = 0;
+    size_t                                    v_block_size = 0;
     size_t                                    scale_block_size = 0;
     bool                                      pd_separation = false;
 
@@ -411,6 +412,7 @@ struct AttentionConfigs {
     size_t      head_num;
     size_t      kv_head_num;
     size_t      size_per_head;
+    size_t      hidden_size;
 
     // rotary embending config
     RopeConfig rope_config;
@@ -425,6 +427,7 @@ struct AttentionConfigs {
 
     // mla config
     bool   use_mla = false;
+    bool   use_mla_ops = false;
     size_t q_lora_rank;
     size_t kv_lora_rank;
     size_t nope_head_dim;
@@ -448,6 +451,53 @@ struct AttentionModuleParams {
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
+};
+
+struct MlaRotaryWriteKVCacheParams {
+    const Buffer&                   q;
+    const Buffer&                   ckv;
+    const Buffer&                   k_rope;
+
+    AttentionCommonInputs&          common;
+    const AttentionLayerWeights&    weights;
+    const AttentionConfigs&         configs;
+    const QScheme                   qscheme;
+};
+
+struct MlaAttentionModuleParams {
+    const int32_t                   layer_id;
+    const Buffer&                   q;
+    const Buffer&                   kv_a;
+    const Buffer&                   k_rope;
+    BufferPtr                       qkv_output; // shape [token_num, hidden_size]
+
+    AttentionCommonInputs&          common;
+    const AttentionLayerWeights&    weights;
+    const AttentionConfigs&         configs;
+    const QScheme                   qscheme;
+};
+
+// decoder attention read kv_a/k_rope from kvcache
+struct MlaDecoderAttentionParams{
+    const int32_t                   layer_id;
+    const Buffer&                   q;
+    BufferPtr                       qkv_output; // shape [token_num, hidden_size]
+
+    AttentionCommonInputs&          common;
+    const AttentionLayerWeights&    weights;
+    const AttentionConfigs&         configs;
+    const QScheme                   qscheme;
+};
+
+struct WriteCacheParams {
+    AttentionCommonInputs&          common;
+    const AttentionConfigs&         configs;
+
+    WriteCacheParams(const AttentionModuleParams& params)
+    : common(params.common), configs(params.configs) {}
+
+    WriteCacheParams(const MlaAttentionModuleParams& params)
+    : common(params.common), configs(params.configs) {}
 };
 
 struct AttentionLayerOutput {
@@ -655,6 +705,7 @@ struct DevicePrepParams {
     const AttentionConfigs& configs;
 
     const BufferPtr &sequence_lengths;
+    const BufferPtr &input_lengths;
     const BufferPtr &kv_cache_block_id;
 
     DataType dtype = DataType::TYPE_INVALID;

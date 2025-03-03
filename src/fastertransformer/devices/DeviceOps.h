@@ -40,9 +40,13 @@ public:
     // dedicated attention ops
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     virtual AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
+    virtual AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params);
+    virtual AttentionModuleOutput mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params);
+    virtual void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
 
     // Top level model ops
     virtual AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
+    virtual AttentionLayerOutput mlaAttentionLayer(const AttentionLayerParams& params);
     virtual FfnLayerOutput ffnLayer(const FfnLayerParams& params);
     virtual FfnLayerOutput microBatchedFfnLayer(const FfnLayerParams& params);
     virtual FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);

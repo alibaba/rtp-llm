@@ -290,11 +290,11 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
-            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport() && !params.configs.use_mla_ops) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;
-            } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
+            } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && !params.configs.use_mla_ops) {
                 fmha_type_ = FMHAType::TRT_V1;
             }
         } else {
@@ -307,6 +307,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             this,
             params.configs,
             params.sequence_lengths,
+            params.input_lengths,
             params.kv_cache_block_id,
             params.dtype);
 

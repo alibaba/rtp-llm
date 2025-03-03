@@ -157,6 +157,32 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
     return Buffer2torchTensor(*buf, copyData);
 }
 
+inline torch::Tensor Buffer2torchTensorWithStride(const Buffer& buf,
+                                                  const std::vector<int64_t>& new_shape,
+                                                  const size_t offset = 0) {
+    if (buf.isQBuffer()) {
+        throw std::runtime_error("not support qbuffer!");
+    }
+    if (buf.shape().size() != new_shape.size()) {
+        throw std::runtime_error("strides size not match new_shape size");
+    }
+    for (int i = 0; i < new_shape.size(); ++i) {
+        if (new_shape[i] > buf.shape()[i]) {
+            throw std::runtime_error("new_shape not match buf.shape()");
+        }
+    }
+    auto strides = buf.strides();
+    auto option = torch::dtype(dataTypeToTorchType(buf.type()))
+                      .device(memoryTypeToTorchDevice(buf.where()))
+                      .requires_grad(false);
+
+    // 直接从现有内存创建带stride的tensor
+    return torch::from_blob(buf.dataWithOffset(offset),
+                            new_shape,
+                            buf.strides(),
+                            option);
+    }
+
 inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& buf, bool copyData = true) {
     if (!buf->isQBuffer()) {
         throw std::runtime_error("only support qbuffer!");

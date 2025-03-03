@@ -13,7 +13,22 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& pa
         // Arm attention operator support FP32 data type only
         dtype = param.kv_cache_data_type_ == ft::DataType::TYPE_INT8 ? ft::TYPE_INT8 : ft::TYPE_FP32;
     }
-    return CacheConfig((uint)param.num_layers_, (uint)0, (uint)local_head_num_kv, (uint)param.size_per_head_, (uint)param.seq_size_per_block_, dtype);
+
+    if (param.use_mla_ && param.use_mla_ops_) {
+        return CacheConfig(MlaCacheParam{(uint)param.num_layers_,
+                                         (uint)0,
+                                         (uint)param.kv_lora_rank_,
+                                         (uint)param.rope_head_dim_,
+                                         (uint)param.seq_size_per_block_,
+                                         dtype});
+    }
+
+    return CacheConfig(KVCacheParam{(uint)param.num_layers_,
+                                    (uint)0,
+                                    (uint)local_head_num_kv,
+                                    (uint)param.size_per_head_,
+                                    (uint)param.seq_size_per_block_,
+                                    dtype});
 }
 
 size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const ft::GptInitParameter& params) {

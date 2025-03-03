@@ -13,9 +13,11 @@ copy_so("//src/fastertransformer/cuda:fa")
 copy_so("//src/fastertransformer/cutlass:fpA_intB")
 copy_so("//src/fastertransformer/cutlass:moe")
 copy_so("//src/fastertransformer/cutlass:int8_gemm")
-copy_so("@flashinfer//:flashinfer_0")
-copy_so("@flashinfer//:flashinfer_1")
-copy_so("@flashinfer//:flashinfer_2")
+copy_so("@flashinfer//:flashinfer_single")
+copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
+copy_so("@flashinfer//:flashinfer_batch_paged_decode")
+copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
+copy_so("@flashinfer//:flashinfer_sm90")
 
 filegroup(
     name = "libs",

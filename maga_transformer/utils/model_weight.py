@@ -403,6 +403,10 @@ class W:
     mla_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale"
     mla_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale"
 
+    # mla + absorb
+    mla_kc = "self_attention_weights.mla.kc.kernel"
+    mla_vc = "self_attention_weights.mla.vc.kernel"
+
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'
     ffn_b1 = 'ffn_weights.intermediate_weight.bias'
@@ -517,6 +521,9 @@ class W:
 
     # medusa lm_head
     medusa_head = 'medusa_head'
+
+    # rotary embedding cos sin cache
+    rope_cos_sin_cache = 'rotary_embedding.cos_sin_cache'
 
     partial_moe_w = set([
         moe_w1,
@@ -740,6 +747,10 @@ class W:
         mla_k_rope_s: sp_id,
         mla_k_nope_s: sp_neg1,
         mla_v_s: sp_neg1,
+
+        # mla cache
+        mla_kc: sp_0,
+        mla_vc: sp_0,
 
         cross_attn_pre_ln_gamma: sp_id,
         cross_attn_pre_ln_beta: sp_id,

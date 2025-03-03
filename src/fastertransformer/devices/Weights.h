@@ -87,6 +87,13 @@ struct AttentionLayerWeights {
     std::shared_ptr<const DenseWeights>     v_weight;
     std::shared_ptr<const LayerNormWeights> q_a_norm_weight;
     std::shared_ptr<const LayerNormWeights> kv_a_norm_weight;
+
+    // mla decode weights
+    std::shared_ptr<const DenseWeights>    kc_weight;
+    std::shared_ptr<const DenseWeights>    vc_weight;
+
+    // rope cos sin cache
+    ConstBufferPtr                          rope_cos_sin_cache;
 };
 
 struct FfnLayerWeights {
@@ -107,7 +114,7 @@ struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     intermediate_weight3_static_scale_weight;
     std::shared_ptr<const DenseWeights>     intermediate_weight3_static_scale_reciprocal_weight;
     // these fields are for Qwen Mode model.
-    // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+    // See https://github.com/huggingface/transformers/blo dingb/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
     std::shared_ptr<FfnLayerWeights>        shared_expert;
     std::shared_ptr<const DenseWeights>     shared_expert_gate;
     ConstBufferPtr                          e_score_correction_bias; // noaux_tc

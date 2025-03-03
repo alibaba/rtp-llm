@@ -197,6 +197,9 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     attention_weights.q_a_norm_weight = mayCreateLayerNormWeights(map, W::q_a_ln_gamma, W::q_a_ln_beta);
     attention_weights.kv_a_norm_weight = mayCreateLayerNormWeights(map, W::kv_a_ln_gamma, W::kv_a_ln_beta);
 
+    attention_weights.kc_weight = mayCreateDenseWeights(map, W::mla_kc, "", "");
+    attention_weights.vc_weight = mayCreateDenseWeights(map, W::mla_vc, "", "");
+
     attention_weights.static_quant_weight = mayCreateDenseWeights(map, W::attention_output_s);
     attention_weights.static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::attention_output_sr);
 
@@ -315,6 +318,12 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
                                                                 W::post_ln_sr);
 
         layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
+
+        layer_ws.self_attention_weights.rope_cos_sin_cache = mayFindBuffer(*global_weight, W::rope_cos_sin_cache);
+        if (layer_ws.self_attention_weights.rope_cos_sin_cache){
+            FT_CHECK_WITH_INFO(layer_ws.self_attention_weights.rope_cos_sin_cache->type() == DataType::TYPE_FP32, "rope_cos_sin_cache must be fp32");
+        }
+
         layer_ws.ffn_weights = createFfnWeights(layer_weights);
         gpt_weights.layers.emplace_back(std::move(layer_ws));
     }

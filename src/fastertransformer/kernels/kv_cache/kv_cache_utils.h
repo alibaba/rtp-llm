@@ -17,7 +17,7 @@
 #include "src/fastertransformer/utils/EnumUtils.h"
 #include <assert.h>
 #include <cmath>
-#include "src/fastertransformer/kernels/kv_cache_index.h"
+#include "src/fastertransformer/kernels/kv_cache/kv_cache_index.h"
 
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -226,5 +226,8 @@ private:
         return offset.isPrimary() ? mPrimaryPoolPtr : mSecondaryPoolPtr;
     }
 };
+
+
+// MLA KVBlockArray
 
 } // namespace tensorrt_llm::kernels

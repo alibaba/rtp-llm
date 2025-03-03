@@ -41,7 +41,8 @@ cc_library(
     hdrs = glob([
         "*.h",
         "*.cuh",
-        "mla_kernels/*.h"
+        "mla_kernels/*.h",
+        "kv_cache/*.h"
     ], exclude=[
         "AttentionFP8Weight.h",
         "moe_kernels.h",
@@ -213,8 +214,8 @@ cc_library(
     hdrs = [
         "decoder_masked_multihead_attention_utils.h",
         "rotary_position_embedding.h",
-        "kv_cache_utils.h",
-        "kv_cache_index.h"
+        "kv_cache/kv_cache_utils.h",
+        "kv_cache/kv_cache_index.h"
     ],
     deps = any_cuda_deps,
     copts = any_cuda_copts(),

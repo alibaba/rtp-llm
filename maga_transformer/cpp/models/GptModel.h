@@ -67,7 +67,8 @@ struct GptModelInputs {
     ft::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
     ft::BufferPtr                             cache_keys;               // [context_batch_size]
     ft::BufferPtr                             dp_token_nums;
-    size_t                                    block_size;
+    size_t                                    k_block_size;
+    size_t                                    v_block_size;
     size_t                                    scale_block_size;
     bool                                      pd_separation = false;
 

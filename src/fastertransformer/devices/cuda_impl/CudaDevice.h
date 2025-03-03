@@ -33,6 +33,7 @@ struct FlashInferAttnParams {
 
     BufferPtr batch_indice_host;
     BufferPtr positions_host;
+    BufferPtr kvlen_host;
     BufferPtr paged_kv_last_page_len_host;
     BufferPtr paged_kv_last_page_len_1_host;
     BufferPtr page_indice_host;
@@ -51,7 +52,6 @@ struct FlashInferAttnParams {
     torch::Tensor float_workspace_t;
     torch::Tensor int_workspace_t;
     torch::Tensor int_host_workspace_t;
-
     torch::Tensor batch_indice_t;
     torch::Tensor positions_t;
     torch::Tensor paged_kv_last_page_len_t;
@@ -61,16 +61,37 @@ struct FlashInferAttnParams {
     torch::Tensor qo_indptr_host_t;
     torch::Tensor page_indptr_t;
     torch::Tensor page_indptr_host_t;
+    torch::Tensor kvlen_host_t;
     torch::Tensor page_indice_t;
 
+    // including both decode and prefill, for mla
+    BufferPtr total_batch_indices_host;
+    BufferPtr total_positions_host;
+    BufferPtr total_page_indices_host;
+    BufferPtr total_page_indptr_host;
+    BufferPtr total_kv_last_page_len_1_host;
+
+    BufferPtr total_batch_indices;
+    BufferPtr total_positions;
+    BufferPtr total_page_indices;
+    BufferPtr total_page_indptr;
+    BufferPtr total_kv_last_page_len_1;
+
+    torch::Tensor total_batch_indices_t;
+    torch::Tensor total_positions_t;
+    torch::Tensor total_page_indices_t;
+    torch::Tensor total_page_indptr_t;
+    torch::Tensor total_kv_last_page_len_1_t;
+
     bool decode = true;
-    std::vector<int64_t> plan;
+    torch::Tensor plan;
 
     static FlashInferAttnParamsPtr prepareFlashInferAttnParams(
             fastertransformer::DeviceBase *device,
             const fastertransformer::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,
-            const BufferPtr &kv_cache_block_id_host,
+            const BufferPtr &input_lengths_host,
+            const BufferPtr &kv_cache_block_id_host,            
             DataType dtype);
 
 };
@@ -160,6 +181,7 @@ public:
     void allGather(const AllGatherParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr mlaQKVGemm(const AttentionLayerParams& params) override;
+    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     void sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
@@ -168,6 +190,8 @@ public:
                         BufferPtr             gate,
                         torch::Tensor&        gate_with_bias_tensor,
                         BufferPtr&            gate_with_bias);
+    void mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) override;
+    void mlaContextAttention(const MlaAttentionModuleParams& params) override;
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);

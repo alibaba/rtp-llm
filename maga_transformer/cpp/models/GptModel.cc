@@ -51,7 +51,8 @@ string GptModelInputs::debugString() const {
     if (cache_keys) {
         debug_string << ", cache_keys: " << cache_keys->debugStringWithData<int64_t>();
     }
-    debug_string << ", block_size: " << block_size;
+    debug_string << ", k block_size: " << k_block_size;
+    debug_string << ", v block_size: " << v_block_size;
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();
@@ -213,6 +214,7 @@ void GptModel::prepareAttentionInputs(
     auto prep_output = device_->prepareModelRun({
             description_.attention_conf,
             inputs.sequence_lengths,
+            inputs.input_lengths,
             inputs.kv_cache_block_id,
             dtype,
             context_batch_size,
@@ -228,7 +230,8 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.flash_infer_attn_params.swap(prep_output.flash_infer_attn_params);
     attention_inputs.request_id = inputs.request_id;
     attention_inputs.request_pd_separation = inputs.request_pd_separation;
-    attention_inputs.block_size = inputs.block_size;
+    attention_inputs.k_block_size = inputs.k_block_size;
+    attention_inputs.v_block_size = inputs.v_block_size;
     attention_inputs.scale_block_size = inputs.scale_block_size;
     attention_inputs.pd_separation = inputs.pd_separation;
 
@@ -364,18 +367,24 @@ GptLayerOutputs GptModel::forwardGptLayer(
     if (lora_model_input) {
         attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
     }
+    AttentionLayerOutput attn_output;
+    auto attn_params = AttentionLayerParams({
+            layer_id,
+            *hidden,
+            move(attn_out_buf),
+            description_.attention_conf,
+            layer.self_attention_weights,
+            attention_common_inputs,
+            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+            {description_.layernorm_eps, description_.norm_type},
+            act_qscheme
+    });
+    if (description_.attention_conf.use_mla_ops) {
+        attn_output = device_->mlaAttentionLayer(attn_params);
+    } else {
+        attn_output = device_->attentionLayer(attn_params);
+    }
 
-    auto attn_output = device_->attentionLayer(AttentionLayerParams({
-        layer_id,
-        *hidden,
-        move(attn_out_buf),
-        description_.attention_conf,
-        layer.self_attention_weights,
-        attention_common_inputs,
-        device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-        {description_.layernorm_eps, description_.norm_type},
-        act_qscheme
-    }));
     auto attn_hidden = std::move(attn_output.hidden_states);
     if (device_props_.tp_size > 1) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
@@ -492,6 +501,7 @@ GptModelOutputs GptModel::forwardPostLayers(
         auto logits = device_->gemm(GemmParams(
             *last_hidden, *(lm_head->kernel), nullopt, nullptr,
             ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
+        printBufferData(*logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }

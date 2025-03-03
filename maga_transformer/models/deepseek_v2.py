@@ -1,3 +1,4 @@
+import logging
 import torch
 import unicodedata
 import types
@@ -26,6 +27,7 @@ from maga_transformer.utils.model_weight import (
 )
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
+from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 
 def yarn_get_mscale(scale: float=1, mscale: float=1):
     if scale <= 1:
@@ -67,6 +69,15 @@ def mla_pad_t(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_he
     t = t.reshape(-1, head_num * (nope_head_dim + rope_head_dim))
     return t.T.contiguous()
 
+def transpose_slice_k(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
+    t = ts[0]
+    t = t.transpose(0, 1).view(lora_rank, head_num, nope_head_dim + v_head_dim)
+    return t[:, :, :nope_head_dim].permute(1, 2, 0).contiguous()
+
+def transpose_slice_v(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
+    t = ts[0]
+    t = t.transpose(0, 1).view(lora_rank, head_num, nope_head_dim + v_head_dim)
+    return t[:, :, nope_head_dim:].transpose(0, 1).contiguous()
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
@@ -104,6 +115,14 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             WeightInfo(W.mla_kv_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_layernorm.weight', identity)],
                        identity),
         ]
+
+        if self.config.use_mla_ops:
+            mla_layer_weights.append(
+                WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
+                           functools.partial(transpose_slice_k, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
+            mla_layer_weights.append(
+                WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
+                           functools.partial(transpose_slice_v, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
 
         if self.q_use_lora:
             mla_layer_weights.extend([
@@ -204,6 +223,8 @@ class DeepSeekV2(BaseModel):
 
             # MLA config
             config.use_mla = True
+            config.use_mla_ops = bool(os.environ.get('USE_MLA_OPS', False))
+            logging.info(f"deepseek2 use_mla_ops: {config.use_mla_ops}")
             config.q_lora_rank = config_json['q_lora_rank']
             config.kv_lora_rank = config_json['kv_lora_rank']
             config.nope_head_dim = config_json['qk_nope_head_dim']
@@ -213,7 +234,10 @@ class DeepSeekV2(BaseModel):
             config.rotary_embedding_dim = config.rope_head_dim
 
             # yarn rotary config
-            config.rotary_embedding_style = 5
+            if config.use_mla_ops:
+                config.rotary_embedding_style = 0
+            else:
+                config.rotary_embedding_style = 5
             rope_scaling = config_json.get('rope_scaling')
             config.rotary_embedding_scale = rope_scaling['factor']
             config.rotary_factor1 = float(rope_scaling.get('beta_slow', 1))
@@ -223,6 +247,8 @@ class DeepSeekV2(BaseModel):
             scaling_factor = rope_scaling['factor']
             mscale = rope_scaling['mscale']
             mscale_all_dim = rope_scaling['mscale_all_dim']
+            config.deepseek_rope_mscale = mscale
+            config.deepseek_mscale_all_dim = mscale_all_dim
             config.rotary_embedding_mscale = yarn_get_mscale(scaling_factor, mscale) / yarn_get_mscale(scaling_factor, mscale_all_dim)
             config.rotary_embedding_offset = config.nope_head_dim
 
@@ -270,6 +296,28 @@ class DeepSeekV2(BaseModel):
     @staticmethod
     def get_weight_cls():
         return DeepSeekV2Weight
+
+    def _initialize_rope(self):
+        if not self.config.use_mla_ops:
+            return
+        assert self.weight
+        config = self.config
+        logging.info(f"initialize rope cos sin cache with seq_len: {config.max_seq_len}")
+        rotary_emb = DeepseekV3YarnRotaryEmbedding(config.rotary_embedding_dim,
+                                                   config.max_seq_len,
+                                                   config.rotary_embedding_base,
+                                                   scaling_factor=config.rotary_embedding_scale,
+                                                   original_max_position_embeddings=config.org_embedding_max_pos,
+                                                   beta_fast=config.rotary_factor2,
+                                                   beta_slow=config.rotary_factor1,
+                                                   mscale=config.deepseek_rope_mscale,
+                                                   mscale_all_dim=config.deepseek_mscale_all_dim)
+        half_rope_dim = config.rotary_embedding_dim // 2
+        cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
+        sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
+        # cos sin cache must be float32
+        cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous().to(self.device).to(torch.float32)
+        self.weight.global_weights[W.rope_cos_sin_cache] = cos_sin_cache
 
 register_model('deepseek2', DeepSeekV2, ["DeepseekV2ForCausalLM"])
 register_model('deepseek3', DeepSeekV2, ["DeepseekV3ForCausalLM"])

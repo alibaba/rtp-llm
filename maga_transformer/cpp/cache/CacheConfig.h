@@ -7,6 +7,24 @@
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
+struct KVCacheParam {
+    uint         layer_num;
+    uint         block_nums;
+    uint         local_head_num_kv;
+    uint         size_per_head;
+    uint         seq_size_per_block;
+    ft::DataType dtype;
+};
+
+struct MlaCacheParam {
+    uint         layer_num;
+    uint         block_nums;
+    uint         kv_lora_rank;
+    uint         rope_head_dim;
+    uint         seq_size_per_block;
+    ft::DataType dtype;
+};
+
 struct CacheConfig {
     uint32_t     layer_num              = 0;
     uint32_t     block_nums             = 0;
@@ -18,27 +36,27 @@ struct CacheConfig {
     size_t       block_size             = 0;
     size_t       kv_block_size          = 0;
     size_t       kv_scale_block_size    = 0;
-    size_t       kv_block_stride        = 0;
+    size_t       k_block_stride        = 0;
+    size_t       v_block_stride        = 0;
     size_t       kv_scale_block_stride  = 0;
     size_t       total_size             = 0;
+    size_t       scale_size             = 0;
+
+    bool        use_mla = false;
+    uint32_t kv_lora_rank  = 0;
+    uint32_t rope_head_dim = 0;
 
     CacheConfig() {}
 
-    CacheConfig(uint         layer_num_,
-                uint         block_nums_,
-                uint         local_head_num_kv_,
-                uint         size_per_head_,
-                uint         seq_size_per_block_,
-                ft::DataType dtype_):
-        layer_num(layer_num_),
-        block_nums(block_nums_),
-        local_head_num_kv(local_head_num_kv_),
-        size_per_head(size_per_head_),
-        seq_size_per_block(seq_size_per_block_),
-        dtype(dtype_) {
+    CacheConfig(const KVCacheParam& param):
+        layer_num(param.layer_num),
+        block_nums(param.block_nums),
+        local_head_num_kv(param.local_head_num_kv),
+        size_per_head(param.size_per_head),
+        seq_size_per_block(param.seq_size_per_block),
+        dtype(param.dtype) {
 
         auto dtype_size = ft::getTypeSize(dtype);
-        int scale_size = 0;
         if (dtype == ft::TYPE_INT8 || dtype == ft::TYPE_FP8_E4M3) {
             scale_size = 4;
         }
@@ -48,14 +66,66 @@ struct CacheConfig {
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 
         // kv_block_stride is the size of a single block in a single layer
-        kv_block_stride = kv_block_size / layer_num;
+        k_block_stride = kv_block_size / layer_num;
+        v_block_stride = k_block_stride;
         kv_scale_block_stride = kv_scale_block_size / layer_num;
 
         refresh();
     }
 
+    CacheConfig(const MlaCacheParam& param):
+        CacheConfig(KVCacheParam{param.layer_num, param.block_nums, 1, param.kv_lora_rank, param.seq_size_per_block, param.dtype}) {
+        use_mla = true;
+        kv_lora_rank = param.kv_lora_rank;
+        rope_head_dim = param.rope_head_dim;
+
+        auto dtype_size = ft::getTypeSize(dtype);
+        block_size = layer_num * local_head_num_kv * (kv_lora_rank + rope_head_dim + scale_size * 2) * seq_size_per_block * dtype_size;
+
+        k_block_stride = local_head_num_kv * (kv_lora_rank + scale_size) * seq_size_per_block * dtype_size;
+        v_block_stride = local_head_num_kv * (rope_head_dim + scale_size) * seq_size_per_block * dtype_size;
+        refresh();
+    }
+
+
     void refresh() {
         total_size = block_size * block_nums;
+    }
+
+    virtual size_t getKeyBlockStride() const {
+        return k_block_stride;
+    }
+
+    virtual size_t getValueBlockStride() const {
+        return v_block_stride;
+    }
+
+    size_t getKeyLayerStride() const {
+        return block_nums * getKeyBlockStride();
+    }
+
+    size_t getValueLayerStride() const {
+        return block_nums * getValueBlockStride();
+    }
+
+    size_t getKeyOffset(int block_index, int layer_id) const {
+        auto const block_stride = getKeyBlockStride();
+        auto const layer_stride = getKeyLayerStride();
+        return layer_id * layer_stride + block_index * block_stride;
+    }
+
+    size_t getValueOffset(int block_index, int layer_id) const {
+        auto const block_stride = getValueBlockStride();
+        auto const layer_stride = getValueLayerStride();
+        return layer_id * layer_stride + block_index * block_stride;
+    }
+
+    size_t getKeyShape() const {
+        return getKeyBlockStride() / ft::getTypeSize(dtype);
+    }
+
+    size_t getValueShape() const {
+        return getValueBlockStride() / ft::getTypeSize(dtype);
     }
 
     std::string debugString() const {
@@ -68,7 +138,8 @@ struct CacheConfig {
                      << ", size_per_head: " << size_per_head
                      << ", seq_size_per_block: " << seq_size_per_block
                      << ", dtype: " << int(dtype)
-                     << ", kv_block_stride: " << kv_block_stride
+                     << ", k_block_stride: " << k_block_stride
+                     << ", v_block_stride: " << v_block_stride
                      << ", kv_scale_block_stride: " << kv_scale_block_stride
                      << ", total_size: " << total_size
                      << "}";

@@ -44,6 +44,16 @@ const std::vector<size_t>& Buffer::shape() const {
     return shape_;
 }
 
+std::vector<int64_t> Buffer::strides() const {
+    std::vector<int64_t> strides;
+    strides.resize(shape_.size());
+    strides[shape_.size() - 1] = 1;
+    for (int i = shape_.size() - 2; i >= 0; --i) {
+            strides[i] = strides[i + 1] * shape_[i + 1];
+    }    
+    return strides;
+}
+
 void* Buffer::data() const {
     return data_;
 }

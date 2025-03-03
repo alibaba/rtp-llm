@@ -44,7 +44,7 @@ void CacheManager::regUserMr() {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         auto start_time_us = currentTimeUs();
-        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.kv_block_stride)) {
+        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.k_block_stride + config_.v_block_stride)) {
             FT_FAIL("register user mr failed");
         }
         auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
@@ -134,23 +134,12 @@ void CacheManager::allocateAndTpSync() {
 }
 
 void CacheManager::initKvCache() {
-    kv_cache_.k_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
-                                                      config_.dtype,
-                                                      std::vector<size_t>{(size_t)config_.layer_num,
-                                                                          (size_t)config_.block_nums,
-                                                                          (size_t)config_.local_head_num_kv,
-                                                                          (size_t)config_.seq_size_per_block,
-                                                                          (size_t)config_.size_per_head},
-                                                      cache_base_ptr_);
-    kv_cache_.v_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
-                                                      config_.dtype,
-                                                      std::vector<size_t>{(size_t)config_.layer_num,
-                                                                          (size_t)config_.block_nums,
-                                                                          (size_t)config_.local_head_num_kv,
-                                                                          (size_t)config_.seq_size_per_block,
-                                                                          (size_t)config_.size_per_head},
-                                                      (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
-    if (config_.dtype == ft::DataType::TYPE_INT8) {
+    if (config_.use_mla) {
+        initKvCacheMla();
+    } else {
+        initKvCacheNormal();
+    }
+        if (config_.dtype == ft::DataType::TYPE_INT8) {
         kv_cache_.k_scale =
             std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
                                          ft::DataType::TYPE_FP32,
@@ -188,9 +177,46 @@ void CacheManager::initKvCache() {
                 (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
     }
 #endif
-
-
     regUserMr();
+
+}
+
+void CacheManager::initKvCacheMla() {
+    FT_LOG_INFO("init mla kv cache");
+    kv_cache_.k_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
+                                                      config_.dtype,
+                                                      std::vector<size_t>{(size_t)config_.layer_num,
+                                                                          (size_t)config_.block_nums,
+                                                                          (size_t)config_.seq_size_per_block,
+                                                                          (size_t)config_.kv_lora_rank},
+                                                      cache_base_ptr_);
+    kv_cache_.v_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
+                                                      config_.dtype,
+                                                      std::vector<size_t>{(size_t)config_.layer_num,
+                                                                          (size_t)config_.block_nums,                                                      
+                                                                          (size_t)config_.seq_size_per_block,
+                                                                          (size_t)config_.rope_head_dim},
+                                                      (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+}
+
+void CacheManager::initKvCacheNormal() {
+    FT_LOG_INFO("init normal kv cache");
+    kv_cache_.k_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
+                                                      config_.dtype,
+                                                      std::vector<size_t>{(size_t)config_.layer_num,
+                                                                          (size_t)config_.block_nums,
+                                                                          (size_t)config_.local_head_num_kv,
+                                                                          (size_t)config_.seq_size_per_block,
+                                                                          (size_t)config_.size_per_head},
+                                                      cache_base_ptr_);
+    kv_cache_.v_blocks = std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
+                                                      config_.dtype,
+                                                      std::vector<size_t>{(size_t)config_.layer_num,
+                                                                          (size_t)config_.block_nums,
+                                                                          (size_t)config_.local_head_num_kv,
+                                                                          (size_t)config_.seq_size_per_block,
+                                                                          (size_t)config_.size_per_head},
+                                                      (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
 }
 
 const CacheConfig& CacheManager::cacheConfig() const {
@@ -384,7 +410,7 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
         CacheItem item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
                        {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
                        {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
-                        free_info.loss.empty() ? 
+                        free_info.loss.empty() ?
                         free_info.loss : std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                         free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
@@ -401,94 +427,115 @@ void CacheManager::incrRefCounter(const std::vector<int>& indices) {
 }
 
 void CacheManager::setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer) {
-    auto layer_stride = config_.block_nums * config_.kv_block_stride;
-    auto copyFunc = [&](ft::Buffer& src_buffer, ft::BufferPtr& dst_blocks){
-        auto dst_data = (char*)dst_blocks->data() + layer_id * layer_stride + block_index * config_.kv_block_stride;
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
+    auto k_shape = config_.getKeyShape();
+    auto v_shape = config_.getValueShape();
+
+    auto copyFunc = [&](ft::Buffer& src_buffer, ft::BufferPtr& dst_blocks, size_t offset, size_t shape){
+        auto dst_data = (char*)dst_blocks->data() + offset;
         auto dst_buffer = Buffer(
-            dst_blocks->where(), src_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, dst_data);
+            dst_blocks->where(), src_buffer.type(), {shape}, dst_data);
         device_->copy({dst_buffer, src_buffer});
     };
 
-    copyFunc(k_buffer, kv_cache_.k_blocks);
-    copyFunc(v_buffer, kv_cache_.v_blocks);
+    copyFunc(k_buffer, kv_cache_.k_blocks, k_offset, k_shape);
+    copyFunc(v_buffer, kv_cache_.v_blocks, v_offset, v_shape);
 }
 
 void CacheManager::setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer) {
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-        auto layer_k_data = (char*)(k_buffer.data()) + layer_id * config_.kv_block_stride;
+        auto layer_k_data = (char*)(k_buffer.data()) + layer_id * config_.getKeyBlockStride();
         auto layer_k_buffer = Buffer(
-                k_buffer.where(), k_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, layer_k_data);
-        auto layer_v_data = (char*)(v_buffer.data()) + layer_id * config_.kv_block_stride;
+                k_buffer.where(), k_buffer.type(), {config_.getKeyShape()}, layer_k_data);
+        auto layer_v_data = (char*)(v_buffer.data()) + layer_id * config_.getValueBlockStride();
         auto layer_v_buffer = Buffer(
-                v_buffer.where(), v_buffer.type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, layer_v_data);
+                v_buffer.where(), v_buffer.type(), {config_.getValueShape()}, layer_v_data);
         setKVBlockValue(block_index, layer_id, layer_k_buffer, layer_v_buffer);
     }
 }
 
 std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block_index, int layer_id) {
-    auto layer_stride = config_.block_nums * config_.kv_block_stride;
-    auto kdst_buffer = device_->allocateBuffer(
-            {config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
-    auto vdst_buffer = device_->allocateBuffer(
-            {config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
+    auto k_shape = config_.getKeyShape();
+    auto v_shape = config_.getValueShape();
 
-    auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
-        auto src_data = (char*)(src_blocks->data()) + layer_id * layer_stride + block_index * config_.kv_block_stride;
+    auto kdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {k_shape}, ft::AllocationType::DEVICE});
+    auto vdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {v_shape}, ft::AllocationType::DEVICE});
+
+    auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer, size_t offset, size_t shape){
+        auto src_data = (char*)(src_blocks->data()) + offset;
         auto src_buffer = Buffer(
-            src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
+            src_blocks->where(), config_.dtype, {shape}, src_data);
         device_->copy({*dst_buffer, src_buffer});
     };
-    copyFunc(kv_cache_.k_blocks, kdst_buffer);
-    copyFunc(kv_cache_.v_blocks, vdst_buffer);
+
+    copyFunc(kv_cache_.k_blocks, kdst_buffer, k_offset, k_shape);
+    copyFunc(kv_cache_.v_blocks, vdst_buffer, v_offset, v_shape);
 
     return {kdst_buffer, vdst_buffer};
 }
 
 std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block_index) {
-    auto layer_stride = config_.block_nums * config_.kv_block_stride;
+    auto k_shape = config_.getKeyShape();
+    auto v_shape = config_.getValueShape();
     auto kdst_buffer = device_->allocateBuffer(
-            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+            {config_.dtype, {config_.layer_num, k_shape}, ft::AllocationType::DEVICE});
     auto vdst_buffer = device_->allocateBuffer(
-            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+            {config_.dtype, {config_.layer_num, v_shape}, ft::AllocationType::DEVICE});
 
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-        auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
-            auto src_data = (char*)(src_blocks->data()) + layer_id * layer_stride + block_index * config_.kv_block_stride;
-            auto src_buffer = Buffer(
-                src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
-            device_->copy({dst_buffer->view(layer_id, 1)[0], src_buffer});
-        };
-        copyFunc(kv_cache_.k_blocks, kdst_buffer);
-        copyFunc(kv_cache_.v_blocks, vdst_buffer);
+        auto k_offset = config_.getKeyOffset(block_index, layer_id);
+        auto v_offset = config_.getValueOffset(block_index, layer_id);
+        auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer, size_t offset, size_t shape){
+        auto src_data = (char*)(src_blocks->data()) + offset;
+        auto src_buffer = Buffer(
+            src_blocks->where(), config_.dtype, {shape}, src_data);
+        device_->copy({dst_buffer->view(layer_id, 1)[0], src_buffer});
+    };
+        copyFunc(kv_cache_.k_blocks, kdst_buffer, k_offset, k_shape);
+        copyFunc(kv_cache_.v_blocks, vdst_buffer, v_offset, v_shape);
     }
 
     return {kdst_buffer, vdst_buffer};
 }
 
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    auto layer_stride = config_.block_nums * config_.kv_block_stride;
+    auto k_shape = config_.getKeyShape();
+    auto v_shape = config_.getValueShape();
+
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-        auto copyFunc = [&](ft::BufferPtr& buffer_blocks){
-            auto dst_data = (char*)(buffer_blocks->data()) + layer_id * layer_stride + dest_block_index * config_.kv_block_stride;
-            auto src_data = (char*)(buffer_blocks->data()) + layer_id * layer_stride + src_block_index * config_.kv_block_stride;
+        auto dst_k_offset = config_.getKeyOffset(dest_block_index, layer_id);
+        auto src_k_offset = config_.getKeyOffset(src_block_index, layer_id);
+        auto dst_v_offset = config_.getValueOffset(dest_block_index, layer_id);
+        auto src_v_offset = config_.getValueOffset(src_block_index, layer_id);
+        auto copyFunc = [&](ft::BufferPtr& buffer_blocks, size_t dst_offset, size_t src_offset, size_t shape){
+            auto dst_data = (char*)(buffer_blocks->data()) + dst_offset;
+            auto src_data = (char*)(buffer_blocks->data()) + src_offset;
             auto dst_buffer = Buffer(
-                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, dst_data);
+                buffer_blocks->where(), config_.dtype, {shape}, dst_data);
             auto src_buffer = Buffer(
-                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, src_data);
+                buffer_blocks->where(), config_.dtype, {shape}, src_data);
             device_->copy({dst_buffer, src_buffer});
         };
-        copyFunc(kv_cache_.k_blocks);
-        copyFunc(kv_cache_.v_blocks);
+        copyFunc(kv_cache_.k_blocks, dst_k_offset, src_k_offset, k_shape);
+        copyFunc(kv_cache_.v_blocks, dst_v_offset, src_v_offset, v_shape);
     }
 }
 
 CacheManager::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {
     BlockAddrInfo addr_info;
     size_t total_blocks_num = (size_t)(layer_id * config_.block_nums + block_index);
-    auto offset = total_blocks_num * (size_t)config_.kv_block_stride;
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
     auto scale_offset = total_blocks_num * (size_t)config_.kv_scale_block_stride;
-    addr_info.k_addr = (int8_t*)kv_cache_.k_blocks->data() + offset;
-    addr_info.v_addr = (int8_t*)kv_cache_.v_blocks->data() + offset;
+    addr_info.k_addr = (int8_t*)kv_cache_.k_blocks->data() + k_offset;
+    addr_info.v_addr = (int8_t*)kv_cache_.v_blocks->data() + v_offset;
+
+    // TODO(yinzhi): check scale
     if (kv_cache_.k_scale) {
         addr_info.k_scale_addr = (int8_t*)kv_cache_.k_scale->data() + scale_offset;
         addr_info.v_scale_addr = (int8_t*)kv_cache_.v_scale->data() + scale_offset;
@@ -538,6 +585,7 @@ void CacheManager::copyKvCacheFromSeqPosition(const SeqPosition& src_seq_positio
 void CacheManager::beamSearchKvUpdate(ft::BufferPtr src_block_offset,
                                       ft::BufferPtr target_block_offset)
 {
+    // TODO(yinzhi): not available for mla yet
     auto k_blocks_tensor = Buffer2torchTensor(kv_cache_.k_blocks, false);
     auto v_blocks_tensor = Buffer2torchTensor(kv_cache_.v_blocks, false);
 

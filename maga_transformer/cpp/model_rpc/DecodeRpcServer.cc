@@ -460,16 +460,23 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& request_key      = load_context.request_key;
     auto        cache_manager    = engine_->resourceContext().cache_manager;
     const auto& cache_config     = cache_manager->cacheConfig();
-    auto        block_size       = cache_config.kv_block_stride;
+    auto        k_block_size       = cache_config.k_block_stride;
+    auto        v_block_size       = cache_config.v_block_stride;
     auto        scale_block_size = cache_config.kv_scale_block_stride;
     auto        layer_num        = maga_init_params_.gpt_init_parameter.num_layers_;
 
-    if (block_size % load_context.peer_addrs.size() != 0 && scale_block_size % load_context.peer_addrs.size() != 0) {
+    if (v_block_size % load_context.peer_addrs.size() != 0 || k_block_size % load_context.peer_addrs.size() != 0
+        || scale_block_size % load_context.peer_addrs.size() != 0) {
         FT_LOG_WARNING(
-            "block size [%d] is not divisible by peer ips size [%d]", block_size, load_context.peer_addrs.size());
+            "k block size [%d] or v block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
+            k_block_size,
+            v_block_size,
+            scale_block_size,
+            load_context.peer_addrs.size());
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
     }
-    block_size       = block_size / load_context.peer_addrs.size();
+    k_block_size     = k_block_size / load_context.peer_addrs.size();
+    v_block_size = v_block_size / load_context.peer_addrs.size();
     scale_block_size = scale_block_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
@@ -488,12 +495,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto  cache_key = makeCacheKey(std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 auto  block_id  = load_context.block_ids[block_pos];
                 auto  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
-                void* k_addr    = (void*)((int64_t)addr_info.k_addr + i * block_size);
-                void* v_addr    = (void*)((int64_t)addr_info.v_addr + i * block_size);
+                void* k_addr    = (void*)((int64_t)addr_info.k_addr + i * k_block_size);
+                void* v_addr    = (void*)((int64_t)addr_info.v_addr + i * v_block_size);
                 std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
                 std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
-                load_layer_cache->addBlock("k_" + cache_key, k_block_addr, block_size, true, true);
-                load_layer_cache->addBlock("v_" + cache_key, v_block_addr, block_size, true, true);
+                load_layer_cache->addBlock("k_" + cache_key, k_block_addr, k_block_size, true, true);
+                load_layer_cache->addBlock("v_" + cache_key, v_block_addr, v_block_size, true, true);
                 if (addr_info.k_scale_addr) {
                     void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);
                     void* v_scale_addr = (void*)((int64_t)addr_info.v_scale_addr + i * scale_block_size);

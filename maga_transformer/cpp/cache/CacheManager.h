@@ -107,8 +107,8 @@ public:
     void freeWithCache(FreeInfo& free_info);
     void insertResidentCache(FreeInfo& free_info);
 
-    void setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
-    void setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
+    virtual void setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
+    virtual void setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
     std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index, int layer_id);
     std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index);
     void blockCopy(int src_block_index, int dest_block_index);
@@ -120,7 +120,7 @@ public:
 
     void                                    regUserMr();
 
-private:
+protected:
     const BlockCache&                       blockCache() const;
     size_t                                  cacheItemNum() const;
     uint32_t                                totalBlocks() const;
@@ -128,6 +128,8 @@ private:
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndTpSync();
     void                                    initKvCache();
+    void                                    initKvCacheNormal();
+    void                                    initKvCacheMla();
     MatchInfo                               matchImpl(const MallocInfo& malloc_info);
     void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(int64_t request_id, int nums = 1);
@@ -149,7 +151,7 @@ private:
 
     void reportMetricsLoop();
 
-private:
+protected:
     CacheConfig     config_;
     int             seq_size_per_block_;
     std::set<int>   free_blocks_index_;

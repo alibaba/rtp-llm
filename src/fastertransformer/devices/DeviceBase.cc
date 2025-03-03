@@ -124,7 +124,7 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
     }
 }
 
-void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
+void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     auto& param = params.common;
     if (param.warmup) {
         FT_LOG_DEBUG("is warmup, so ignore writeCacheStore");
@@ -171,12 +171,12 @@ void DeviceBase::writeCacheStore(const AttentionModuleParams& params) {
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
             auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.block_size);
-            void* v_addr = (void*)((int8_t*)v_cache_data + block_id * param.block_size);
+            void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
+            void* v_addr = (void*)((int8_t*)v_cache_data + block_id * param.v_block_size);
             std::shared_ptr<void> k_block_addr(k_addr, [](void* p) { });
             std::shared_ptr<void> v_block_addr(v_addr, [](void* p) { });
-            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.block_size, true, true);
-            request_blocks->addBlock("v_" + cache_key, v_block_addr, param.block_size, true, true);
+            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
+            request_blocks->addBlock("v_" + cache_key, v_block_addr, param.v_block_size, true, true);
             if (k_scale_data) {
                 void* k_scale_addr = (void*)((int8_t*)k_scale_data + block_id * param.scale_block_size);
                 void* v_scale_addr = (void*)((int8_t*)v_scale_data + block_id * param.scale_block_size);

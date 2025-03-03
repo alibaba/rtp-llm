@@ -794,4 +794,41 @@ __device__ inline void attention_rope(RopeConfig rope_config,
     }
 }
 
+template<typename scalar_t, typename vector_t>
+__global__ void launchApplyRopeKernel(scalar_t*  input,
+                                      RopeConfig rope_config,
+                                      int        head_num,
+                                      int        head_size,
+                                      int        seq_len,
+                                      const int* padding_offset,
+                                      const int* prefill_length) {
+    extern __shared__ __align__(sizeof(float2)) char smem[];
+
+    const int token_idx     = blockIdx.x;
+    const int head_num_idx  = blockIdx.y;
+    const int tidx          = threadIdx.x;
+    const int head_size_idx = tidx * 2;
+    const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
+    const int tgt_token_idx = token_idx + token_padding_offset;
+
+    const int batch_idx = tgt_token_idx / seq_len;
+    const int token_prefill_length = prefill_length == nullptr ? 0 : prefill_length[batch_idx];
+    const int seq_idx = tgt_token_idx % seq_len + token_prefill_length;
+
+    const bool work = (head_num_idx < head_num && head_size_idx < head_size);
+
+    if (work) {
+        vector_t  x;
+        const int offset = token_idx * head_num * head_size + head_num_idx * head_size + head_size_idx;
+
+        x = *reinterpret_cast<vector_t*>(&input[offset]);
+
+        FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+            apply_rope<scalar_t, vector_t, ROPE_STYLE>(
+                rope_config, x, reinterpret_cast<scalar_t*>(smem), tidx, seq_idx, seq_len);
+        });
+
+        *reinterpret_cast<vector_t*>(&input[offset]) = x;
+    }
+}
 }  // namespace fastertransformer

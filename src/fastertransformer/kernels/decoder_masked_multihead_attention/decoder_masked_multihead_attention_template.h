@@ -17,7 +17,7 @@
 
 #include "decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
-#include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
@@ -95,7 +95,7 @@ __inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const
     assert(index_1 < dim_1);
     return index_0 * dim_1 + index_1;
 }
-  
+
 // Use HMMA to compute with FP16/BF16 inputs and FP32 accumulators.
 // #define MMHA_USE_HMMA
 

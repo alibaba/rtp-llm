@@ -56,6 +56,13 @@ static const std::string q_a_ln_beta   = "self_attention_weights.mla.query_a_lay
 static const std::string kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma";
 static const std::string kv_a_ln_beta  = "self_attention_weights.mla.key_value_a_layernorm_weight.beta";
 
+// mla_absorb
+static const std::string mla_kc = "self_attention_weights.mla.kc.kernel";
+static const std::string mla_vc = "self_attention_weights.mla.vc.kernel";
+
+// rotary embedding cos sin cache
+static const std::string rope_cos_sin_cache = "rotary_embedding.cos_sin_cache";
+
 static const std::string attn_q_s = "self_attention_weights.mla.query_weight.weight_only_quant_scale";
 static const std::string attn_q_a_s = "self_attention_weights.mla.query_a_weight.weight_only_quant_scale";
 static const std::string attn_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale";

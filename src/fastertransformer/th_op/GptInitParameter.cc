@@ -329,6 +329,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)     \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)     \
     DEF_PROPERTY(use_mla, use_mla_)                                     \
+    DEF_PROPERTY(use_mla_ops, use_mla_ops_)                             \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                             \
     DEF_PROPERTY(kv_lora_rank, kv_lora_rank_)                           \
     DEF_PROPERTY(nope_head_dim, nope_head_dim_)                         \
@@ -337,7 +338,9 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(moe_n_group, moe_n_group_)                             \
     DEF_PROPERTY(moe_topk_group, moe_topk_group_)                       \
     DEF_PROPERTY(softmax_extra_scale, softmax_extra_scale_)             \
-    DEF_PROPERTY(vit_separation, vit_separation_)
+    DEF_PROPERTY(vit_separation, vit_separation_)                       \
+    DEF_PROPERTY(deepseek_rope_mscale, deepseek_rope_mscale_)           \
+    DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num

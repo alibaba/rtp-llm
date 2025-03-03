@@ -67,6 +67,7 @@ public:
     MemoryType                 where() const;
     DataType                   type() const;
     const std::vector<size_t>& shape() const;
+    std::vector<int64_t>       strides() const;
     void*                      data() const;
     void*                      dataWithOffset(size_t offset) const;
 

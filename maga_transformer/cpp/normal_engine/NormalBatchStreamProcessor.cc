@@ -69,7 +69,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.mm_features_locs =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {multimodal_features_len}, ft::AllocationType::HOST}, {});
     }
-    model_input.block_size = block_size_;
+    model_input.k_block_size = k_block_size_;
+    model_input.v_block_size = v_block_size_;
     model_input.scale_block_size = scale_block_size_;
     model_input.pd_separation = pd_separation_;
     model_input.warmup = warm_up_;
@@ -170,7 +171,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                         } else {
                             gathered_mm_features.emplace_back(feature_buffer);
                         }
-                        
+
                     }
                     auto text_token_mask = stream->textTokensMask();
                     memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
