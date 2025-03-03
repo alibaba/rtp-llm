@@ -62,12 +62,15 @@ def git_deps():
     new_git_repository(
         name = "flashinfer",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
-        commit = "63fa200edbe4a54dcba36943ac0d0987f5292628",
+        commit = "55b75d8515c30e317f3b7d12fd905371cb6f0dbd",
         build_file = str(Label("//3rdparty/flashinfer:flashinfer.BUILD")),
         patches = [
             "//3rdparty/flashinfer:0001-fix-compile.patch",
             "//3rdparty/flashinfer:0002-dispatch-group-size.patch",
             "//3rdparty/flashinfer:0003-tanh-compatibility.patch",
+            "//3rdparty/flashinfer:0004-fix-dispatch.patch",
+            "//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
+            "//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
         ],
     )
 

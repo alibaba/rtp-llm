@@ -105,9 +105,16 @@ def fa_deps():
         actual = "@flash_attention//:fa_hdrs",
     )
 
+def flashinfer_deps():
+    native.alias(
+        name = "flashinfer",
+        actual = "@flashinfer//:flashinfer"
+    )
+
+
 def kernel_so_deps():
     return select({
-        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libflashinfer_0_so", ":libflashinfer_1_so", ":libflashinfer_2_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libflashinfer_single_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so"],
         "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
