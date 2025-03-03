@@ -340,6 +340,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "message": {
                     "role": "assistant",
                     "content": "我需要调用get_current_weather API来获取天气",
+                    "function_call": None,
                     "tool_calls": [
                         {
                             "index": 0,
@@ -351,7 +352,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                             },
                         }
                     ],
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "tool_calls",
