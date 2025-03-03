@@ -3,6 +3,7 @@
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 using namespace fastertransformer;
 namespace unittest {
@@ -65,11 +66,47 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input, int64_t of
     dim3   block((input.size(3) + 31) / 32 * 32);
     dim3   grid(input.size(0) * input.size(1), input.size(2));
 
-    size_t smem_size = dim * sizeof(float);
+    size_t smem_size = 2 * dim * sizeof(float);
+    auto data_type = torchDTypeToDataType(input.dtype());
 
-    KernelWrapper<<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float, 4 ,at::RestrictPtrTraits>(),
-            RopeStyle(style), dim, base, scale, max_pos, mscale, offset);
+    RopeConfig rope_config;
+    rope_config.style   = RopeStyle(style);
+    rope_config.dim     = dim;
+    rope_config.base    = base;
+    rope_config.scale   = scale;
+    rope_config.max_pos = max_pos;
+    rope_config.mscale  = mscale;
+    rope_config.offset  = offset;
+
+    int seq_len = input.size(1);
+    int head_num = input.size(2);
+    int head_size = input.size(3);
+
+    if (rope_config.style == RopeStyle::Yarn) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 32;
+    } else if (rope_config.style == RopeStyle::Llama3) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 4;
+    }
+
+    switch (data_type) {
+        case TYPE_FP16:
+            launchApplyRopeKernel<half, uint32_t><<<grid, block, smem_size, stream>>>((half*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        case TYPE_BF16:
+            launchApplyRopeKernel<__nv_bfloat16, __nv_bfloat162><<<grid, block, smem_size, stream>>>((__nv_bfloat16*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        case TYPE_FP32:
+            launchApplyRopeKernel<float, float2><<<grid, block, smem_size, stream>>>((float*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        default:
+            throw std::runtime_error("Unsupported data type");
+    }
+
+    // KernelWrapper<<<grid, block, smem_size, stream>>>(
+    //         input.packed_accessor32<float, 4 ,at::RestrictPtrTraits>(),
+    //         RopeStyle(style), dim, base, scale, max_pos, mscale, offset);
 
     torch::Tensor output = input.detach().clone();
     return output;

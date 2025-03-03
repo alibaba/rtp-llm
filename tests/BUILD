@@ -183,3 +183,58 @@ py_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "mla_context_attention",
+    srcs = [
+        "mla/mla_context_attention.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mla_decode_attention",
+    srcs = [
+        "mla/mla_decode_attention.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mla_rotary_kvcache_test",
+    srcs = [
+        "mla/mla_rotary_kvcache_test.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
