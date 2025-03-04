@@ -129,6 +129,10 @@ void CacheManager::allocateAndTpSync() {
     config_.refresh();
     cache_aligned_buffer_ =
         device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.total_size}});
+    // temp hack for mla, since other devices not impl bufMemset
+    if (config_.use_mla) {
+        device_->bufMemset(*cache_aligned_buffer_, 0);
+    }
 
     cache_base_ptr_ = cache_aligned_buffer_->data();
 }
