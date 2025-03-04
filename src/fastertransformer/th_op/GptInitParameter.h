@@ -224,6 +224,9 @@ public:
     // 0 for no sep, 1 for server, 2 for client
     int64_t     vit_separation_                     = 0;
 
+
+    std::string model_name_ = "";
+
     //multi machine
     std::vector<std::string> worker_addrs_;
     std::vector<std::string> worker_grpc_addrs_;

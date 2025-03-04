@@ -115,6 +115,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [结构化剪枝](docs/Sparse-Tutorial.md)
 * [量化](docs/Quantization.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)
+* [多进程前端Server模式](docs/MultiFrontendServer.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)

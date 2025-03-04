@@ -37,7 +37,6 @@ class InternVL(BaseModel, MultiModalMixin):
         config.mm_related_params.vit_weights = InternVLVitWeight({"vision_model": self.mm_part.vision_model,
                                                                     "mlp1": self.mm_part.mlp1}, True)
         config.mm_sep_tokens = [[self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]]
-        config.special_tokens.stop_words_id_list = [self.tokenizer.encode("<|im_end|>")]
 
 
     @staticmethod
@@ -87,6 +86,11 @@ class InternVL(BaseModel, MultiModalMixin):
         assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
         config.mm_related_params.special_tokens.update({'default_mm_token': '<image>'})
         return config
+
+    @classmethod
+    def _update_config(cls, config: GptInitModelParameters):
+        if config.tokenizer_path:
+            config.special_tokens.stop_words_id_list = [cls.get_tokenizer(config).encode("<|im_end|>")]
 
     @staticmethod
     def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):

@@ -20,31 +20,30 @@ from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput
 from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
+from maga_transformer.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slices, \
             truncate_response_with_stop_words, truncate_token_with_stop_word_id, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 request_counter = AtomicCounter()
 
 class Pipeline(object):
-    def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
-        self.model = model
+    def __init__(self, model_cls: Union["BaseModel", BaseModel],
+                model_config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
+        self.model_cls = model_cls
+        self.model_config = model_config
         self.tokenizer = tokenizer
-        self._special_tokens: int = self.model.config.special_tokens
-        self._mm_token: str = self.model.config.mm_related_params.special_tokens.get('default_mm_token', '')
-        self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
-        if self.model.is_multimodal():
-            if isinstance(self.model, AsyncModel):
-                self.vit_engine = MMProcessEngine(self.model.model)
-            else:
-                self.vit_engine = MMProcessEngine(self.model)
+        self._special_tokens: int = self.model_config.special_tokens
+        self._mm_token: str = self.model_config.mm_related_params.special_tokens.get('default_mm_token', '')
+        self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model_cls)
+        self.backend_rpc_server_visitor = BackendRPCServerVisitor(model_config)
 
     def stop(self):
-        if isinstance(self.model, AsyncModel):
-            self.model.stop()
+        pass
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
@@ -60,7 +59,7 @@ class Pipeline(object):
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
-            # 认为是从inference_worker传递进来的，不需要再处理一遍
+            # 认为是从frontend_worker传递进来的，不需要再处理一遍
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
@@ -128,19 +127,19 @@ class Pipeline(object):
             request_id = request_counter.increment()
 
         generate_config_json = kwargs.pop("generate_config", {})
-        generate_config = self.create_generate_config(generate_config_json, self.model.config.vocab_size,
-                                                      self.model.config.special_tokens, self.tokenizer, **kwargs)
+        generate_config = self.create_generate_config(generate_config_json, self.model_config.vocab_size,
+                                                      self.model_config.special_tokens, self.tokenizer, **kwargs)
         # for delete stop word from output
         prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), **kwargs)
         mm_inputs = []
-        if self.model.is_multimodal():
+        if self.model_config.is_multimodal:
             prompt, mm_inputs = self.piple_funcs.multimodal_modify_prompt_func(prompt, urls, self._mm_token,
-                                                                            generate_config=generate_config.model_dump(), **kwargs)
+                    generate_config=generate_config.model_dump(), **kwargs)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
                                              generate_config=generate_config.model_dump(),
                                              tokenizer=self.tokenizer,
-                                             add_special_tokens=self.model.config.add_special_tokens,
+                                             add_special_tokens=self.model_config.add_special_tokens,
                                              special_tokens=self._special_tokens,
                                              **kwargs)
 
@@ -275,7 +274,7 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = self.model.enqueue(input)
+        stream: AsyncGenerator[GenerateOutputs, None] = self.backend_rpc_server_visitor.enqueue(input)
 
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []

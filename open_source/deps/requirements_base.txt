@@ -48,3 +48,4 @@ librosa
 av
 pillow-heif
 pillow-avif-plugin
+setproctitle

@@ -11,8 +11,6 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import str_to_bool
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from transformers import PreTrainedTokenizerBase
-from maga_transformer.models.base_model import BaseModel
-from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
     ChatCompletionStreamResponse, \
@@ -23,37 +21,36 @@ from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 
 class OpenaiEndopoint():
-    def __init__(self, model: Union[AsyncModel, BaseModel]):
-        self.model = model
-        self.max_seq_len = self.model.config.max_seq_len
-        if self.model.is_multimodal():
-            if isinstance(self.model, AsyncModel):
-                self.vit_engine = MMProcessEngine(self.model.model)
-            else:
-                self.vit_engine = MMProcessEngine(self.model)
+    def __init__(self, model_config: GptInitModelParameters,
+                 tokenizer: PreTrainedTokenizerBase,
+                 backend_rpc_server_visitor: BackendRPCServerVisitor):
+        self.model_config = model_config
+        self.max_seq_len = self.model_config.max_seq_len
 
-        tokenizer = self.model.tokenizer
         if (tokenizer == None):
-            raise AttributeError(f"model [{model}] has no tokenizer!")
+            raise AttributeError(f"tokenizer is none!")
         self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
         self.eos_token_id = None
         if (isinstance(tokenizer, PreTrainedTokenizerBase)):
             self.eos_token_id = tokenizer.eos_token_id
         if (self.eos_token_id == None):
-            self.eos_token_id = self.model.config.special_tokens.eos_token_id
+            self.eos_token_id = self.model_config.special_tokens.eos_token_id
 
-        self.stop_words_id_list = self.model.config.special_tokens.stop_words_id_list
+        self.stop_words_id_list = self.model_config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
             model_type=os.environ["MODEL_TYPE"],
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
-            template_type=self.model.config.template_type,
-            ckpt_path=self.model.config.ckpt_path
+            template_type=self.model_config.template_type,
+            ckpt_path=self.model_config.ckpt_path
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
@@ -69,7 +66,6 @@ class OpenaiEndopoint():
             word = self.tokenizer.decode(stop_word_ids)
             if len(word):
                 self.stop_words_str_list.append(word)
-
 
         env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
         env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
@@ -88,7 +84,7 @@ class OpenaiEndopoint():
 
     async def list_models(self):
         global model_args
-        model_card = ModelCard(id=self.model.__class__.__name__)
+        model_card = ModelCard(id=self.model_config.model_name)
         return ModelList(data=[model_card])
 
     def _extract_generation_config(self, request: ChatCompletionRequest) -> GenerateConfig:
@@ -117,8 +113,8 @@ class OpenaiEndopoint():
             config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
-        config.add_special_tokens(self.model.config.special_tokens)
-        config.convert_select_tokens(self.model.config.vocab_size, self.tokenizer)
+        config.add_special_tokens(self.model_config.special_tokens)
+        config.convert_select_tokens(self.model_config.vocab_size, self.tokenizer)
         return config
 
     async def _collect_complete_response(
@@ -183,7 +179,7 @@ class OpenaiEndopoint():
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,
-            model=self.model.__class__.__name__,
+            model=self.model_config.model_name,
             debug_info=debug_info,
         )
 
@@ -243,7 +239,8 @@ class OpenaiEndopoint():
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
 
-        if self.model.is_multimodal():
+        mm_inputs = []
+        if self.model_config.is_multimodal:
             mm_inputs = rendered_input.multimodal_inputs
         else:
             mm_inputs = []
@@ -258,7 +255,7 @@ class OpenaiEndopoint():
             rendered_input.input_ids,
             mm_inputs,
             generate_config,
-            self.model,
+            self.backend_rpc_server_visitor,
             chat_request
         )
 

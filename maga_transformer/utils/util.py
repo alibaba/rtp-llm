@@ -6,10 +6,11 @@ import logging
 import shutil
 import pynvml
 import threading
+import requests
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Union, Dict, Any, List, Set
 from maga_transformer import _ft_pickler
-from pathlib import Path
 
 class AtomicCounter:
     def __init__(self, initial: int=0):
@@ -183,3 +184,16 @@ def has_overlap_kmp(a: str, b: str) -> bool:
             j += 1
         prefix[i] = j
     return prefix[-1] > 0
+
+def request_server(method: str, server_port: int, uri: str = '', req: Dict[str, Any] = {}):
+    try:
+        if method == "get":
+            response = requests.get(f'http://localhost:{server_port}/{uri}', json=req)
+            return response.json()
+        elif method == "post":
+            response = requests.post(f'http://localhost:{server_port}/{uri}', json=req)
+            return response.json()
+        else:
+            return {"error": "error method"}
+    except requests.RequestException as e:
+        return {"error": f"Failed to call {uri}", "details": str(e)}

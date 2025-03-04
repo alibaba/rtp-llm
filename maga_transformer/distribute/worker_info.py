@@ -9,8 +9,20 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
-WORKER_INFO_PORT_NUM = 6
 MASTER_INFO_PORT_NUM = 6
+MIN_WORKER_INFO_PORT_NUM = 7
+WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+
+def get_worker_port_num():
+    global WORKER_INFO_PORT_NUM
+    global MIN_WORKER_INFO_PORT_NUM
+    WORKER_INFO_PORT_NUM = int(os.environ.get('WORKER_INFO_PORT_NUM', MIN_WORKER_INFO_PORT_NUM))
+    logging.info(f'env WORKER_INFO_PORT_NUM: {WORKER_INFO_PORT_NUM}')
+    if WORKER_INFO_PORT_NUM < MIN_WORKER_INFO_PORT_NUM:
+        raise Exception(f"env worker info port num {WORKER_INFO_PORT_NUM} " \
+            f"is small than min worker info port num {MIN_WORKER_INFO_PORT_NUM}")
+
+get_worker_port_num()
 
 class ParallelInfo(object):
     # EP从TP里分
@@ -117,7 +129,11 @@ class ParallelInfo(object):
 g_parallel_info = ParallelInfo.from_env()
 
 class WorkerInfo(object):
-    def __init__(self, ip: str, server_port: int, gang_hb_port: int, http_port: int, rpc_server_port: int, remote_rpc_server_port: int, cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, cache_store_rdma_connect_port: int, local_rank: int, world_rank: int, name: str, info: Any):
+    def __init__(self, ip: str, server_port: int, gang_hb_port: int, 
+                 http_port: int, rpc_server_port: int, remote_rpc_server_port: int, 
+                 cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, 
+                 cache_store_rdma_connect_port: int, backend_server_port: int, 
+                 local_rank: int, world_rank: int, name: str, info: Any):
         self.ip = ip
         self.server_port = server_port
         self.gang_hb_port = gang_hb_port
@@ -128,6 +144,7 @@ class WorkerInfo(object):
         self.cache_store_connect_port = cache_store_connect_port
         self.cache_store_rdma_listen_port = cache_store_rdma_listen_port
         self.cache_store_rdma_connect_port = cache_store_rdma_connect_port
+        self.backend_server_port = backend_server_port
         self.local_rank: int = local_rank
         self.world_rank: int = world_rank
         self.name = name
@@ -149,6 +166,7 @@ class WorkerInfo(object):
             cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
             cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank),
             cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(g_parallel_info.local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),
+            backend_server_port=WorkerInfo.backend_server_port_offset(g_parallel_info.local_rank),
             local_rank=g_parallel_info.local_rank,
             world_rank=g_parallel_info.world_rank,
             name='', info=None)
@@ -186,6 +204,10 @@ class WorkerInfo(object):
     def http_port_offset(local_rank: int, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 5
 
+    @staticmethod
+    def backend_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 6
+
     # used for ut
     def reload(self):
         new_info = self.from_env()
@@ -197,6 +219,7 @@ class WorkerInfo(object):
         self.cache_store_listen_port = new_info.cache_store_listen_port
         self.cache_store_connect_port = new_info.cache_store_connect_port
         self.rpc_server_port = new_info.rpc_server_port
+        self.backend_server_port = new_info.backend_server_port
         self.local_rank = new_info.local_rank
         self.world_rank = new_info.world_rank
         self.name = new_info.name
@@ -205,6 +228,7 @@ class WorkerInfo(object):
     def __str__(self):
         return f"""
         WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} http_port={self.http_port} rpc_port={self.rpc_server_port} \n
+        backend_server_port={self.backend_server_port}
         cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port}
         local_rank={self.local_rank} world_rank={self.world_rank} name={self.name} info={self.info} ]
         """
@@ -239,7 +263,6 @@ def update_master_info(ip: str, base_port: int):
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4
-
 
 def total_need_port_num() -> int:
     return MASTER_INFO_PORT_NUM * g_parallel_info.dp_size + WORKER_INFO_PORT_NUM * g_parallel_info.tp_size

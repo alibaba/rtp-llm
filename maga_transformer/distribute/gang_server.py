@@ -129,13 +129,13 @@ class GangServer:
 
     def wait_infernece_server_ready(self):
         for member in self._gang_info.workers():
-            url = f'http://{member.ip}:{member.server_port}/health'
+            url = f'http://{member.ip}:{member.backend_server_port}/health'
             try:
                 resposne = requests.get(url, timeout=1)
             except:
-                raise Exception(f"failed to check member {member.ip}:{member.server_port}/health")
+                raise Exception(f"failed to check member {member.ip}:{member.backend_server_port}/health")
             if resposne.status_code != 200:
-                raise Exception(f"member {member.ip}:{member.server_port} /health status_code: {resposne.status_code}, is not ready")
+                raise Exception(f"member {member.ip}:{member.backend_server_port} /health status_code: {resposne.status_code}, is not ready")
 
     def request_workers(self, req: Dict[str, Any], uri: str = 'inference_internal', is_wait: bool = False):
         req = copy.deepcopy(req)
@@ -143,7 +143,7 @@ class GangServer:
             _ = requests.post(url, json=req)
         future_list = []
         for member in self._gang_info.workers():
-            url = f'http://{member.ip}:{member.server_port}/{uri}'
+            url = f'http://{member.ip}:{member.backend_server_port}/{uri}'
             future_ = self._request_threadpool.submit(curl_impl, url)
             future_list.append(future_)
         if is_wait:
@@ -155,13 +155,13 @@ class GangServer:
             try:
                 res = http_post_with_retry(url, {"name": "", "ip": ""})
             except:
-                logging.error(f"Gang server {member.ip}:{member.server_port} heartbeat loss, do abort")
+                logging.error(f"Gang server {member.ip}:{member.gang_hb_port} heartbeat loss, do abort")
                 os._exit(-1)
             if res.status_code != 200:
                 logging.error(f"Gang server {member.ip} status code is not 200, do abort")
                 os._exit(-1)
             if res.json()['initializing'] == True:
-                logging.error(f"Gang server {member.ip}:{member.server_port} is restarted, do abort")
+                logging.error(f"Gang server {member.ip}:{member.gang_hb_port} is restarted, do abort")
                 os._exit(-1)
 
     def start_health_check(self):

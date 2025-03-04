@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 import safetensors.torch
 
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
@@ -220,7 +220,9 @@ class BaseModel(object):
         self.load(self.device)
 
     @classmethod
-    def create_config(cls, model_config: ModelConfig, parallel_info:ParallelInfo=g_parallel_info) -> GptInitModelParameters:
+    def create_config(cls, model_config: ModelConfig,
+                      parallel_info:ParallelInfo=g_parallel_info,
+                      config_mode: ConfigMode = ConfigMode.ComplexMode) -> GptInitModelParameters:
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         cls._load_quant_config(model_config.ckpt_path, config)
         if config.hidden_size == 0:
@@ -237,13 +239,19 @@ class BaseModel(object):
             ptuning_path=model_config.ptuning_path,
             ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict,
-            parallel_info=parallel_info
+            parallel_info=parallel_info,
+            config_mode=config_mode
         )
+        cls._update_config(config)
         return config
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> GptInitModelParameters:
         raise NotImplementedError()
+
+    @classmethod
+    def _update_config(cls, config: GptInitModelParameters):
+        pass
 
     @staticmethod
     def _load_quant_config(ckpt_path: str,  config: GptInitModelParameters):

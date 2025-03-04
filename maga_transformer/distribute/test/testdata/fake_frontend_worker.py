@@ -1,4 +1,4 @@
-class InferenceWorker(object):
+class FrontendWorker(object):
     def __init__(self):
         pass
 

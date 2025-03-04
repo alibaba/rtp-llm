@@ -93,7 +93,7 @@ def pipeline_main(model_args, barrier):
         model_args['ckpt_path'],
         model_config=ModelConfig(**model_args))
     tokenizer = model.model.tokenizer
-    pipeline = Pipeline(model, tokenizer)
+    pipeline = Pipeline(model, model.config, model.tokenizer)
     barrier.wait()
     return pipeline, tokenizer
 

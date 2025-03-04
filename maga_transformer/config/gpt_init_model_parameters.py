@@ -81,6 +81,10 @@ class TemplateType(Enum):
     base = "image"
 
 
+class ConfigMode(Enum):
+    SimpleMode = 1
+    ComplexMode = 2
+
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -161,6 +165,9 @@ class GptInitModelParameters:
         self.vit_run_batch = False
         self.is_ft_style_weight = False
 
+        self.is_multimodal = False
+        self.model_name = ""
+
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -181,6 +188,21 @@ class GptInitModelParameters:
         for k, v in update_params.items():
             setattr(self, k, v)
         return self
+
+    def update_worker_addrs(self):
+        worker_addrs = []
+        worker_grpc_addrs = []
+        for member in get_gang_info().members:
+            logging.info(f"member world rank: {member.world_rank}, local rank: {self.local_rank}, " \
+                f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}")
+            if int((member.world_rank / self.tp_size) % self.dp_size) == self.dp_rank:
+                worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
+                worker_grpc_addrs.append(f'{member.ip}:{member.rpc_server_port}')
+                logging.info(f"append member for pd sep " \
+                    f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, " \
+                    f"{member.cache_store_rdma_listen_port} to local rank {self.local_rank}, world rank {member.world_rank}")
+        self.worker_grpc_addrs = worker_grpc_addrs
+        self.worker_addrs = worker_addrs
 
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None
@@ -285,7 +307,8 @@ class GptInitModelParameters:
                       gen_num_per_circle: int,
                       ref_module: Optional[torch.nn.Module] = None,
                       ref_dict: Dict[str, torch.Tensor] = {},
-                      parallel_info: ParallelInfo=g_parallel_info):
+                      parallel_info: ParallelInfo=g_parallel_info,
+                      config_mode: ConfigMode = ConfigMode.ComplexMode):
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
         self.ep_size = parallel_info.ep_size
@@ -293,17 +316,6 @@ class GptInitModelParameters:
         self.dp_size = parallel_info.dp_size
         self.dp_rank = parallel_info.dp_rank
         self.local_rank = parallel_info.local_rank
-
-        worker_addrs = []
-        worker_grpc_addrs = []
-        for member in get_gang_info().members:
-            logging.info(f"member world rank: {member.world_rank}, local rank: {self.local_rank}, tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}")
-            if int((member.world_rank / self.tp_size) % self.dp_size) == self.dp_rank:
-                worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
-                worker_grpc_addrs.append(f'{member.ip}:{member.rpc_server_port}')
-                logging.info(f"append member for pd sep {member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, {member.cache_store_rdma_listen_port} to local rank {self.local_rank}, world rank {member.world_rank}")
-        self.worker_grpc_addrs = worker_grpc_addrs
-        self.worker_addrs = worker_addrs
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
@@ -321,10 +333,17 @@ class GptInitModelParameters:
             self.max_seq_len = 1024
         logging.info(f'max_seq_len: {self.max_seq_len}')
 
+        self.update_task_type_use_kvcache()
+
+        logging.info(f"config_mode = {config_mode}")
+        if config_mode == ConfigMode.SimpleMode:
+            return
+
+        self.update_worker_addrs()
         self.update_config_with_sparse_config(ckpt_path)
         self.update_inter_padding_size(self.tp_size, self.ep_size, self.dp_size)
         self.update_task_prompt_config()
-        self.update_task_type_use_kvcache()
+        
         self.update_weight_style(ckpt_path)
 
         load_cutlass_gemm_config(self.quant_algo)

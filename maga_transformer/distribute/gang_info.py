@@ -18,6 +18,7 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
             gang_hb_port=-1,
             http_port=-1,
             rpc_server_port=-1,
+            backend_server_port=-1,
             remote_rpc_server_port=-1,
             cache_store_listen_port=-1,
             cache_store_connect_port=-1,
@@ -102,7 +103,7 @@ class GangInfo(NamedTuple):
     def workers(self) -> List[WorkerInfo]:
         return [member for member in self.members if not member.equals(self.master)]
 
-def get_gang_info() -> GangInfo:
+def get_gang_info() -> GangInfo:  
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
         if os.environ.get(CONFIG_FILE_ENV):
@@ -115,7 +116,8 @@ def get_gang_info() -> GangInfo:
         else:
             members = get_c2_members()
     else:
-        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 'local', None)]
+        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()),
+                              -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 'local', None)]
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
@@ -130,6 +132,7 @@ def get_gang_info() -> GangInfo:
                 gang_hb_port=WorkerInfo.gang_hb_port_offset(local_rank, member.server_port),
                 http_port=WorkerInfo.http_port_offset(local_rank, member.server_port),
                 rpc_server_port=WorkerInfo.rpc_server_port_offset(local_rank, member.server_port),
+                backend_server_port=WorkerInfo.backend_server_port_offset(local_rank, member.server_port),
                 cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(local_rank, member.server_port),
                 cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(local_rank, member.server_port),
                 remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0))),

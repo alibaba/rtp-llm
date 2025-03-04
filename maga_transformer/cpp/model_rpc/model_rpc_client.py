@@ -23,8 +23,7 @@ from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
-
-request_counter = AtomicCounter()
+from maga_transformer.utils.concurrency_controller import ConcurrencyException, get_global_controller
 
 MAX_GRPC_TIMEOUT_SECONDS = 60 * 5
 
@@ -159,7 +158,8 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         try:
-            async with grpc.aio.insecure_channel(self._addresses[request_counter.increment() % len(self._addresses)]) as channel:
+            request_counter = get_global_controller().get_request_counter()
+            async with grpc.aio.insecure_channel(self._addresses[request_counter % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(input_pb, timeout=grpc_timeout_seconds)
                 # 调用服务器方法并接收流式响应

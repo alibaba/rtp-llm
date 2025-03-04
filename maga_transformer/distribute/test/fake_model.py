@@ -1,4 +1,5 @@
 import torch
+import logging
 from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union
 
 from maga_transformer.model_factory_register import register_model
@@ -31,14 +32,21 @@ class FakeModel(BaseModel):
     def load(self, ckpt_path: str):
         pass
 
-    @staticmethod
-    def create_config(ckpt_path: str, **kwargs: Any) -> Any:
+    def ready(self):
+        return True
+    
+    def stop(self):
+        pass
+
+    @classmethod
+    def create_config(cls, model_config: Any) -> GptInitModelParameters:
         config = GptInitModelParameters(head_num = 2, size_per_head = 128,
                                              layer_num = 2, max_seq_len = 2048, vocab_size = 500000, multi_task_prompt=None)
         config.lora_infos = None
         config.multi_task_prompt = None
         config.is_sparse_head = False
         config.use_medusa = False
+        config.tokenizer_path = model_config.tokenizer_path
         return config
 
     @classmethod

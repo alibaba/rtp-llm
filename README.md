@@ -135,6 +135,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [Structured Pruning](docs/Sparse-Tutorial.md)
 * [Quantization](docs/Quantization.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutroial.md)
+* [MultiFrontendServer](docs/MultiFrontendServer.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)

@@ -24,6 +24,7 @@ from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 from maga_transformer.utils.util import has_overlap, has_overlap_kmp
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
+from maga_transformer.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 
 think_mode = int(os.environ.get("THINK_MODE", "0"))
 think_start_tag = os.environ.get("THINK_START_TAG", "<think>\n")
@@ -261,13 +262,13 @@ class CustomChatRenderer():
             input_ids: List[int],
             mm_inputs: List[MultimodalInput],
             generate_config: GenerateConfig,
-            model: Union[AsyncModel, BaseModel],
+            backend_rpc_server_visitor: BackendRPCServerVisitor,
             request: ChatCompletionRequest
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
-        output_generator: AsyncGenerator[GenerateOutput, None] = model.enqueue(
+        output_generator: AsyncGenerator[GenerateOutput, None] = backend_rpc_server_visitor.enqueue(
             GenerateInput(
                 request_id=request_id,
                 token_ids=input_id_tensor,

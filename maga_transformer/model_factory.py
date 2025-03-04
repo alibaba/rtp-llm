@@ -12,10 +12,12 @@ from maga_transformer.models.base_model import BaseModel, ModelConfig
 from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode
 from maga_transformer.utils.dump_config_utils import dump_model_to_table
 from maga_transformer.utils.fuser import fetch_remote_file_to_local
 from maga_transformer.utils.util import check_with_info
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env, get_propose_weight_type_from_env
 
 from maga_transformer.model_factory_register import _model_factory
@@ -41,6 +43,20 @@ class ModelFactory:
         global _model_factory
         model_cls = _model_factory[model_type]
         return model_cls
+
+    @staticmethod
+    def create_gpt_init_config(model_config: ModelConfig):
+        global _model_factory
+        if model_config.model_type not in _model_factory:
+            raise Exception(f"model type {model_config.model_type} not registered!")
+        model_cls = _model_factory[model_config.model_type]
+        config: GptInitModelParameters = model_cls.create_config(
+            model_config, parallel_info=g_parallel_info, config_mode=ConfigMode.SimpleMode)
+        config.model_name = model_cls.__name__
+        if issubclass(model_cls, MultiModalMixin):
+            config.is_multimodal = True
+        
+        return model_cls, config
 
     @staticmethod
     def _create_model(model_config: ModelConfig):

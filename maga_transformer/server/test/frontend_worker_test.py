@@ -6,7 +6,7 @@ from unittest import TestCase, main
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
+from maga_transformer.server.frontend_worker import FrontendWorker, BatchPipelineResponse
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.structure.request_extractor import request_id_field_name
 from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_master_info, g_worker_info
@@ -14,12 +14,12 @@ from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_m
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from maga_transformer.test.utils.port_util import get_consecutive_free_ports
 
-class FakeInferenceWorker(InferenceWorker):
+class FakeFrontendWorker(FrontendWorker):
     def __init__(self, model, pipeline):
         self.model = model
         self.pipeline = pipeline
 
-class InferenceWorkerTest(TestCase):
+class FrontendWorkerTest(TestCase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         os.environ['KV_CACHE_MEM_MB'] = '100'
@@ -27,9 +27,9 @@ class InferenceWorkerTest(TestCase):
         os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = str(64 * 1024 * 1024)
         self.tokenizer_path = os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source")
         self.ckpt_path = os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source")
-        self.inference_worker = self.create_inference_worker()
+        self.frontend_worker = self.create_frontend_worker()
 
-    def create_inference_worker(self):
+    def create_frontend_worker(self):
         port_list = get_consecutive_free_ports(1)
         os.environ['START_PORT'] = str(port_list[0])
         update_master_info('0.0.0.0', int(port_list[0]))
@@ -40,13 +40,13 @@ class InferenceWorkerTest(TestCase):
                                                  weight_type=WEIGHT_TYPE.FP16,
                                                  max_seq_len=2048)
         model: AsyncModel = self.fake_model_loader.load_model()
-        pipeline = Pipeline(model, model.tokenizer)
-        return FakeInferenceWorker(model, pipeline)
+        pipeline = Pipeline(model, model.config, model.tokenizer)
+        return FakeFrontendWorker(model, pipeline)
 
-    async def _run(self, inference_worker, **kwargs):
+    async def _run(self, frontend_worker, **kwargs):
         count = 0
         kwargs[request_id_field_name] = 1
-        gen = inference_worker.inference(**kwargs)
+        gen = frontend_worker.inference(**kwargs)
         result = []
         aux_info = []
         finished = []
@@ -71,20 +71,20 @@ class InferenceWorkerTest(TestCase):
 
     def test_simple(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker, prompt="please write a story about dog", generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1}))
+            return asyncio.run(self._run(self.frontend_worker, prompt="please write a story about dog", generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1}))
         # just ensure every input has result
         result_text, aux_info, finished = func()
         logging.info(f"result_text: {result_text}, aux_info: {aux_info}, finished:{finished}")
         self.assertTrue(len(result_text) > 0)
 
     def test_text_input(self):
-        result_text, aux_info, finished = asyncio.run(self._run(self.inference_worker, text="please write a story about dog", generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1}))
+        result_text, aux_info, finished = asyncio.run(self._run(self.frontend_worker, text="please write a story about dog", generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1}))
         # logging.info(f"test text input : {result_text}, aux_info: {aux_info}, finished:{finished}")
         self.assertTrue(len(result_text) > 0)
 
     def test_num_batch(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker,
+            return asyncio.run(self._run(self.frontend_worker,
                                          prompt_batch=["please write a story about dog",
                                                        "please write a story about dog"],
                                          yield_generator=True,
@@ -101,7 +101,7 @@ class InferenceWorkerTest(TestCase):
         self.assertTrue(len(result_text) > 0)
 
     def test_num_return_sequences_1(self):
-        result_text, aux_info, finished = asyncio.run(self._run(self.inference_worker,
+        result_text, aux_info, finished = asyncio.run(self._run(self.frontend_worker,
                                                                 prompt="please write a story about dog",
                                                                 yield_generator=True,
                                                                 generate_config={"top_k": 1, "max_new_tokens": 3, "top_p": 1, "return_incremental": True, "num_return_sequences": 1}))
@@ -111,7 +111,7 @@ class InferenceWorkerTest(TestCase):
         self.assertEqual(True, finished)
 
     def test_batch_num_return_sequences_1(self):
-        result_text, aux_info, finished = asyncio.run(self._run(self.inference_worker,
+        result_text, aux_info, finished = asyncio.run(self._run(self.frontend_worker,
                                                                 prompt_batch=["please write a story about dog",
                                                                               "please write a story about dog"],
                                                                 yield_generator=True,
@@ -127,7 +127,7 @@ class InferenceWorkerTest(TestCase):
 
     def test_incremental(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker,
+            return asyncio.run(self._run(self.frontend_worker,
                                          prompt="please write a story about dog",
                                          yield_generator=True,
                                          generate_config={"top_k": 1, "max_new_tokens": 3, "top_p": 1, "return_incremental": True}))
@@ -140,7 +140,7 @@ class InferenceWorkerTest(TestCase):
 
     def test_batch_incremental(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker,
+            return asyncio.run(self._run(self.frontend_worker,
                                          prompt_batch=["please write a story about dog",
                                                        "please write a story about dog"],
                                          yield_generator=True,
@@ -154,7 +154,7 @@ class InferenceWorkerTest(TestCase):
 
     def test_num_return_incremental(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker,
+            return asyncio.run(self._run(self.frontend_worker,
                                          prompt="please write a story about dog",
                                          yield_generator=True,
                                          generate_config={"top_k": 1, "max_new_tokens": 3, "top_p": 1, "return_incremental": True, "num_return_sequences": 3}))
@@ -167,7 +167,7 @@ class InferenceWorkerTest(TestCase):
 
     def test_batch_num_return_incremental(self):
         def func():
-            return asyncio.run(self._run(self.inference_worker,
+            return asyncio.run(self._run(self.frontend_worker,
                                          prompt_batch=["please write a story about dog",
                                                        "please write a story about dog"],
                                          yield_generator=True,
@@ -185,7 +185,7 @@ class InferenceWorkerTest(TestCase):
         self.assertTrue(len(result_text) > 0)
 
     def test_encode(self):
-        token_ids, tokens = self.inference_worker.tokenizer_encode('a b c')
+        token_ids, tokens = self.frontend_worker.tokenizer_encode('a b c')
         self.assertEqual(token_ids, [1, 263, 289, 274])
         self.assertEqual(tokens, ['<s>', 'a', 'b', 'c'])
 

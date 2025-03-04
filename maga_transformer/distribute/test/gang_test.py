@@ -18,8 +18,20 @@ torch.cuda.set_device = lambda x:None
 from maga_transformer.distribute.gang_info import get_c2_members
 from maga_transformer.distribute.gang_info import get_gang_info
 from maga_transformer.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
+from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
+from maga_transformer.server.frontend_server import FrontendWorker, FrontendServer
 from maga_transformer.distribute.test.fake_model import FakeModel
-from maga_transformer.start_server import main
+from maga_transformer.start_backend_server import main
+
+def fake_init(self, *args, **kwargs):
+    self.model_config = None
+    self.tokenizer = None
+    self.model_cls = None
+    self.pipeline = None
+    self.backend_rpc_server_visitor = None
+
+FrontendWorker.__init__ = fake_init
+OpenaiEndopoint.__init__ = fake_init
 
 class GangTest(unittest.TestCase):
     def __init__(self, *args, **kwargs):
@@ -133,16 +145,16 @@ class GangTest(unittest.TestCase):
                                     "DIST_BARRIER_TIMEOUT": "10",
                                     "CUDA_VISIBLE_DEVICES": "0,1"})
     def test_server_start(self, torch_device_count):
+        try:
+            multiprocessing.set_start_method('spawn')
+        except RuntimeError as e:
+            logging.warn(str(e))
+            pass
+        
         torch_device_count.return_value = 2
         g_parallel_info.reload()
-
         procs: List[Process] = list()
-        if torch_device_count.return_value == 1:
-            proc = multiprocessing.Process(target=main)
-            proc.start()
-            procs.append(proc)
-        else:
-            procs = main()
+        procs = main()
 
         time.sleep(30)
 

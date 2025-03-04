@@ -21,104 +21,56 @@ from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter, check_with_info
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.metrics import kmonitor, AccMetrics, GaugeMetrics
-from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.distribute.gang_server import GangServer
-from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
 from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.embedding.embedding_endpoint import EmbeddingEndpoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest
-from maga_transformer.server.inference_worker import InferenceWorker, TokenizerEncodeResponse
+from maga_transformer.server.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from maga_transformer.server.misc import format_exception
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.structure.request_extractor import request_id_field_name
-from maga_transformer.lora.lora_manager import LoraManager
-from maga_transformer.model_factory import AsyncModel
+from maga_transformer.utils.concurrency_controller import ConcurrencyException, get_global_controller
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
-class InferenceServer(object):
+class FrontendServer(object):
     def __init__(self):
-        if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
-            os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
-        if torch.cuda.is_available():
-            if 'NCCL_P2P_DISABLE' not in os.environ and 'RTX' in torch.cuda.get_device_name(0):
-                os.environ['NCCL_P2P_DISABLE'] = '1'
-        else:
-            os.environ['NCCL_P2P_DISABLE'] = '1'
         self._access_logger = AccessLogger()
-        self._gang_server = GangServer()
-        self._inference_worker = None
+        self._frontend_worker = None
         self._openai_endpoint = None
-        self._lora_manager = None
         self._request_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
-        self._init_controller()
-        # just rank 0 report metric
-        if g_parallel_info.world_rank == 0:
-            kmonitor.init()
+        self._global_controller = get_global_controller()
+        logging.info(f"global_controller here2 = {self._global_controller}")
+        kmonitor.init()
 
     def start(self):
-        self._gang_server.start()
         if os.environ.get('DEBUG_START_FAKE_PROCESS', None) is not None:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
-            self._inference_worker = None
+            self._frontend_worker = None
         else:
-            self._inference_worker = InferenceWorker()
+            self._frontend_worker = FrontendWorker()
             self._openai_endpoint = None
-            self._embedding_endpoint = None
-            if self._inference_worker.model is not None and self._inference_worker.model.task_type != TaskType.LANGUAGE_MODEL:
-                self._embedding_endpoint = EmbeddingEndpoint(self._inference_worker.model)
+            self.is_embedding = False
+            if self._frontend_worker.model_config is not None \
+                    and self._frontend_worker.model_config.task_type != TaskType.LANGUAGE_MODEL:
+                self.is_embedding = True
             else:
-                self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
-                if isinstance(self._inference_worker.model, AsyncModel):
-                    # uply hack :(
-                    self._inference_worker.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
-                            self._inference_worker.model.model.model_weights_loader,
-                            self._inference_worker.model.model.config.lora_infos,
-                            self._gang_server._gang_info,
-                            self._openai_endpoint.tokenizer,
-                            self._openai_endpoint.chat_renderer)
-                    self._lora_manager = LoraManager(self._inference_worker.model)
-
-    def model_runtime_meta(self) -> str:
-        return "unknown" if self._inference_worker is None else self._inference_worker.model_runtime_meta
+                self._openai_endpoint = OpenaiEndopoint(
+                    self._frontend_worker.model_config,
+                    self._frontend_worker.tokenizer,
+                    self._frontend_worker.backend_rpc_server_visitor)
 
     def stop(self):
-        self._inference_worker.stop()
+        pass
 
     def ready(self):
-        return self._inference_worker.ready()
-
-    @property
-    def is_embedding(self):
-        return self._embedding_endpoint is not None
-
-    def wait_all_worker_ready(self):
-        # master需要等其他所有机器都ready以后才能起服务，挂vipserver
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            while True:
-                try:
-                    self._gang_server.wait_infernece_server_ready()
-                    break
-                except Exception as e:
-                    logging.warn("worker not all ready, error_msg: " + str(e))
-                    time.sleep(5)
-
-    def _init_controller(self):
-        concurrency_with_block = json.loads(os.environ.get('CONCURRENCY_WITH_BLOCK', "False").lower())
-        if g_parallel_info.world_rank == 0:
-            limit = int(os.environ.get('CONCURRENCY_LIMIT', 32))
-            logging.info(f"CONCURRENCY_LIMIT to {limit}")
-            self._controller = ConcurrencyController(limit, block=concurrency_with_block)
-        elif g_parallel_info.world_size != 1:
-            logging.info("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99")
-            self._controller = ConcurrencyController(99, block=concurrency_with_block)
-
+        return True
+    
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
             self, request: Dict[str, Any], response: CompleteResponseAsyncGenerator,
@@ -160,8 +112,8 @@ class InferenceServer(object):
             req[request_id_field_name] = self._request_count.increment()
 
         def generate_call():
-            assert self._inference_worker is not None
-            return self._inference_worker.inference(**req)
+            assert self._frontend_worker is not None
+            return self._frontend_worker.inference(**req)
 
         return await self._infer_wrap(req, raw_request, generate_call)
 
@@ -193,35 +145,6 @@ class InferenceServer(object):
             return self._openai_endpoint.chat_render(request)
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
-
-    async def embedding(self, request: Dict[str, Any], raw_request: Request):
-        start_time = time.time()
-        if isinstance(request, str):
-            request = json.loads(request)
-        request[request_id_field_name] = self._request_count.increment()
-        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
-        try:
-            with self._controller:
-                assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
-                result, logable_result = await self._embedding_endpoint.handle(request)
-                # do not log result since too big
-                if logable_result is not None:
-                    self._access_logger.log_success_access(request, logable_result)
-                end_time = time.time()
-                kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
-                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
-                usage = result.get('usage', {})
-                if not isinstance(usage, dict):
-                    usage = {}
-                return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
-        except BaseException as e:
-            return self._handle_exception(request, e)
-
-    async def similarity(self, request: Dict[str, Any], raw_request: Request):
-        return await self.embedding(request, raw_request)
-
-    async def classifier(self, request: Dict[str, Any], raw_request: Request):
-        return await self.embedding(request, raw_request)
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
@@ -271,18 +194,18 @@ class InferenceServer(object):
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, current_time_ms()-start_time)
                 kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1)
             finally:
-                self._controller.decrement()
+                self._global_controller.decrement()
 
-        assert self._inference_worker is not None
+        assert self._frontend_worker is not None
         start_time = current_time_ms()
         try:
             response_generator = generate_call()
         except Exception as e:
-            self._controller.decrement()
+            self._global_controller.decrement()
             raise e
 
         return CompleteResponseAsyncGenerator(__gen_response_with_report(start_time, response_generator), response_generator._collect_complete_response_func)
-
+    
     async def _collect_complete_response_and_record_access_log(self, req: Dict[Any, Any], res: Any):
         complete_response = await res.gen_complete_response_once()
         complete_response = complete_response.model_dump(exclude_none=True) if isinstance(complete_response, BaseModel) else complete_response
@@ -291,11 +214,11 @@ class InferenceServer(object):
         return complete_response
 
     async def _infer_impl(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
-        assert self._inference_worker is not None
+        assert self._frontend_worker is not None
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": req.get("source", "unkown")})
         self._access_logger.log_query_access(req)
-        is_streaming = self._inference_worker.is_streaming(req)
-        self._controller.increment()
+        is_streaming = self._frontend_worker.is_streaming(req)
+        self._global_controller.increment()
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = await self._call_generate_with_report(generate_call)
@@ -320,7 +243,7 @@ class InferenceServer(object):
                 token_ids = self._openai_endpoint.render_chat(chat_request).input_ids
             else:
                 prompt = req.pop('prompt')
-                token_ids = self._inference_worker.pipeline.encode(prompt)
+                token_ids = self._frontend_worker.pipeline.encode(prompt)
             return ORJSONResponse({
                 "token_ids": token_ids
             })
@@ -333,66 +256,13 @@ class InferenceServer(object):
                 req = json.loads(req)
             assert isinstance(req, dict)
             prompt = req.pop('prompt')
-            assert self._inference_worker is not None
+            assert self._frontend_worker is not None
             if req.get("return_offsets_mapping", None) == True:
-                mapping = self._inference_worker.tokenizer_offset_mapping(prompt)
+                mapping = self._frontend_worker.tokenizer_offset_mapping(prompt)
                 response = TokenizerEncodeResponse(offset_mapping=mapping['offset_mapping'], token_ids=mapping['input_ids'])
             else:
-                token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)
+                token_ids, tokens = self._frontend_worker.tokenizer_encode(prompt)
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
-
-    def get_load_balance_info(self) -> LoadBalanceInfo:
-        if self._inference_worker.model is None:
-            return LoadBalanceInfo()
-        return self._inference_worker.model.get_load_balance_info()
-
-    def get_engine_schedule_info(self) -> EngineScheduleInfo:
-        if self._inference_worker.model is None:
-            return EngineScheduleInfo()
-        return self._inference_worker.model.get_engine_schedule_info()
-
-    def set_log_level(self, req: Union[str,Dict[Any, Any]]) -> None:
-        if isinstance(req, str):
-            req = json.loads(req)
-        return torch.ops.fastertransformer.set_log_level(req['log_level'])
-
-    async def update(self, version_info: VersionInfo):
-        request = version_info.model_dump()
-        request[request_id_field_name] = self._request_count.increment()
-        lora_infos: Dict[str, Any] = dict()
-        if version_info.peft_info != None:
-            lora_infos = version_info.peft_info.get("lora_info", {})
-        try:
-            assert self._lora_manager
-            with Timer() as t, self.thread_lock_:
-                add_lora_map = self._lora_manager.get_add_lora_map(lora_infos)
-                remove_lora_map = self._lora_manager.get_remove_lora_map(lora_infos)
-                # must remove first
-                for key, value in remove_lora_map.items():
-                    self.remove_lora({"adapter_name": key})
-                for key, value in add_lora_map.items():
-                    self.add_lora({"adapter_name": key, "lora_path": value})
-            rep = ORJSONResponse(None)
-            kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
-            kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
-        except Exception as e:
-            self._access_logger.log_exception_access(request, e)
-            kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
-            error_code = 500
-            rep = ORJSONResponse(format_exception(e), status_code=error_code)
-        return rep
-
-    def add_lora(self, req: Dict[str, str]):
-        assert self._lora_manager is not None
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, 'add_lora_internal', True)
-        self._lora_manager.add_lora(req['adapter_name'], req['lora_path'])
-
-    def remove_lora(self, req: Dict[str, str]):
-        assert self._lora_manager is not None
-        self._lora_manager.remove_lora(req['adapter_name'])
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, 'remove_lora_internal', True)

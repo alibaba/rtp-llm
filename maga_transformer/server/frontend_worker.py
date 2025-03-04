@@ -12,14 +12,12 @@ current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
 from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.utils.util import copy_gemm_config
-from maga_transformer.utils.fuser import _nfs_manager
-from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.models.base_model import GenerateResponse, GenerateConfig
-from maga_transformer.model_factory import ModelFactory, AsyncModel
 from maga_transformer.structure.request_extractor import RequestExtractor, Request
+from transformers import PreTrainedTokenizerBase, AutoTokenizer
+from maga_transformer.model_factory import ModelFactory
 
 from pydantic import BaseModel
 
@@ -47,17 +45,19 @@ class TokenizerEncodeResponse(BaseModel):
     tokens: List[str] = []
     error: str = ""
 
-class InferenceWorker():
+class FrontendWorker():
     def __init__(self) -> None:
-        copy_gemm_config()
-        logging.info("starting InferenceWorker")
-        if not torch.cuda.is_available():
-            logging.info("GPU not found: using CPU")
-
-        self.model: AsyncModel = ModelFactory.create_from_env()
-        self.model_runtime_meta = self.model.model_runtime_meta
-        self.pipeline = Pipeline(self.model, self.model.tokenizer)
-        logging.info("Load model done.")
+        logging.info("starting frontend worker")
+        self.model_cls, self.model_config = ModelFactory.create_gpt_init_config(ModelFactory.create_normal_model_config())
+        self.tokenizer = None
+        if self.model_config.tokenizer_path:
+            self.tokenizer = self.model_cls.get_tokenizer(self.model_config)
+            if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
+                self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+            self.model_config.update_task_prompt_tokens_id(self.tokenizer)
+        self.pipeline = Pipeline(self.model_cls, self.model_config, self.tokenizer)
+        self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
+        logging.info("frontend worker start done.")
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(prompt, return_offsets_mapping=True, return_attention_mask=False)
@@ -69,7 +69,8 @@ class InferenceWorker():
         return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
-        request_extractor = RequestExtractor(self.model.default_generate_config)
+        default_generate_config = GenerateConfig()
+        request_extractor = RequestExtractor(default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)
 
         if request.is_streaming is False and request.incremental:
@@ -77,7 +78,7 @@ class InferenceWorker():
 
         response_generator = self._inference(request, **kwargs)
 
-        complete_response_collect_func = partial(InferenceWorker.collect_complete_response,
+        complete_response_collect_func = partial(FrontendWorker.collect_complete_response,
                                                  incremental=request.incremental,
                                                  batch_infer=request.batch_infer,
                                                  num_return_sequences=request.num_return_sequences)
@@ -94,17 +95,6 @@ class InferenceWorker():
             return self._batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
         else:
             return self._yield_generate(request.request_id, request.input_texts[0], request.input_urls[0], generate_config=request.generate_configs[0], **kwargs)
-
-    def stop(self) -> None:
-        if isinstance(self.model, AsyncModel):
-            logging.info("stoping InferenceWorker")
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.model.stop()
-
-    def ready(self) -> bool:
-        if isinstance(self.model, AsyncModel):
-            return self.model.ready()
 
     def _format_response(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
@@ -150,12 +140,6 @@ class InferenceWorker():
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get('stream', False)
-
-    def update(self, version_info: VersionInfo):
-        lora_infos: Dict[str, Any] = dict()
-        if version_info.peft_info != None:
-            lora_infos = version_info.peft_info.get("lora_info", {})
-        return self.model.update(lora_infos)
 
     async def _batch_async_generators(self, incremental: bool, num_return_sequences: int,
                                       generators: List[AsyncGenerator[Dict[str, Any], None]],
@@ -205,7 +189,7 @@ class InferenceWorker():
             complete_batch_response = []
             async for single_response_incremental_stream in CompleteResponseAsyncGenerator.generate_from_list(batch_response_incremental_stream):
                 single_yield_response = CompleteResponseAsyncGenerator.generate_from_list(single_response_incremental_stream)
-                single_complete_response = await InferenceWorker.collect_complete_response(single_yield_response, incremental, False, num_return_sequences)
+                single_complete_response = await FrontendWorker.collect_complete_response(single_yield_response, incremental, False, num_return_sequences)
                 complete_batch_response.append(single_complete_response)
             return BatchPipelineResponse(response_batch=complete_batch_response)
 

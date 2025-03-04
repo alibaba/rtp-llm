@@ -87,7 +87,8 @@ requirement([
     "av",
     "pyrsmi",
     "amdsmi",
-    "fast-safetensors"
+    "fast-safetensors",
+    "setproctitle"
 ] + tensorrt)
 
 
@@ -268,6 +269,8 @@ py_library(
         '__init__.py',
         'model_factory.py',
         'start_server.py',
+        'start_frontend_server.py',
+        'start_backend_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
     ],
@@ -286,6 +289,7 @@ py_library(
         ":jieba",
         ":openai",
         ":librosa",
+        ":setproctitle",
     ],
     imports = ["."],
 )
@@ -418,6 +422,7 @@ whl_reqs = [
     "librosa",
     "matplotlib",
     "av",
+    "setproctitle",
 ] + whl_deps() + platform_deps() + xft_dep 
 
 # target for wheel

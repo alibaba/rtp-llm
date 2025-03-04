@@ -339,6 +339,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(moe_topk_group, moe_topk_group_)                       \
     DEF_PROPERTY(softmax_extra_scale, softmax_extra_scale_)             \
     DEF_PROPERTY(vit_separation, vit_separation_)                       \
+    DEF_PROPERTY(model_name, model_name_)                               \
     DEF_PROPERTY(deepseek_rope_mscale, deepseek_rope_mscale_)           \
     DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)
 

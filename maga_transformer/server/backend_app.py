@@ -22,16 +22,15 @@ from anyio import CapacityLimiter
 from uvicorn.loops.auto import auto_loop_setup
 
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
-from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
-from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
-from maga_transformer.embedding.embedding_app import register_embedding_api
+from maga_transformer.embedding.backend_embedding_app import register_backend_embedding_api
 from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.server.inference_server import InferenceServer
+from maga_transformer.server.backend_server import BackendServer
 from maga_transformer.server.misc import check_is_master, check_is_worker
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.utils.util import AtomicCounter
+from maga_transformer.model_factory import ModelFactory
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
@@ -42,8 +41,8 @@ active_requests = AtomicCounter()
 server_shutdown = False
 
 class GracefulShutdownServer(Server):
-    def set_server(self, inference_server):
-        self.inference_server = inference_server
+    def set_server(self, backend_server):
+        self.backend_server = backend_server
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
@@ -53,17 +52,17 @@ class GracefulShutdownServer(Server):
         while active_requests.get() > 0:
             logging.info(f"wait {active_requests.get()} requests finish for 1s")
             await asyncio.sleep(1)
-        self.inference_server.stop()
+        self.backend_server.stop()
         await super().shutdown(sockets)
 
-class InferenceApp(object):
+class BackendApp(object):
     def __init__(self):
-        self.inference_server = InferenceServer()
+        self.backend_server = BackendServer()
 
     def start(self):
-        self.inference_server.start()
+        self.backend_server.start()
         app = self.create_app()
-        self.inference_server.wait_all_worker_ready()
+        self.backend_server.wait_all_worker_ready()
 
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
 
@@ -78,7 +77,7 @@ class InferenceApp(object):
             app,
             host="0.0.0.0",
             loop=loop,
-            port=g_worker_info.server_port,
+            port=g_worker_info.backend_server_port,
             log_config=UVICORN_LOGGING_CONFIG,
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
@@ -86,10 +85,10 @@ class InferenceApp(object):
 
         try:
             server = GracefulShutdownServer(config)
-            server.set_server(self.inference_server)
+            server.set_server(self.backend_server)
             server.run()
         except BaseException as e:
-            self.inference_server.stop()
+            self.backend_server.stop()
             raise e
 
     def create_app(self):
@@ -111,7 +110,7 @@ class InferenceApp(object):
             if server_shutdown :
                 detail = "this server has been shutdown"
                 ready = False
-            elif self.inference_server.ready() == False:
+            elif self.backend_server.ready() == False:
                 detail = "inference server is not ready"
                 ready = False
 
@@ -123,7 +122,7 @@ class InferenceApp(object):
 
         @app.on_event("startup")
         async def startup():
-            RunVar("_default_thread_limiter").set(CapacityLimiter(self.inference_server._controller.max_concurrency * 2))
+            RunVar("_default_thread_limiter").set(CapacityLimiter(self.backend_server._global_controller.max_concurrency * 2))
 
         @app.get("/health")
         @app.post("/health")
@@ -147,9 +146,9 @@ class InferenceApp(object):
         def worker_status():
             check_shutdown()
             load_balance_version = 0
-            load_balance_info = self.inference_server.get_load_balance_info()
-            engine_schedule_info = self.inference_server.get_engine_schedule_info()
-            available_concurrency = self.inference_server._controller.get_available_concurrency()
+            load_balance_info = self.backend_server.get_load_balance_info()
+            engine_schedule_info = self.backend_server.get_engine_schedule_info()
+            available_concurrency = self.backend_server._global_controller.get_available_concurrency()
 
             if int(os.environ.get('LOAD_BALANCE', 0)) and load_balance_info.step_per_minute > 0 and load_balance_info.step_latency_us > 0:
                 available_concurrency = load_balance_info.step_per_minute
@@ -176,7 +175,7 @@ class InferenceApp(object):
                     "input_length": task.input_length
                 } for task in engine_schedule_info.finished_task_info_list],
                 "last_schedule_delta": engine_schedule_info.last_schedule_delta,
-                "machine_info": self.inference_server.model_runtime_meta()
+                "machine_info": self.backend_server.model_runtime_meta()
             }
 
         # entry for worker RANK != 0
@@ -186,94 +185,39 @@ class InferenceApp(object):
             global active_requests
             active_requests.increment()
             try:
-                return await self.inference_server.inference(req, raw_request)
+                return await self.backend_server.inference(req, raw_request)
             finally:
                 active_requests.decrement()
-
-        # entry for worker RANK == 0
-        @app.post("/")
-        @check_is_master()
-        async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
-            # compat for huggingface-pipeline request endpoint
-            global active_requests
-            active_requests.increment()
-            try:
-                if self.inference_server.is_embedding:
-                    res = await self.inference_server.embedding(req, raw_request)
-                    return res
-                else:
-                    return await self.inference_server.inference(req, raw_request)
-            finally:
-                active_requests.decrement()
-
 
         @app.post("/add_lora_internal")
         @check_is_worker()
         def add_lora_internal(req: Dict[str, str]):
-            self.inference_server.add_lora(req)
+            self.backend_server.add_lora(req)
 
         @app.post("/remove_lora_internal")
         @check_is_worker()
         def remove_lora_internal(req: Dict[str, str]):
-            self.inference_server.remove_lora(req)
+            self.backend_server.remove_lora(req)
 
         # update for worker RANK == 0
         @app.post("/update")
         @check_is_master()
         def update(version_info: VersionInfo):
-            return self.inference_server.update(version_info)
-
-        @app.get("/v1/models")
-        async def list_models():
-            assert (self.inference_server._openai_endpoint != None)
-            return await self.inference_server._openai_endpoint.list_models()
-
-        # entry for worker RANK == 0
-        @app.post("/chat/completions")
-        @app.post("/v1/chat/completions")
-        @check_is_master()
-        async def chat_completion(request: ChatCompletionRequest, raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.inference_server.chat_completion(request, raw_request)
-            finally:
-                active_requests.decrement()
-
-        # entry for worker RANK == 0
-        @app.post("/chat/render")
-        @app.post("/v1/chat/render")
-        @check_is_master()
-        async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.inference_server.chat_render(request, raw_request)
-            finally:
-                active_requests.decrement()
-
-        # entry for worker RANK == 0
-        @app.post("/tokenizer/encode")
-        @check_is_master()
-        async def encode(req: Union[str,Dict[Any, Any]]):
-            return self.inference_server.tokenizer_encode(req)
-
-        # entry for worker RANK == 0
-        @app.post("/tokenize")
-        @check_is_master()
-        async def encode(req: Union[str,Dict[Any, Any]]):
-            return self.inference_server.tokenize(req)
+            try: 
+                return self.backend_server.update(version_info)
+            except Exception as e:
+                return {"error": f"Failed to update", "details": str(e)}
 
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str,Dict[Any, Any]]):
             try:
-                if self.inference_server.set_log_level(req):
+                if self.backend_server.set_log_level(req):
                     return {"status": "ok"}
                 else:
                     return {"status": "set log level failed"}
             except Exception as e:
                 return {"error": str(e)}
 
-        register_embedding_api(app, self.inference_server)
+        register_backend_embedding_api(app, self.backend_server)
         return app

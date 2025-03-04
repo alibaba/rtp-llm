@@ -10,13 +10,13 @@ from typing import Dict, Any, AsyncIterator, Optional
 import argparse
 import asyncio
 
-from maga_transformer.inference import InferenceWorker
+from maga_transformer.inference import FrontendWorker
 
 
 class LLMModel(kserve.Model):
     def __init__(self, predictor_config: Optional[PredictorConfig] = None):
         super().__init__('rtp-llm', predictor_config)
-        self._inference_worker = InferenceWorker()
+        self._frontend_worker = FrontendWorker()
         self.ready = True
 
     def preprocess(self, payload, context=None):
@@ -30,14 +30,14 @@ class LLMModel(kserve.Model):
             return await self.nonstream_wrap(generate_request)
 
     async def nonstream_wrap(self, generate_request: GenerateRequest):
-        rep_gen = self._inference_worker.inference(text=generate_request.text_input,
+        rep_gen = self._frontend_worker.inference(text=generate_request.text_input,
                                                    generate_config=generate_request.parameters)
         async for rep in rep_gen:
             pass
         return GenerateResponse(text_output=rep['response'], model_name=self.name)
 
     async def stream_wrap(self, generate_request: GenerateRequest):
-        rep_gen = self._inference_worker.inference(text=generate_request.text_input,
+        rep_gen = self._frontend_worker.inference(text=generate_request.text_input,
                                                    generate_config=generate_request.parameters)
         async for rep in rep_gen:
             yield rep['response']

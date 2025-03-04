@@ -44,7 +44,7 @@ GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
 }
 
 int64_t getDefaultDeviceReserveMemoryBytes(const GptInitParameter& params) {
-    auto reserve_bytes = -256L * 1024 * 1024;
+    auto reserve_bytes = -512L * 1024 * 1024;
     FT_LOG_INFO("Default device reserve memory bytes: %ld", reserve_bytes);
     return reserve_bytes;
 }

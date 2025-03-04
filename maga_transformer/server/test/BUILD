@@ -1,7 +1,7 @@
 py_test(
-    name = "inference_server_test",
+    name = "frontend_server_test",
     srcs = [
-        "inference_server_test.py",
+        "frontend_server_test.py",
     ],
     deps = [
         "//maga_transformer:testlib",
@@ -9,9 +9,9 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
-py_test (
-    name = "inference_worker_test",
-    srcs = ["inference_worker_test.py"],
+py_test(
+    name = "frontend_worker_test",
+    srcs = ["frontend_worker_test.py"],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
     ],

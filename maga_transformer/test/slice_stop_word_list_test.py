@@ -19,7 +19,7 @@ class SliceStopWordListTest(TestCase):
                                 ckpt_path,
                                 WEIGHT_TYPE.FP16,
                                 1024).load_model()        
-        self.pipeline = Pipeline(model, model.tokenizer)
+        self.pipeline = Pipeline(model, model.config, model.tokenizer)
 
     async def mock_generate(self):
         yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892]]]), finished=False)])
@@ -28,7 +28,7 @@ class SliceStopWordListTest(TestCase):
         yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29879]]]), finished=False)])
         yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[596]]]), finished=False)])
 
-    @mock.patch("maga_transformer.async_decoder_engine.async_model.AsyncModel.enqueue")
+    @mock.patch("maga_transformer.async_decoder_engine.backend_rpc_server_visitor.BackendRPCServerVisitor.enqueue")
     def test_slice(self, mock_enqueue):
         mock_enqueue.return_value = self.mock_generate()
         outs = self.pipeline("hello", stop_words_list=[[29879, 596]])

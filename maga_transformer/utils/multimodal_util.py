@@ -43,7 +43,8 @@ class MultimodalInput:
     config: MMPreprocessConfig
     tensor: torch.Tensor
 
-    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT, config: MMPreprocessConfig=MMPreprocessConfig(), tensor: torch.Tensor =torch.empty(1)):
+    def __init__(self, url: str, mm_type: MMUrlType=MMUrlType.DEFAULT,
+                 config: MMPreprocessConfig=MMPreprocessConfig(), tensor: torch.Tensor=torch.empty(1)):
         self.url = url
         self.mm_type = mm_type
         self.config = config

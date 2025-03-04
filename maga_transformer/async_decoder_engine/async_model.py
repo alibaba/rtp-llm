@@ -27,7 +27,7 @@ class AsyncModel:
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:
-        return self.model.is_multimodal()
+        return self.config.is_multimodal
     
     def _model_runtime_meta(self) -> str:        
         try:
