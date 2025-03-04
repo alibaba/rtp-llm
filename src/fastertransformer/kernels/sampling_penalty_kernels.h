@@ -78,22 +78,13 @@ void invokeBatchApplyTemperaturePenalty(T*           logits,
                                         cudaStream_t stream);
 
 template<typename T>
-void invokeMinLengthPenalty(T*           logits,
-                            const int*   min_lengths,
-                            const int*   end_ids,
-                            const int*   sequnece_lengths,
-                            const int    max_input_length,
-                            const int    batch_size,
-                            const int    vocab_size_padded,
-                            cudaStream_t stream);
-
-template<typename T>
 void invokeMinLengthPenaltyNew(T*           logits,
                                const int*   min_lengths,
                                const int*   end_ids,
                                const int*   sequnece_lengths,
                                const int*   input_lengths,
                                const int    decoder_batch_size,
+                               const int    batch_size,
                                const int    vocab_size_padded,
                                cudaStream_t stream);
 

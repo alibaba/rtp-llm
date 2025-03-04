@@ -8,10 +8,8 @@
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include <random>
-#if USING_CUDA12 == 1
 #include "3rdparty/flashinfer/flashinfer.h"
-#endif
+#include <random>
 #include <memory>
 
 using namespace std;
@@ -20,56 +18,21 @@ namespace fastertransformer {
 
 using SamplerT = float;
 
-
-bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
-    const auto batch_size = params.logits.shape()[0];
-    if ((!use_flashinfer_sample_kernel) ||
-        params.random_seed.has_value() ||
-        params.cum_log_probs.has_value() ||
-        params.output_all_probs.has_value() ||
-        params.output_log_probs.has_value()) {
-        return false;
-    }
-    if (params.repetition_penalty.has_value() &&
-        std::any_of(params.repetition_penalty.value().get().data<float>(),
-                    params.repetition_penalty.value().get().data<float>() + batch_size,
-                    [&](auto t) { return std::abs(t - 1.0f) > 1e-7; })) {
-        return false;
-    }
-    if (params.min_lengths.has_value() &&
-        std::any_of(params.min_lengths.value().get().data<int32_t>(),
-                    params.min_lengths.value().get().data<int32_t>() + batch_size,
-                    [&](auto t) { return t != 0; })) {
-        return false;
-    }
-    if (params.no_repeat_ngram_size.has_value() &&
-        std::any_of(params.no_repeat_ngram_size.value().get().data<int32_t>(),
-                    params.no_repeat_ngram_size.value().get().data<int32_t>() + batch_size,
-                    [&](auto t) { return t != 0; })) {
-        return false;
-    }
-    return true;
-}
-
-
-GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buffer& top_k,
-                                 const Buffer& top_p, const Buffer& temperature,
-                                 Buffer& token_ids) {
-#if USING_CUDA12 == 1
-    auto device_tokens = clone({token_ids});
-    auto transposed_tokens = transpose({*device_tokens});
+void CudaDevice::processLogits(const GreedyParams& params, const BufferPtr &device_tokens, const BufferPtr &transposed_tokens) {
+    auto &logits = params.logits;
+    const auto vocab_size_padded = params.logits.shape()[1];
+    const auto decoder_batch_size = params.sequence_lengths.shape()[0];
     const auto batch_size = logits.shape()[0];
-    const auto vocab_size_padded = logits.shape()[1];
-    auto logits_ref = logits.slice(0, logits.shape()[0]);
-    BufferPtr temperature_buf;
-    if (std::any_of(temperature.data<float>(),
-                    temperature.data<float>() + batch_size,
-                    [&](auto t) { return std::abs(t - 1.0f) > 1e-7; }))
+    const auto step = params.step;
+
+    if (std::any_of(params.temperature.data<float>(),
+                    params.temperature.data<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; }))
     {
-        temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-        copy({*temperature_buf, temperature});
+        BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+        copy({*temperature_buf, params.temperature});
         invokeBatchApplyTemperaturePenalty(
-            logits_ref->data<float>(),
+            logits.data<float>(),
             (float *)nullptr, // embedding_bias
             temperature_buf->data<float>(),
             batch_size,
@@ -77,6 +40,108 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
             vocab_size_padded,
             stream_);
     }
+
+    if (params.repetition_penalty) {
+        auto& repetition_penalty = params.repetition_penalty->get();
+        if (std::any_of(repetition_penalty.data<float>(),
+                        repetition_penalty.data<float>() + batch_size,
+                        [&](auto t) { return t != 1.0f; }))
+        {
+            auto sequence_lengths = clone({params.input_lengths});
+            if (decoder_batch_size) {
+                copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
+            }
+            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
+            auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+            auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
+            copy({*repetition_penalty_buf, repetition_penalty});
+            invokeBatchApplyRepetitionPenalty(
+                    logits.data<float>(),
+                    penalty_logits->data<float>(),
+                    repetition_penalty_buf->data<float>(),
+                    transposed_tokens->data<int32_t>(),
+                    batch_size,
+                    batch_size, // local_batch_size
+                    vocab_size_padded,
+                    sequence_lengths->data<int32_t>(),
+                    step + 1, // max_input_length
+                    step + 1, // step
+                    repetition_penalty_type,
+                    stream_);
+            // NOTE: here step is max_len - 1
+        }
+    }
+
+    /*
+      logits: [decoder_batch_size;context_batch_size]
+      input_lengths: [decoder_batch_size;context_batch_size]
+      sequence_lengths: [decoder_batch_size]
+     */
+    if (params.min_lengths && params.eos_ids) {
+        auto min_lengths_buf = clone({params.min_lengths.value().get()});
+        auto sequence_lengths = clone({params.sequence_lengths});
+        auto input_lengths = clone({params.input_lengths});
+        invokeMinLengthPenaltyNew(
+                logits.data<float>(),
+                min_lengths_buf->data<int32_t>(),
+                params.eos_ids.value().get().data<int32_t>(),
+                sequence_lengths->data<int32_t>(),
+                input_lengths->data<int32_t>(),
+                decoder_batch_size,
+                batch_size,
+                vocab_size_padded,
+                stream_);
+    }
+
+    if (decoder_batch_size && params.no_repeat_ngram_size) {
+        const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value().get();
+        if (any_of(no_repeat_ngram_size.data<int32_t>(),
+                   no_repeat_ngram_size.data<int32_t>() + decoder_batch_size,
+                   [](auto s) { return s != 0; }))
+        {
+            auto no_repeat_ngram_size_buf = clone({no_repeat_ngram_size});
+            auto output_ids_ptrs = allocateBuffer({DataType::TYPE_UINT64, {decoder_batch_size}, AllocationType::HOST});
+            for (int i = 0; i < decoder_batch_size; i++) {
+                output_ids_ptrs->data<uint64_t>()[i] = (uint64_t)(device_tokens->data<int32_t>() + i * (step + 1));
+            }
+            auto output_ids_ptrs_device = clone({*output_ids_ptrs, AllocationType::DEVICE});
+            auto sequence_lengths = clone({params.sequence_lengths});
+
+            tensorrt_llm::kernels::invokeBanRepeatNgram(
+                    logits.data<float>(),
+                    (int32_t const**)(output_ids_ptrs_device->data()),
+                    nullptr, // finished_buf
+                    nullptr, // parent_ids_buf
+                    nullptr, // batch_slot
+                    sequence_lengths->data<int32_t>(),
+                    decoder_batch_size,
+                    1, // beam_width
+                    step + 1,
+                    no_repeat_ngram_size_buf->data<int32_t>(),
+                    vocab_size_padded,
+                    step + 1,
+                    stream_);
+            }
+    }
+}
+
+bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
+    if ((!use_flashinfer_sample_kernel) ||
+        params.random_seed.has_value() ||
+        params.cum_log_probs.has_value() ||
+        params.output_all_probs.has_value() ||
+        params.output_log_probs.has_value()) {
+        return false;
+    }
+    return true;
+}
+
+GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens) {
+    const auto batch_size = params.logits.shape()[0];
+    auto& top_k = params.top_k;
+    auto& top_p = params.top_p;
+
+    auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     auto probs = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
     auto success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
@@ -111,22 +176,22 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const Buffer& logits, const Buff
         top_k_top_p_sampling_from_probs(probs_t, uniform_samples, samples_t, success_t, top_k_t, 1.0, top_p_t, 1.0, deterministic, (int64_t)stream_);
     }
     auto output_tokens = transpose({*transposed_tokens});
-    copy({token_ids, *output_tokens});
+    copy({params.token_ids, *output_tokens});
     sync_check_cuda_error();
     return {success};
-#else
-    return {};
-#endif
 }
 
 GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
-#if USING_CUDA12 == 1
-    if (checkUseFlashinferSampleGreedy(params)) {
-        return flashinferSampleGreedy(params.logits, params.top_k, params.top_p, params.temperature, params.token_ids);
-    }
-#endif
+    auto device_tokens = clone({params.token_ids});
+    auto transposed_tokens = transpose({*device_tokens});
 
-    completeSampleGreedy(params);
+    processLogits(params, device_tokens, transposed_tokens);
+    
+    if (checkUseFlashinferSampleGreedy(params)) {
+        return flashinferSampleGreedy(params, transposed_tokens);
+    }
+
+    completeSampleGreedy(params, transposed_tokens);
     return GreedyOutput{};
 }
 
@@ -137,7 +202,8 @@ GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
 // where "x" are skipped.
 // topk should has higher proirity than topp.
 
-void CudaDevice::completeSampleGreedy(const GreedyParams& params) {
+
+void CudaDevice::completeSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
@@ -151,8 +217,6 @@ void CudaDevice::completeSampleGreedy(const GreedyParams& params) {
     RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[1] - 1),
                           "step should equal to token_ids.shape[1] - 1, but %ld vs %ld",
                           step, params.token_ids.shape()[1] - 1);
-    auto device_tokens = clone({params.token_ids});
-    auto transposed_tokens = transpose({*device_tokens});
 
     // 1. prepare buffers
     auto& top_k = params.top_k;
@@ -190,9 +254,7 @@ void CudaDevice::completeSampleGreedy(const GreedyParams& params) {
     auto cum_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.cum_log_probs, float);
     auto output_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_log_probs, float);
     auto output_all_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float);
-    // 3. prepare common inputs
 
-    // 3.1. setup random seeds
     if (random_seed) {
         auto& seeds = random_seed.value().get();
         if (seeds.size() == 1) {
@@ -208,103 +270,6 @@ void CudaDevice::completeSampleGreedy(const GreedyParams& params) {
             invokeCurandBatchInitialize(
                 (curandState_t *)curandstate_buf_->data(), batch_size,
                 (unsigned long long *)random_seeds_buf->data(), stream_);
-        }
-    }
-
-    // 3.2. compute logits penalty
-    if (std::any_of(temperature.data<float>(),
-                    temperature.data<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; }))
-    {
-        BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-        copy({*temperature_buf, temperature});
-        invokeBatchApplyTemperaturePenalty(
-            logits.data<float>(),
-            (float *)nullptr, // embedding_bias
-            temperature_buf->data<float>(),
-            batch_size,
-            vocab_size_padded,
-            vocab_size_padded,
-            stream_);
-    }
-    const auto decoder_batch_size = params.sequence_lengths.shape()[0];
-    if (params.repetition_penalty) {
-        auto& repetition_penalty = params.repetition_penalty->get();
-        if (std::any_of(repetition_penalty.data<float>(),
-                        repetition_penalty.data<float>() + batch_size,
-                        [&](auto t) { return t != 1.0f; }))
-        {
-            auto sequence_lengths = clone({params.input_lengths});
-            if (decoder_batch_size) {
-                copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
-            }
-            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-            auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-            auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-            copy({*repetition_penalty_buf, repetition_penalty});
-            invokeBatchApplyRepetitionPenalty(
-                    logits.data<float>(),
-                    penalty_logits->data<float>(),
-                    repetition_penalty_buf->data<float>(),
-                    transposed_tokens->data<int32_t>(),
-                    batch_size,
-                    batch_size, // local_batch_size
-                    vocab_size_padded,
-                    sequence_lengths->data<int32_t>(),
-                    step + 1, // max_input_length
-                    step + 1, // step
-                    repetition_penalty_type,
-                    stream_);
-            // NOTE: here step is max_len - 1
-        }
-    }
-
-    BufferPtr output_ids_ptrs;
-    if (decoder_batch_size) {
-        auto sequence_lengths = clone({params.sequence_lengths});
-        auto input_lengths = clone({params.input_lengths});
-
-        if (params.min_lengths && params.eos_ids) {
-            auto min_lengths_buf = clone({params.min_lengths.value().get()});
-            invokeMinLengthPenaltyNew(
-                logits.data<float>(),
-                min_lengths_buf->data<int32_t>(),
-                params.eos_ids.value().get().data<int32_t>(),
-                sequence_lengths->data<int32_t>(),
-                input_lengths->data<int32_t>(),
-                decoder_batch_size,
-                vocab_size_padded,
-                stream_);
-        }
-
-        if (params.no_repeat_ngram_size) {
-            const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value().get();
-            if (any_of(no_repeat_ngram_size.data<int32_t>(),
-                       no_repeat_ngram_size.data<int32_t>() + decoder_batch_size,
-                       [](auto s) { return s != 0; }))
-            {
-                auto no_repeat_ngram_size_buf = clone({no_repeat_ngram_size});
-                output_ids_ptrs = allocateBuffer({DataType::TYPE_UINT64, {decoder_batch_size}, AllocationType::HOST});
-                for (int i = 0; i < decoder_batch_size; i++) {
-                    output_ids_ptrs->data<uint64_t>()[i] = (uint64_t)(device_tokens->data<int32_t>() + i * (step + 1));
-                }
-                auto output_ids_ptrs_device = clone({*output_ids_ptrs, AllocationType::DEVICE});
-
-                tensorrt_llm::kernels::invokeBanRepeatNgram(
-                    logits.data<float>(),
-                    (int32_t const**)(output_ids_ptrs_device->data()),
-                    nullptr, // finished_buf
-                    nullptr, // parent_ids_buf
-                    nullptr, // batch_slot
-                    sequence_lengths->data<int32_t>(),
-                    decoder_batch_size,
-                    1, // beam_width
-                    step + 1,
-                    no_repeat_ngram_size_buf->data<int32_t>(),
-                    vocab_size_padded,
-                    step + 1,
-                    stream_);
-            }
         }
     }
 

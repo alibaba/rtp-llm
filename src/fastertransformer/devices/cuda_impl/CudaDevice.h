@@ -147,10 +147,9 @@ private:
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
     bool checkUseFlashinferSampleGreedy(const GreedyParams& params);
-    GreedyOutput flashinferSampleGreedy(const Buffer& logits, const Buffer& top_k,
-                         const Buffer& top_p, const Buffer& temperature,
-                         Buffer& token_ids);
-    void completeSampleGreedy(const GreedyParams& params);
+    GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens);
+    void processLogits(const GreedyParams& params, const BufferPtr &device_tokens, const BufferPtr &transposed_tokens);
+    void completeSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens);
 
 public:
     cudaStream_t getStream() {return stream_;}

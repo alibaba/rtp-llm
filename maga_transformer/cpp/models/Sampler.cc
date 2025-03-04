@@ -50,7 +50,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         auto sequence_lengths = from_batch_idx < decoder_batch_size
             ? inputs.sequence_lengths->view(from_batch_idx,
                                             min(sample_batch_size, decoder_batch_size - from_batch_idx))
-            : Buffer::emptyBuffer();
+            : Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INT32, {0}, nullptr);
 
         BufferPtr sample_cum_log_probs;
         if (inputs.cum_log_probs) {

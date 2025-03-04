@@ -196,19 +196,23 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                 // NOTE: here step is max_len - 1
             }
         }
+    }
 
-        if (params.min_lengths && params.eos_ids) {
-            auto min_lengths_buf = clone({params.min_lengths.value().get()});
-            invokeMinLengthPenaltyNew(
+    if (params.min_lengths && params.eos_ids) {
+        auto min_lengths_buf = clone({params.min_lengths.value().get()});
+        // move this to NormalExecutor
+        auto sequence_lengths = clone({params.sequence_lengths});
+        auto input_lengths = clone({params.input_lengths});
+        invokeMinLengthPenaltyNew(
                 logits.data<float>(),
                 min_lengths_buf->data<int32_t>(),
                 params.eos_ids.value().get().data<int32_t>(),
                 sequence_lengths->data<int32_t>(),
                 input_lengths->data<int32_t>(),
                 decoder_batch_size,
+                batch_size,
                 vocab_size_padded,
                 stream_);
-        }
     }
 
     // 4. run sampling

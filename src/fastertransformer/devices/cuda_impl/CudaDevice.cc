@@ -421,10 +421,6 @@ void CudaDevice::checkUseFlashinferSampleKernel() {
         FT_LOG_WARNING("Flashinfer sample is disabled for by env");
         return;
     }
-    if(CompileConfig::cudart_version < 12000) {
-        FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
-        return;
-    }
     FT_LOG_INFO("use Flashinfer sample kernel");
     use_flashinfer_sample_kernel = true;
 }
