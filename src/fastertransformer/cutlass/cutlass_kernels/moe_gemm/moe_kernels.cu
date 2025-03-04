@@ -670,7 +670,7 @@ void topkKernelLauncher(float const* input, float const* input_with_bias, float*
     }
     case 2:
     {
-        topkKernelLauncherHelper<4>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
+        topkKernelLauncherHelper<2>(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows,
             num_experts, k, startk, endk, start_expert, end_expert, norm_mode, stream);
         break;
     }
