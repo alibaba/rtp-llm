@@ -106,6 +106,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             "message": {
                 "role": "assistant",
                 "content": "Thought: 我可以使用 get_current_weather API。",
+                "reasoning_content": None,
                 "function_call": {
                     "name": "get_current_weather",
                     "arguments": "{\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}"
@@ -179,9 +180,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0, 314)
         stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
         generate = self.endpoint._complete_stream_response(stream_generator, None)
-        # response = [x async for x in generate][-1]
-        # response = await generate.gen_complete_response_once()
-        # print(response.choices[0].model_dump_json())
         async for x in generate:
             response = x
             response = await generate.gen_complete_response_once()
@@ -192,6 +190,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             "message": {
                 "role": "assistant",
                 "content": "我需要调用get_current_weather API来获取天气",
+                "reasoning_content": None,
                 "function_call": {
                     "name": "get_current_weather",
                     "arguments": "{\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}"
@@ -219,6 +218,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             {
                 "role": "assistant",
                 "content": ": 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}",
+                "reasoning_content": None,
                 "function_call": None,
                 "tool_calls": None,
                 "partial": False,
@@ -340,6 +340,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "message": {
                     "role": "assistant",
                     "content": "我需要调用get_current_weather API来获取天气",
+                    "reasoning_content": None,
                     "function_call": None,
                     "tool_calls": [
                         {
@@ -380,6 +381,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "message": {
                     "role": "assistant",
                     "content": ': 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
+                    "reasoning_content": None,
                     "function_call": None,
                     "tool_calls": None,
                     "partial": False,

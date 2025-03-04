@@ -150,6 +150,11 @@ class OutputDelta():
     output_length: int
     reuse_length: int
 
+@dataclass
+class ThinkStatus():
+    in_think_mode: int = 0
+    think_buffer: str = ""
+    think_output_buffer: str = ""
 
 class RenderedInputs:
     input_ids: List[int] = []
@@ -356,6 +361,7 @@ class CustomChatRenderer():
             return await self._create_empty_delta(output.aux_info)
 
     async def _generate_first(self, n: int):
+        print(f'_generate_first----')
         return StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
                         index=i,
@@ -366,7 +372,7 @@ class CustomChatRenderer():
                     ) for i in range(n)]
         )
 
-    async def _generate_stream_response(self, items: List[OutputDelta]) -> StreamResponseObject:
+    async def _generate_stream_response(self, items: List[OutputDelta], think_status: ThinkStatus) -> StreamResponseObject:
         if len(items) == 0:
             raise Exception("output items length should not be 0")
         input_lengths = items[0].input_length
@@ -374,19 +380,31 @@ class CustomChatRenderer():
         reuse_lengths = items[0].reuse_length
         all_choices = []
         
-        global think_mode
-        in_think_mode = think_mode
-        think_buffer, think_output_buffer = "", ""
         index = 0
         for i, item in enumerate(items):
+            text = item.output_str if isinstance(item.output_str, str) else item.output_str.content
+            if len(text) == 0:
+                all_choices.append(ChatCompletionResponseStreamChoice(
+                    index=index,
+                    delta=DeltaMessage(
+                        reasoning_content="" if think_status.in_think_mode else None,
+                        content="" if not think_status.in_think_mode else None
+                    ),
+                    logprobs=ChoiceLogprobs(
+                        content=[item.logprobs] if item.logprobs != None else None,
+                        refusal=None
+                    ) if item.logprobs != None else None
+                ))
+                index += 1
+                continue
             processing_index = 0
-            while processing_index < item.output_length:
-                if in_think_mode:
-                    think_buffer += item.output_str[processing_index]
+            while processing_index < len(text):
+                if think_status.in_think_mode:
+                    think_status.think_buffer += text[processing_index]
                     # Check if think_buffer ends with '</think>' (handle partial matches)
-                    if think_buffer.endswith(think_end_tag):
+                    if think_status.think_buffer.endswith(think_end_tag):
                         # Remove '</think>' from think_buffer
-                        reasoning_text = think_output_buffer[:-think_end_tag_len]
+                        reasoning_text = think_status.think_output_buffer[:-think_end_tag_len]
                         # Output reasoning_text if not empty
                         if reasoning_text:
                             all_choices.append(ChatCompletionResponseStreamChoice(
@@ -399,23 +417,23 @@ class CustomChatRenderer():
                             ))
                             index += 1
                         # Clear think_buffer and set in_think_mode to False
-                        think_buffer = ""
-                        think_output_buffer = ""
-                        in_think_mode = False
+                        think_status.think_buffer = ""
+                        think_status.think_output_buffer = ""
+                        think_status.in_think_mode = False
                     elif (
-                        think_end_tag.startswith(think_buffer)
-                        or think_buffer.startswith(think_end_tag)
+                        think_end_tag.startswith(think_status.think_buffer)
+                        or think_status.think_buffer.startswith(think_end_tag)
                     ):
                         # Partial match with '</think>', need to accumulate more characters                                  
                         pass  # Do nothing, continue accumulating
                     else:
                         # No match, output the accumulated think_buffer as reasoning
-                        think_output_buffer += think_buffer
-                        think_buffer = ""
+                        think_status.think_output_buffer += think_status.think_buffer
+                        think_status.think_buffer = ""
                     processing_index += 1 
                 else:
                     # Not in think mode, output to content
-                    content_text = item.output_str[processing_index:]
+                    content_text = text[processing_index:]
                     if content_text:
                         all_choices.append(ChatCompletionResponseStreamChoice(
                             index=index,
@@ -426,18 +444,18 @@ class CustomChatRenderer():
                             ) if item.logprobs != None else None
                         ))
                         index += 1
-                    processing_index = item.output_length
-            if think_output_buffer and in_think_mode:
+                    processing_index = len(text)
+            if think_status.think_output_buffer and think_status.in_think_mode:
                 all_choices.append(ChatCompletionResponseStreamChoice(
                     index=index,
-                    delta=DeltaMessage(reasoning_content=think_output_buffer),
+                    delta=DeltaMessage(reasoning_content=think_status.think_output_buffer),
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
                 index += 1
-                think_output_buffer = ""
+                think_status.think_output_buffer = ""
 
         return StreamResponseObject(
                 choices=all_choices,
@@ -449,7 +467,7 @@ class CustomChatRenderer():
                 )
         )
 
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool, think_status: ThinkStatus):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:
             if buffer.output is None:
@@ -462,7 +480,7 @@ class CustomChatRenderer():
                 aux_info.input_len,
                 aux_info.output_len,
                 aux_info.reuse_len))
-        return await self._generate_stream_response(output_items)
+        return await self._generate_stream_response(output_items, think_status)
 
     async def _generate_final(self, buffer_list: List[StreamStatus], request: ChatCompletionRequest):
         input_token_length = 0
@@ -516,6 +534,12 @@ class CustomChatRenderer():
         num_return_sequences = request.n if request.n is not None else 1
         status_list = await self._create_status_list(num_return_sequences, request)
         index = 0
+        global think_mode
+        think_status = ThinkStatus(
+            in_think_mode=think_mode,
+            think_buffer="",
+            think_output_buffer=""
+        )
         async for outputs in output_generator:
             if index == 0:
                 yield await self._generate_first(num_return_sequences)
@@ -525,11 +549,12 @@ class CustomChatRenderer():
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list, generate_config.is_streaming))
-            yield await self._generate_stream_response(delta_list)
+            print(f'\ndelta list:[{delta_list}]\n')
+            yield await self._generate_stream_response(delta_list, think_status)
             if self._check_all_finished(status_list):
                 break
         if index != 0:
-            yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming)
+            yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming, think_status)
             yield await self._generate_final(status_list, request)
 
     def _create_empty_delta_sync(self, input_len, output_len, reuse_len):
@@ -634,7 +659,7 @@ class CustomChatRenderer():
                     ) for i in range(n)]
         )
 
-    def _generate_stream_response_sync(self, items: List[OutputDelta]) -> StreamResponseObject:
+    def _generate_stream_response_sync(self, items: List[OutputDelta], think_status: ThinkStatus) -> StreamResponseObject:
         if len(items) == 0:
             raise Exception("output items length should not be 0")
         input_lengths = items[0].input_length
@@ -642,19 +667,31 @@ class CustomChatRenderer():
         reuse_lengths = items[0].reuse_length
         all_choices = []
         
-        global think_mode
-        in_think_mode = think_mode
-        think_buffer, think_output_buffer = "", ""
         index = 0
         for i, item in enumerate(items):
+            text = item.output_str if isinstance(item.output_str, str) else item.output_str.content
+            if len(text) == 0:
+                all_choices.append(ChatCompletionResponseStreamChoice(
+                    index=index,
+                    delta=DeltaMessage(
+                        reasoning_content="" if think_status.in_think_mode else None,
+                        content="" if not think_status.in_think_mode else None
+                    ),
+                    logprobs=ChoiceLogprobs(
+                        content=[item.logprobs] if item.logprobs != None else None,
+                        refusal=None
+                    ) if item.logprobs != None else None
+                ))
+                index += 1
+                continue
             processing_index = 0
-            while processing_index < item.output_length:
-                if in_think_mode:
-                    think_buffer += item.output_str[processing_index]
+            while processing_index < len(text):
+                if think_status.in_think_mode:
+                    think_status.think_buffer += text[processing_index]
                     # Check if think_buffer ends with '</think>' (handle partial matches)
-                    if think_buffer.endswith(think_end_tag):
+                    if think_status.think_buffer.endswith(think_end_tag):
                         # Remove '</think>' from think_buffer
-                        reasoning_text = think_output_buffer[:-think_end_tag_len]
+                        reasoning_text = think_status.think_output_buffer[:-think_end_tag_len]
                         # Output reasoning_text if not empty
                         if reasoning_text:
                             all_choices.append(ChatCompletionResponseStreamChoice(
@@ -667,23 +704,23 @@ class CustomChatRenderer():
                             ))
                             index += 1
                         # Clear think_buffer and set in_think_mode to False
-                        think_buffer = ""
-                        think_output_buffer = ""
-                        in_think_mode = False
+                        think_status.think_buffer = ""
+                        think_status.think_output_buffer = ""
+                        think_status.in_think_mode = False
                     elif (
-                        think_end_tag.startswith(think_buffer)
-                        or think_buffer.startswith(think_end_tag)
+                        think_end_tag.startswith(think_status.think_buffer)
+                        or think_status.think_buffer.startswith(think_end_tag)
                     ):
                         # Partial match with '</think>', need to accumulate more characters                                  
                         pass  # Do nothing, continue accumulating
                     else:
                         # No match, output the accumulated think_buffer as reasoning
-                        think_output_buffer += think_buffer
-                        think_buffer = ""
+                        think_status.think_output_buffer += think_status.think_buffer
+                        think_status.think_buffer = ""
                     processing_index += 1 
                 else:
                     # Not in think mode, output to content
-                    content_text = item.output_str[processing_index:]
+                    content_text = text[processing_index:]
                     if content_text:
                         all_choices.append(ChatCompletionResponseStreamChoice(
                             index=index,
@@ -694,18 +731,18 @@ class CustomChatRenderer():
                             ) if item.logprobs != None else None
                         ))
                         index += 1
-                    processing_index = item.output_length
-            if think_output_buffer and in_think_mode:
+                    processing_index = len(text)
+            if think_status.think_output_buffer and think_status.in_think_mode:
                 all_choices.append(ChatCompletionResponseStreamChoice(
                     index=index,
-                    delta=DeltaMessage(reasoning_content=think_output_buffer),
+                    delta=DeltaMessage(reasoning_content=think_status.think_output_buffer),
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
                 index += 1
-                think_output_buffer = ""
+                think_status.think_output_buffer = ""
 
         return StreamResponseObject(
                 choices=all_choices,
@@ -722,7 +759,8 @@ class CustomChatRenderer():
                            input_len_list, output_len_list, reuse_len_list,
                            all_probs_list, output_ids_list,
                            stop_words_str: List[str],
-                           is_streaming: bool):
+                           is_streaming: bool,
+                           think_status: ThinkStatus):
         output_items: List[OutputDelta] = []
         for buffer, input_len, output_len, reuse_len, all_probs, output_ids in zip(
                 buffer_list,
@@ -736,7 +774,7 @@ class CustomChatRenderer():
                 input_len,
                 output_len,
                 reuse_len))
-        return self._generate_stream_response_sync(output_items)
+        return self._generate_stream_response_sync(output_items, think_status)
 
     def _generate_final_sync(self,
                              buffer_list: List[StreamStatusSync],
@@ -796,8 +834,8 @@ class CustomChatRenderer():
                                         output_ids_list, # GenerateOutput
                                         max_new_tokens, # GenerateConfig
                                         stop_words_str, # GenerateConfig
-                                        is_streaming
-                                        ):
+                                        is_streaming,
+                                        think_status: ThinkStatus):
         stop_word_slice_list = get_stop_word_slices(stop_words_str) # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
         for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
@@ -811,7 +849,7 @@ class CustomChatRenderer():
                                                               max_new_tokens, stop_words_str,
                                                               stop_word_slice_list,
                                                               is_streaming))
-        stream_response =  self._generate_stream_response_sync(delta_list)
+        stream_response =  self._generate_stream_response_sync(delta_list, think_status)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -824,12 +862,13 @@ class CustomChatRenderer():
                                      input_len_list, output_len_list, reuse_len_list,
                                      all_probs_list, output_ids_list,
                                      stop_words_str,
-                                     is_streaming):
+                                     is_streaming,
+                                     think_status: ThinkStatus):
         stream_response = self._flush_buffer_sync(status_list,
                                                   input_len_list, output_len_list, reuse_len_list,
                                                   all_probs_list, output_ids_list,
                                                   stop_words_str,
-                                                  is_streaming)
+                                                  is_streaming, think_status)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -885,12 +924,13 @@ class CustomChatRenderer():
                                      input_len_list, output_len_list, reuse_len_list,
                                      all_probs_list, output_ids_list,
                                      stop_words_str,
-                                     is_streaming):
+                                     is_streaming,
+                                     think_status: ThinkStatus):
         stream_response = self._flush_buffer_sync(status_list,
                                                   input_len_list, output_len_list, reuse_len_list,
                                                   all_probs_list, output_ids_list,
                                                   stop_words_str,
-                                                  is_streaming)
+                                                  is_streaming, think_status)
         return stream_response
 
     def render_stream_response_final_blocking(self,

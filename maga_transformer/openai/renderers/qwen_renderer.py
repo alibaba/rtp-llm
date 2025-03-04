@@ -16,7 +16,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
     DeltaMessage, FinisheReason, UsageInfo, RendererInfo, PromptTokensDetails
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs, StreamStatus, StreamStatusSync, OutputDelta
+    StreamResponseObject, RenderedInputs, StreamStatus, StreamStatusSync, OutputDelta, ThinkStatus
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
@@ -386,12 +386,12 @@ class QwenRenderer(CustomChatRenderer):
             return [StreamStatus(request) for _ in range(n)]
 
     #override
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool):
+    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool, think_status: ThinkStatus):
         if buffer_list[0].request.tools:
-            return await self.qwen_tool_renderer._flush_buffer(buffer_list, stop_words_str, is_streaming)
+            return await self.qwen_tool_renderer._flush_buffer(buffer_list, stop_words_str, is_streaming, think_status)
 
         if (not isinstance(buffer_list[0], QwenStreamStatus)):
-            return await super()._flush_buffer(buffer_list, stop_words_str, is_streaming)
+            return await super()._flush_buffer(buffer_list, stop_words_str, is_streaming, think_status)
         output_items: List[OutputDelta] = []
         for status in buffer_list:
             if status.generating_function_call:
@@ -416,7 +416,7 @@ class QwenRenderer(CustomChatRenderer):
                     status.input_token_length,
                     status.output_token_length,
                     status.reuse_length))
-        return await self._generate_stream_response(output_items)
+        return await self._generate_stream_response(output_items, think_status)
 
     #override
     def _update_single_status_sync(self,

@@ -20,6 +20,7 @@ from maga_transformer.openai.renderers.custom_renderer import (
     RenderedInputs,
     StreamStatus,
     OutputDelta,
+    ThinkStatus
 )
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import (
@@ -461,6 +462,7 @@ class QwenToolRenderer(CustomChatRenderer):
         buffer_list: List[StreamStatus],
         stop_words_str: List[str],
         is_streaming: bool,
+        think_status: ThinkStatus
     ):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:
@@ -490,7 +492,7 @@ class QwenToolRenderer(CustomChatRenderer):
                     aux_info.reuse_len,
                 )
             )
-        return await self._generate_stream_response(output_items)
+        return await self._generate_stream_response(output_items, think_status)
 
 
 register_renderer("qwen_tool", QwenToolRenderer)
