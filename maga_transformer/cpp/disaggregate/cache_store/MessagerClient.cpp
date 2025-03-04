@@ -17,8 +17,7 @@ MessagerClient::~MessagerClient() {
     stopTcpClient();
 }
 
-bool MessagerClient::init(uint32_t connect_port, uint32_t rdma_connect_port, bool enable_metric) {
-    connect_port_ = connect_port;
+bool MessagerClient::init(bool enable_metric) {
     if (!initTcpClient(enable_metric)) {
         FT_LOG_WARNING("messager client init failed, tcp client init failed");
         return false;
@@ -66,19 +65,23 @@ void MessagerClient::stopTcpClient() {
 }
 
 void MessagerClient::load(const std::string&                                           ip,
+                          uint32_t                                                     port,
+                          uint32_t                                                     rdma_port,
                           const std::shared_ptr<RequestBlockBuffer>&                   request_block_buffer,
                           CacheStoreLoadDoneCallback                                   callback,
                           uint32_t                                                     timeout_ms,
                           const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
-                          int partition_count, int partition_id) {
-    auto channel = getChannel(ip);
+                          int                                                          partition_count,
+                          int                                                          partition_id) {
+    auto channel = getChannel(ip, port);
     if (channel == nullptr) {
         FT_LOG_WARNING("messager client get channel failed, ip %s", ip.c_str());
         callback(false, CacheStoreErrorCode::LoadConnectFailed);
         return;
     }
 
-    auto request = makeLoadRequest(request_block_buffer, timeout_ms - 10, partition_count, partition_id);  // TODO: 10 is message transfer time
+    auto request = makeLoadRequest(
+        request_block_buffer, timeout_ms - 10, partition_count, partition_id);  // TODO: 10 is message transfer time
     if (request == nullptr) {
         FT_LOG_WARNING("messager client generate load request failed");
         callback(false, CacheStoreErrorCode::LoadSendRequestFailed);
@@ -99,7 +102,8 @@ void MessagerClient::load(const std::string&                                    
 
 CacheLoadRequest* MessagerClient::makeLoadRequest(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                                                   uint32_t                                   timeout_ms,
-                                                  int partition_count, int partition_id) {
+                                                  int                                        partition_count,
+                                                  int                                        partition_id) {
     auto blocks = request_block_buffer->getBlocks();
 
     auto request = new CacheLoadRequest;
@@ -117,30 +121,31 @@ CacheLoadRequest* MessagerClient::makeLoadRequest(const std::shared_ptr<RequestB
     return request;
 }
 
-std::shared_ptr<arpc::RPCChannelBase> MessagerClient::getChannel(const std::string& ip) {
+std::shared_ptr<arpc::RPCChannelBase> MessagerClient::getChannel(const std::string& ip, uint32_t port) {
+    std::string spec = "tcp:" + ip + ":" + std::to_string(port);
+
     std::lock_guard<std::mutex> lock(channel_map_mutex_);
-    auto                        channel = channel_map_[ip];
+    auto                        channel = channel_map_[spec];
     if (channel != nullptr && !channel->ChannelBroken()) {
         return channel;
     }
 
-    auto new_channel = openChannel(ip);
+    auto new_channel = openChannel(spec);
     if (new_channel == nullptr || new_channel->ChannelBroken()) {
         return nullptr;
     }
 
-    FT_LOG_INFO("new channel connect to %s", ip.c_str());
-    channel_map_[ip] = new_channel;
+    FT_LOG_INFO("new channel connect to %s", spec.c_str());
+    channel_map_[spec] = new_channel;
     return new_channel;
 }
 
-std::shared_ptr<arpc::RPCChannelBase> MessagerClient::openChannel(const std::string& ip) {
+std::shared_ptr<arpc::RPCChannelBase> MessagerClient::openChannel(const std::string& spec) {
     if (!rpc_channel_manager_) {
         FT_LOG_WARNING("messager client open channel failed, rpc channel manager is null");
         return nullptr;
     }
 
-    std::string spec = "tcp:" + ip + ":" + std::to_string(connect_port_);
     return std::shared_ptr<arpc::RPCChannelBase>(
         dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
 }

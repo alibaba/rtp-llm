@@ -122,12 +122,17 @@ LoadContext::LoadContext(const std::shared_ptr<CacheStore>& cache_store, bool co
 
 void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffer,
                        const std::string&                                      ip,
+                       uint32_t                                                port,
+                       uint32_t                                                rdma_port,
                        int64_t                                                 timeout_ms,
                        CheckCancelFunc                                         check_cancel_func,
-                       int partition_count, int partition_id) {
-    peer_ip_ = ip;
+                       int                                                     partition_count,
+                       int                                                     partition_id) {
+    peer_ip_         = ip;
+    port_            = port;
+    rdma_port_       = rdma_port;
     partition_count_ = partition_count;
-    partition_id_ = partition_id;
+    partition_id_    = partition_id;
     call(request_block_buffer, timeout_ms, check_cancel_func);
 }
 
@@ -138,7 +143,14 @@ bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_bloc
                                                                                         CacheStoreErrorCode ec) {
         shared_this->updateResult(success, ec, request_block_buffer);
     };
-    cache_store->load(request_block_buffer, load_layer_callback, peer_ip_, timeout_ms, partition_count_, partition_id_);
+    cache_store->load(request_block_buffer,
+                      load_layer_callback,
+                      peer_ip_,
+                      port_,
+                      rdma_port_,
+                      timeout_ms,
+                      partition_count_,
+                      partition_id_);
     return true;
 }
 

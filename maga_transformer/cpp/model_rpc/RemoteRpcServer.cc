@@ -29,10 +29,9 @@ void RemoteRpcServer::initLocalHostInfo() {
     } else {
         local_id = "ip_" + local_ip;
     }
-    auto    pid        = getpid();
-    auto    start_time = currentTimeUs();
-    process_id_ = local_id + "_pid_" + std::to_string(pid)
-                        + "_timestamp_" + std::to_string(start_time);
+    auto pid        = getpid();
+    auto start_time = currentTimeUs();
+    process_id_     = local_id + "_pid_" + std::to_string(pid) + "_timestamp_" + std::to_string(start_time);
     FT_LOG_INFO("local process id is %s", process_id_.c_str());
 }
 
@@ -42,7 +41,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
         return;
     }
     // worker 0 is master (rank 0)
-    for(auto& worker_addr : maga_init_params_.gpt_init_parameter.worker_addrs_) {
+    for (auto& worker_addr : maga_init_params_.gpt_init_parameter.worker_addrs_) {
         FT_LOG_INFO("In gpt init params: worker address is %s", worker_addr.c_str());
         resource_.workers.push_back(worker_addr);
     }
@@ -55,26 +54,27 @@ void RemoteRpcServer::initLocalPeerInfo() {
 
 void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
     FT_LOG_INFO("init_params.use_cache_store = %d, init_params.pd_separation = %d",
-                init_params.use_cache_store_, init_params.pd_separation_);
+                init_params.use_cache_store_,
+                init_params.pd_separation_);
 
     if (!init_params.use_cache_store_) {
         FT_FAIL("cache store not used in RemoteRpcServer is unexpected");
     }
     const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
-    auto device = engine_->getDevice();
+    auto device                                                                = engine_->getDevice();
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
-    params.listen_port = init_params.cache_store_listen_port_;
-    params.connect_port = init_params.cache_store_connect_port_;
+    params.listen_port      = init_params.cache_store_listen_port_;
     params.rdma_listen_port = init_params.cache_store_rdma_listen_port_;
-    params.rdma_connect_port = init_params.cache_store_rdma_connect_port_;
-    params.rdma_mode = init_params.cache_store_rdma_mode_;
-    params.thread_count = 4;
-    params.queue_size = 500;
-    params.device = device;
-    FT_LOG_INFO("cache store listen port is [%ld], connect port is [%d], rdma_mode is [%d]",
-        params.listen_port, params.connect_port, params.rdma_mode);
+    params.rdma_mode        = init_params.cache_store_rdma_mode_;
+    params.thread_count     = 4;
+    params.queue_size       = 500;
+    params.device           = device;
+    FT_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
+                params.listen_port,
+                params.rdma_listen_port,
+                params.rdma_mode);
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
     FT_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     FT_LOG_INFO("cache store init success");

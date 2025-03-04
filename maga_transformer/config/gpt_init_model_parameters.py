@@ -293,6 +293,13 @@ class GptInitModelParameters:
         self.dp_rank = parallel_info.dp_rank
         self.local_rank = parallel_info.local_rank
 
+        worker_addrs = []
+        for member in get_gang_info().members:
+            if member.local_rank // self.tp_size == self.dp_rank:
+                worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
+                logging.info(f"append member for pd sep {member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port} to local rank {self.local_rank}")
+        self.worker_addrs = worker_addrs
+
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path

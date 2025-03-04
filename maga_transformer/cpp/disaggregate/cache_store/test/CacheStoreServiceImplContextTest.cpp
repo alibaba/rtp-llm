@@ -58,19 +58,22 @@ protected:
     std::shared_ptr<arpc::TimerManager>                   timer_manager_;
 
     std::shared_ptr<CacheStoreServiceImplContext> context_;
+
+    uint32_t port1_;
+    uint32_t port2_;
+    uint32_t rdma_port1_;
+    uint32_t rdma_port2_;
 };
 
 bool CacheStoreServiceImplContextTest::initCacheStores() {
-    auto port1      = autil::NetUtil::randomPort();
-    auto port2      = autil::NetUtil::randomPort();
-    auto rdma_port1 = autil::NetUtil::randomPort();
-    auto rdma_port2 = autil::NetUtil::randomPort();
+    port1_      = autil::NetUtil::randomPort();
+    port2_      = autil::NetUtil::randomPort();
+    rdma_port1_ = autil::NetUtil::randomPort();
+    rdma_port2_ = autil::NetUtil::randomPort();
 
     CacheStoreInitParams params1;
-    params1.listen_port       = port1;
-    params1.connect_port      = port2;
-    params1.rdma_listen_port  = rdma_port1;
-    params1.rdma_connect_port = rdma_port2;
+    params1.listen_port       = port1_;
+    params1.rdma_listen_port  = rdma_port1_;
     params1.enable_metric     = false;
     params1.memory_util       = memory_util_;
     params1.device            = device_util_->device_;
@@ -81,10 +84,8 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     }
 
     CacheStoreInitParams params2;
-    params2.listen_port       = port2;
-    params2.connect_port      = port1;
-    params2.rdma_listen_port  = rdma_port2;
-    params2.rdma_connect_port = rdma_port1;
+    params2.listen_port       = port2_;
+    params2.rdma_listen_port  = rdma_port2_;
     params2.enable_metric     = false;
     params2.memory_util       = memory_util_;
     params2.device            = device_util_->device_;

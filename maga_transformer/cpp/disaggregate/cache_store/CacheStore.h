@@ -19,18 +19,22 @@ public:
 
     virtual void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                       CacheStoreLoadDoneCallback                 callback,
-                      const std::string&                         ip         = "",
-                      uint32_t                                   timeout_ms = 1000,
-                      int partition_count = 1,
-                      int partition_id = 0) = 0;
+                      const std::string&                         ip,
+                      uint32_t                                   port,
+                      uint32_t                                   rdma_port,
+                      uint32_t                                   timeout_ms      = 1000,
+                      int                                        partition_count = 1,
+                      int                                        partition_id    = 0) = 0;
 
     virtual std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
-         const std::string&                                      ip,
-         int64_t                                                 timeout_ms,
-         LoadContext::CheckCancelFunc                            check_cancel_func,
-         int partition_count = 1,
-         int partition_id = 0) = 0;
+                const std::string&                                      ip,
+                uint32_t                                                port,
+                uint32_t                                                rdma_port,
+                int64_t                                                 timeout_ms,
+                LoadContext::CheckCancelFunc                            check_cancel_func,
+                int                                                     partition_count = 1,
+                int                                                     partition_id    = 0) = 0;
 
     virtual std::shared_ptr<StoreContext>
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers, int64_t timeout_ms) = 0;

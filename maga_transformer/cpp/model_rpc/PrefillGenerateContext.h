@@ -14,34 +14,34 @@ namespace rtp_llm {
 
 struct PrefillStatInfo {
     enum ExecuteStage {
-        start                   = 0,
-        getRpcConnection        = 1,
-        multimodalProcess       = 2,
-        remoteAllocateResource  = 3,
-        enqueueRequest          = 4,
-        remoteLoadCacheStart    = 5,
-        pollLocalOutput         = 6,
-        remoteLoadCacheEnd      = 7,
-        RemoteGenerate          = 8,
-        pollRemoteOutput        = 9,
-        finish                  = 10
+        start                  = 0,
+        getRpcConnection       = 1,
+        multimodalProcess      = 2,
+        remoteAllocateResource = 3,
+        enqueueRequest         = 4,
+        remoteLoadCacheStart   = 5,
+        pollLocalOutput        = 6,
+        remoteLoadCacheEnd     = 7,
+        RemoteGenerate         = 8,
+        pollRemoteOutput       = 9,
+        finish                 = 10
     };
 
-    int64_t begin_time                      = 0;
-    int64_t get_rpc_connection_rt_us        = 0;
-    int64_t multimodal_process_rt_us        = 0;
-    int64_t remote_allocate_resource_rt_us  = 0;
-    int64_t enqueue_request_rt_us           = 0;
-    int64_t remote_load_cache_start_rt_us   = 0;
-    int64_t poll_local_output_rt_us         = 0;
-    int64_t remote_load_cache_end_rt_us     = 0;
-    int64_t remote_generate_rt_us           = 0;
-    int64_t poll_remote_output_rt_us        = 0;
-    ExecuteStage stage                      = start;
+    int64_t      begin_time                     = 0;
+    int64_t      get_rpc_connection_rt_us       = 0;
+    int64_t      multimodal_process_rt_us       = 0;
+    int64_t      remote_allocate_resource_rt_us = 0;
+    int64_t      enqueue_request_rt_us          = 0;
+    int64_t      remote_load_cache_start_rt_us  = 0;
+    int64_t      poll_local_output_rt_us        = 0;
+    int64_t      remote_load_cache_end_rt_us    = 0;
+    int64_t      remote_generate_rt_us          = 0;
+    int64_t      poll_remote_output_rt_us       = 0;
+    ExecuteStage stage                          = start;
 
     ExecuteStage saveStage() const;
-    void restoreStage(ExecuteStage stage);
-    void nextStage();
+    void         restoreStage(ExecuteStage stage);
+    void         nextStage();
 };
 
 struct RPCContext {
@@ -55,22 +55,26 @@ struct RPCContext {
 
 class PrefillGenerateContext: public GenerateContext {
 public:
-    PrefillGenerateContext(RemoteServerResource* resource, RPCContext& rpc_context,
-                           int64_t timeout_ms, grpc::ServerContext* server_context,
-                           kmonitor::MetricsReporterPtr& metrics_reporter, std::shared_ptr<PrefillRpcServerRuntimeMeta> meta)
-                           : GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter),
-                             resource(resource), rpc_context(rpc_context), meta(meta) {
-                                for(auto &worker : resource->workers) {
-                                    std::string ip = extractIP(worker);
-                                    prefill_worker_ips.push_back(ip);
-                                }
-                             }
+    PrefillGenerateContext(RemoteServerResource*                        resource,
+                           RPCContext&                                  rpc_context,
+                           int64_t                                      timeout_ms,
+                           grpc::ServerContext*                         server_context,
+                           kmonitor::MetricsReporterPtr&                metrics_reporter,
+                           std::shared_ptr<PrefillRpcServerRuntimeMeta> meta):
+        GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter),
+        resource(resource),
+        rpc_context(rpc_context),
+        meta(meta) {
+        for (auto& worker : resource->workers) {
+            prefill_worker_ips.push_back(worker);
+        }
+    }
     ~PrefillGenerateContext();
-    void reset() override;
-    void setStream(const std::shared_ptr<GenerateStream>& stream) override;
-    void nextStage();
+    void         reset() override;
+    void         setStream(const std::shared_ptr<GenerateStream>& stream) override;
+    void         nextStage();
     grpc::Status closeGrpcStream();
-    void closeGrpcConnection();
+    void         closeGrpcConnection();
 
 private:
     void markRequestEnd();
@@ -81,25 +85,25 @@ private:
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;
 
-    RemoteServerResource*                   resource;
-    RPCContext                              rpc_context;
-    std::shared_ptr<GenerateInput>          generate_input;
+    RemoteServerResource*                        resource;
+    RPCContext                                   rpc_context;
+    std::shared_ptr<GenerateInput>               generate_input;
     std::shared_ptr<PrefillRpcServerRuntimeMeta> meta;
 
-    std::string                             decode_addr;
-    std::vector<std::string>                prefill_worker_ips;   
-    GrpcConnection                          grpc_connection;
-    std::shared_ptr<RpcService::Stub>       stub;
-    std::shared_ptr<grpc::ClientContext>    client_context;
-    std::shared_ptr<ClientStream>           client_stream;
-    bool                                    grpc_stream_closed = false;
-    grpc::Status                            last_grpc_stream_closed_status = grpc::Status::OK;
-    PrefillStatInfo                         stat_info;
-    int64_t                                 loading_cache_requests  = 0;
+    std::string                          decode_addr;
+    std::vector<std::string>             prefill_worker_ips;
+    GrpcConnection                       grpc_connection;
+    std::shared_ptr<RpcService::Stub>    stub;
+    std::shared_ptr<grpc::ClientContext> client_context;
+    std::shared_ptr<ClientStream>        client_stream;
+    bool                                 grpc_stream_closed             = false;
+    grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
+    PrefillStatInfo                      stat_info;
+    int64_t                              loading_cache_requests = 0;
 
     // for debug, will delete in future
-    GenerateOutputsPB                       response;
-    int64_t                                 remote_cost_time_us;
+    GenerateOutputsPB response;
+    int64_t           remote_cost_time_us;
 };
 
 }  // namespace rtp_llm

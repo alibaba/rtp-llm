@@ -8,7 +8,6 @@ namespace rtp_llm {
 
 class CacheStoreInitParams {
 public:
-    uint32_t connect_port{15002};
     uint32_t listen_port{15002};
 
     uint32_t thread_count{2};
@@ -17,7 +16,6 @@ public:
     // memory util
     void*    stream{nullptr};
     bool     rdma_mode{true};
-    uint32_t rdma_connect_port{0};
     uint32_t rdma_listen_port{0};
 
     bool enable_metric{true};

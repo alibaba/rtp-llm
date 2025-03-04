@@ -21,16 +21,18 @@ protected:
 
     std::shared_ptr<MessagerClient> client_;
     std::shared_ptr<MessagerServer> server_;
+
+    uint32_t port_;
 };
 
 bool MessagerClientTest::initMessager() {
     server_buffer_store_ =
         std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
 
-    auto port = autil::NetUtil::randomPort();
+    port_ = autil::NetUtil::randomPort();
 
     client_ = std::make_shared<MessagerClient>(memory_util_);
-    if (!client_->init(port, 0, false)) {
+    if (!client_->init(false)) {
         return false;
     }
 
@@ -38,7 +40,7 @@ bool MessagerClientTest::initMessager() {
     auto metrics_reporter_ = std::make_shared<CacheStoreMetricsReporter>();
 
     server_ = std::make_shared<MessagerServer>(memory_util_, server_buffer_store_, metrics_reporter_, timer_manager_);
-    if (!server_->init(port, 0, false)) {
+    if (!server_->init(port_, 0, false)) {
         return false;
     }
     return true;
@@ -88,7 +90,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_Success) {
     };
 
     mutex.lock();
-    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr, 1, 0);
+    client_->load(autil::NetUtil::getBindIp(), port_, 0, load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();
@@ -113,7 +115,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_connectFailed) {
     mutex.lock();
 
     client_->stopTcpClient();
-    client_->load(autil::NetUtil::getBindIp(), load_cache, load_callback, 1000, nullptr, 1, 0);
+    client_->load(autil::NetUtil::getBindIp(), port_, 0, load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();
@@ -135,7 +137,7 @@ TEST_F(MessagerClientTest, testSendLoadRequest_sendRequestFailed) {
     };
     mutex.lock();
 
-    client_->load("11.22.33.44", load_cache, load_callback, 1000, nullptr, 1, 0);
+    client_->load("11.22.33.44", port_, 0, load_cache, load_callback, 1000, nullptr, 1, 0);
 
     mutex.lock();  // wait till callback
     mutex.unlock();

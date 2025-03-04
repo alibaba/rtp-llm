@@ -51,12 +51,12 @@ void CacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std
             continue;
         }
 
-        if (unloaded_block_info->len() != block->len) {
+        if (unloaded_block_info->len() != block->len / partition_count_) {
             FT_LOG_WARNING(
                 "cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
                 block->key.c_str(),
                 unloaded_block_info->len(),
-                block->len,
+                block->len / partition_count_,
                 peer_ip_.c_str());
             runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
             return;
@@ -112,8 +112,10 @@ bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<Bloc
     block_info->set_key(block->key);
     block_info->set_len(block_len);
     auto block_content = block_info->mutable_content();
-    block_content->assign(std::shared_ptr<const char>(block->addr, reinterpret_cast<const char*>((int64_t)(block->addr.get()) + block_len * partition_id_)),
-                          size_t(block_len));
+    block_content->assign(
+        std::shared_ptr<const char>(
+            block->addr, reinterpret_cast<const char*>((int64_t)(block->addr.get()) + block_len * partition_id_)),
+        size_t(block_len));
     return true;
 }
 
