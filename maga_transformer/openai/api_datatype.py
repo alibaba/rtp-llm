@@ -71,6 +71,7 @@ class ContentPart(BaseModel):
 class ChatMessage(BaseModel):
     role: RoleEnum
     content: Union[str, None, List[ContentPart]] = ""
+    reasoning_content: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
@@ -209,6 +210,7 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[RoleEnum] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
 

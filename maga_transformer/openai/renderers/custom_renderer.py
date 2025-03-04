@@ -24,6 +24,10 @@ from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 
+think_mode = int(os.environ.get("THINK_MODE", "0"))
+think_end_tag = os.environ.get("THINK_END_TAG", "</think>\n")
+think_end_tag_len = len(think_end_tag)
+
 class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
@@ -368,17 +372,75 @@ class CustomChatRenderer():
         input_lengths = items[0].input_length
         output_lengths = sum([x.output_length for x in items])
         reuse_lengths = items[0].reuse_length
-        return StreamResponseObject(
-                choices=[ChatCompletionResponseStreamChoice(
-                    index=i,
-                    delta=DeltaMessage(
-                        content=item.output_str,
-                    ) if isinstance(item.output_str, str) else item.output_str,
+        all_choices = []
+        
+        global think_mode
+        in_think_mode = think_mode
+        think_buffer, think_output_buffer = "", ""
+        index = 0
+        for i, item in enumerate(items):
+            processing_index = 0
+            while processing_index < item.output_length:
+                if in_think_mode:
+                    think_buffer += item.output_str[processing_index]
+                    # Check if think_buffer ends with '</think>' (handle partial matches)
+                    if think_buffer.endswith(think_end_tag):
+                        # Remove '</think>' from think_buffer
+                        reasoning_text = think_output_buffer[:-think_end_tag_len]
+                        # Output reasoning_text if not empty
+                        if reasoning_text:
+                            all_choices.append(ChatCompletionResponseStreamChoice(
+                                    index=index,
+                                    delta=DeltaMessage(reasoning_content=reasoning_text),
+                                    logprobs=ChoiceLogprobs(
+                                        content=[item.logprobs] if item.logprobs != None else None,
+                                        refusal=None
+                                    ) if item.logprobs != None else None
+                            ))
+                            index += 1
+                        # Clear think_buffer and set in_think_mode to False
+                        think_buffer = ""
+                        think_output_buffer = ""
+                        in_think_mode = False
+                    elif (
+                        think_end_tag.startswith(think_buffer)
+                        or think_buffer.startswith(think_end_tag)
+                    ):
+                        # Partial match with '</think>', need to accumulate more characters                                  
+                        pass  # Do nothing, continue accumulating
+                    else:
+                        # No match, output the accumulated think_buffer as reasoning
+                        think_output_buffer += think_buffer
+                        think_buffer = ""
+                    processing_index += 1 
+                else:
+                    # Not in think mode, output to content
+                    content_text = item.output_str[processing_index:]
+                    if content_text:
+                        all_choices.append(ChatCompletionResponseStreamChoice(
+                            index=index,
+                            delta=DeltaMessage(content=content_text),
+                            logprobs=ChoiceLogprobs(
+                                content=[item.logprobs] if item.logprobs != None else None,
+                                refusal=None
+                            ) if item.logprobs != None else None
+                        ))
+                        index += 1
+                    processing_index = item.output_length
+            if think_output_buffer and in_think_mode:
+                all_choices.append(ChatCompletionResponseStreamChoice(
+                    index=index,
+                    delta=DeltaMessage(reasoning_content=think_output_buffer),
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
-                ) for i, item in enumerate(items)],
+                ))
+                index += 1
+                think_output_buffer = ""
+
+        return StreamResponseObject(
+                choices=all_choices,
                 usage=UsageInfo(
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
@@ -578,17 +640,75 @@ class CustomChatRenderer():
         input_lengths = items[0].input_length
         output_lengths = sum([x.output_length for x in items])
         reuse_lengths = items[0].reuse_length
-        return StreamResponseObject(
-                choices=[ChatCompletionResponseStreamChoice(
-                    index=i,
-                    delta=DeltaMessage(
-                        content=item.output_str,
-                    ) if isinstance(item.output_str, str) else item.output_str,
+        all_choices = []
+        
+        global think_mode
+        in_think_mode = think_mode
+        think_buffer, think_output_buffer = "", ""
+        index = 0
+        for i, item in enumerate(items):
+            processing_index = 0
+            while processing_index < item.output_length:
+                if in_think_mode:
+                    think_buffer += item.output_str[processing_index]
+                    # Check if think_buffer ends with '</think>' (handle partial matches)
+                    if think_buffer.endswith(think_end_tag):
+                        # Remove '</think>' from think_buffer
+                        reasoning_text = think_output_buffer[:-think_end_tag_len]
+                        # Output reasoning_text if not empty
+                        if reasoning_text:
+                            all_choices.append(ChatCompletionResponseStreamChoice(
+                                    index=index,
+                                    delta=DeltaMessage(reasoning_content=reasoning_text),
+                                    logprobs=ChoiceLogprobs(
+                                        content=[item.logprobs] if item.logprobs != None else None,
+                                        refusal=None
+                                    ) if item.logprobs != None else None
+                            ))
+                            index += 1
+                        # Clear think_buffer and set in_think_mode to False
+                        think_buffer = ""
+                        think_output_buffer = ""
+                        in_think_mode = False
+                    elif (
+                        think_end_tag.startswith(think_buffer)
+                        or think_buffer.startswith(think_end_tag)
+                    ):
+                        # Partial match with '</think>', need to accumulate more characters                                  
+                        pass  # Do nothing, continue accumulating
+                    else:
+                        # No match, output the accumulated think_buffer as reasoning
+                        think_output_buffer += think_buffer
+                        think_buffer = ""
+                    processing_index += 1 
+                else:
+                    # Not in think mode, output to content
+                    content_text = item.output_str[processing_index:]
+                    if content_text:
+                        all_choices.append(ChatCompletionResponseStreamChoice(
+                            index=index,
+                            delta=DeltaMessage(content=content_text),
+                            logprobs=ChoiceLogprobs(
+                                content=[item.logprobs] if item.logprobs != None else None,
+                                refusal=None
+                            ) if item.logprobs != None else None
+                        ))
+                        index += 1
+                    processing_index = item.output_length
+            if think_output_buffer and in_think_mode:
+                all_choices.append(ChatCompletionResponseStreamChoice(
+                    index=index,
+                    delta=DeltaMessage(reasoning_content=think_output_buffer),
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
-                ) for i, item in enumerate(items)],
+                ))
+                index += 1
+                think_output_buffer = ""
+
+        return StreamResponseObject(
+                choices=all_choices,
                 usage=UsageInfo(
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
@@ -784,21 +904,32 @@ class CustomChatRenderer():
         all_choices = []
         usage = None
         aux_info = None
+        
+        def split_think_tag(text: Optional[str]):
+            if text is None:
+                return None, None
+            text_results = text.split(think_end_tag, 1)
+            resoning_content = text_results[0] if len(text_results) == 2 else None
+            content = text_results[1] if len(text_results) == 2 else text
+            return content, resoning_content
+        
         for response in choice_generator:
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
-                    all_choices = [
-                        ChatCompletionResponseChoice(
-                            index=i,
-                            message=ChatMessage(
-                                role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
-                                function_call=choice.delta.function_call or None,
-                            ),
-                            finish_reason=choice.finish_reason,
-                            logprobs=choice.logprobs,
-                        ) for i, choice in enumerate(response.choices)
-                    ]
+                    for i, choice in enumerate(response.choices):
+                        content, resoning_content = split_think_tag(choice.delta.content)
+                        all_choices.append(ChatCompletionResponseChoice(
+                                index=i,
+                                message=ChatMessage(
+                                    role=choice.delta.role or RoleEnum.assistant,
+                                    content=content or None,
+                                    resoning_content=resoning_content or None,
+                                    function_call=choice.delta.function_call or None,
+                                ),
+                                finish_reason=choice.finish_reason,
+                                logprobs=choice.logprobs,
+                            )
+                        )
                 else:
                     raise ValueError(f"response.choices has different length! "
                                      f"[{response.choices}] vs [{all_choices}].")
@@ -808,6 +939,9 @@ class CustomChatRenderer():
                         all_choices[i].message.content = (response.choices[i].delta.content or None)
                     else:
                         all_choices[i].message.content += (response.choices[i].delta.content or "")
+                    content, resoning_content = split_think_tag(all_choices[i].message.content)
+                    all_choices[i].message.content = content
+                    all_choices[i].message.resoning_content = resoning_content
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
