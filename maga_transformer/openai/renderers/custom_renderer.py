@@ -382,7 +382,18 @@ class CustomChatRenderer():
         
         index = 0
         for i, item in enumerate(items):
-            text = item.output_str if isinstance(item.output_str, str) else item.output_str.content
+            if isinstance(item.output_str, DeltaMessage):
+                all_choices.append(ChatCompletionResponseStreamChoice(
+                    index=index,
+                    delta=item.output_str,
+                    logprobs=ChoiceLogprobs(
+                        content=[item.logprobs] if item.logprobs != None else None,
+                        refusal=None
+                    ) if item.logprobs != None else None
+                ))
+                index += 1
+                continue
+            text = item.output_str
             if len(text) == 0:
                 all_choices.append(ChatCompletionResponseStreamChoice(
                     index=index,

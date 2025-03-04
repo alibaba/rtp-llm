@@ -401,5 +401,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
         self.assertEqual(self.endpoint.stop_words_str_list, ['<|user|>', '<|observation|>'])
 
+    def test_think_label(self):
+        # todo in 20250305
+        pass
+
 if __name__ == '__main__':
     main()
