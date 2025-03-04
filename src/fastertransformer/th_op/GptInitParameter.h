@@ -221,6 +221,7 @@ public:
 
     //multi machine
     std::vector<std::string> worker_addrs_;
+    std::vector<std::string> worker_grpc_addrs_;
 
     GptInitParameter();
 

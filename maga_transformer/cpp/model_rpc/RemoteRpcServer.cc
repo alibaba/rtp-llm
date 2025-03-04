@@ -45,11 +45,21 @@ void RemoteRpcServer::initLocalPeerInfo() {
         FT_LOG_INFO("In gpt init params: worker address is %s", worker_addr.c_str());
         resource_.workers.push_back(worker_addr);
     }
+    for (auto& worker_grpc_addr : maga_init_params_.gpt_init_parameter.worker_grpc_addrs_) {
+        FT_LOG_INFO("In gpt init params: worker grpc address is %s", worker_grpc_addr.c_str());
+        resource_.grpc_workers.push_back(worker_grpc_addr);
+    }
     string worker_info = "worker address is ";
     for (auto& worker : resource_.workers) {
         worker_info += worker + ", ";
     }
     FT_LOG_INFO(worker_info);
+
+    string worker_grpc_info = "worker grpc address is ";
+    for (auto& worker : resource_.grpc_workers) {
+        worker_grpc_info += worker + ", ";
+    }
+    FT_LOG_INFO(worker_grpc_info);
 }
 
 void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {

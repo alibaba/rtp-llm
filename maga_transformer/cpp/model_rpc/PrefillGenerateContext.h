@@ -66,7 +66,7 @@ public:
         rpc_context(rpc_context),
         meta(meta) {
         for (auto& worker : resource->workers) {
-            prefill_worker_ips.push_back(worker);
+            prefill_worker_cache_store_addrs.push_back(worker);
         }
     }
     ~PrefillGenerateContext();
@@ -91,7 +91,7 @@ public:
     std::shared_ptr<PrefillRpcServerRuntimeMeta> meta;
 
     std::string                          decode_addr;
-    std::vector<std::string>             prefill_worker_ips;
+    std::vector<std::string>             prefill_worker_cache_store_addrs;
     GrpcConnection                       grpc_connection;
     std::shared_ptr<RpcService::Stub>    stub;
     std::shared_ptr<grpc::ClientContext> client_context;

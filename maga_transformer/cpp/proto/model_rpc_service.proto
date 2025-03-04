@@ -179,14 +179,14 @@ message GenerateRequestPB {
     int64 start_time = 4;
     int32 first_generate_token_id = 5;
     GenerateInputPB input = 6;
-    repeated string peer_ips = 7;
+    repeated string peer_addrs = 7;
 }
 
 // in tp case, decode master broadcast to decode worker
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
-    repeated string peer_ips = 3;
+    repeated string peer_addrs = 3;
     repeated int64 cache_keys = 4;
     repeated int32 block_ids = 5;
     int64 block_num = 6;

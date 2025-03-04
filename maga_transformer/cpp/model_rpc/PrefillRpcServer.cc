@@ -211,8 +211,8 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     alloc_request.set_allocated_input(new_request);
-    for(auto& ip : prefill_context.prefill_worker_ips) {
-        alloc_request.add_peer_ips(ip);
+    for(auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
+        alloc_request.add_peer_addrs(addrs);
     }
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, client_stream->Write(alloc_request),

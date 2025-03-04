@@ -305,6 +305,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(cache_store_rdma_listen_port, cache_store_rdma_listen_port_)     \
     DEF_PROPERTY(worker_port_offset, worker_port_offset_)     \
     DEF_PROPERTY(worker_addrs, worker_addrs_)                                \
+    DEF_PROPERTY(worker_grpc_addrs, worker_grpc_addrs_)                 \
     DEF_PROPERTY(remote_rpc_server_port, remote_rpc_server_port_)       \
     DEF_PROPERTY(pd_separation, pd_separation_)                         \
     DEF_PROPERTY(use_cache_store, use_cache_store_)                     \

@@ -129,7 +129,7 @@ void PrefillGenerateContext::markRequestEnd() {
         resource->cache_store->markRequestEnd(std::to_string(request_id));
         return;
     }
-    const auto& prefill_workers = resource->workers;
+    const auto& prefill_workers = resource->grpc_workers;
     RemoteFinishRequestPB finish_request;
     finish_request.set_request_id(request_id);
     for (int i = 0; i < prefill_workers.size(); i++) {
