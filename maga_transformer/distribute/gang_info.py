@@ -25,6 +25,9 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
             cache_store_rdma_listen_port=-1,
             local_rank=0,
             name=info['name'], ip=info['ip'], info=info))
+    zone_name = os.environ.get("ZONE_NAME", "")
+    if zone_name:
+        members = [member for member in members if member.name.split('_')[-2] == zone_name]
     masters = [member for member in members if member.name.endswith('part0')]
     if len(masters) != 1:
         raise Exception(f"gang master should contains 1 but got {len(masters)}")
