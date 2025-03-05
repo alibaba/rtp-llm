@@ -1,7 +1,7 @@
 import logging
 from typing import Optional, Type
 from maga_transformer.device.device_base import DeviceType, DeviceBase
-from maga_transformer.device.device_impl import CpuImpl, ArmCpuImpl, CudaImpl, RocmImpl
+from maga_transformer.device.device_impl import CpuImpl, ArmCpuImpl, CudaImpl, PpuImpl, RocmImpl
 from maga_transformer.ops import get_device, DeviceType, DeviceExporter
 
 _current_device: Optional[DeviceBase] = None
@@ -14,7 +14,7 @@ def get_device_cls(type: DeviceType) -> Type:
     elif type == DeviceType.Cuda:
         return CudaImpl
     elif type == DeviceType.Ppu:
-        return CudaImpl
+        return PpuImpl
     elif type == DeviceType.ROCm:
         return RocmImpl
     else:

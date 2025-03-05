@@ -3,6 +3,7 @@ from pathlib import PosixPath
 import json
 import enum
 import os
+import logging
 import torch
 import struct
 from safetensors import safe_open
@@ -182,10 +183,23 @@ class CkptFileInfo:
                     return tensor
 
 
-    def load_tensors(self, device: str = "cuda:0"):
+    def load_tensors(self, device: str = "cuda:0", direct_io=True):
+        file_path = os.path.abspath(self.file_name)
+        if file_path.startswith(('/dev/shm', '/run/shm', '/sys/fs/cgroup')):
+            logging.info(f"abs path : {file_path} cannot use direct_io")
+            direct_io=False
+                
         if self.is_safetensor():
-            from safetensors.torch import load_file
-            return load_file(self.file_name, device=device)
+            try:
+                from fast_safetensors import load_safetensors_to_device
+                logging.info(f"use fast_safetensors to device: {device} direct_io:{direct_io}")
+                res =  load_safetensors_to_device(self.file_name, max_buf_size=2*1024*1024*1024, direct_io=direct_io, device=device)
+                logging.debug(f"load_safetensors_to_device result: {list(res.keys())}")
+                return res
+            except ModuleNotFoundError:
+                logging.info(f"use safetensors to device: {device}")
+                from safetensors.torch import load_file
+                return load_file(self.file_name, device=device)
         else:
             return torch.load(self.file_name, map_location=torch.device(device))
 

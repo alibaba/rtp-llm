@@ -143,11 +143,11 @@ class CkptDatabase(BaseDatabase):
 
         return orders 
 
-    def load_tensors_by_prefix(self, prefix_list: List[str], device: str) -> dict[str, List[torch.Tensor]]:
+    def load_tensors_by_prefix(self, prefix_list: List[str], device: str, direct_io: bool) -> dict[str, List[torch.Tensor]]:
         res = {}
         for ckptfile in self.PretrainFileList:
             if any(tensor.startswith(prefix_list) for tensor in ckptfile.get_tensor_names()):
-                tensors = ckptfile.load_tensors(device)
+                tensors = ckptfile.load_tensors(device, direct_io)
                 for k, v in tensors.items():
                     if not k.startswith(prefix_list):
                         continue

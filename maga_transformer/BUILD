@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps")
 load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -87,6 +87,7 @@ requirement([
     "av",
     "pyrsmi",
     "amdsmi",
+    "fast-safetensors"
 ] + tensorrt)
 
 
@@ -110,7 +111,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         "//maga_transformer/aios/kmonitor:kmonitor_py",
-    ] + arch_dep
+    ] + arch_dep + internal_deps()
 )
 
 py_library(
@@ -417,7 +418,7 @@ whl_reqs = [
     "librosa",
     "matplotlib",
     "av",
-] + whl_deps() + platform_deps() + xft_dep
+] + whl_deps() + platform_deps() + xft_dep 
 
 # target for wheel
 py_wheel(

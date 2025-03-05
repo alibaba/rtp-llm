@@ -123,11 +123,12 @@ class ModelWeightsLoader:
         model_weights = ModelWeights(self._num_layers, device, self._data_type)
         layer_weight_prefix = ModelWeights.layer_weight_prefix(self._tp_rank, self._dp_rank, self._ep_rank)
         global_weight_prefix = ModelWeights.global_weight_prefix(self._tp_rank, self._dp_rank, self._ep_rank)
+        direct_io = self._exported_device.support_dio_load
         # 清空现有的权重
         weights = [ {} for id in range(self._num_layers)]
         global_weights = {}
         # 重新构建权重
-        all_tensors = self._database.load_tensors_by_prefix((layer_weight_prefix, global_weight_prefix), device)
+        all_tensors = self._database.load_tensors_by_prefix((layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io)
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
                 # 解析键名，例如 "layers.0.weight"

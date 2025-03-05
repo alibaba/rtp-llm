@@ -152,3 +152,7 @@ def triton_deps(names):
     return select({
         "//conditions:default": [],
     })
+
+def internal_deps():
+    return []
+

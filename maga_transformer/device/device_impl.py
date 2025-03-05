@@ -231,6 +231,14 @@ class CudaImpl(GpuImpl):
             logging.warn(f"Cannot get CUDA device capability: {e}")
             return super().arch  # 使用父类的实现
 
+    @property
+    def support_dio_load(self) -> bool:
+        return True
+
+class PpuImpl(CudaImpl):
+    @property
+    def support_dio_load(self) -> bool:
+        return False
 
 
 class RocmImpl(GpuImpl):

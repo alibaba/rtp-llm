@@ -24,7 +24,11 @@ class DeviceBase:
 
     def get_device_id(self) -> int:
         return self.exported_device.get_device_id()
-    
+
+    @property
+    def support_dio_load(self) -> bool:
+        return False
+
     def _get_mem_info(self) -> MemInfo:
         raise NotImplementedError("_get_mem_info is not implemented")
 
