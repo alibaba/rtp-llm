@@ -401,9 +401,49 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
         self.assertEqual(self.endpoint.stop_words_str_list, ['<|user|>', '<|observation|>'])
 
-    def test_think_label(self):
-        # todo in 20250305
-        pass
+    async def test_think_label(self):
+        custom_renderer.think_mode = 1
+        custom_renderer.think_end_tag = 'ulaire'    # id = 73675
+        custom_renderer.think_end_tag_len = len('ulaire')
+        os.environ['MODEL_TYPE'] = 'qwen'
+        tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model)
+        
+        test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        request = ChatCompletionRequest(messages=[])
+        input_length = 109
+        id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        async for x in generate:
+            print(f"---[{x}]")
+        response = await generate.gen_complete_response_once()
+        print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        self.assertEqual(
+            json.loads(response.choices[0].model_dump_json()),
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": '我使用使用使用',
+                    "reasoning_content": '我可以可以可以',
+                    "function_call": None,
+                    "tool_calls": None,
+                    "partial": False,
+                },
+                "finish_reason": "stop",
+                "logprobs": None,
+            },
+        )
 
 if __name__ == '__main__':
     main()
