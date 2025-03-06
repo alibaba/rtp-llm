@@ -364,8 +364,9 @@ bool initKmonitorFactory() {
 kmonitor::MetricsTags getHippoTags() {
     auto hippo_tags = kmonitor::MetricsTags();
     if (std::getenv("HIPPO_ROLE")) {
-        hippo_tags.AddTag("host_ip", autil::EnvUtil::getEnv("HIPPO_SLAVE_IP", ""));
-        hippo_tags.AddTag("container_ip", autil::EnvUtil::getEnv("RequestedIP", ""));
+        auto host_ip = autil::EnvUtil::getEnv("HIPPO_SLAVE_IP", "");
+        hippo_tags.AddTag("host_ip", host_ip);
+        hippo_tags.AddTag("container_ip", autil::EnvUtil::getEnv("RequestedIP", host_ip));
         hippo_tags.AddTag("hippo_role", autil::EnvUtil::getEnv("HIPPO_ROLE", ""));
         hippo_tags.AddTag("hippo_app", autil::EnvUtil::getEnv("HIPPO_APP", ""));
         hippo_tags.AddTag("hippo_group", autil::EnvUtil::getEnv("HIPPO_SERVICE_NAME", ""));
