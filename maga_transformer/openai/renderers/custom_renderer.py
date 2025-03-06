@@ -618,55 +618,27 @@ class CustomChatRenderer():
                     ) for i in range(n)]
         )
 
-    def _generate_stream_response_sync(self, items: List[OutputDelta], think_status: ThinkStatus) -> StreamResponseObject:
+    def _generate_stream_response_sync(self, items: List[OutputDelta]) -> StreamResponseObject:
         if len(items) == 0:
             raise Exception("output items length should not be 0")
         input_lengths = items[0].input_length
         output_lengths = sum([x.output_length for x in items])
         reuse_lengths = items[0].reuse_length
-        all_choices = []
-        
-        index = 0
-        for i, item in enumerate(items):
-            if isinstance(item.output_str, DeltaMessage):
-                all_choices.append(ChatCompletionResponseStreamChoice(
-                    index=index,
-                    delta=item.output_str,
+        return StreamResponseObject(
+                choices=[ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(
+                        content=item.output_str,
+                    ) if isinstance(item.output_str, str) else item.output_str,
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
-                ))
-                index += 1
-                continue
-            if think_status.in_think_mode:
-                if think_end_tag in item.output_str:
-                    reasoning_text, content = item.output_str.split(think_end_tag, 2)
-                    think_status.in_think_mode = 0
-                else:
-                    reasoning_text, content = item.output_str, None
-                    think_status.think_tokens = item.output_length
-            else:
-                reasoning_text, content = None, item.output_str
-            all_choices.append(ChatCompletionResponseStreamChoice(
-                index=index,
-                delta=DeltaMessage(
-                    reasoning_content=reasoning_text,
-                    content=content,
-                ),
-                logprobs=ChoiceLogprobs(
-                    content=[item.logprobs] if item.logprobs != None else None,
-                        refusal=None
-                    ) if item.logprobs != None else None
-                ))
-            index += 1
-        return StreamResponseObject(
-                choices=all_choices,
+                ) for i, item in enumerate(items)],
                 usage=UsageInfo(
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
                     completion_tokens=output_lengths,
-                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                     prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_lengths) if reuse_lengths > 0 else None
                 )
         )
@@ -676,8 +648,7 @@ class CustomChatRenderer():
                            input_len_list, output_len_list, reuse_len_list,
                            all_probs_list, output_ids_list,
                            stop_words_str: List[str],
-                           is_streaming: bool,
-                           think_status: ThinkStatus):
+                           is_streaming: bool):
         output_items: List[OutputDelta] = []
         for buffer, input_len, output_len, reuse_len, all_probs, output_ids in zip(
                 buffer_list,
@@ -691,11 +662,11 @@ class CustomChatRenderer():
                 input_len,
                 output_len,
                 reuse_len))
-        return self._generate_stream_response_sync(output_items, think_status)
+        return self._generate_stream_response_sync(output_items)
 
     def _generate_final_sync(self,
                              buffer_list: List[StreamStatusSync],
-                             input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
+                             input_len_list, output_len_list, reuse_len_list):
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
@@ -723,7 +694,6 @@ class CustomChatRenderer():
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
-                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                 prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
             ),
             aux_info=aux_info
@@ -752,8 +722,7 @@ class CustomChatRenderer():
                                         output_ids_list, # GenerateOutput
                                         max_new_tokens, # GenerateConfig
                                         stop_words_str, # GenerateConfig
-                                        is_streaming,
-                                        think_status: ThinkStatus):
+                                        is_streaming):
         stop_word_slice_list = get_stop_word_slices(stop_words_str) # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
         for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
@@ -767,7 +736,7 @@ class CustomChatRenderer():
                                                               max_new_tokens, stop_words_str,
                                                               stop_word_slice_list,
                                                               is_streaming))
-        stream_response =  self._generate_stream_response_sync(delta_list, think_status)
+        stream_response =  self._generate_stream_response_sync(delta_list)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -780,13 +749,12 @@ class CustomChatRenderer():
                                      input_len_list, output_len_list, reuse_len_list,
                                      all_probs_list, output_ids_list,
                                      stop_words_str,
-                                     is_streaming,
-                                     think_status: ThinkStatus):
+                                     is_streaming):
         stream_response = self._flush_buffer_sync(status_list,
                                                   input_len_list, output_len_list, reuse_len_list,
                                                   all_probs_list, output_ids_list,
                                                   stop_words_str,
-                                                  is_streaming, think_status)
+                                                  is_streaming)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -796,9 +764,9 @@ class CustomChatRenderer():
 
     def render_stream_response_final(self,
                                      status_list,
-                                     input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
+                                     input_len_list, output_len_list, reuse_len_list):
         stream_response = self._generate_final_sync(status_list,
-                                                    input_len_list, output_len_list, reuse_len_list, think_status)
+                                                    input_len_list, output_len_list, reuse_len_list)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -819,8 +787,7 @@ class CustomChatRenderer():
                                         output_ids_list, # GenerateOutput
                                         max_new_tokens, # GenerateConfig
                                         stop_words_str, # GenerateConfig
-                                        is_streaming,
-                                        think_status: ThinkStatus
+                                        is_streaming
                                         ):
         stop_word_slice_list = get_stop_word_slices(stop_words_str) # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
@@ -835,7 +802,7 @@ class CustomChatRenderer():
                                                               max_new_tokens, stop_words_str,
                                                               stop_word_slice_list,
                                                               is_streaming))
-        stream_response =  self._generate_stream_response_sync(delta_list, think_status)
+        stream_response =  self._generate_stream_response_sync(delta_list)
         return stream_response
 
     def render_stream_response_flush_blocking(self,
@@ -843,20 +810,19 @@ class CustomChatRenderer():
                                      input_len_list, output_len_list, reuse_len_list,
                                      all_probs_list, output_ids_list,
                                      stop_words_str,
-                                     is_streaming,
-                                     think_status: ThinkStatus):
+                                     is_streaming):
         stream_response = self._flush_buffer_sync(status_list,
                                                   input_len_list, output_len_list, reuse_len_list,
                                                   all_probs_list, output_ids_list,
                                                   stop_words_str,
-                                                  is_streaming, think_status)
+                                                  is_streaming)
         return stream_response
 
     def render_stream_response_final_blocking(self,
                                      status_list,
-                                     input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
+                                     input_len_list, output_len_list, reuse_len_list):
         stream_response = self._generate_final_sync(status_list,
-                                                    input_len_list, output_len_list, reuse_len_list, think_status)
+                                                    input_len_list, output_len_list, reuse_len_list)
         return stream_response
 
     def collect_complete_response(self, choice_generator):
