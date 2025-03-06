@@ -2,6 +2,8 @@ import os
 import unittest
 import torch
 
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
 class TestRope(unittest.TestCase):
 
     def __init__(self, methodName: str = "runTest") -> None:

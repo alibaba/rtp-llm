@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from flash_attn import flash_attn_varlen_func
 import random
 
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)

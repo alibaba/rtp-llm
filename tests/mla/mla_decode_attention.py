@@ -9,6 +9,8 @@ from test_util import compare_tensor_diff_with_ratio
 from typing import List
 import random
 
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
 logging.basicConfig(
     level="INFO",
     format='%(message)s')

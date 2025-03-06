@@ -5,6 +5,8 @@ import os
 import unittest
 import torch
 
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
 from dataclasses import dataclass
 from typing import List
 import random

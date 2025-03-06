@@ -3,6 +3,8 @@ import torch.nn as nn
 import unittest
 import os
 
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
 def deepseek_transpose(x: torch.Tensor) -> torch.Tensor:
     b, h, s, d = x.shape
     x = x.view(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
