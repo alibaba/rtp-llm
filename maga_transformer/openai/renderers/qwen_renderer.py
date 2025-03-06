@@ -484,13 +484,14 @@ class QwenRenderer(CustomChatRenderer):
                            input_len_list, output_len_list, reuse_len_list,
                            all_probs_list, output_ids_list,
                            stop_words_str: List[str],
-                           is_streaming: bool):
+                           is_streaming: bool,
+                           think_status: ThinkStatus):
         if (not isinstance(buffer_list[0], QwenStreamStatusSync)):
             return super()._flush_buffer_sync(buffer_list,
                                               input_len_list, output_len_list, reuse_len_list,
                                               all_probs_list, output_ids_list,
                                               stop_words_str,
-                                              is_streaming)
+                                              is_streaming, think_status)
         output_items: List[OutputDelta] = []
         for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
                 buffer_list,
@@ -519,7 +520,7 @@ class QwenRenderer(CustomChatRenderer):
                     input_len,
                     output_len,
                     reuse_len))
-        return self._generate_stream_response_sync(output_items)
+        return self._generate_stream_response_sync(output_items, think_status)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()

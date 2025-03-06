@@ -835,7 +835,7 @@ class CustomChatRenderer():
                                                               max_new_tokens, stop_words_str,
                                                               stop_word_slice_list,
                                                               is_streaming))
-        stream_response =  self._generate_stream_response_sync(delta_list,think_status)
+        stream_response =  self._generate_stream_response_sync(delta_list, think_status)
         return stream_response
 
     def render_stream_response_flush_blocking(self,
