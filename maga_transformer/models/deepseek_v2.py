@@ -116,13 +116,13 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                        identity),
         ]
 
-        if self.config.use_mla_ops:
-            mla_layer_weights.append(
-                WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
-                           functools.partial(transpose_slice_k, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
-            mla_layer_weights.append(
-                WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
-                           functools.partial(transpose_slice_v, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
+        # if self.config.use_mla_ops:
+        #     mla_layer_weights.append(
+        #         WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
+        #                    functools.partial(transpose_slice_k, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
+        #     mla_layer_weights.append(
+        #         WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
+        #                    functools.partial(transpose_slice_v, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
 
         if self.q_use_lora:
             mla_layer_weights.extend([

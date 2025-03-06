@@ -21,7 +21,7 @@ from maga_transformer.models.downstream_modules.custom_module import CustomModul
 from maga_transformer.models.downstream_modules.utils import create_custom_module
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.utils.util import to_torch_dtype
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo
+from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, ModelWeights
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, ModelWeightsLoader
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput
@@ -324,7 +324,7 @@ class BaseModel(object):
     def load_model_weight(self):
         weights_info = self.get_weight_cls()(self.config, self.parallel_info.tp_size, self.parallel_info.tp_rank)
         self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        self.weight = self.model_weights_loader.load_weights_from_scratch(device=self.device)
+        self.weight: ModelWeights = self.model_weights_loader.load_weights_from_scratch(device=self.device)
         self._load_custom_module_weights(self.model_weights_loader)
         if self.static_lora:
             lora_name = list(self.config.lora_infos.keys())[0]
@@ -361,6 +361,15 @@ class BaseModel(object):
 
         if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
+
+        if self.config.use_mla_ops:
+            for layer_weight in self.weight.weights:
+                mla_k_nope_weight  = layer_weight[W.mla_k_nope_w]
+                mla_v_weight = layer_weight[W.mla_v_w]
+                kc_weight = mla_k_nope_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).permute(1, 2, 0).contiguous()
+                vc_weight = mla_v_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).transpose(0, 1).contiguous()
+                layer_weight[W.mla_kc] = kc_weight
+                layer_weight[W.mla_vc] = vc_weight
 
         if self.config.vit_separation != 1:
             if self.task_type == TaskType.LANGUAGE_MODEL:
