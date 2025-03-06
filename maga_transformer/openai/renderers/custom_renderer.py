@@ -902,7 +902,8 @@ class CustomChatRenderer():
                                         output_ids_list, # GenerateOutput
                                         max_new_tokens, # GenerateConfig
                                         stop_words_str, # GenerateConfig
-                                        is_streaming
+                                        is_streaming,
+                                        think_status: ThinkStatus
                                         ):
         stop_word_slice_list = get_stop_word_slices(stop_words_str) # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
@@ -917,7 +918,7 @@ class CustomChatRenderer():
                                                               max_new_tokens, stop_words_str,
                                                               stop_word_slice_list,
                                                               is_streaming))
-        stream_response =  self._generate_stream_response_sync(delta_list)
+        stream_response =  self._generate_stream_response_sync(delta_list,think_status)
         return stream_response
 
     def render_stream_response_flush_blocking(self,
