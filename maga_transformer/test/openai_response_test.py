@@ -38,7 +38,7 @@ async def fake_output_generator(
         outputs = GenerateOutputs()
         aux = AuxInfo()
         aux.input_len = seq_len
-        aux.output_len = 1
+        aux.output_len = i + 1
         outputs.generate_outputs.append(GenerateOutput(
             hidden_states=None,
             output_ids=output_tensor,

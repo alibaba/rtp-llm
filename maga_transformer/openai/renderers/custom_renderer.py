@@ -25,7 +25,7 @@ from maga_transformer.utils.word_util import get_stop_word_slices, truncate_resp
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 
 think_mode = int(os.environ.get("THINK_MODE", "0"))
-think_end_tag = os.environ.get("THINK_END_TAG", "</think>\n")
+think_end_tag = os.environ.get("THINK_END_TAG", "</think>")
 think_end_tag_len = len(think_end_tag)
 
 class StreamStatus:
@@ -399,7 +399,7 @@ class CustomChatRenderer():
                     think_status.in_think_mode = 0
                 else:
                     reasoning_text, content = item.output_str, None
-                    think_status.think_tokens += item.output_length
+                    think_status.think_tokens = item.output_length
             else:
                 reasoning_text, content = None, item.output_str
             all_choices.append(ChatCompletionResponseStreamChoice(
@@ -645,7 +645,7 @@ class CustomChatRenderer():
                     think_status.in_think_mode = 0
                 else:
                     reasoning_text, content = item.output_str, None
-                    think_status.think_tokens += item.output_length
+                    think_status.think_tokens = item.output_length
             else:
                 reasoning_text, content = None, item.output_str
             all_choices.append(ChatCompletionResponseStreamChoice(
