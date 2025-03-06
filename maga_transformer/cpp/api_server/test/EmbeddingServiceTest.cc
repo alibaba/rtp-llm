@@ -132,7 +132,9 @@ TEST_F(EmbeddingServiceTest, Embedding_Success) {
     std::string handle_response = "hello world";
     EXPECT_CALL(*mock_embedding_endpoint_, handle).WillOnce(Invoke([handle_response](
                     const std::string& body,
-                    std::optional<EmbeddingEndpoint::EmbeddingType> type) {
+                    std::optional<EmbeddingEndpoint::EmbeddingType> type,
+                    const kmonitor::MetricsReporterPtr& metrics_reporter,
+                    int64_t start_time_us) {
         return std::make_pair(handle_response, std::nullopt);
     }));
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([handle_response](const std::string& data) {
