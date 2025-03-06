@@ -38,6 +38,7 @@ async def fake_output_generator(
         outputs = GenerateOutputs()
         aux = AuxInfo()
         aux.input_len = seq_len
+        aux.output_len = 1
         outputs.generate_outputs.append(GenerateOutput(
             hidden_states=None,
             output_ids=output_tensor,
@@ -423,8 +424,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length)
         stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
         generate = self.endpoint._complete_stream_response(stream_generator, None)
-        async for x in generate:
-            print(f"---[{x}]")
+        # response = [x async for x in generate][-1]
+        response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
@@ -443,6 +444,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "finish_reason": "stop",
                 "logprobs": None,
             },
+        )
+        self.assertEqual(
+            json.loads(response.usage.completion_tokens_details.model_dump_json()),
+            {
+                'audio_tokens': None, 
+                'reasoning_tokens': 4
+            }
         )
 
 if __name__ == '__main__':

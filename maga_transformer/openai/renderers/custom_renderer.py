@@ -17,7 +17,7 @@ from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
-    RoleEnum, RendererInfo, ChatCompletionStreamResponse, PromptTokensDetails, \
+    RoleEnum, RendererInfo, ChatCompletionStreamResponse, CompletionTokensDetails, PromptTokensDetails, \
     ChatCompletionTokenLogprob, TopLogprob, ChoiceLogprobs, \
     ChatCompletionResponseChoice, ChatCompletionResponse, DebugInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
@@ -154,7 +154,7 @@ class OutputDelta():
 class ThinkStatus():
     in_think_mode: int = 0
     think_buffer: str = ""
-    think_output_buffer: str = ""
+    think_tokens: int = 0
 
 class RenderedInputs:
     input_ids: List[int] = []
@@ -408,6 +408,8 @@ class CustomChatRenderer():
                 ))
                 index += 1
                 continue
+            if think_status.in_think_mode:
+                think_status.think_tokens += item.output_length
             processing_index = 0
             while processing_index < len(text):
                 if think_status.in_think_mode:
@@ -429,18 +431,9 @@ class CustomChatRenderer():
                             index += 1
                         # Clear think_buffer and set in_think_mode to False
                         think_status.think_buffer = ""
-                        think_status.think_output_buffer = ""
-                        think_status.in_think_mode = False
-                    elif (
-                        think_end_tag.startswith(think_status.think_buffer)
-                        or think_status.think_buffer.startswith(think_end_tag)
-                    ):
-                        # Partial match with '</think>', need to accumulate more characters                                  
-                        pass  # Do nothing, continue accumulating
-                    else:
-                        # No match, output the accumulated think_buffer as reasoning
-                        think_status.think_output_buffer += think_status.think_buffer
-                        think_status.think_buffer = ""
+                        think_status.in_think_mode = 0
+                        # ignore "</think>" tag's length
+                        think_status.think_tokens -= item.output_length
                     processing_index += 1 
                 else:
                     # Not in think mode, output to content
@@ -474,6 +467,7 @@ class CustomChatRenderer():
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
                     completion_tokens=output_lengths,
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                     prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_lengths) if reuse_lengths > 0 else None
                 )
         )
@@ -493,7 +487,7 @@ class CustomChatRenderer():
                 aux_info.reuse_len))
         return await self._generate_stream_response(output_items, think_status)
 
-    async def _generate_final(self, buffer_list: List[StreamStatus], request: ChatCompletionRequest):
+    async def _generate_final(self, buffer_list: List[StreamStatus], request: ChatCompletionRequest, think_status: ThinkStatus):
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
@@ -527,6 +521,7 @@ class CustomChatRenderer():
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                 prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
             ),
             aux_info=aux_info
@@ -566,7 +561,7 @@ class CustomChatRenderer():
                 break
         if index != 0:
             yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming, think_status)
-            yield await self._generate_final(status_list, request)
+            yield await self._generate_final(status_list, request, think_status)
 
     def _create_empty_delta_sync(self, input_len, output_len, reuse_len):
         return OutputDelta(
@@ -695,6 +690,8 @@ class CustomChatRenderer():
                 ))
                 index += 1
                 continue
+            if think_status.in_think_mode:
+                think_status.think_tokens += item.output_length
             processing_index = 0
             while processing_index < len(text):
                 if think_status.in_think_mode:
@@ -716,18 +713,9 @@ class CustomChatRenderer():
                             index += 1
                         # Clear think_buffer and set in_think_mode to False
                         think_status.think_buffer = ""
-                        think_status.think_output_buffer = ""
-                        think_status.in_think_mode = False
-                    elif (
-                        think_end_tag.startswith(think_status.think_buffer)
-                        or think_status.think_buffer.startswith(think_end_tag)
-                    ):
-                        # Partial match with '</think>', need to accumulate more characters                                  
-                        pass  # Do nothing, continue accumulating
-                    else:
-                        # No match, output the accumulated think_buffer as reasoning
-                        think_status.think_output_buffer += think_status.think_buffer
-                        think_status.think_buffer = ""
+                        think_status.in_think_mode = 0
+                        # ignore "</think>" tag's length
+                        think_status.think_tokens -= item.output_length
                     processing_index += 1 
                 else:
                     # Not in think mode, output to content
@@ -761,6 +749,7 @@ class CustomChatRenderer():
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
                     completion_tokens=output_lengths,
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                     prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_lengths) if reuse_lengths > 0 else None
                 )
         )
@@ -789,7 +778,7 @@ class CustomChatRenderer():
 
     def _generate_final_sync(self,
                              buffer_list: List[StreamStatusSync],
-                             input_len_list, output_len_list, reuse_len_list):
+                             input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
@@ -817,6 +806,7 @@ class CustomChatRenderer():
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
                 prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
             ),
             aux_info=aux_info
@@ -889,9 +879,9 @@ class CustomChatRenderer():
 
     def render_stream_response_final(self,
                                      status_list,
-                                     input_len_list, output_len_list, reuse_len_list):
+                                     input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
         stream_response = self._generate_final_sync(status_list,
-                                                    input_len_list, output_len_list, reuse_len_list)
+                                                    input_len_list, output_len_list, reuse_len_list, think_status)
         chat_response = ChatCompletionStreamResponse(
                             choices=stream_response.choices,
                             usage=stream_response.usage,
@@ -946,9 +936,9 @@ class CustomChatRenderer():
 
     def render_stream_response_final_blocking(self,
                                      status_list,
-                                     input_len_list, output_len_list, reuse_len_list):
+                                     input_len_list, output_len_list, reuse_len_list, think_status: ThinkStatus):
         stream_response = self._generate_final_sync(status_list,
-                                                    input_len_list, output_len_list, reuse_len_list)
+                                                    input_len_list, output_len_list, reuse_len_list, think_status)
         return stream_response
 
     def collect_complete_response(self, choice_generator):
