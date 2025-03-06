@@ -393,74 +393,27 @@ class CustomChatRenderer():
                 ))
                 index += 1
                 continue
-            text = item.output_str
-            if len(text) == 0:
-                all_choices.append(ChatCompletionResponseStreamChoice(
-                    index=index,
-                    delta=DeltaMessage(
-                        reasoning_content="" if think_status.in_think_mode else None,
-                        content="" if not think_status.in_think_mode else None
-                    ),
-                    logprobs=ChoiceLogprobs(
-                        content=[item.logprobs] if item.logprobs != None else None,
-                        refusal=None
-                    ) if item.logprobs != None else None
-                ))
-                index += 1
-                continue
             if think_status.in_think_mode:
-                think_status.think_tokens += item.output_length
-            processing_index = 0
-            while processing_index < len(text):
-                if think_status.in_think_mode:
-                    think_status.think_buffer += text[processing_index]
-                    # Check if think_buffer ends with '</think>' (handle partial matches)
-                    if think_status.think_buffer.endswith(think_end_tag):
-                        # Remove '</think>' from think_buffer
-                        reasoning_text = think_status.think_output_buffer[:-think_end_tag_len]
-                        # Output reasoning_text if not empty
-                        if reasoning_text:
-                            all_choices.append(ChatCompletionResponseStreamChoice(
-                                    index=index,
-                                    delta=DeltaMessage(reasoning_content=reasoning_text),
-                                    logprobs=ChoiceLogprobs(
-                                        content=[item.logprobs] if item.logprobs != None else None,
-                                        refusal=None
-                                    ) if item.logprobs != None else None
-                            ))
-                            index += 1
-                        # Clear think_buffer and set in_think_mode to False
-                        think_status.think_buffer = ""
-                        think_status.in_think_mode = 0
-                        # ignore "</think>" tag's length
-                        think_status.think_tokens -= item.output_length
-                    processing_index += 1 
+                if think_end_tag in item.output_str:
+                    reasoning_text, content = item.output_str.split(think_end_tag, 2)
+                    think_status.in_think_mode = 0
                 else:
-                    # Not in think mode, output to content
-                    content_text = text[processing_index:]
-                    if content_text:
-                        all_choices.append(ChatCompletionResponseStreamChoice(
-                            index=index,
-                            delta=DeltaMessage(content=content_text),
-                            logprobs=ChoiceLogprobs(
-                                content=[item.logprobs] if item.logprobs != None else None,
-                                refusal=None
-                            ) if item.logprobs != None else None
-                        ))
-                        index += 1
-                    processing_index = len(text)
-            if think_status.think_output_buffer and think_status.in_think_mode:
-                all_choices.append(ChatCompletionResponseStreamChoice(
-                    index=index,
-                    delta=DeltaMessage(reasoning_content=think_status.think_output_buffer),
-                    logprobs=ChoiceLogprobs(
-                        content=[item.logprobs] if item.logprobs != None else None,
+                    reasoning_text, content = item.output_str, None
+                    think_status.think_tokens += item.output_length
+            else:
+                reasoning_text, content = None, item.output_str
+            all_choices.append(ChatCompletionResponseStreamChoice(
+                index=index,
+                delta=DeltaMessage(
+                    reasoning_content=reasoning_text,
+                    content=content,
+                ),
+                logprobs=ChoiceLogprobs(
+                    content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
-                index += 1
-                think_status.think_output_buffer = ""
-
+            index += 1
         return StreamResponseObject(
                 choices=all_choices,
                 usage=UsageInfo(
@@ -675,14 +628,10 @@ class CustomChatRenderer():
         
         index = 0
         for i, item in enumerate(items):
-            text = item.output_str if isinstance(item.output_str, str) else item.output_str.content
-            if len(text) == 0:
+            if isinstance(item.output_str, DeltaMessage):
                 all_choices.append(ChatCompletionResponseStreamChoice(
                     index=index,
-                    delta=DeltaMessage(
-                        reasoning_content="" if think_status.in_think_mode else None,
-                        content="" if not think_status.in_think_mode else None
-                    ),
+                    delta=item.output_str,
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
@@ -691,58 +640,26 @@ class CustomChatRenderer():
                 index += 1
                 continue
             if think_status.in_think_mode:
-                think_status.think_tokens += item.output_length
-            processing_index = 0
-            while processing_index < len(text):
-                if think_status.in_think_mode:
-                    think_status.think_buffer += text[processing_index]
-                    # Check if think_buffer ends with '</think>' (handle partial matches)
-                    if think_status.think_buffer.endswith(think_end_tag):
-                        # Remove '</think>' from think_buffer
-                        reasoning_text = think_status.think_output_buffer[:-think_end_tag_len]
-                        # Output reasoning_text if not empty
-                        if reasoning_text:
-                            all_choices.append(ChatCompletionResponseStreamChoice(
-                                    index=index,
-                                    delta=DeltaMessage(reasoning_content=reasoning_text),
-                                    logprobs=ChoiceLogprobs(
-                                        content=[item.logprobs] if item.logprobs != None else None,
-                                        refusal=None
-                                    ) if item.logprobs != None else None
-                            ))
-                            index += 1
-                        # Clear think_buffer and set in_think_mode to False
-                        think_status.think_buffer = ""
-                        think_status.in_think_mode = 0
-                        # ignore "</think>" tag's length
-                        think_status.think_tokens -= item.output_length
-                    processing_index += 1 
+                if think_end_tag in item.output_str:
+                    reasoning_text, content = item.output_str.split(think_end_tag, 2)
+                    think_status.in_think_mode = 0
                 else:
-                    # Not in think mode, output to content
-                    content_text = text[processing_index:]
-                    if content_text:
-                        all_choices.append(ChatCompletionResponseStreamChoice(
-                            index=index,
-                            delta=DeltaMessage(content=content_text),
-                            logprobs=ChoiceLogprobs(
-                                content=[item.logprobs] if item.logprobs != None else None,
-                                refusal=None
-                            ) if item.logprobs != None else None
-                        ))
-                        index += 1
-                    processing_index = len(text)
-            if think_status.think_output_buffer and think_status.in_think_mode:
-                all_choices.append(ChatCompletionResponseStreamChoice(
-                    index=index,
-                    delta=DeltaMessage(reasoning_content=think_status.think_output_buffer),
-                    logprobs=ChoiceLogprobs(
-                        content=[item.logprobs] if item.logprobs != None else None,
+                    reasoning_text, content = item.output_str, None
+                    think_status.think_tokens += item.output_length
+            else:
+                reasoning_text, content = None, item.output_str
+            all_choices.append(ChatCompletionResponseStreamChoice(
+                index=index,
+                delta=DeltaMessage(
+                    reasoning_content=reasoning_text,
+                    content=content,
+                ),
+                logprobs=ChoiceLogprobs(
+                    content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
-                index += 1
-                think_status.think_output_buffer = ""
-
+            index += 1
         return StreamResponseObject(
                 choices=all_choices,
                 usage=UsageInfo(
@@ -956,6 +873,7 @@ class CustomChatRenderer():
             return content, resoning_content
         
         for response in choice_generator:
+            
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
                     for i, choice in enumerate(response.choices):
