@@ -218,6 +218,7 @@ void CudaDevice::overlappedCommBarrier() {
         check_cuda_error(cudaEventCreate(&event));
         check_cuda_error(cudaEventRecord(event, communication_stream_));
         check_cuda_error(cudaStreamWaitEvent(stream_, event, 0));
+        check_cuda_error(cudaEventDestroy(event));
     }
 }
 

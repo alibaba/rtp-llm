@@ -295,6 +295,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         check_cuda_error(cudaEventCreate(&event));
         check_cuda_error(cudaEventRecord(event, stream_));
         check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
+        check_cuda_error(cudaEventDestroy(event));
     }
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
