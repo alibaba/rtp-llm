@@ -398,7 +398,7 @@ class CustomChatRenderer():
                     think_status.in_think_mode = 0
                 else:
                     reasoning_text, content = item.output_str, None
-                    think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or ""))
+                think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or ""))
             else:
                 reasoning_text, content = None, item.output_str
             all_choices.append(ChatCompletionResponseStreamChoice(
