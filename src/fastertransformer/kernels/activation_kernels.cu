@@ -319,13 +319,17 @@ void invokeGenericActivation(T*           up_out,
     int temp_n = n + n % 2;
 
     dim3 block, grid;
-    if (temp_n / 4 / packed_elems <= 1024) {
-        block.x = temp_n / 4 / packed_elems;
+    constexpr int max_threads_per_block = 1024;
+    constexpr int elems_per_thread = 4 * packed_elems;
+
+    if (temp_n / elems_per_thread <= max_threads_per_block) {
+        block.x = temp_n / elems_per_thread;
         grid.x  = m;
     }
     else {
-        block.x = 1024;
-        grid.x  = ceil(m * temp_n / 1024.);
+        block.x = max_threads_per_block;
+        constexpr int elems_per_block = max_threads_per_block * elems_per_thread;
+        grid.x  = (m * temp_n + elems_per_block - 1) / elems_per_block;
     }
     generic_activation<Activation><<<grid, block, 0, stream>>>(reinterpret_cast<PT*>(up_out),
                                                                reinterpret_cast<const PBT*>(bias),
