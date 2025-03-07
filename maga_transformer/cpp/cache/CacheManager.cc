@@ -43,13 +43,28 @@ void CacheManager::regUserMr() {
     if (device_->cacheStore() && !kvcache_reg_mr_) {
         FT_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
+        
         auto start_time_us = currentTimeUs();
-        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.k_block_stride + config_.v_block_stride)) {
-            FT_FAIL("register user mr failed");
+        if (!memory_util->regUserMr(cache_base_ptr_, config_.k_total_size, true, config_.k_block_stride)) {
+            FT_FAIL("register user mr for k buffer failed");
         }
-        mr_cost_time_ms_ = (currentTimeUs() - start_time_us) / 1000;
-        FT_LOG_INFO("register user mr success: cost %ld ms, cache base address %p, len %lu, end address %p",
-            mr_cost_time_ms_, cache_base_ptr_, config_.total_size, (int8_t*)cache_base_ptr_ + config_.total_size);
+        auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
+        FT_LOG_INFO("register user mr for k buffer success: cost %ld ms, cache base address %p, len %lu, end address %p",
+            cost_time_ms, cache_base_ptr_, config_.k_total_size, (int8_t*)cache_base_ptr_ + config_.k_total_size);
+        mr_cost_time_ms_ += cost_time_ms;
+
+        start_time_us = currentTimeUs();
+        if (!memory_util->regUserMr((int8_t*)cache_base_ptr_ + config_.k_total_size,
+                config_.v_total_size, true, config_.v_block_stride)) {
+            FT_FAIL("register user mr for v buffer failed");
+        }
+        cost_time_ms = (currentTimeUs() - start_time_us) / 1000;
+        FT_LOG_INFO("register user mr for v buffer success: cost %ld ms, cache base address %p, len %lu, end address %p",
+            cost_time_ms, (int8_t*)cache_base_ptr_ + config_.k_total_size, config_.v_total_size,
+            (int8_t*)cache_base_ptr_ + config_.total_size);
+        
+        mr_cost_time_ms_ += cost_time_ms;
+
         kvcache_reg_mr_ = true;
     }
 }
@@ -59,9 +74,13 @@ void CacheManager::deregUserMr() {
         FT_LOG_INFO("start to deregUserMr user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
         if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
-            FT_FAIL("deregUserMr user mr failed");
+            FT_FAIL("deregUserMr user mr for k buffer failed");
         }
-        FT_LOG_INFO("deregUserMr user mr success");
+        FT_LOG_INFO("deregUserMr user mr for k buffer success");
+        if (!memory_util->deregUserMr((int8_t*)cache_base_ptr_ + config_.k_total_size, true)) {
+            FT_FAIL("deregUserMr user mr for v buffer failed");
+        }
+        FT_LOG_INFO("deregUserMr user mr for v buffer success");
     }
 }
 

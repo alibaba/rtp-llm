@@ -34,17 +34,22 @@ struct CacheConfig {
     ft::DataType dtype                  = ft::TYPE_INVALID;
 
     size_t       block_size             = 0;
+    size_t       k_block_size           = 0;
+    size_t       v_block_size           = 0;
+
     size_t       kv_block_size          = 0;
     size_t       kv_scale_block_size    = 0;
-    size_t       k_block_stride        = 0;
-    size_t       v_block_stride        = 0;
+    size_t       k_block_stride         = 0;
+    size_t       v_block_stride         = 0;
     size_t       kv_scale_block_stride  = 0;
     size_t       total_size             = 0;
+    size_t       k_total_size           = 0;
+    size_t       v_total_size           = 0;
     size_t       scale_size             = 0;
 
     bool        use_mla = false;
-    uint32_t kv_lora_rank  = 0;
-    uint32_t rope_head_dim = 0;
+    uint32_t    kv_lora_rank  = 0;
+    uint32_t    rope_head_dim = 0;
 
     CacheConfig() {}
 
@@ -70,6 +75,9 @@ struct CacheConfig {
         v_block_stride = k_block_stride;
         kv_scale_block_stride = kv_scale_block_size / layer_num;
 
+        k_block_size = kv_block_size;
+        v_block_size = kv_block_size;
+
         refresh();
     }
 
@@ -84,12 +92,17 @@ struct CacheConfig {
 
         k_block_stride = local_head_num_kv * (kv_lora_rank + scale_size) * seq_size_per_block * dtype_size;
         v_block_stride = local_head_num_kv * (rope_head_dim + scale_size) * seq_size_per_block * dtype_size;
+
+        k_block_size = layer_num * k_block_stride;
+        v_block_size = layer_num * v_block_stride;
+
         refresh();
     }
 
-
     void refresh() {
-        total_size = block_size * block_nums;
+        total_size      = block_size * block_nums;
+        k_total_size    = k_block_size * block_nums;
+        v_total_size    = v_block_size * block_nums;
     }
 
     virtual size_t getKeyBlockStride() const {
@@ -140,7 +153,11 @@ struct CacheConfig {
                      << ", dtype: " << int(dtype)
                      << ", k_block_stride: " << k_block_stride
                      << ", v_block_stride: " << v_block_stride
+                     << ", k_block_size: " << k_block_size
+                     << ", v_block_size: " << v_block_size
                      << ", kv_scale_block_stride: " << kv_scale_block_stride
+                     << ", k_total_size: " << k_total_size
+                     << ", v_total_size: " << v_total_size
                      << ", total_size: " << total_size
                      << "}";
         return debug_string.str();
