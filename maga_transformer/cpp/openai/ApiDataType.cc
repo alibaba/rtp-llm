@@ -84,6 +84,7 @@ void ChatMessage::Jsonize(Jsonizable::JsonWrapper& json) {
         content = content_vec;
     }
 
+    JSONIZE_OPTIONAL(reasoning_content);
     JSONIZE_OPTIONAL(function_call);
     JSONIZE_OPTIONAL(tool_calls);
 }

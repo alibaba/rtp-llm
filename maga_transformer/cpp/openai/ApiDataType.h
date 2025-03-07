@@ -72,6 +72,7 @@ public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
     std::string role;
     std::variant<std::string, std::vector<ContentPart>> content;
+    std::optional<std::string> reasoning_content;
     std::optional<FunctionCall> function_call;
     std::optional<std::vector<ToolCall>> tool_calls;
 };

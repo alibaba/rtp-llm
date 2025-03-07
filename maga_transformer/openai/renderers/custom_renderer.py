@@ -834,22 +834,22 @@ class CustomChatRenderer():
             if text is None:
                 return None, None
             text_results = text.split(think_end_tag, 1)
-            resoning_content = text_results[0] if len(text_results) == 2 else None
+            reasoning_content = text_results[0] if len(text_results) == 2 else None
             content = text_results[1] if len(text_results) == 2 else text
-            return content, resoning_content
+            return content, reasoning_content
         
         for response in choice_generator:
             
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
                     for i, choice in enumerate(response.choices):
-                        content, resoning_content = split_think_tag(choice.delta.content)
+                        content, reasoning_content = split_think_tag(choice.delta.content)
                         all_choices.append(ChatCompletionResponseChoice(
                                 index=i,
                                 message=ChatMessage(
                                     role=choice.delta.role or RoleEnum.assistant,
                                     content=content or None,
-                                    resoning_content=resoning_content or None,
+                                    reasoning_content=reasoning_content or None,
                                     function_call=choice.delta.function_call or None,
                                 ),
                                 finish_reason=choice.finish_reason,
@@ -865,9 +865,9 @@ class CustomChatRenderer():
                         all_choices[i].message.content = (response.choices[i].delta.content or None)
                     else:
                         all_choices[i].message.content += (response.choices[i].delta.content or "")
-                    content, resoning_content = split_think_tag(all_choices[i].message.content)
+                    content, reasoning_content = split_think_tag(all_choices[i].message.content)
                     all_choices[i].message.content = content
-                    all_choices[i].message.resoning_content = resoning_content
+                    all_choices[i].message.reasoning_content = reasoning_content
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
