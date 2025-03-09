@@ -428,8 +428,6 @@ class CustomChatRenderer():
         reuse_lengths = items[0].reuse_length
         all_choices = []
         
-        print(f'vvv is_stream: [{think_status.is_streaming}]')
-        
         for i, item in enumerate(items):
             if isinstance(item.output_str, DeltaMessage):
                 all_choices.append(ChatCompletionResponseStreamChoice(
