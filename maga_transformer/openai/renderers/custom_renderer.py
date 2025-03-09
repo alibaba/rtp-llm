@@ -396,9 +396,13 @@ class CustomChatRenderer():
                 if think_end_tag in item.output_str:
                     reasoning_text, content = item.output_str.split(think_end_tag, 2)
                     think_status.in_think_mode = 0
+                    if len(think_end_tag) < len(item.output_str):   # stream=False, output_str is whole response
+                        think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or "")) - 1
+                    else:   # stream=True
+                        think_status.think_tokens = item.output_length - 1
                 else:
                     reasoning_text, content = item.output_str, None
-                think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or ""))
+                    think_status.think_tokens = item.output_length
             else:
                 reasoning_text, content = None, item.output_str
             all_choices.append(ChatCompletionResponseStreamChoice(
