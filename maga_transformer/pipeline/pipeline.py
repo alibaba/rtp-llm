@@ -63,6 +63,7 @@ class Pipeline(object):
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
+        config.add_thinking_params(tokenizer)
         config.validate()
         return config
 
@@ -145,7 +146,6 @@ class Pipeline(object):
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(generate_config.sp_advice_prompt) 
-        
 
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)

@@ -570,6 +570,11 @@ size_t GenerateStream::maxTokenNum() const {
         generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
+size_t GenerateStream::maxThinkingNum() const {
+    return std::min(maxTokenNum(),
+        generate_input_->generate_config->max_thinking_tokens + generate_input_->inputLength());
+}
+
 bool GenerateStream::needFinish() {
     return seqLength() >= maxTokenNum() || needFinishBySPTokens();
 }
@@ -641,7 +646,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     auto num_new_tokens = update_info.num_new_tokens;
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), vocab_size_, numBeams(), streamId(), error_token_id)) {
+    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), maxThinkingNum(), vocab_size_, numBeams(), streamId(), error_token_id)) {
         setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                         "output token id:" + std::to_string(error_token_id) +
                         " out of vocab size: " + std::to_string(vocab_size_));

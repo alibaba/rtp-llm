@@ -38,6 +38,9 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    generate_config_pb.max_thinking_tokens = input_py.generate_config.max_thinking_tokens
+    generate_config_pb.end_think_token_id = input_py.generate_config.end_think_token_id
+    generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.num_return_sequences = input_py.generate_config.num_return_sequences
     generate_config_pb.min_new_tokens = input_py.generate_config.min_new_tokens

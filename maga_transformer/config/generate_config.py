@@ -3,6 +3,8 @@ import hashlib
 from pydantic import BaseModel
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Union
+
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from maga_transformer.utils.util import check_with_info
 from maga_transformer.utils.check_util import *
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
@@ -15,6 +17,9 @@ class GenerateConfig(BaseModel):
     max_new_tokens: int = 1000
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000
+    max_thinking_tokens: int = 200
+    end_think_token_id: int = -1
+    in_think_mode: int = 0
     num_beams: int = 1
     # 0 mean not use num_return_sequences,
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
@@ -114,6 +119,15 @@ class GenerateConfig(BaseModel):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
+        
+    def add_thinking_params(self, tokenizer: Optional[PreTrainedTokenizerBase]):
+        self.end_think_token_id = int(os.environ.get("THINK_END_TOKEN_ID", "-1"))
+        if tokenizer and self.end_think_token_id == -1:
+            think_end_tag: str = os.environ.get("THINK_END_TAG", "</think>")
+            tokenized_result: List[int] = tokenizer.encode(text=think_end_tag)
+            if len(tokenized_result) == 1:
+                self.end_think_token_id = tokenized_result[0]
+        self.in_think_mode = int(os.environ.get("THINK_MODE", "0")) and self.end_think_token_id >= 0
 
     def validate(self):
         try:
@@ -153,6 +167,11 @@ class GenerateConfig(BaseModel):
                 f"stop_words_list {self.stop_words_list} is wrong data type")
             check_with_info(is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type")
+            if self.in_think_mode:
+                check_with_info(is_positive_integer(self.max_thinking_tokens), \
+                    f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type")
+                check_with_info(is_positive_integer(self.end_think_token_id), \
+                    f"end_think_token_id {self.end_think_token_id} is wrong data type")
             calculate_loss_list = [0, 1, 2]
             check_with_info(self.calculate_loss in calculate_loss_list, \
                 f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list}," \
