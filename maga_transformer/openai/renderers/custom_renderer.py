@@ -25,8 +25,8 @@ from maga_transformer.utils.word_util import get_stop_word_slices, truncate_resp
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 
 think_mode = int(os.environ.get("THINK_MODE", "0"))
+think_start_tag = os.environ.get("THINK_START_TAG", "<think>")
 think_end_tag = os.environ.get("THINK_END_TAG", "</think>")
-think_end_tag_len = len(think_end_tag)
 
 class StreamStatus:
     index: int = 0
@@ -155,6 +155,8 @@ class ThinkStatus():
     in_think_mode: int = 0
     think_buffer: str = ""
     think_tokens: int = 0
+    content_buffer: str = ""
+    is_streaming: bool = False
 
 class RenderedInputs:
     input_ids: List[int] = []
@@ -370,6 +372,53 @@ class CustomChatRenderer():
                         ),
                     ) for i in range(n)]
         )
+        
+    def _split_reasoning_text_and_content(self, item: OutputDelta, think_status: ThinkStatus):
+        if isinstance(item.output_str, str):
+            if think_status.in_think_mode:
+                if think_end_tag in item.output_str:
+                    reasoning_text, content = item.output_str.split(think_end_tag, 2)
+                    think_status.think_buffer += reasoning_text + think_end_tag
+                    think_status.content_buffer += content
+                    think_status.in_think_mode = 0
+                    if not think_status.is_streaming:
+                        think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or "")) - 1
+                    else:
+                        think_status.think_tokens = item.output_length - 1
+                else:
+                    reasoning_text, content = item.output_str, None
+                    think_status.think_buffer += reasoning_text
+                    think_status.think_tokens = item.output_length
+            else:
+                reasoning_text, content = None, item.output_str
+                think_status.content_buffer += content
+        else:
+            reasoning_text, content = None, item.output_str
+        return reasoning_text, content
+        
+    def _remove_think_start_and_end_tag(self, reasoning_text: Optional[str], content: Optional[str], think_status: ThinkStatus):
+        if think_mode:
+            if think_status.is_streaming:
+                if reasoning_text:
+                    for headline in ['\n\n', '\n', '']:
+                        headline = think_start_tag + headline
+                        if think_status.think_buffer == headline and headline.endswith(reasoning_text):
+                            reasoning_text = ""
+                if content:
+                    for headline in ['\n\n', '\n']:
+                        if think_status.content_buffer == headline and headline.endswith(content):
+                            content = ""
+            else:
+                if reasoning_text:
+                    for headline in ['\n\n', '\n', '']:
+                        headline = think_start_tag + headline
+                        if reasoning_text.startswith(headline):
+                            reasoning_text = reasoning_text[len(headline):]
+                if content:
+                    for headline in ['\n\n', '\n']:
+                        if think_status.think_buffer.endswith(think_end_tag) and content.startswith(headline):
+                            content = content[len(headline):]
+        return reasoning_text, content
 
     async def _generate_stream_response(self, items: List[OutputDelta], think_status: ThinkStatus) -> StreamResponseObject:
         if len(items) == 0:
@@ -379,34 +428,24 @@ class CustomChatRenderer():
         reuse_lengths = items[0].reuse_length
         all_choices = []
         
-        index = 0
+        print(f'vvv is_stream: [{think_status.is_streaming}]')
+        
         for i, item in enumerate(items):
             if isinstance(item.output_str, DeltaMessage):
                 all_choices.append(ChatCompletionResponseStreamChoice(
-                    index=index,
+                    index=i,
                     delta=item.output_str,
                     logprobs=ChoiceLogprobs(
                         content=[item.logprobs] if item.logprobs != None else None,
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
-                index += 1
                 continue
-            if think_status.in_think_mode:
-                if think_end_tag in item.output_str:
-                    reasoning_text, content = item.output_str.split(think_end_tag, 2)
-                    think_status.in_think_mode = 0
-                    if len(think_end_tag) < len(item.output_str):   # stream=False, output_str is whole response
-                        think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or "")) - 1
-                    else:   # stream=True
-                        think_status.think_tokens = item.output_length - 1
-                else:
-                    reasoning_text, content = item.output_str, None
-                    think_status.think_tokens = item.output_length
-            else:
-                reasoning_text, content = None, item.output_str
+            reasoning_text, content = self._split_reasoning_text_and_content(item, think_status)
+            reasoning_text, content = self._remove_think_start_and_end_tag(reasoning_text, content, think_status)
+            
             all_choices.append(ChatCompletionResponseStreamChoice(
-                index=index,
+                index=i,
                 delta=DeltaMessage(
                     reasoning_content=reasoning_text,
                     content=content,
@@ -416,7 +455,6 @@ class CustomChatRenderer():
                         refusal=None
                     ) if item.logprobs != None else None
                 ))
-            index += 1
         return StreamResponseObject(
                 choices=all_choices,
                 usage=UsageInfo(
@@ -497,10 +535,7 @@ class CustomChatRenderer():
         status_list = await self._create_status_list(num_return_sequences, request)
         index = 0
         global think_mode
-        think_status = ThinkStatus(
-            in_think_mode=think_mode,
-            think_buffer=""
-        )
+        think_status = ThinkStatus(in_think_mode=think_mode, think_buffer="", think_tokens=0, content_buffer="", is_streaming=generate_config.is_streaming)
         async for outputs in output_generator:
             if index == 0:
                 yield await self._generate_first(num_return_sequences)
