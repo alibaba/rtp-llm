@@ -154,11 +154,6 @@ class GptInitModelParameters:
         self.remote_rpc_server_port = g_worker_info.remote_rpc_server_port
         self.worker_port_offset = WORKER_INFO_PORT_NUM
  
-        worker_addrs = []
-        for member in get_gang_info().members:
-            worker_addrs.append(f'{member.ip}:{member.rpc_server_port}')
-            self.worker_addrs = worker_addrs
-
         self.add_special_tokens = True
         self.template_type = TemplateType.chat
         self.build_position_ids = False

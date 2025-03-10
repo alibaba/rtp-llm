@@ -361,7 +361,6 @@ class CustomChatRenderer():
             return await self._create_empty_delta(output.aux_info)
 
     async def _generate_first(self, n: int):
-        print(f'_generate_first----')
         return StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
                         index=i,
@@ -496,8 +495,7 @@ class CustomChatRenderer():
         global think_mode
         think_status = ThinkStatus(
             in_think_mode=think_mode,
-            think_buffer="",
-            think_output_buffer=""
+            think_buffer=""
         )
         async for outputs in output_generator:
             if index == 0:
@@ -508,7 +506,6 @@ class CustomChatRenderer():
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list, generate_config.is_streaming))
-            print(f'\ndelta list:[{delta_list}]\n')
             yield await self._generate_stream_response(delta_list, think_status)
             if self._check_all_finished(status_list):
                 break

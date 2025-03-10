@@ -119,7 +119,7 @@ def main():
     if g_parallel_info.world_size % torch.cuda.device_count() != 0 and g_parallel_info.world_size > torch.cuda.device_count():
         raise Exception(f'result: {g_parallel_info.world_size % torch.cuda.device_count()} \
             not support WORLD_SIZE {g_parallel_info.world_size} for {torch.cuda.device_count()} local gpu')
-
+        
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
         return multi_rank_start()
     else:

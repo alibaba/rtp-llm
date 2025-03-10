@@ -25,6 +25,7 @@ from maga_transformer.openai.api_datatype import (
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.openai.renderer_factory import ChatRendererFactory, CustomChatRenderer, RendererParams
+from maga_transformer.openai.renderers import custom_renderer
 
 async def fake_output_generator(
         output_ids: List[int], max_seq_len: int, eos_id: int, seq_len: int

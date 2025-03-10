@@ -153,6 +153,10 @@ class OpenaiEndopoint():
                         all_choices[i].message.content = (response.choices[i].delta.content or None)
                     else:
                         all_choices[i].message.content += (response.choices[i].delta.content or "")
+                    if all_choices[i].message.reasoning_content == None:
+                        all_choices[i].message.reasoning_content = (response.choices[i].delta.reasoning_content or None)
+                    else:
+                        all_choices[i].message.reasoning_content += (response.choices[i].delta.reasoning_content or "")
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].message.tool_calls = (

@@ -29,20 +29,20 @@ class DeviceResource:
     def _lock_gpus(self):
         with ExitStack() as stack:
             gpu_ids = []
-        for id in self.total_gpus:
-            lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
-            try:
+            for id in self.total_gpus:
+                lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
+                try:
                     stack.enter_context(lock_device.acquire(timeout=1))
-            except Timeout as _:
-                logging.info(f"lock device {id} failed")
-                continue
+                except Timeout as _:
+                    logging.info(f"lock device {id} failed")
+                    continue
                 gpu_ids.append(str(id))
-            logging.info(f"lock device {id} done")
+                logging.info(f"lock device {id} done")
                 if len(gpu_ids) >= self.required_gpu_count:
                     logging.info(f"use gpus:[{gpu_ids}]")
                     self.gpu_locks = stack.pop_all()
                     self.gpu_ids = gpu_ids
-                return True
+                    return True
         return False
 
     def __enter__(self):

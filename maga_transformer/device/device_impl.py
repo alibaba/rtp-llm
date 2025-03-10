@@ -257,6 +257,21 @@ class RocmImpl(GpuImpl):
         total = rocml.smi_get_device_memory_total(id)
         return MemInfo(total - used, used)
 
+    @property
+    def arch(self) -> str:
+        if self.rocml:
+            try:
+                id = self.get_device_id()
+                device_name = self.rocml.smi_get_device_name(id)
+                # 从设备名称中提取架构信息（假设名称包含 gfx 版本）
+                gfx_match = re.search(r'gfx(\d+)', device_name)
+                if gfx_match:
+                    return gfx_match.group(1)
+            except Exception as e:
+                logging.warn(f"Cannot get ROCm device gfx version: {e}")
+        # 如果无法获取，则使用环境变量或默认值
+        return os.environ.get('SPECIFY_GPU_ARCH', "900")
+
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str,
                                            gptq: bool, awq: bool, weight_bits: int):
         GPTQ_FLAG = 1 if gptq == True else 0
@@ -364,4 +379,4 @@ class RocmImpl(GpuImpl):
         x_ = x_.permute(0, 1, 3, 4, 2, 5).contiguous()
         x_ = x_.view(b_, n_ , k_)
         x_ = x_.contiguous()
-        return x_ 
+        return x_

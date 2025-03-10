@@ -177,8 +177,8 @@ class ModelWeightsLoader:
             free_mem = device_mem_info.free / (1024.0 ** 2)
         model_mem = model_size / self._tp_size / (1024.0 ** 2)
         return current_device if free_mem * 0.8 > model_mem else "cpu"
-        
-    def prepare_weights_from_scratch(self, device): 
+
+    def prepare_weights_from_scratch(self, device):
         if self._vit_separation != 1:
             for id in range(self._num_layers):
                 results, logs, lora_logs =  self._load_layer_weight(id, device)
@@ -612,6 +612,8 @@ class ModelWeightsLoader:
 
     def _split_tensor(self, name: str, tensor: torch.Tensor, bits=4) -> torch.Tensor:
         if self._tp_size <= 1 and self._ep_size <= 1 and self._dp_size <= 1:
+            if name in [W.moe_w1, W.moe_w2]:
+                return self._exported_device.shuffle_moe_weight(tensor, self._data_type, name)
             return tensor
         if (not self._tp_split_emb_and_lm_head and
             name in [W.lm_head, W.lm_head_b, W.embedding, W.positional_embedding, W.token_type_embedding]):

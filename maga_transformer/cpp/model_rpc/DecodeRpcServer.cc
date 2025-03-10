@@ -49,11 +49,11 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
 }
 
 void DecodeRpcServer::initThreadPool() {
-    if (maga_init_params_.gpt_init_parameter.tp_size_ == 1) {
+    if (resource_.workers.size() > 0) {
         return;
     }
     thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-        maga_init_params_.gpt_init_parameter.tp_size_ * 8, maga_init_params_.gpt_init_parameter.tp_size_ * 8, nullptr, "RemoteCacheLoadPool");
+        resource_.workers.size() * 8, resource_.workers.size() * 8, nullptr, "RemoteCacheLoadPool");
     FT_CHECK_WITH_INFO(thread_pool_->start(), "DecodeRpcServer init ThreadPool failed");
     FT_LOG_INFO("normal cache store init done");
 }
@@ -326,7 +326,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         void* got_tag;
         bool  ok = false;
         for (uint32_t i = 0; i < completion_queues.size(); i++) {
-            if (each_finished_count[i] == tp_size_per_queue) {
+            if (each_finished_count[i] == worker_size_per_queue) {
                 continue;
             }
             if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
@@ -357,11 +357,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                 error_msg += std::to_string(rank) + ": " + pb_error_message + ", ";
             }
             finished_count++;
-            if (finished_count == tp_size) {
+            if (finished_count == worker_size) {
                 break;
             }
         }
-        if (finished_count == tp_size) {
+        if (finished_count == worker_size) {
             break;
         }
     }
@@ -370,7 +370,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         completion_queue.Shutdown();
     }
 
-    if (finished_count != maga_init_params_.gpt_init_parameter.tp_size_) {
+    if (finished_count != worker_size) {
         all_success = false;
     }
     if (!all_success) {
