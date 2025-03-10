@@ -48,7 +48,7 @@ rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
             // kmon metric init
             (void)rtp_llm::initKmonitorFactory();
             auto kmon_tags = rtp_llm::getHippoTags();
-            kmon_tags.AddTag("DP_RANK", std::to_string(gpt_init_params.dp_rank_));
+            kmon_tags.AddTag("dp_rank", std::to_string(gpt_init_params.dp_rank_));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         return params;

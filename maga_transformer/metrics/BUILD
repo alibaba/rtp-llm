@@ -4,5 +4,6 @@ py_library(
         "*.py"
     ]),
     visibility = ["//visibility:public"],
-    deps = ["//maga_transformer/aios/kmonitor:kmonitor_py"],
+    deps = ["//maga_transformer/aios/kmonitor:kmonitor_py",
+            "//maga_transformer/distribute:distribute"],
 )
