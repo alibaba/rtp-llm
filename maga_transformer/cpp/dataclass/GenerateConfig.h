@@ -122,6 +122,9 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation
                      << ", pd_separation: " << pd_separation
+                     << ", in_think_mode: " << in_think_mode
+                     << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", end_think_token_id: " << end_think_token_id
                      << "}";
         return debug_string.str();
     }
@@ -185,6 +188,9 @@ public:
         JSONIZE(return_all_probs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
+        JSONIZE(in_think_mode);
+        JSONIZE(max_thinking_tokens);
+        JSONIZE(end_think_token_id);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

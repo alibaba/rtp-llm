@@ -8,7 +8,8 @@ CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int m
     : device_(device)
     , batch_size_(batch_size)
     , max_seq_len_(max_seq_len)
-    , seq_size_per_block_(seq_size_per_block) {
+    , seq_size_per_block_(seq_size_per_block)
+    , is_think_end_token_id_exist_(batch_size, 0) {
 }
 
 CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
@@ -20,7 +21,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
     , common_len_(other.common_len_)
     , start_check_seq_length_(other.start_check_seq_length_)
     , first_token_time_us_(other.first_token_time_us_)
-    , first_token_latency_us_(other.first_token_latency_us_) {
+    , first_token_latency_us_(other.first_token_latency_us_)
+    , is_think_end_token_id_exist_(other.is_think_end_token_id_exist_) {
     complete_token_ids_ = device_->clone({*(other.complete_token_ids_), ft::AllocationType::HOST});
 }
 
@@ -108,14 +110,10 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int> &
     return false;
 }
 
-bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int max_thinking_tokens, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
+bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
     if (seq_length_ == input_length) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
-    }
-
-    if (seq_length_ + num_new_tokens > max_thinking_tokens) {
-        // todo wenyang
     }
 
     if (seq_length_ + num_new_tokens > max_token_num) {
@@ -135,6 +133,13 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
                 error_token_id = current_token_id; 
                 return false;
             }
+            if (current_token_id == end_think_token_id) {
+                is_think_end_token_id_exist_[i] = 1;
+            }
+        }
+        if (seq_length_ + num_new_tokens >= max_thinking_tokens && is_think_end_token_id_exist_[i] == 0) {
+            *(*new_tokens)[i].dataWithOffset<int>(num_new_tokens - 1) = end_think_token_id;
+            is_think_end_token_id_exist_[i] = 1;
         }
         if (num_beams > 1) {
             auto new_tokens_num = (*new_tokens)[i].shape()[0];
@@ -174,6 +179,10 @@ void CompleteTokenIds::copyTokensTo(int batch_id, void *dst, int offset, size_t 
 void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const ft::Buffer &src) {
     device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num), src});
     setSeqLength(seq_length_ + token_num);
+}
+
+const std::vector<int>& CompleteTokenIds::isThinkEndTokenIdExist() {
+    return is_think_end_token_id_exist_;
 }
 
 int64_t CompleteTokenIds::firstTokenTimeUs() const {
