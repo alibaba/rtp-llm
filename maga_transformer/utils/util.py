@@ -162,3 +162,24 @@ def closest_power_of_2(x):
     while power * 2 <= x:
         power *= 2
     return power
+
+# a's suffix is equal to b's prefix
+def has_overlap(a: str, b: str) -> bool:
+    max_possible = min(len(a), len(b))
+    for k in range(1, max_possible + 1):
+        if a[-k:] == b[:k]:
+            return True
+    return False
+
+# a's suffix is equal to b's prefix
+def has_overlap_kmp(a: str, b: str) -> bool:
+    s = b + '#' + a
+    prefix = [0] * len(s)
+    for i in range(1, len(s)):
+        j = prefix[i-1]
+        while j > 0 and s[i] != s[j]:
+            j = prefix[j-1]
+        if s[i] == s[j]:
+            j += 1
+        prefix[i] = j
+    return prefix[-1] > 0
