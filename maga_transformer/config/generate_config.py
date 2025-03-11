@@ -17,7 +17,7 @@ class GenerateConfig(BaseModel):
     max_new_tokens: int = 1000
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000
-    max_thinking_tokens: int = 200
+    max_thinking_tokens: int = 32000
     end_think_token_id: int = -1
     in_think_mode: int = 0
     num_beams: int = 1
