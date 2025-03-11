@@ -25,14 +25,12 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
 
     assert(moe_conf.ep_size == tp_size * moe_conf.dp_size);
     size_t    tp_token_size = (token_num + tp_size - 1) / tp_size;
-    BufferPtr hidden        = params.input.slice(tp_token_size * moe_conf.tp_rank,
-                                          std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
-    auto      expert_ids    = params.expert_ids.slice(tp_token_size * moe_conf.tp_rank,
-                                              std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
-    auto      expert_scales = params.expert_scales.slice(
-        tp_token_size * moe_conf.tp_rank, std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
+    size_t    slice_begin = std::min(tp_token_size * moe_conf.tp_rank, token_num);
+    size_t    slice_size = std::min(token_num - slice_begin, tp_token_size);
+    BufferPtr hidden        = params.input.slice(slice_begin, slice_size);
+    auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);
+    auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);
     token_num = hidden->shape()[0];
-
     BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
     BufferPtr token_nums_per_rank =
         allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
@@ -113,9 +111,11 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
             (params.origin_token_num + params.moe_configs.tp_size - 1) / params.moe_configs.tp_size;
         size_t dim1_size = all_output->shape()[1];
         assert(params.origin_token_num >= tp_token_size * params.moe_configs.tp_rank);
+        size_t current_token_num = std::max(0, std::min((int)params.origin_token_num - int(tp_token_size * params.moe_configs.tp_rank), (int)tp_token_size));
+
         BufferPtr scatter_output = allocateBuffer(
             {all_output->type(),
-             {std::min(params.origin_token_num - tp_token_size * params.moe_configs.tp_rank, tp_token_size),
+             {current_token_num,
               dim1_size}});
         if (params.overlapped) {
             overlap_hold_buffers_.emplace_back(scatter_output);
@@ -143,9 +143,11 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
                 overlap_hold_buffers_.emplace_back(padding_output);
             }
         }
-        copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
-              *scatter_output,
-              params.overlapped});
+        if (scatter_output->shape()[0] > 0) {
+            copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
+                    *scatter_output,
+                    params.overlapped});
+        }
         allGather({{padding_output}, ParallelMode::TP, params.overlapped});
         if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size) {
             return {padding_output};

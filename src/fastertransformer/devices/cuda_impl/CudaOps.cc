@@ -81,15 +81,19 @@ TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
         "You can only transpose a 2D buffer, but got [%s]", input.debugString().c_str());
     if (shape.size() == 2) {
         auto output = allocateBuffer({data_type, {shape[1], shape[0]}});
-        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
-                                            output->data(), input.data(), shape[0], shape[1], stream
-                                            );
+        if (output->sizeBytes()) {
+            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
+                                                output->data(), input.data(), shape[0], shape[1], stream
+                                                );
+        }
         return output;
     } else {
         auto output = allocateBuffer({data_type, {shape[1], shape[0], shape[2]}});
-        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
-                                            output->data(), input.data(), shape[0], shape[1], shape[2], stream
-                                            );
+        if (output->sizeBytes()) {
+            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
+                                                output->data(), input.data(), shape[0], shape[1], shape[2], stream
+                                                );
+        }
         return output;
     }
 }
