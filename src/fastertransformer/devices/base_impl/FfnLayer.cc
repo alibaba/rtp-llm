@@ -36,8 +36,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 shared_expert_output = multiply({
                     shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
             }
-
-            if (moe_conf.dp_size > 1 && moe_conf.tp_size > 1) {
+            if (moe_conf.tp_size > 1) {
                 auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
                 shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
             }

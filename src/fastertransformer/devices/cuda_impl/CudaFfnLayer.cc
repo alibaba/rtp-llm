@@ -302,7 +302,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
 
-    if (moe_conf.ep_size > 1 && true) {
+    if (moe_conf.ep_size > 1) {
         MoeDispatchOutput dispatched_output =
             epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
         BufferPtr hidden_states = dispatched_output.hidden;

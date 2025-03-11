@@ -55,7 +55,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         initNcclParam(params.dp_rank, params.dp_size, params.master_ip,
                       params.dp_master_port, "RTP_LLM_DP_GROUP_", dp_nccl_param_);
     }
-    if (params.dp_size > 1) {
+    if (params.ep_size > 1) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank, params.dp_size * params.tp_size, params.master_ip,
                       params.dp_tp_master_port, "RTP_LLM_DP_TP_GROUP_", dp_tp_nccl_param_);
     }
