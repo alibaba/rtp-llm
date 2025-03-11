@@ -121,6 +121,7 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3, W::ffn_z3);
     ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1, W::ffn_z1);
     ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2, W::ffn_z2);
+    ffn_weights.gate_up_weight   = mayCreateDenseWeights(map, W::ffn_w13, W::ffn_b13, W::ffn_s13, W::ffn_z13);
 
     ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
     ffn_weights.moe_gate_weight   = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1, W::moe_z1);
@@ -136,10 +137,9 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     // for qwen moe
     if (ffn_weights.moe_gating_weight) {
         // this moe layer has a parallel dense ffn layer as shared expert.
-        if (ffn_weights.up_weight) {
+        if (ffn_weights.gate_up_weight) {
             ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
-            ffn_weights.shared_expert->up_weight = move(ffn_weights.up_weight);
-            ffn_weights.shared_expert->gate_weight = move(ffn_weights.gate_weight);
+            ffn_weights.shared_expert->gate_up_weight = move(ffn_weights.gate_up_weight);
             ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
 
             // for qwen moe

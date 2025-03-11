@@ -60,7 +60,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
                 w = self._get_hf_quant_weight_info(layer)
                 layer_weights.append(w)
             elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
-                inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size
                 w = self._get_hf_layer_weight_info(layer)
                 w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
                 layer_weights.append(w)

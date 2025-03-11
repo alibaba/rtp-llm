@@ -485,6 +485,8 @@ class W:
     ffn_b1 = 'ffn_weights.intermediate_weight.bias'
     ffn_w3 = 'ffn_weights.intermediate_weight3.kernel'
     ffn_b3 = 'ffn_weights.intermediate_weight3.bias'
+    ffn_w13 = 'ffn_weights.intermediate_weight13.kernel'
+    ffn_b13 = 'ffn_weights.intermediate_weight13.bias'
     ffn_ln_gamma = 'ffn_weights.dense_layernorm.gamma'
     ffn_ln_beta = 'ffn_weights.dense_layernorm.beta'
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
@@ -549,6 +551,8 @@ class W:
     vision_ffn_s1 = 'vision_ffn_weights.intermediate_weight.weight_only_quant_scale'
     ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
     ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
+    ffn_z13 = 'ffn_weights.intermediate_weight13.zero'
+    ffn_s13 = 'ffn_weights.intermediate_weight13.weight_only_quant_scale'
     vision_ffn_s3 = 'vision_ffn_weights.intermediate_weight3.weight_only_quant_scale'
     ffn_act_s = 'ffn_weights.intermediate_weight2.act_quant_scale'  # gpt_xx model awq quant act need div scales
     ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
@@ -715,6 +719,15 @@ class W:
     ]
 
     int8_ffn_weights = [
+        [
+            [ffn_w1, ffn_s1],
+            [ffn_w3, ffn_s3],
+            [ffn_w13, ffn_s13],
+        ],
+        [ffn_w2, ffn_s2],
+    ]
+
+    int8_ffn_weights_3 = [
         [ffn_w1, ffn_s1],
         [ffn_w3, ffn_s3],
         [ffn_w2, ffn_s2],
@@ -747,9 +760,18 @@ class W:
     ]
 
     groupwise_ffn_weights = [
+        [
+            [ffn_w1, ffn_z1, ffn_s1],
+            [ffn_w3, ffn_z3, ffn_s3],
+            [ffn_w13, ffn_z13, ffn_s13]
+        ],
+        [ffn_w2, ffn_z2, ffn_s2]
+    ]
+
+    groupwise_ffn_weights_3 = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w3, ffn_z3, ffn_s3],
-        [ffn_w2, ffn_z2, ffn_s2],
+        [ffn_w2, ffn_z2, ffn_s2]
     ]
 
     groupwise_ffn_weights_2 = [
@@ -760,6 +782,41 @@ class W:
     groupwise_partial_moe_weights = [
         [moe_w1, moe_z1, moe_s1],
         [moe_w2, moe_z2, moe_s2]
+    ]
+
+    ffn_weights_1 = [
+        ffn_w1,
+        ffn_b1,
+        ffn_z1,
+        ffn_s1
+    ]
+
+    ffn_weights_3 = [
+        ffn_w3,
+        ffn_b3,
+        ffn_z3,
+        ffn_s3
+    ]
+
+    ffn_pair_weight_name_dict = { 
+        ffn_w1: ffn_w3,
+        ffn_b1: ffn_b3,
+        ffn_z1: ffn_z3,
+        ffn_s1: ffn_s3
+    }
+
+    ffn_merge_weight_name_dict = { 
+        ffn_w1: ffn_w13,
+        ffn_b1: ffn_b13,
+        ffn_z1: ffn_z13,
+        ffn_s1: ffn_s13
+    }
+
+    ffn_weights_w13 = [
+        ffn_w13,
+        ffn_b13,
+        ffn_z13,
+        ffn_s13
     ]
 
     gpt_style_tp_strategy: Dict[str, Any] = {
@@ -888,28 +945,6 @@ class W:
         final_ln_gamma,
         final_ln_beta,
         prefix_w
-    ]
-
-    layer_weights_list = [
-        pre_ln_gamma,
-        pre_ln_beta,
-        attn_qkv_w,
-        attn_qkv_b,
-        attn_ln_gamma,
-        attn_ln_beta,
-        qk_ln_gamma,
-        attn_o_w,
-        attn_o_b,
-        post_ln_gamma,
-        post_ln_beta,
-        ffn_w1,
-        ffn_b1,
-        ffn_w3,
-        ffn_b3,
-        ffn_ln_gamma,
-        ffn_ln_beta,
-        ffn_w2,
-        ffn_b2,
     ]
 
     fp32_weights_list = [

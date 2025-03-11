@@ -3,7 +3,10 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include <cstddef>
 #include <numeric>
+#include <optional>
 
 using namespace std;
 
@@ -36,70 +39,104 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     } else {
         BufferPtr up_output;
         if (isGatedActivation(params.configs.activation_type)) {
-            BufferPtr ffn_input_ptr = nullptr;
-            FT_LOG_DEBUG("enable_sp %d ffn_tp_size %d", params.enable_sp, init_params_.ffn_tp_size);
-            if (params.enable_sp && init_params_.ffn_tp_size > 1) {
-                BufferPtr ag_recv_buffer = nullptr;
-                size_t pad_token_num = params.input.shape()[0] * init_params_.ffn_tp_size;
-                if (params.qscheme == NoQuantize) {
-                    ffn_input_ptr = params.input.slice(0, params.input.shape()[0]);
-                    ag_recv_buffer = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
-                } else if (params.qscheme == Qint8PerToken){
-                    ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslice(0, params.input.shape()[0]);
-                    BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
-                    BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
-                                                    {pad_token_num},
-                                                    AllocationType::DEVICE},
-                                                    {"ag_recv_buffer_scale"});
-                    ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
-                                                    std::move(scales),
-                                                    std::move(BufferPtr(
-                                                        new Buffer(MemoryType::MEMORY_GPU,
-                                                        DataType::TYPE_INVALID,
-                                                        {0},
-                                                        nullptr)))));
-                } else if (params.qscheme == Qfp8PerTensor){
-                    ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslicePerTensor(0, params.input.shape()[0]);
-                    BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
-                    BufferPtr scales = reinterpret_cast<const QBuffer&>(params.input).scalesPtr();
-                    ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
-                                                    std::move(scales),
-                                                    std::move(BufferPtr(
-                                                        new Buffer(MemoryType::MEMORY_GPU,
-                                                        DataType::TYPE_INVALID,
-                                                        {0},
-                                                        nullptr)))));
+            if (params.weights.gate_up_weight) {
+                auto gate_up_gemm_params = GemmParams(params.input, *(params.weights.gate_up_weight->kernel));
+                BufferPtr gate_up_output = loraLinear(LoraLinearParams(gate_up_gemm_params, params.lora_input.up_lora_input)).output;
+                bool is_cuda = init_params_.device_type == DeviceType::Cuda;
+                printBufferData(*gate_up_output, "gate_up_output");
+                if (is_cuda && (params.configs.activation_type == ActivationType::Swiglu || 
+                        params.configs.activation_type == ActivationType::Silu || 
+                        params.configs.activation_type == ActivationType::Gelu)) {
+                    up_output = allocateBuffer({gate_up_output->type(), {gate_up_output->shape()[0], gate_up_output->shape()[1] / 2}, AllocationType::DEVICE});
+                    activation({params.configs.activation_type,
+                            gate_up_output,
+                            std::nullopt,
+                            std::nullopt,
+                            std::nullopt,
+                            std::nullopt,
+                            up_output,
+                            true});
                 } else {
-                    throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
+                    torch::Tensor gate_up_output_torch_tensor = Buffer2torchTensor(gate_up_output, false);
+                    std::vector<torch::Tensor> split_tensors = torch::chunk(gate_up_output_torch_tensor, 2, -1);
+                    torch::Tensor first_half = split_tensors[0].clone();
+                    torch::Tensor second_half = split_tensors[1].clone();
+                    up_output = torchTensor2Buffer(second_half);
+                    BufferPtr gate_output = torchTensor2Buffer(first_half);
+
+                    activation({params.configs.activation_type,
+                                up_output,
+                                std::nullopt,
+                                *gate_output,
+                                std::nullopt,
+                                mayGetRef(params.weights.act_scale)});
                 }
-                printBufferData(*ffn_input_ptr, "ffn_ag_input");
-                GemmParams up_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.up_weight->kernel));
-                AllGatherLoraLinearOutput all_gather_output = allGatherloraLinear({LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input), ffn_input_ptr, ag_recv_buffer, params.qscheme, params.output->type(), ParallelMode::FFN_TP});
-                // syncAndCheck();
-                ffn_input_ptr = all_gather_output.all_gather_recv_buffer;
-                up_output = all_gather_output.output;
-                printBufferData(*ffn_input_ptr, "ffn_ag_inter_output");
-                printBufferData(*up_output, "ffn_ag_final_output");
             } else {
-                GemmParams up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-                up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
+                BufferPtr ffn_input_ptr = nullptr;
+                FT_LOG_DEBUG("enable_sp %d ffn_tp_size %d", params.enable_sp, init_params_.ffn_tp_size);
+                if (params.enable_sp && init_params_.ffn_tp_size > 1) {
+                    BufferPtr ag_recv_buffer = nullptr;
+                    size_t pad_token_num = params.input.shape()[0] * init_params_.ffn_tp_size;
+                    if (params.qscheme == NoQuantize) {
+                        ffn_input_ptr = params.input.slice(0, params.input.shape()[0]);
+                        ag_recv_buffer = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                    } else if (params.qscheme == Qint8PerToken){
+                        ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslice(0, params.input.shape()[0]);
+                        BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                        BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
+                                                        {pad_token_num},
+                                                        AllocationType::DEVICE},
+                                                        {"ag_recv_buffer_scale"});
+                        ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                                        std::move(scales),
+                                                        std::move(BufferPtr(
+                                                            new Buffer(MemoryType::MEMORY_GPU,
+                                                            DataType::TYPE_INVALID,
+                                                            {0},
+                                                            nullptr)))));
+                    } else if (params.qscheme == Qfp8PerTensor){
+                        ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslicePerTensor(0, params.input.shape()[0]);
+                        BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                        BufferPtr scales = reinterpret_cast<const QBuffer&>(params.input).scalesPtr();
+                        ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                                        std::move(scales),
+                                                        std::move(BufferPtr(
+                                                            new Buffer(MemoryType::MEMORY_GPU,
+                                                            DataType::TYPE_INVALID,
+                                                            {0},
+                                                            nullptr)))));
+                    } else {
+                        throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
+                    }
+                    printBufferData(*ffn_input_ptr, "ffn_ag_input");
+                    GemmParams up_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.up_weight->kernel));
+                    AllGatherLoraLinearOutput all_gather_output = allGatherloraLinear({LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input), ffn_input_ptr, ag_recv_buffer, params.qscheme, params.output->type(), ParallelMode::FFN_TP});
+                    // syncAndCheck();
+                    ffn_input_ptr = all_gather_output.all_gather_recv_buffer;
+                    up_output = all_gather_output.output;
+                    printBufferData(*ffn_input_ptr, "ffn_ag_inter_output");
+                    printBufferData(*up_output, "ffn_ag_final_output");
+                } else {
+                    GemmParams up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+                    up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
+                }
+                printBufferData(*up_output, "ffn_up");
+                BufferPtr gate_output = nullptr;
+                if (params.enable_sp && init_params_.ffn_tp_size > 1) {
+                    GemmParams gate_gemm_params = GemmParams(*ffn_input_ptr, *(params.weights.gate_weight->kernel));
+                    gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
+                } else {
+                    GemmParams gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
+                    gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
+                }
+                printBufferData(*gate_output, "ffn_gate");
+                activation({params.configs.activation_type,
+                            up_output,
+                            mayGetRef(params.weights.up_weight->bias),
+                            *gate_output,
+                            std::nullopt,
+                            mayGetRef(params.weights.act_scale)});
             }
-            printBufferData(*up_output, "ffn_up");
-            BufferPtr gate_output = nullptr;
-            if (params.enable_sp && init_params_.ffn_tp_size > 1) {
-                GemmParams gate_gemm_params = GemmParams(*ffn_input_ptr, *(params.weights.gate_weight->kernel));
-                gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
-            } else {
-                GemmParams gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
-                gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
-            }
-            printBufferData(*gate_output, "ffn_gate");
-            activation({params.configs.activation_type,
-                        up_output,
-                        mayGetRef(params.weights.up_weight->bias),
-                        *gate_output,
-                        std::nullopt,
-                        mayGetRef(params.weights.act_scale)});
         } else {
             FT_CHECK_WITH_INFO(!params.enable_sp, "enable_sp is not supported for non-gated activation");
             auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));

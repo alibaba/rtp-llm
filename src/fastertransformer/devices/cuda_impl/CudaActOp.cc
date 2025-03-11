@@ -2,6 +2,8 @@
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "3rdparty/flashinfer/flashinfer.h"
 
 
 using namespace std;
@@ -85,15 +87,29 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     auto gate_bias = params.gate_bias ? params.gate_bias.value().get().data() : nullptr;
     auto act_scale = params.act_scale ? params.act_scale.value().get().data() : nullptr;
 
-    DTYPE_DISPATCH(
-        states->type(), params.atype,
-        states->data(), bias,
-        gate, gate_bias, m, n,
-        act_scale,
-        stream_
-    );
-    sync_check_cuda_error();
-    return states;
+    if (params.fuse_gate_up) {
+        torch::Tensor gate_up_tensor = Buffer2torchTensor(*params.states, false);
+        torch::Tensor output_tensor = Buffer2torchTensor(*params.output_buffer, false);
+        if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
+            silu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
+        } else if (params.atype == ActivationType::Gelu) {
+            gelu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        }
+        sync_check_cuda_error();
+        return params.output_buffer;
+    } else {
+        DTYPE_DISPATCH(
+            states->type(), params.atype,
+            states->data(), bias,
+            gate, gate_bias, m, n,
+            act_scale,
+            stream_
+        );
+        sync_check_cuda_error();
+        return states;
+    }
 }
 
 } // namespace fastertransformer

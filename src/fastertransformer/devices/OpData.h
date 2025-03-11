@@ -854,14 +854,18 @@ struct ActivationParams {
     const OptionalConstBufferRef gate      = std::nullopt;
     const OptionalConstBufferRef gate_bias = std::nullopt;
     const OptionalConstBufferRef act_scale = std::nullopt;
+    BufferPtr output_buffer = nullptr;
+    bool fuse_gate_up = false;
 
     ActivationParams(ActivationType               atype,
                      BufferPtr                    states,
                      const OptionalConstBufferRef bias,
                      const OptionalConstBufferRef gate,
                      const OptionalConstBufferRef gate_bias,
-                     const OptionalConstBufferRef act_scale):
-        atype(atype), states(states), bias(bias), gate(gate), gate_bias(gate_bias), act_scale(act_scale) {}
+                     const OptionalConstBufferRef act_scale,
+                     BufferPtr                    output_buffer = nullptr,
+                     bool fuse_gate_up = false):
+        atype(atype), states(states), bias(bias), gate(gate), gate_bias(gate_bias), act_scale(act_scale), output_buffer(output_buffer), fuse_gate_up(fuse_gate_up) {}
 
     ActivationParams(ActivationType atype, BufferPtr states): atype(atype), states(states), bias(std::nullopt), gate(std::nullopt), gate_bias(std::nullopt), act_scale(std::nullopt) {};
 };

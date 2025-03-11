@@ -261,7 +261,6 @@ void printBuffer6d(const std::string&  hint,
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print, bool show_stats_only) {
     const auto log_level = force_print ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_TRACE1;
-
     if (!force_print) {
         if (!rtp_llm::Logger::getEngineLogger().isTraceMode()) {
             return;

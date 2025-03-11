@@ -83,6 +83,8 @@ class ModelWeightsLoader:
         self._exported_device = get_current_device()
         self._is_ft_style_weight = weights_info.is_ft_style_weight
         self._vit_separation = weights_info.vit_separation
+        self._disable_merge_w13 = os.getenv('DISALBE_MERGE_W13', '0').lower() == '1'
+        logging.info(f"DISALBE_MERGE_W13 {self._disable_merge_w13}")
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -152,6 +154,30 @@ class ModelWeightsLoader:
                 name = key[len(global_weight_prefix):]
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 global_weights[name] = tensor[0].to(device)
+
+        if not self._disable_merge_w13:
+            update_weights = [ {} for id in range(self._num_layers)]
+            compaction_weights = []
+            for layer_id, layer_weight_dict in enumerate(weights):
+                for weight_name, tensor in layer_weight_dict.items():
+                    if weight_name in W.ffn_weights_1:
+                        pair_weight_name = W.ffn_pair_weight_name_dict[weight_name]
+                        pair_tensor = None
+                        for weight_name2, tensor2 in layer_weight_dict.items():
+                            if weight_name2 == pair_weight_name:
+                                pair_tensor = tensor2
+                                break
+                        compaction_weights.append((layer_id, W.ffn_merge_weight_name_dict[weight_name], [tensor, pair_tensor]))
+                    elif weight_name not in W.ffn_weights_3:
+                        update_weights[layer_id][weight_name] = tensor
+            for (layer_id, name, [gate_tensor, up_tensor]) in compaction_weights:
+                merged_tensor = torch.concat([gate_tensor, up_tensor], dim=-1).continous()
+                update_weights[layer_id][name] = merged_tensor
+                logging.info(f"merge weight {layer_id}, {name}, gate tensor shape: {gate_tensor.shape}, up tensor shape: {up_tensor.shape}, merge tensor shape:  {merged_tensor.shape}")
+                gate_tensor = gate_tensor.cpu()
+                up_tensor = up_tensor.cpu()
+            weights = update_weights
+
         model_weights.weights = weights
         model_weights.global_weights = global_weights
         model_weights.is_ft_style_weight = True
@@ -261,38 +287,105 @@ class ModelWeightsLoader:
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists:
-                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-                qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
-                qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
-                if len(qweight) == 0:
-                    if self._weights_info._is_sparse_head:
-                        continue
-                    else:
-                        raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
-                elif len(qweight) > 1:
-                    raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
-                try:
-                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=torch.int32)
-                    qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id=layer_id, datatype=torch.int32)
-                    qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id)
-                    qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
-                    qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor, bits=self._weights_info._quant_algo.getWeightBits())
-                    qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
-                    weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device,
-                                                     self._weights_info._quant_algo.isGptq(),
-                                                     self._weights_info._quant_algo.isAwq(),
-                                                     self._weights_info._quant_algo.getWeightBits())
-                    results.append((layer_id, qweight[0].name, weight))
-                    results.append((layer_id, qzero[0].name, zero))
-                    results.append((layer_id, qscale[0].name, scale))
-                except Exception as e:
-                    logging.error(f'load groupwise layer_weight in layer {layer_id}.{qweight[0].name} failed: {e} {traceback.format_exc(e)}')
-                    raise e
+                if not isinstance(weight_list[0], list):
+                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                    qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
+                    qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
+                    if len(qweight) == 0:
+                        if self._weights_info._is_sparse_head:
+                            continue
+                        else:
+                            raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
+                    elif len(qweight) > 1:
+                        raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
+                    try:
+                        qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=torch.int32)
+                        qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id=layer_id, datatype=torch.int32)
+                        qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id)
+                        qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
+                        qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor, bits=self._weights_info._quant_algo.getWeightBits())
+                        qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
+                        weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device,
+                                                        self._weights_info._quant_algo.isGptq(),
+                                                        self._weights_info._quant_algo.isAwq(),
+                                                        self._weights_info._quant_algo.getWeightBits())
+                        results.append((layer_id, qweight[0].name, weight))
+                        results.append((layer_id, qzero[0].name, zero))
+                        results.append((layer_id, qscale[0].name, scale))
+                    except Exception as e:
+                        logging.error(f'load groupwise layer_weight in layer {layer_id}.{qweight[0].name} failed: {e} {traceback.format_exc(e)}')
+                        raise e
+                else:
+                    if len(weight_list) != 3:
+                        raise Exception(f"groupwise layer_weight in layer {layer_id} should have 3 weight_list")
+                    weight_list1 = weight_list[0]
+                    weight_list2 = weight_list[1] 
+                    merged_weight_list = weight_list[2]
+
+                    qweight1 = [weight for weight in layer_weights if weight.name == weight_list1[0]]
+                    qzero1  = [weight for weight in layer_weights if weight.name == weight_list1[1]]
+                    qscale1  = [weight for weight in layer_weights if weight.name == weight_list1[2]]
+
+                    qweight2 = [weight for weight in layer_weights if weight.name == weight_list2[0]]
+                    qzero2  = [weight for weight in layer_weights if weight.name == weight_list2[1]]
+                    qscale2  = [weight for weight in layer_weights if weight.name == weight_list2[2]]
+
+                    merged_qweight = [weight for weight in layer_weights if weight.name == merged_weight_list[0]]
+
+                    if len(qweight1) == 0:
+                        if self._weights_info._is_sparse_head:
+                            continue
+                        else:
+                            raise Exception(f"not found weight {weight_list1[0]} in layer {layer_id}")
+                    elif len(qweight1) > 1:
+                        raise Exception(f"found more than one weight {weight_list1[0]} in layer {layer_id}")
+                    
+                    if len(qweight2) == 0:
+                        if self._weights_info._is_sparse_head:
+                            continue
+                        else:
+                            raise Exception(f"not found weight {weight_list2[0]} in layer {layer_id}")
+                    elif len(qweight2) > 1:
+                        raise Exception(f"found more than one weight {weight_list2[0]} in layer {layer_id}")
+
+                    if len(merged_qweight) > 0:
+                        raise Exception(f"found merged weight {merged_weight_list[0]} in layer {layer_id}")
+                    try:
+                        qweight_tensor1 = self._load_and_convert_tensor(qweight1[0], layer_id=layer_id, datatype=torch.int32)
+                        qzero_tensor1 = self._load_and_convert_tensor(qzero1[0], layer_id=layer_id, datatype=torch.int32)
+                        qscale_tensor1 = self._load_and_convert_tensor(qscale1[0], layer_id=layer_id)
+                        qweight_tensor1 = self._split_tensor(qweight1[0].name, qweight_tensor1)
+                        qzero_tensor1 = self._split_tensor(qzero1[0].name, qzero_tensor1, bits=self._weights_info._quant_algo.getWeightBits())
+                        qscale_tensor1 = self._split_tensor(qscale1[0].name, qscale_tensor1)
+
+
+                        qweight_tensor2 = self._load_and_convert_tensor(qweight2[0], layer_id=layer_id, datatype=torch.int32)
+                        qzero_tensor2 = self._load_and_convert_tensor(qzero2[0], layer_id=layer_id, datatype=torch.int32)
+                        qscale_tensor2 = self._load_and_convert_tensor(qscale2[0], layer_id=layer_id)
+                        qweight_tensor2 = self._split_tensor(qweight2[0].name, qweight_tensor2)
+                        qzero_tensor2 = self._split_tensor(qzero2[0].name, qzero_tensor2, bits=self._weights_info._quant_algo.getWeightBits())
+                        qscale_tensor2 = self._split_tensor(qscale2[0].name, qscale_tensor2)
+
+
+                        merged_qweight_tensor = torch.concat([qweight_tensor1, qweight_tensor2], dim=-1).contiguous()
+                        merged_qzero_tensor = torch.concat([qzero_tensor1, qzero_tensor2], dim=-1).contiguous()
+                        merged_qscale_tensor = torch.concat([qscale_tensor1, qscale_tensor2], dim=-1).contiguous()
+
+                        weight, zero, scale = apply_func(merged_qweight_tensor, merged_qzero_tensor, merged_qscale_tensor, device,
+                                                        self._weights_info._quant_algo.isGptq(),
+                                                        self._weights_info._quant_algo.isAwq(),
+                                                        self._weights_info._quant_algo.getWeightBits())
+                        results.append((layer_id, merged_weight_list[0], weight))
+                        results.append((layer_id, merged_weight_list[1], zero))
+                        results.append((layer_id, merged_weight_list[2], scale))
+                    except Exception as e:
+                        logging.error(f'load groupwise layer_weight in layer {layer_id}.{merged_weight_list[0]} failed: {e} {traceback.format_exc(e)}')
+                        raise e
 
         convert_weight(W.groupwise_attn_weights, self._exported_device.preprocess_groupwise_weight_params)
 
         if is_gated_activation:
-            ffn_weight_lists = W.groupwise_ffn_weights
+            ffn_weight_lists = W.groupwise_ffn_weights_3 if self._disable_merge_w13 else W.groupwise_ffn_weights
         else:
             ffn_weight_lists = W.groupwise_ffn_weights_2
 
@@ -384,24 +477,60 @@ class ModelWeightsLoader:
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func, datatype):
             for weight_list in weight_lists:
-                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-                scale_name = weight_list[1]
-                if len(qweight) == 0:
-                    continue
-                elif len(qweight) > 1:
-                    raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
-                try:
-                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
-                    if self._merge_lora:
-                        qweight_tensor = self.apply_lora(qweight_tensor, qweight[0], layer_id)
-                    qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0])
+                if not isinstance(weight_list[0], list):
+                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                    scale_name = weight_list[1]
+                    if len(qweight) == 0:
+                        continue
+                    elif len(qweight) > 1:
+                        raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
+                    try:
+                        qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
+                        if self._merge_lora:
+                            qweight_tensor = self.apply_lora(qweight_tensor, qweight[0], layer_id)
+                        qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0])
 
-                    weight, scale = apply_func(qweight_tensor, device)
-                    results.append((layer_id, qweight[0].name, weight))
-                    results.append((layer_id, scale_name, scale))
-                except Exception as e:
-                    logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
-                    raise e
+                        weight, scale = apply_func(qweight_tensor, device)
+                        results.append((layer_id, qweight[0].name, weight))
+                        results.append((layer_id, scale_name, scale))
+                    except Exception as e:
+                        logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
+                        raise e
+                else:
+                    weight_list1 = weight_list[0]
+                    weight_list2 = weight_list[1]
+                    weight_list3 = weight_list[2]
+                    qweight1 = [weight for weight in layer_weights if weight.name == weight_list1[0]]
+                    scale1 = weight_list1[1]
+                    qweight2 = [weight for weight in layer_weights if weight.name == weight_list2[0]]
+                    scale2 = weight_list2[1]
+                    if len(qweight1) == 0:
+                        continue
+                    elif len(qweight1) > 1:
+                        raise Exception(f"found more than one weight {weight_list1[0]} in layer {layer_id}")
+                    if len(qweight2) == 0:
+                        continue
+                    elif len(qweight2) > 1:
+                        raise Exception(f"found more than one weight {weight_list2[0]} in layer {layer_id}")
+                    try:
+                        qweight_tensor1 = self._load_and_convert_tensor(qweight1[0], layer_id=layer_id, datatype=datatype)
+                        if self._merge_lora:
+                            qweight_tensor1 = self.apply_lora(qweight_tensor1, qweight1[0], layer_id)
+                        qweight_tensor1 = self._split_and_sanitize_tensor(qweight_tensor1, qweight1[0])
+
+                        qweight_tensor2 = self._load_and_convert_tensor(qweight2[0], layer_id=layer_id, datatype=datatype)
+                        if self._merge_lora:
+                            qweight_tensor2 = self.apply_lora(qweight_tensor2, qweight2[0], layer_id)
+                        qweight_tensor2 = self._split_and_sanitize_tensor(qweight_tensor2, qweight2[0])
+
+                        merge_qweight = torch.concat([qweight_tensor1, qweight_tensor2], dim=-1).contiguous()
+
+                        merge_weight, merge_scale = apply_func(merge_qweight, device)
+                        results.append((layer_id, weight_list3[0], merge_weight))
+                        results.append((layer_id, weight_list3[1], merge_scale))
+                    except Exception as e:
+                        logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
+                        raise e
 
         if self._use_expert_attention:
             # for CogVLM2, moe is not supported and gated activation is enabled
@@ -417,7 +546,12 @@ class ModelWeightsLoader:
         convert_weight(W.int8_attn_vision_weights, self._exported_device.apply_int8, self._data_type)
 
         if is_gated_activation:
-            ffn_weight_lists = W.int8_ffn_weights if is_moe == False else W.int8_partial_moe_weights
+            if is_moe:
+                ffn_weight_lists = W.int8_partial_moe_weights
+            elif self._disable_merge_w13:
+                ffn_weight_lists = W.int8_ffn_weights_3
+            else:
+                ffn_weight_lists = W.int8_ffn_weights
         else:
             ffn_weight_lists = W.int8_ffn_weights_2 if is_moe == False else W.int8_partial_moe_weights_2
 
@@ -428,7 +562,11 @@ class ModelWeightsLoader:
             convert_weight(W.int8_vision_ffn_weights, self._exported_device.apply_int8, self._data_type)
 
         if self._weights_info.moe_style_ == 2:
-            convert_weight(W.int8_ffn_weights, self._exported_device.apply_int8, self._data_type)
+            if self._disable_merge_w13:
+                onvert_weight(W.int8_ffn_weights_3, self._exported_device.apply_int8, self._data_type)
+            else:
+                convert_weight(W.int8_ffn_weights, self._exported_device.apply_int8, self._data_type)
+
 
         return results
 
@@ -519,6 +657,30 @@ class ModelWeightsLoader:
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif quant_algo.isWeightOnlyPerCol():
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
+        
+        if not self._disable_merge_w13:
+            update_results = []
+            compaction_weights = []
+            for (layer_id, weight_name, tensor) in results:
+                if weight_name in W.ffn_weights_1:
+                    pair_weight_name = W.ffn_pair_weight_name_dict[weight_name]
+                    pair_tensor = None
+                    for (_, weight_name2, tensor2) in results:
+                        if weight_name2 == pair_weight_name:
+                            pair_tensor = tensor2
+                            break
+                    compaction_weights.append((layer_id, W.ffn_merge_weight_name_dict[weight_name], [tensor, pair_tensor]))
+                elif weight_name not in W.ffn_weights_3:
+                    update_results.append((layer_id, weight_name, tensor))
+            for (layer_id, name, [gate_tensor, up_tensor]) in compaction_weights:
+                merged_tensor = torch.concat([gate_tensor, up_tensor], dim=-1).contiguous()
+                update_results.append((layer_id, name, merged_tensor))
+                logging.info(f"merge weight {layer_id}, {name}, gate tensor shape: {gate_tensor.shape}, up tensor shape: {up_tensor.shape}, merge tensor shape:  {merged_tensor.shape}")
+                gate_tensor = gate_tensor.cpu()
+                up_tensor = up_tensor.cpu()
+            results = update_results
+        gc.collect()
+        torch.cuda.empty_cache()
         return results, self._weight_log, self._lora_log
 
     def _trunc_layer_weights_for_partial_moe(self, layer_weights: List[WeightInfo]):

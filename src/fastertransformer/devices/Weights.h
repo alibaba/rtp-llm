@@ -100,10 +100,11 @@ struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
-    std::shared_ptr<DenseWeights>     moe_gate_weight;
+    std::shared_ptr<DenseWeights>           moe_gate_weight;
 
     std::shared_ptr<const DenseWeights>     down_weight;
-    std::shared_ptr<DenseWeights>     moe_down_weight;
+    std::shared_ptr<DenseWeights>           moe_down_weight;
+    std::shared_ptr<const DenseWeights>     gate_up_weight;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 
