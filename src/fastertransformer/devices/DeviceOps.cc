@@ -154,6 +154,10 @@ void DeviceOps::allGather(const AllGatherParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+AllToAllOutput DeviceOps::allToAll(const AllToAllParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

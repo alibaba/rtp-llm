@@ -32,4 +32,39 @@ void getUniqueId(ncclUniqueId* id, const std::string& store_key, c10d::TCPStore*
     }
 }
 
+void all2all_single_equal_split(
+    void* sendbuff, void* recvbuff, size_t total_size, ncclComm_t comm, cudaStream_t stream) {
+    ncclDataType_t type     = ncclUint8;
+    int            numranks = 0;
+    NCCLCHECK(ncclCommCount(comm, &numranks));
+
+    size_t rankdiff = total_size / numranks;
+    NCCLCHECK(ncclGroupStart());
+    for (int peer = 0; peer < numranks; ++peer) {
+        NCCLCHECK(ncclSend((char*)sendbuff + peer * rankdiff, rankdiff, type, peer, comm, stream));
+        NCCLCHECK(ncclRecv((char*)recvbuff + peer * rankdiff, rankdiff, type, peer, comm, stream));
+    }
+    NCCLCHECK(ncclGroupEnd());
+}
+
+void all2all_single_unequal_split(void*          sendbuff,
+                                  const size_t*  sendcounts,
+                                  const size_t*  senddispls,
+                                  void*          recvbuff,
+                                  const size_t*  recvcounts,
+                                  const size_t*  recvdispls,
+                                  size_t         size,
+                                  ncclDataType_t type,
+                                  ncclComm_t     comm,
+                                  cudaStream_t   stream) {
+    int numranks = 0;
+    NCCLCHECK(ncclCommCount(comm, &numranks));
+    NCCLCHECK(ncclGroupStart());
+    for (int peer = 0; peer < numranks; ++peer) {
+        NCCLCHECK(ncclSend(((char*)sendbuff) + senddispls[peer] * size, sendcounts[peer], type, peer, comm, stream));
+        NCCLCHECK(ncclRecv(((char*)recvbuff) + recvdispls[peer] * size, recvcounts[peer], type, peer, comm, stream));
+    }
+    NCCLCHECK(ncclGroupEnd());
+}
+
 }  // namespace fastertransformer

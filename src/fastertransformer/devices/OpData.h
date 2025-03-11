@@ -112,6 +112,7 @@ struct CloneParams {
 struct CopyParams {
     const Buffer& dst;
     const Buffer& src;
+    bool overlapped = false;
 
     void check() const {
         FT_CHECK_WITH_INFO(src.type() == dst.type(),
@@ -140,6 +141,7 @@ using TransposeOutput = BufferPtr;
 
 struct TransposeParams {
     const Buffer& input;
+    bool overlapped = false;
 };
 
 using ConvertOutput = BufferPtr;
@@ -559,22 +561,58 @@ struct FfnLayerParams {
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
-                   BufferPtr                    output = nullptr,
-                   const OptionalConstBufferRef dp_token_nums = std::nullopt):
+                   BufferPtr                    output = nullptr):
         input(input), configs(configs), weights(weights), residual(residual),
-        dp_token_nums(dp_token_nums), qscheme(qscheme), output(std::move(output)){}
+        qscheme(qscheme), output(std::move(output)){}
 
     const Buffer& input;
     const FfnConfigs&            configs;
     const FfnLayerWeights&       weights;
 
     const OptionalConstBufferRef residual; // for intel xft
-    const OptionalConstBufferRef dp_token_nums;
 
     const QScheme qscheme;
     BufferPtr                    output;
 
     lora::FfnLayerLoraInput      lora_input;
+};
+
+struct MoeGateSelectOutput {
+    BufferPtr expert_ids;
+    BufferPtr expert_scales;
+};
+
+struct MoeDispatchOutput {
+    BufferPtr                 hidden;
+    BufferPtr                 expert_ids;
+    BufferPtr                 expert_scales;
+    BufferPtr                 indices;
+    const std::vector<size_t> input_split_sizes;
+    const std::vector<size_t> output_split_sizes;
+};
+
+struct MoeDispatchParams {
+    MoeDispatchParams(const Buffer&     input,
+                      const Buffer&     expert_ids,
+                      const Buffer&     expert_scales,
+                      const MoeConfigs& moe_configs):
+        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs) {}
+
+    const Buffer&     input;
+    const Buffer&     expert_ids;
+    const Buffer&     expert_scales;
+    const MoeConfigs& moe_configs;
+};
+
+struct MoeCombineParams {
+    const BufferPtr           input;
+    const BufferPtr           indices;
+    const BufferPtr           output;
+    const std::vector<size_t> input_split_sizes;
+    const std::vector<size_t> output_split_sizes;
+    const MoeConfigs&         moe_configs;
+    size_t                    origin_token_num;
+    bool                      overlapped = false;
 };
 
 struct GreedyParams {
@@ -618,6 +656,7 @@ struct BroadcastParams {
     const std::vector<BufferPtr>& buffers;
     const int64_t root;
     ParallelMode mode = ParallelMode::TP;
+    bool overlapped = false;
 };
 
 enum class ReduceOp {
@@ -648,12 +687,24 @@ struct AllReduceParams {
 
 struct AllReduceOutput {
     const BufferPtr buffer;
-    ParallelMode mode = ParallelMode::TP;
 };
 
 struct AllGatherParams {
     const std::vector<BufferPtr>& buffers;
     ParallelMode mode = ParallelMode::TP;
+    bool overlapped = false;
+};
+
+struct AllToAllParams {
+    const std::vector<BufferPtr> buffers;
+    const std::vector<size_t>    input_split_sizes;
+    const std::vector<size_t>    output_split_sizes;
+    bool                         overlapped = false;
+    ParallelMode                 mode       = ParallelMode::DP_AND_TP;
+};
+
+struct AllToAllOutput {
+    std::vector<BufferPtr> outputs;
 };
 
 // output = act(input) + bias

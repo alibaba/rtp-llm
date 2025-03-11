@@ -89,7 +89,7 @@ cc_library(
         "custom_ar/custom_ar_comm.h"
     ],
     deps = [
-        ":nccl",
+        ":nccl_util",
         ":cuda_utils",
         ":memory_utils",
         "//src/fastertransformer/core:types",
@@ -103,7 +103,7 @@ cc_library(
 )
 
 cc_library(
-    name = "nccl",
+    name = "nccl_util",
     srcs = [
         "nccl/nccl_utils_torch.cc",
         "nccl/nccl_utils.cc",
@@ -251,7 +251,7 @@ cc_library(
     hdrs = [
         "Dispatch.h"],
     deps = [
-        ":nccl",
+        ":nccl_util",
         ":nvtx",
         ":cublas",
         ":cufmha",

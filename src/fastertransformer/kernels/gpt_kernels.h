@@ -299,4 +299,8 @@ void invokeGetCuSeqLens(int* cu_seqlens,
                         const int batch_size,
                         cudaStream_t stream);
 
+// just support two dim
+template<typename T>
+void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream);
+
 }  // namespace fastertransformer

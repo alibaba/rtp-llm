@@ -66,7 +66,6 @@ struct GptModelInputs {
     ft::BufferPtr                             request_id;               // int64, [context_batch_size]
     ft::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
     ft::BufferPtr                             cache_keys;               // [context_batch_size]
-    ft::BufferPtr                             dp_token_nums;
     size_t                                    k_block_size;
     size_t                                    v_block_size;
     size_t                                    scale_block_size;
@@ -122,7 +121,6 @@ struct GptLayerOutputs {
 struct GptLayerInputs {
     ft::BufferPtr hidden;
     ft::BufferPtr pre_decoder_residual;
-    ft::BufferPtr dp_token_nums;
     ft::AttentionCommonInputs attention_common_inputs;
     const ft::DataType dtype;
 };

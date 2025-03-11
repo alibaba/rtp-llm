@@ -316,7 +316,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, dtype, attention_common_inputs);
     attention_common_inputs.position_ids = combo_position_ids;
 
-    return {move(hidden), move(pre_decoder_residual), inputs.dp_token_nums, move(attention_common_inputs), dtype};
+    return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype};
 }
 
 GptLayerOutputs GptModel::forwardGptLayer(
@@ -435,8 +435,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                                             act_qscheme,
-                                            std::move(ffn_output_buf),
-                                            inputs.dp_token_nums ? (OptionalConstBufferRef)*inputs.dp_token_nums : nullopt});
+                                            std::move(ffn_output_buf)});
     if (lora_model_input) {
         ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
     }
@@ -572,19 +571,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 }
 
 void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
-    if (device->getDeviceProperties().dp_size > 1) {
-        inputs.dp_token_nums = device->allocateBuffer(
-                {ft::DataType::TYPE_UINT32,
-                         {device->getDeviceProperties().dp_size},
-                         ft::AllocationType::HOST});
-        if (device->getDeviceProperties().tp_rank == 0) {
-            *(inputs.dp_token_nums->dataWithOffset<uint32_t>(device->getDeviceProperties().dp_rank)) = inputs.combo_tokens->shape()[0];
-            device->allGather({{inputs.dp_token_nums}, ParallelMode::DP});
-        }
-        if (device->getDeviceProperties().tp_size <= 1) {
-            device->syncCommunication(false);
-        }
-    }
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
@@ -716,9 +702,6 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         for (auto& mm_feature: inputs.multimodal_features.value()) {
             buffers.emplace_back(mm_feature);
         }
-    }
-    if (device->getDeviceProperties().dp_size > 1) {
-        buffers.emplace_back(inputs.dp_token_nums);
     }
     device->broadcast({buffers, 0});
     device->syncAndCheck();

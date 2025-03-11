@@ -140,6 +140,7 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         FT_CHECK(false);
 
 #define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)             \
+    MACRO(DataType::TYPE_BYTES, uint8_t, __VA_ARGS__)           \
     MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)            \
     MACRO(DataType::TYPE_INT32, int32_t, __VA_ARGS__)          \
     MACRO(DataType::TYPE_INT64, int64_t, __VA_ARGS__)          \

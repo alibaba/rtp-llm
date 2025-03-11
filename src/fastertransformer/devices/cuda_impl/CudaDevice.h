@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -174,10 +175,13 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
+    MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params);
+    FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     GreedyOutput sampleGreedy(const GreedyParams& params) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
+    AllToAllOutput allToAll(const AllToAllParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr mlaQKVGemm(const AttentionLayerParams& params) override;
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
@@ -191,6 +195,8 @@ public:
                         BufferPtr&            gate_with_bias);
     void mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
+    MoeDispatchOutput epDispatch(const MoeDispatchParams& params);
+    FfnLayerOutput epCombine(const MoeCombineParams& params);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
@@ -265,6 +271,8 @@ private:
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> dp_tp_custom_allreduce_comm_ = nullptr; // for custom dp tp allreduce use
 
+    // BufferPtr will be error when multi stream, tmp hold
+    std::vector<BufferPtr> overlap_hold_buffers_;
 protected:
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;

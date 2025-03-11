@@ -91,6 +91,16 @@ void Buffer::updateShape(const std::vector<size_t>& shape) {
     shape_ = shape;
 }
 
+void Buffer::updateTypeAndShape(DataType type, const std::vector<size_t>& shape) {
+    size_t new_size = std::accumulate(shape.begin(), shape.end(), (size_t)getTypeSize(type),
+                                            std::multiplies<size_t>());
+    FT_CHECK_WITH_INFO(
+        new_size == sizeBytes(),
+        "new size bytes  not match: %d vs %d", new_size, sizeBytes());
+    type_ = type;
+    shape_ = shape;
+}
+
 Buffer::DeleterFuncType Buffer::getSubBufferDeleter() const {
     this->view_count_++;
     return [this](Buffer* buffer) -> void {

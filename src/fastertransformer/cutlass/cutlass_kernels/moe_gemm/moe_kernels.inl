@@ -72,6 +72,8 @@ void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int*
     int64_t* expert_first_token_offset, int64_t num_rows, int64_t num_experts, int64_t num_experts_per_node, int64_t k,
     CubKeyValueSorter& sorter, void* sorter_ws, cudaStream_t stream);
 
+void genSourceRow(int* expert_rows, int* source_rows, int token_num, int top_k, int num_experts, int start_expert, int end_expert, cudaStream_t stream);
+
 // TODO Could linear search be better for small # experts
 template <class T>
 __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices, int64_t const arr_length, T const target)
@@ -93,10 +95,6 @@ __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices, i
     }
     return target_location + 1;
 }
-
-void selectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
-    int* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
-    int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream);
 
 void computeExpertFirstTokenOffset(int const* sorted_indices, int const total_indices, int const num_experts,
     int64_t* expert_first_token_offset, cudaStream_t stream);
@@ -1112,7 +1110,6 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     TLLM_CHECK_WITH_INFO(
         num_rows == active_rows, "Using 'finished' is deprecated and will be removed in future versions");
     TLLM_CHECK(input_activations);
-    TLLM_CHECK(gating_output);
     TLLM_CHECK(fc1_expert_weights);
     TLLM_CHECK(fc2_expert_weights);
     TLLM_CHECK(workspace_ptr);
@@ -1187,10 +1184,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     int const start_expert = num_experts_per_node * parallelism_config.ep_rank;
     int const end_expert = start_expert + num_experts_per_node;
 
-    selectExpertsForTokens(gating_output, gating_output_with_bias, token_topk_unpermuted_scales, sparse_mixer_out_, softmax_out_,
-        expert_for_source_row, source_rows_, num_rows, num_experts, k, start_expert, end_expert, sparse_mixer_epsilon,
-        normalization_mode, stream);
-
+    genSourceRow(expert_for_source_row, source_rows_, num_rows, k, num_experts, start_expert, end_expert, stream);
     sync_check_cuda_error();
 
     sortAndScanSoftmaxOutput(expert_for_source_row, source_rows_, permuted_experts_, permuted_rows_,

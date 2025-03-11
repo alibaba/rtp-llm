@@ -104,6 +104,7 @@ public:
     }
 
     void updateShape(const std::vector<size_t>& shape);
+    void updateTypeAndShape(DataType type, const std::vector<size_t>& shape);
     Buffer reshape(const std::vector<size_t>& shape) const;
     Buffer view(size_t offset, size_t size) const; // only from 0-d
     // only from 0-d

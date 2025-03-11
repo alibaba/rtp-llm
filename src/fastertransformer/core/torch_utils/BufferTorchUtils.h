@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include <torch/all.h>
 
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/QBuffer.h"
 #include "maga_transformer/cpp/utils/Logger.h"
@@ -91,6 +92,8 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
         FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
     case TYPE_UINT32:
         return torch::kInt;
+    case TYPE_BYTES:
+        return torch::kByte;
     default:
         FT_LOG_ERROR("Unsupported data type: [%d]", data_type);
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)data_type));

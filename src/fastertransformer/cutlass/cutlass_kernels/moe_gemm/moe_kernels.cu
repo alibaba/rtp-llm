@@ -1126,6 +1126,36 @@ __global__ void buildReverseMap(int* expanded_source_row_to_expanded_dest_row,
     }
 }
 
+__global__ void genSourceRowKernel(
+    int* expert_rows, int* source_rows, int token_num, int top_k, int num_experts, int start_expert, int end_expert) {
+    int const idx       = blockIdx.x * blockDim.x + threadIdx.x;
+    int const token_idx = idx / top_k;
+    int const k_idx     = idx % top_k;
+    if (idx < token_num * top_k) {
+        if (expert_rows[idx] >= start_expert && expert_rows[idx] < end_expert) {
+            expert_rows[idx] = expert_rows[idx] - start_expert;
+        } else {
+            expert_rows[idx] = expert_rows[idx] + num_experts;
+        }
+        source_rows[idx] = k_idx * token_num + token_idx;
+    }
+}
+
+void genSourceRow(int*         expert_rows,
+                  int*         source_rows,
+                  int          token_num,
+                  int          top_k,
+                  int          num_experts,
+                  int          start_expert,
+                  int          end_expert,
+                  cudaStream_t stream) {
+    int const threads = 256;
+    int const blocks  = token_num * top_k / 256 + 1;
+
+    genSourceRowKernel<<<blocks, threads, 0, stream>>>(
+        expert_rows, source_rows, token_num, top_k, num_experts, start_expert, end_expert);
+}
+
 void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int* permuted_experts, int* permuted_rows,
     int64_t* expert_first_token_offset, int64_t num_rows, int64_t num_experts, int64_t num_experts_per_node, int64_t k,
     CubKeyValueSorter& sorter, void* sorter_ws, cudaStream_t stream)

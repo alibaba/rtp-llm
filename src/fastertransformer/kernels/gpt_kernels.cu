@@ -15,6 +15,7 @@
  */
 
 #include <assert.h>
+#include <type_traits>
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
@@ -760,8 +761,18 @@ template void invokeLookupHiddenStateOfLastToken(T*       from_tensor, \
 
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(float);
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(half);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(int32_t);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(int8_t);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(uint8_t);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(uint32_t);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(int64_t);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(uint64_t);
 #ifdef ENABLE_BF16
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
+#endif
+
+#ifdef ENABLE_FP8
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
 #endif
 
 #define INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_FIRST(T) \
@@ -1570,5 +1581,52 @@ void invokeGetCuSeqLens(int* cu_seqlens,
         cu_seqlens, sequence_length, prefix_length, batch_size);
     sync_check_cuda_error();
 }
+
+template<typename T, int ELEM_PER_THREAD>
+__global__ void scatter_add_kernel(T const* src, int N, int K, int32_t const* index, T* out) {
+    int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    thread_idx *= ELEM_PER_THREAD;
+    // int offset = blockDim.x * gridDim.x;
+    int     k       = thread_idx % K;
+    int64_t new_idx = (int64_t)index[thread_idx / K] * K;
+#pragma unroll
+    for (int i = 0; i < ELEM_PER_THREAD; ++i) {
+        if (thread_idx + i < (size_t)N * K) {
+            atomicAdd(out + new_idx + k + i, src[thread_idx + i]);
+        }
+    }
+}
+
+template<typename T>
+void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream) {
+    const int  num_threads     = 256;
+    const int  elem_per_thread = 4;
+    const dim3 block(num_threads);
+    FT_CHECK(K % (elem_per_thread * 2) == 0);
+
+    if constexpr (std::is_same<T, float>::value) {
+        const dim3 grid(((size_t)N * K + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
+        scatter_add_kernel<float, elem_per_thread><<<grid, block, 0, stream>>>(src, N, K, index, out);
+    } else if (K % 2 == 0) {
+        using Tp = typename packed_as<T, 2>::type;
+        const dim3 grid(((size_t)N * K / 2 + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
+        scatter_add_kernel<Tp, elem_per_thread><<<grid, block, 0, stream>>>((Tp*)src, N, K / 2, index, (Tp*)out);
+
+    } else {
+        throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
+    }
+}
+
+#define INSTANTIATE_INVOKE_SCATTER_ADD(T)                                                                              \
+    template void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream)
+
+INSTANTIATE_INVOKE_SCATTER_ADD(half);
+INSTANTIATE_INVOKE_SCATTER_ADD(float);
+
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_SCATTER_ADD(__nv_bfloat16);
+#endif
+#undef INSTANTIATE_INVOKE_SCATTER_ADD
+
 
 }  // namespace fastertransformer

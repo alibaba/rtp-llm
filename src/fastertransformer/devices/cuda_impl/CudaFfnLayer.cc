@@ -1,61 +1,255 @@
+#include "src/fastertransformer/devices/OpData.h"
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include <cstring>
+#include <numeric>
 
 using namespace std;
 
 namespace fastertransformer {
 
-FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
+MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
+    const auto& moe_conf = params.moe_configs;
+
+    auto const ep_size    = moe_conf.ep_size;
+    auto const tp_size    = moe_conf.tp_size;
+    auto const expert_num = moe_conf.expert_num;
+    auto const top_k      = moe_conf.top_k;
+    size_t     token_num  = params.expert_ids.shape()[0];
+
+    assert(moe_conf.ep_size == tp_size * moe_conf.dp_size);
+    size_t    tp_token_size = (token_num + tp_size - 1) / tp_size;
+    BufferPtr hidden        = params.input.slice(tp_token_size * moe_conf.tp_rank,
+                                          std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
+    auto      expert_ids    = params.expert_ids.slice(tp_token_size * moe_conf.tp_rank,
+                                              std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
+    auto      expert_scales = params.expert_scales.slice(
+        tp_token_size * moe_conf.tp_rank, std::min(token_num - tp_token_size * moe_conf.tp_rank, tp_token_size));
+    token_num = hidden->shape()[0];
+
+    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
+    BufferPtr token_nums_per_rank =
+        allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
+    bufMemset(*token_nums_per_rank, 0);
+    int32_t*                          token_nums_per_rank_ptr = token_nums_per_rank->data<int32_t>();
+    std::vector<std::vector<int32_t>> token_idx_per_rank;
+    token_idx_per_rank.resize(ep_size);
+    int const num_experts_per_node = expert_num / ep_size;
+    for (int i = 0; i < token_num; ++i) {
+        for (int j = 0; j < top_k; ++j) {
+            size_t expert_id = *(experts_ids_host->dataWithOffset<int32_t>(i * top_k + j));
+            assert(expert_id < expert_num);
+            const auto ep_rank = expert_id / num_experts_per_node;
+            if (token_idx_per_rank[ep_rank].empty() || *token_idx_per_rank[ep_rank].rbegin() != i) {
+                token_nums_per_rank_ptr[ep_rank] += 1;
+                token_idx_per_rank[ep_rank].push_back(i);
+            }
+        }
+    }
+    printBufferData(*token_nums_per_rank, "token_nums_per_rank");
+    auto token_nums_per_rank_gpu     = clone({*token_nums_per_rank});
+    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
+    size_t    total_size = std::accumulate(token_nums_per_rank_ptr, token_nums_per_rank_ptr + ep_size, 0);
+    BufferPtr all_token_indices_cpu =
+        allocateBuffer({DataType::TYPE_INT32, {total_size}, AllocationType::HOST}, {"token_nums_per_rank"});
+
+    size_t offset = 0;
+    for (int i = 0; i < ep_size; ++i) {
+        memcpy(all_token_indices_cpu->dataWithOffset<int32_t>(offset),
+               token_idx_per_rank[i].data(),
+               token_idx_per_rank[i].size() * sizeof(int32_t));
+        offset += token_idx_per_rank[i].size();
+    }
+
+    printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
+    BufferPtr all_token_indices = clone({*all_token_indices_cpu});
+    // sync allToAll all_token_nums_per_rank_gpu
+    syncCommunication(false);
+    auto                all_token_nums_per_rank = clone({*all_token_nums_per_rank_gpu, AllocationType::HOST});
+    std::vector<size_t> input_split_sizes;
+    std::vector<size_t> output_split_sizes;
+    input_split_sizes.resize(ep_size);
+    output_split_sizes.resize(ep_size);
+    for (int i = 0; i < ep_size; ++i) {
+        input_split_sizes[i]  = token_nums_per_rank_ptr[i];
+        output_split_sizes[i] = *(all_token_nums_per_rank->dataWithOffset<int32_t>(i));
+    }
+    vector<BufferPtr> selected_buffers;
+    selected_buffers.emplace_back(select({*hidden, *all_token_indices}));
+    selected_buffers.emplace_back(select({*expert_ids, *all_token_indices}));
+    selected_buffers.emplace_back(select({*expert_scales, *all_token_indices}));
+
+    auto global_buffers = allToAll({selected_buffers, input_split_sizes, output_split_sizes}).outputs;
+    return {global_buffers[0],
+            global_buffers[1],
+            global_buffers[2],
+            all_token_indices,
+            input_split_sizes,
+            output_split_sizes};
+}
+
+FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
+    if (params.overlapped) {
+        overlap_hold_buffers_.clear();
+    }
+    auto all_output =
+        allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped}).outputs[0];
+    if (params.overlapped) {
+        overlap_hold_buffers_.emplace_back(all_output);
+        overlap_hold_buffers_.emplace_back(params.input);
+        overlap_hold_buffers_.emplace_back(params.indices);
+    }
+    torch::Tensor indices_tensor;
+    cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
+    if (params.moe_configs.tp_size > 1) {
+        // TODO: can use torch all gather unequal size to avoid copy
+        const size_t tp_token_size =
+            (params.origin_token_num + params.moe_configs.tp_size - 1) / params.moe_configs.tp_size;
+        size_t dim1_size = all_output->shape()[1];
+        assert(params.origin_token_num >= tp_token_size * params.moe_configs.tp_rank);
+        BufferPtr scatter_output = allocateBuffer(
+            {all_output->type(),
+             {std::min(params.origin_token_num - tp_token_size * params.moe_configs.tp_rank, tp_token_size),
+              dim1_size}});
+        if (params.overlapped) {
+            overlap_hold_buffers_.emplace_back(scatter_output);
+        }
+        assert(scatter_output->shape()[0] == params.indices->shape()[0]);
+        if (scatter_output->shape()[0] > 0) {
+            cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
+                                             invokeScatterAdd,
+                                             all_output->data(),
+                                             all_output->shape()[0],
+                                             all_output->shape()[1],
+                                             params.indices->data<int32_t>(),
+                                             scatter_output->data(),
+                                             stream);
+        }
+
+        BufferPtr padding_output;
+        if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size && params.output) {
+            padding_output = params.output;
+        } else {
+            padding_output =
+                allocateBuffer({all_output->type(), {tp_token_size * params.moe_configs.tp_size, dim1_size}});
+            if (params.overlapped) {
+                overlap_hold_buffers_.emplace_back(padding_output);
+            }
+        }
+        copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
+              *scatter_output,
+              params.overlapped});
+        allGather({{padding_output}, ParallelMode::TP, params.overlapped});
+        if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size) {
+            return {padding_output};
+        } else {
+            BufferPtr output = params.output ? params.output : allocateBufferLike(padding_output->view(0, params.origin_token_num));
+            copy({*output, padding_output->view(0, params.origin_token_num), params.overlapped});
+            return {output};
+        }
+    } else {
+        vector<size_t> new_shape = all_output->shape();
+        new_shape[0]             = params.origin_token_num;
+        BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
+        if (output->shape()[0] > 0) {
+            cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
+                                             invokeScatterAdd,
+                                             all_output->data(),
+                                             all_output->shape()[0],
+                                             all_output->shape()[1],
+                                             params.indices->data<int32_t>(),
+                                             output->data(),
+                                             stream);
+        }
+        return {output};
+    }
+}
+
+MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
 
     const auto& moe_conf = params.configs.moe_configs.value();
-    const auto& hidden = params.input;
-    const auto& weights = params.weights;
-    const auto type = hidden.type();
-    const auto weight_type = weights.moe_down_weight->kernel->type();
-    const auto token_num = hidden.shape()[0];
-    const auto hidden_dim = hidden.shape()[1];
+    const auto& hidden   = params.input;
+
+    const auto token_num  = hidden.shape()[0];
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
-    const auto top_k = moe_conf.top_k;
-    const auto moe_inter_size = moe_conf.moe_inter_padding_size;
+    const auto top_k      = moe_conf.top_k;
+
+    const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
+
+    const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
+    const auto expert_for_source_row =
+        allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expert_for_src"});
+    const auto sparse_mixer_out = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"sparse_mixer_out"});
+    const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_softmax_out"});
+    const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
+
+    auto       normalization_mode = moe_conf.has_moe_norm ?
+                                        tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                        tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    auto       gate_with_bias     = gate;
+    at::Tensor gate_with_bias_tensor;  // hold the tensor to prevent it from being released
+    prepareMoEGate(params, gate, gate_with_bias_tensor, gate_with_bias);
+
+    tensorrt_llm::kernels::selectExpertsForTokens(gate->data<float>(),
+                                                  gate_with_bias->data<float>(),
+                                                  expert_scales->data<float>(),
+                                                  sparse_mixer_out->data<float>(),
+                                                  softmax_out->data<float>(),
+                                                  expert_for_source_row->data<int>(),
+                                                  source_rows->data<int>(),
+                                                  token_num,
+                                                  num_expert,
+                                                  top_k,
+                                                  0,
+                                                  num_expert,
+                                                  0,
+                                                  normalization_mode,
+                                                  stream_);
+    return {expert_for_source_row, expert_scales};
+}
+
+FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+    RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
+
+    const auto& moe_conf = params.configs.moe_configs.value();
+    const auto& hidden   = params.input;
+    const auto& weights  = params.weights;
+    const auto  type     = hidden.type();
+
+    const auto weight_type            = weights.moe_down_weight->kernel->type();
+    const auto token_num              = hidden.shape()[0];
+    const auto hidden_dim             = hidden.shape()[1];
+    const auto num_expert             = params.weights.moe_gating_weight->kernel->shape()[1];
+    const auto top_k                  = moe_conf.top_k;
+    const auto moe_inter_size         = moe_conf.moe_inter_padding_size;
     const auto normalize_expert_scale = moe_conf.normalize_expert_scale;
     // TODO group_size
     auto group_size = 0;
     if (params.weights.moe_gate_weight->kernel->isQBuffer()) {
-        if ( dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zerosData() != nullptr) {
-            group_size = params.weights.moe_gate_weight->kernel->shape()[1]
-                         / dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zeros().shape()[1];
+        if (dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zerosData() != nullptr) {
+            group_size =
+                params.weights.moe_gate_weight->kernel->shape()[1]
+                / dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zeros().shape()[1];
         }
     }
-
-    BufferPtr output = nullptr;
+    auto      normalization_mode = moe_conf.has_moe_norm ?
+                                       tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                       tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    BufferPtr output             = nullptr;
     if (params.output) {
         output = params.output;
     } else {
         output = allocateBuffer({type, {token_num, hidden_dim}});
     }
-
-    const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel,
-                            nullopt, nullptr, DataType::TYPE_FP32});
-
-    const auto fc2_result = allocateBuffer({type, {token_num, top_k, hidden_dim}}, {"moe_fc2_result"});
-    const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expert_scale"});
-    const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expand_src_to_dst"});
-    const auto expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}}, {"moe_expert_for_src"});
-
-    auto normalization_mode = moe_conf.has_moe_norm
-                            ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE
-                            : tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-
-    auto gate_with_bias = gate;
-    at::Tensor gate_with_bias_tensor; // hold the tensor to prevent it from being released
-    prepareMoEGate(params, gate, gate_with_bias_tensor, gate_with_bias);
-
-    printBufferData(*gate, "MOE gate");
 
     moe_plugin_->init(num_expert,
                       top_k,
@@ -70,37 +264,66 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
                       normalization_mode,
                       moe_conf.ep_size,
                       moe_conf.ep_rank);
-    const auto ws_size   = moe_plugin_->getWorkspaceSize(token_num);
-    const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}}, {"moe_workspace"});
+    const auto new_ws_size   = moe_plugin_->getWorkspaceSize(token_num);
+    const auto new_worksapce = allocateBuffer({DataType::TYPE_BYTES, {new_ws_size}}, {"moe_workspace"});
+    auto       fc2_result    = allocateBuffer({type, {token_num, top_k, hidden_dim}}, {"moe_fc2_result"});
+    const auto new_expanded_source_row_to_dest =
+        allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expand_src_to_dst"});
 
-    moe_plugin_->enqueue(
-        hidden.data(),
-        gate->data<float>(),
-        gate_with_bias->data<float>(),
-        weights.moe_gate_weight->kernel->data(),
-        BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
-        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
-        OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
-        weights.moe_down_weight->kernel->data(),
-        BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
-        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
-        OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
-        token_num,
-        worksapce->data<char>(),
-        // output
-        output->data(),
-        fc2_result->data(),
-        nullptr,   // finished
-        expert_scales->data(),
-        expanded_source_row_to_dest->data<int>(),
-        expert_for_source_row->data<int>(),
-        stream_
-    );
-    printBufferData(*expanded_source_row_to_dest, "expanded_source_row_to_dest");
-    printBufferData(*expert_for_source_row, "expert_for_source_row");
+    moe_plugin_->enqueue(hidden.data(),
+                         nullptr,  // gate->data<float>(),
+                         nullptr,  // gate_with_bias->data<float>(),
+                         weights.moe_gate_weight->kernel->data(),
+                         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
+                         BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
+                         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
+                         weights.moe_down_weight->kernel->data(),
+                         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
+                         BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
+                         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
+                         token_num,
+                         new_worksapce->data<char>(),
+                         // output
+                         output->data(),
+                         fc2_result->data(),
+                         nullptr,  // finished
+                         gate_outputs.expert_scales->data<float>(),
+                         new_expanded_source_row_to_dest->data<int>(),
+                         gate_outputs.expert_ids->data<int>(),
+                         stream_);
     printBufferData(*output, "moe_ffn_out");
-
     return FfnLayerOutput({move(output)});
+}
+
+FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
+    const auto&         moe_conf    = params.configs.moe_configs.value();
+    MoeGateSelectOutput gate_output = moeGateSelect(params);
+
+    if (moe_conf.ep_size > 1 && true) {
+        MoeDispatchOutput dispatched_output =
+            epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
+        BufferPtr hidden_states = dispatched_output.hidden;
+        if (hidden_states->shape()[0]) {
+            auto moe_ffn_params = FfnLayerParams(
+                {*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme});
+            hidden_states =
+                moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
+        }
+        FfnLayerOutput out = epCombine({hidden_states,
+                                        dispatched_output.indices,
+                                        // nullptr,
+                                        params.output,
+                                        dispatched_output.input_split_sizes,
+                                        dispatched_output.output_split_sizes,
+                                        moe_conf,
+                                        params.input.shape()[0],
+                                        init_params_.enable_comm_overlap});
+        printBufferData(*out.hidden_states, "moe_ffn_ep_out");
+        return out;
+    } else {
+        return moeFfn(params, gate_output);
+    }
 }
 
 void CudaDevice::prepareMoEGate(const FfnLayerParams& params,

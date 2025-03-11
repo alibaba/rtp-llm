@@ -41,9 +41,9 @@
 namespace fastertransformer {
 #define NCCLCHECK(cmd)                                                                                                 \
     do {                                                                                                               \
-        ncclResult_t r = cmd;                                                                                          \
-        if (r != ncclSuccess) {                                                                                        \
-            printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(r));                      \
+        ncclResult_t __r = cmd;                                                                                          \
+        if (__r != ncclSuccess) {                                                                                        \
+            printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(__r));                      \
             fflush(stdout);                                                                                            \
             fflush(stderr);                                                                                            \
             abort();                                                                                                   \
