@@ -55,9 +55,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
-    TRANS_OPTIONAL(in_think_mode);
-    TRANS_OPTIONAL(max_thinking_tokens);
-    TRANS_OPTIONAL(end_think_token_id);
+    generate_config->in_think_mode = config_proto->in_think_mode();
+    generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
+    generate_config->end_think_token_id = config_proto->end_think_token_id();
     return generate_config;
 }
 

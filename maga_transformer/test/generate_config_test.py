@@ -2,6 +2,9 @@ import os
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.models.starcoder import StarcoderTokenizer
+from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from transformers import AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from unittest import TestCase, main
 from typing import Any
@@ -9,6 +12,9 @@ from typing import Any
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
+        self.test_data_path = os.path.join(
+            os.getcwd(), 'maga_transformer/test'
+        )
 
     def _create_generate_config(self):
         return {
@@ -98,6 +104,38 @@ class GenerateConfigTest(TestCase):
         a.gen_hash_value()
         b.gen_hash_value()
         self.assertTrue(a.is_same(b))
+    
+    def test_add_thinking_params(self):
+        os.environ["THINK_MODE"] = "1"
+        os.environ["THINK_END_TOKEN_ID"] = "102"
+        parameter = GptInitModelParameters(0, 0, 0, 0, 0)
+        tokenizer = QWenTokenizer(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken")
+        generate_config_dict = self._create_generate_config()
+        generate_config_dict.update({
+            "max_thinking_tokens": 109
+        })
+        generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
+        self.assertEqual(generate_config.max_thinking_tokens, 109)
+        self.assertEqual(generate_config.in_think_mode, 1)
+        self.assertEqual(generate_config.end_think_token_id, 102)
+
+    def test_add_thinking_params_with_think_token(self):
+        os.environ["THINK_MODE"] = "1"
+        os.environ["THINK_END_TOKEN_ID"] = "-1"
+        os.environ["THINK_END_TOKEN"] = "</think>"
+        parameter = GptInitModelParameters(0, 0, 0, 0, 0)
+        tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        generate_config_dict = self._create_generate_config()
+        generate_config_dict.update({
+            "max_thinking_tokens": 20
+        })
+        generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
+        self.assertEqual(generate_config.max_thinking_tokens, 20)
+        self.assertEqual(generate_config.in_think_mode, 1)
+        self.assertEqual(generate_config.end_think_token_id, 151649)
 
 if __name__ == '__main__':
     main()
