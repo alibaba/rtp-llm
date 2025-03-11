@@ -270,8 +270,7 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     const auto new_worksapce = allocateBuffer({DataType::TYPE_BYTES, {new_ws_size}}, {"moe_workspace"});
     auto       fc2_result    = allocateBuffer({type, {token_num, top_k, hidden_dim}}, {"moe_fc2_result"});
     const auto new_expanded_source_row_to_dest =
-        allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expand_src_to_dst"});
-
+        allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_expand_src_to_dst"});
     moe_plugin_->enqueue(hidden.data(),
                          nullptr,  // gate->data<float>(),
                          nullptr,  // gate_with_bias->data<float>(),
