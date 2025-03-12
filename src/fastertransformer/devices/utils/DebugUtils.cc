@@ -20,19 +20,20 @@ void printBuffer1d(const std::string&  hint,
     FT_LOG(log_level, "Buffer %s: shape [%d]", hint.c_str(), dim1);
     std::stringstream ss;
     ss << "Buffer " << hint << " : ";
-    double sum1       = 0;
-    double sum2       = 0;
     auto   print_func = [&](size_t column_start, size_t column_end) {
         for (int i = column_start; i < column_end && i < dim1; i++) {
             double value = tensor[i].item<double>();
             ss << " i = " << i << " value = " << value;
-            sum1 += value;
-            sum2 += value * value;
         }
     };
+    const auto [sum1, sum2] = calculateTensorSum(
+        [&](size_t i) -> auto { return tensor[i]; }, // 访问器
+        dim1          // 当前维度长度
+    );
     print_func(column_start, column_end);
     ss << " ...... ";
     print_func(std::max((size_t)0, dim1 - (column_end - column_start)), dim1);
+    
     ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
     FT_LOG(log_level, ss.str());
 }
@@ -52,16 +53,16 @@ void printBuffer2d(const std::string&  hint,
         std::stringstream ss;
         ss << "Buffer " << hint << " : ";
         ss << "[" << i << "]";
-        double sum1       = 0;
-        double sum2       = 0;
         auto   print_func = [&](size_t column_start, size_t column_end) {
             for (int j = column_start; j < column_end && j < dim2; j++) {
                 double value = tensor[i][j].item<double>();
                 ss << " k = " << j << " value = " << value;
-                sum1 += value;
-                sum2 += value * value;
             }
         };
+        const auto [sum1, sum2] = calculateTensorSum(
+            [&](size_t j) -> auto { return tensor[i][j]; },
+            dim2
+        );
         print_func(column_start, column_end);
         ss << " ...... ";
         print_func(std::max((size_t)0, dim2 - (column_end - column_start)), dim2);
@@ -91,16 +92,16 @@ void printBuffer3d(const std::string&  hint,
             std::stringstream ss;
             ss << "Buffer " << hint << " : ";
             ss << "[" << i << ", " << j << "]";
-            double sum1       = 0;
-            double sum2       = 0;
             auto   print_func = [&](size_t column_start, size_t column_end) {
                 for (int k = column_start; k < column_end && k < dim3; k++) {
                     double value = tensor[i][j][k].item<double>();
                     ss << " k = " << k << " value = " << value;
-                    sum1 += value;
-                    sum2 += value * value;
                 }
             };
+            const auto [sum1, sum2] = calculateTensorSum(
+                [&](size_t k) -> auto { return tensor[i][j][k]; },
+                dim3
+            );
             print_func(column_start, column_end);
             ss << " ...... ";
             print_func(std::max((size_t)0, dim3 - (column_end - column_start)), dim3);
@@ -133,16 +134,16 @@ void printBuffer4d(const std::string&  hint,
                 std::stringstream ss;
                 ss << "Buffer " << hint << " : ";
                 ss << "[" << i << "," << j << "," << k << "]";
-                double sum1       = 0;
-                double sum2       = 0;
                 auto   print_func = [&](size_t column_start, size_t column_end) {
                     for (int x = column_start; x < column_end && x < dim4; x++) {
                         double value = tensor[i][j][k][x].item<double>();
                         ss << " k = " << x << " value = " << value;
-                        sum1 += value;
-                        sum2 += value * value;
                     }
                 };
+                const auto [sum1, sum2] = calculateTensorSum(
+                    [&](size_t x) -> auto { return tensor[i][j][k][x]; },
+                    dim4
+                );
                 print_func(column_start, column_end);
                 ss << " ...... ";
                 print_func(std::max((size_t)0, dim4 - (column_end - column_start)), dim4);
@@ -178,16 +179,16 @@ void printBuffer5d(const std::string&  hint,
                     std::stringstream ss;
                     ss << "Buffer " << hint << " : ";
                     ss << "[" << i << "," << j << "," << k << "," << x << "]";
-                    double sum1       = 0;
-                    double sum2       = 0;
                     auto   print_func = [&](size_t column_start, size_t column_end) {
                         for (int y = column_start; y < column_end && y < dim5; y++) {
                             double value = tensor[i][j][k][x][y].item<double>();
                             ss << " y = " << y << " value = " << value;
-                            sum1 += value;
-                            sum2 += value * value;
                         }
                     };
+                    const auto [sum1, sum2] = calculateTensorSum(
+                        [&](size_t y) -> auto { return tensor[i][j][k][x][y]; },
+                        dim5
+                    );
                     print_func(column_start, column_end);
                     ss << " ...... ";
                     print_func(std::max((size_t)0, dim5 - (column_end - column_start)), dim5);
@@ -226,16 +227,16 @@ void printBuffer6d(const std::string&  hint,
                         std::stringstream ss;
                         ss << "Buffer " << hint << " : ";
                         ss << "[" << i << "," << j << "," << k << "," << x << "," << y << "]";
-                        double sum1       = 0;
-                        double sum2       = 0;
                         auto   print_func = [&](size_t column_start, size_t column_end) {
                             for (int z = column_start; z < column_end && z < dim6; z++) {
                                 double value = tensor[i][j][k][x][y][z].item<double>();
                                 ss << " k = " << z << " value = " << value;
-                                sum1 += value;
-                                sum2 += value * value;
                             }
                         };
+                        const auto [sum1, sum2] = calculateTensorSum(
+                            [&](size_t z) -> auto { return tensor[i][j][k][x][y][z]; },
+                            dim6
+                        );
                         print_func(column_start, column_end);
                         ss << " ...... ";
                         print_func(std::max((size_t)0, dim6 - (column_end - column_start)), dim6);
