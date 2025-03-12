@@ -223,7 +223,7 @@ class DeepSeekV2(BaseModel):
 
             # MLA config
             config.use_mla = True
-            config.use_mla_ops = bool(os.environ.get('USE_MLA_OPS', False))
+            config.use_mla_ops = os.environ.get('USE_MLA_OPS', "1") == "1"
             logging.info(f"deepseek2 use_mla_ops: {config.use_mla_ops}")
             config.q_lora_rank = config_json['q_lora_rank']
             config.kv_lora_rank = config_json['kv_lora_rank']
