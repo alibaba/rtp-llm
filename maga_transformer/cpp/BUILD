@@ -23,6 +23,7 @@ cc_library(
     deps = torch_deps() + [
         "@havenask//aios/alog:alog",
         "@havenask//aios/autil:env_util",
+        "@havenask//aios/autil:net",
         "@com_google_absl//absl/debugging:stacktrace",
         "@com_google_absl//absl/debugging:symbolize",
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",

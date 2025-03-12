@@ -138,11 +138,12 @@ private:
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
         return "[RANK " + std::to_string(rank_)
+               + "][" + ip_
                + "][" + file + ":" + std::to_string(line) + "][" + func + "] ";
     }
 
     inline const std::string getTracePrefix() {
-        return "[RANK " + std::to_string(rank_) + "] ";
+        return "[RANK " + std::to_string(rank_) + "][" + ip_ + "] ";
     }
 
     inline const std::string getLevelName(const uint32_t level) {
@@ -162,6 +163,7 @@ private:
                                                                      {alog::LOG_LEVEL_ERROR, "ERROR"}};
 
     int32_t rank_ = 0;
+    std::string ip_;
 };
 
 } // namespace rtp_llm

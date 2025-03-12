@@ -19,6 +19,7 @@
 #include <stdexcept>
 
 #include "maga_transformer/cpp/utils/Logger.h"
+#include "autil/NetUtil.h"
 
 namespace rtp_llm {
 
@@ -69,6 +70,10 @@ Logger::Logger(const std::string& submodule_name) {
         logger_->setLevel(log_level);
     }
     base_log_level_ = logger_->getLevel();
+    auto success = autil::NetUtil::GetDefaultIp(ip_);
+    if (!success) {
+        printf("Logger failed to get default ip\n");
+    }
 }
 
 void Logger::setBaseLevel(const uint32_t base_level) {

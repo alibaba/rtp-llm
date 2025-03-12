@@ -20,7 +20,9 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initDevices(const EngineInitParams& params) {
-    Logger::getEngineLogger().setRank(params.gpt_init_parameter.local_rank_);
+    const auto rank = params.gpt_init_parameter.dp_rank_ * params.gpt_init_parameter.tp_size_ +
+                      params.gpt_init_parameter.tp_rank_;
+    Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     ft::DeviceFactory::initDevices(params.gpt_init_parameter);
     device_       = ft::DeviceFactory::getDefaultDevice();
