@@ -119,7 +119,7 @@ def get_gang_info() -> GangInfo:
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
-        self: Optional[WorkerInfo] = None
+    self: Optional[WorkerInfo] = None
     master: Optional[WorkerInfo] = None
     all_members: List[WorkerInfo] = []
     for part_rank, member in enumerate(members):

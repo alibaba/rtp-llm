@@ -75,6 +75,8 @@ class ParallelInfo(object):
                 world_size=int(params.get('WORLD_SIZE', '1')),
                 world_rank=int(params.get('WORLD_RANK', '0')),
                 local_world_size=int(params.get('LOCAL_WORLD_SIZE', '1')))
+        if (info.local_world_size > torch.cuda.device_count()):
+            raise Exception(f'local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}')
         if (info.tp_size * info.pp_size * info.dp_size != info.world_size or
             info.world_rank >= info.world_size):
             raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
@@ -103,7 +105,7 @@ class ParallelInfo(object):
             except json.JSONDecodeError:
                 logging.info(f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}")
 
-        return info        
+        return info
 
     # used for ut
     def reload(self):
