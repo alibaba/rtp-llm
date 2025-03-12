@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 #include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "maga_transformer/cpp/devices/OpData.h"
@@ -5,6 +6,18 @@
 #include "maga_transformer/cpp/core/BufferHelper.h"
 #include "maga_transformer/cpp/devices/DeviceFactory.h"
 using namespace rtp_llm;
+=======
+#ifdef USING_ROCM
+#include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
+#else
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#endif
+#include "src/fastertransformer/devices/OpData.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
+using namespace fastertransformer;
+>>>>>>> 0d702f4fa (mla kernels v3)
 
 namespace unittest {
 

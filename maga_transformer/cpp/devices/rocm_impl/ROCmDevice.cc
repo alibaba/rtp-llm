@@ -121,6 +121,13 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     fmha_runner_->init(stream_);
     moe_runner_.reset(new rocmMoeWrapper());
     ck_gemm_runner_.reset(new rocmCKGemmWrapper());
+
+    // select mla type
+    if (params.mla_ops_type != MlaOpsType::AUTO) {
+        mla_ops_type = params.mla_ops_type;
+    } else {
+        mla_ops_type = device_prop_.major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
+    }
 }
 
 ROCmDevice::~ROCmDevice() {
@@ -163,6 +170,21 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     output.need_mask = false;
+    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
+             this,
+             params.configs,
+             params.sequence_lengths,
+             params.input_lengths,
+             params.kv_cache_block_id,
+             params.dtype);
+     output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
+             this,
+             params.configs,
+             params.sequence_lengths,
+             params.input_lengths,
+             params.kv_cache_block_id,
+             params.dtype
+     );
     return std::move(output);
 }
 

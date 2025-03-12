@@ -48,6 +48,21 @@ public:
                    void*  lse_acc_buf,
                    void*  linear_bias_slopes = nullptr,
                    void*  biasBuffer         = nullptr);
+
+    uint32_t runCKFmhaMLA(void*  q,
+                    void*  k,
+                    void*  v,
+                    void*  output,
+                    void*  softmax_lse_,
+                    size_t batch_size,
+                    size_t seq_len,
+                    void*  seqstart_q,
+                    void*  seqstart_k,
+                    void*  lse_acc_buf,
+                    void*  linear_bias_slopes = nullptr,
+                    void*  biasBuffer         = nullptr,
+                    size_t size_per_head_qk   = 0,
+                    size_t size_per_head_v    = 0);
 };
 
 }  // namespace rtp_llm

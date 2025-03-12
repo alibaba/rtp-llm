@@ -26,6 +26,72 @@
 
 namespace rtp_llm {
 
+    struct FlashInferAttnParams {
+        BufferPtr float_workspace;
+        BufferPtr int_workspace;
+        BufferPtr int_host_workspace;
+    
+        BufferPtr batch_indice_host;
+        BufferPtr positions_host;
+        BufferPtr kvlen_host;
+        BufferPtr paged_kv_last_page_len_host;
+        BufferPtr paged_kv_last_page_len_1_host;
+        BufferPtr page_indice_host;
+    
+        BufferPtr batch_indice;
+        BufferPtr positions;
+        BufferPtr paged_kv_last_page_len; // w/o current
+        BufferPtr paged_kv_last_page_len_1; // w current
+    
+        BufferPtr qo_indptr;
+        BufferPtr qo_indptr_host;
+        BufferPtr page_indptr;
+        BufferPtr page_indptr_host;
+        BufferPtr page_indice;
+    
+        torch::Tensor float_workspace_t;
+        torch::Tensor int_workspace_t;
+        torch::Tensor int_host_workspace_t;
+        torch::Tensor batch_indice_t;
+        torch::Tensor positions_t;
+        torch::Tensor paged_kv_last_page_len_t;
+        torch::Tensor paged_kv_last_page_len_1_t;
+    
+        torch::Tensor qo_indptr_t;
+        torch::Tensor qo_indptr_host_t;
+        torch::Tensor page_indptr_t;
+        torch::Tensor page_indptr_host_t;
+        torch::Tensor kvlen_host_t;
+        torch::Tensor page_indice_t;
+        // for flashmla only
+        BufferPtr kv_cache_block_id;
+        BufferPtr kvlen;
+    
+        torch::Tensor kv_cache_block_id_t;
+        torch::Tensor kvlen_t;
+    
+        std::vector<torch::Tensor> flash_mla_plan;
+    
+        bool decode = true;
+        torch::Tensor plan;
+    
+        static FlashInferAttnParamsPtr prepareDecodeFlashInferAttnParams(
+                fastertransformer::DeviceBase *device,
+                const fastertransformer::AttentionConfigs &attn_configs,
+                const BufferPtr &sequence_lengths_host,
+                const BufferPtr &input_lengths_host,
+                const BufferPtr &kv_cache_block_id_host,
+                DataType dtype);
+    
+        static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
+                fastertransformer::DeviceBase *device,
+                const fastertransformer::AttentionConfigs &attn_configs,
+                const BufferPtr &sequence_lengths_host,
+                const BufferPtr &input_lengths_host,
+                const BufferPtr &kv_cache_block_id_host,
+                DataType dtype);
+    };
+
 class ROCmEvent : public DeviceEvent {
 public:
     ROCmEvent(hipStream_t stream);
@@ -60,6 +126,7 @@ public:
     LayernormOutput layernorm(const LayernormParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
@@ -81,8 +148,15 @@ public:
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
+    void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
+    void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
+
+    void mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) override;
+    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
+    SliceOutput slice(const SliceParams& params) override;
 
 public:
+    hipStream_t getStream() {return stream_;}
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;

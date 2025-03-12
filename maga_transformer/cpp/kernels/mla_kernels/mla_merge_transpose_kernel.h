@@ -1,7 +1,12 @@
 #pragma once
 
+#ifdef USING_ROCM
+#include <hip/hip_fp16.h>
+#include "src/fastertransformer/rocm/hip_utils.h"
+#else
 #include <cuda_fp16.h>
 #include "maga_transformer/cpp/cuda/cuda_utils.h"
+#endif
 
 namespace rtp_llm {
 

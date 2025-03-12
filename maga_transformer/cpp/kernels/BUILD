@@ -122,7 +122,8 @@ cc_library(
         "custom_ar_kernels.cu",
         "rocm/quantization_rocm.cu",
         "rocm/layernorm_kernels.cu",
-	    ":mmha1",
+        "mla_kernels/mla_merge_transpose_kernel.cu",
+        ":mmha1",
         ":mmha2",
         ":dmmha",
     ],
@@ -142,6 +143,7 @@ cc_library(
         "custom_ar_kernels.h",
         "rocm/quantization_rocm.h",
         "rocm/layernorm_kernels.h",
+        "mla_kernels/mla_merge_transpose_kernel.h",
     ],
     deps = [
         ":rocm_utils",
@@ -155,6 +157,19 @@ cc_library(
         "//maga_transformer/cpp/rocm:rocm",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp/rocm:rocm_types_hdr",
+    ],
+    copts = rocm_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mla_kernels_rocm",
+    hdrs = glob([
+        "mla_kernels_rocm/*.h",
+    ]),
+    deps = [
+        "//src/fastertransformer/cuda:cuda_utils_rocm",
     ],
     copts = rocm_copts(),
     include_prefix = "src",

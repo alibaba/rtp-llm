@@ -10,6 +10,7 @@ cc_library(
         "*.cc",
     ]),
     deps = [
+        "@aiter//:decode_mla",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "@local_config_rocm//rocm:rocblas",

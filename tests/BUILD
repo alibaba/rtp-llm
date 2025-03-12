@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts", "cuda_copts", "rocm_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "cuda_register")
 
 
@@ -241,6 +241,49 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_library(
+    name = "rocm_test_ops_libs",
+    srcs = glob([
+        "mla/mla_rotary_kvcache_test.cc",
+        "mla/mla_decoder_attention.cc",
+        "mla/rocm_mla_context_attention.cc"
+    ]),
+    deps = torch_deps() + [
+        "//src/fastertransformer/devices/rocm_impl:rocm_impl",        
+    ],
+    copts = rocm_copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "rocm_test_ops",
+    deps = [":rocm_test_ops_libs"],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "rocm_mla_decode_attention",
+    srcs = [
+        "mla/rocm_mla_decode_attention.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+
 py_test(
     name = "mla_rotary_kvcache_test",
     srcs = [
@@ -278,7 +321,46 @@ py_test(
     },
     tags = [
         "manual",
-    ]
+    ],
+)
+
+py_test(
+    name = "rocm_mla_context_attention",
+    srcs = [
+        "mla/rocm_mla_context_attention.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+   deps = [
+        "//maga_transformer:testlib",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "manual",
+    ], 
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "rocm_mla_rotary_kvcache_test",
+    srcs = [
+        "mla/rocm_mla_rotary_kvcache_test.py",
+        "mla/test_util.py",
+        "mla/rotary_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
 )
 
 cc_test(

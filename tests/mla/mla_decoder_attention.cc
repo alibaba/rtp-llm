@@ -1,10 +1,13 @@
+#ifdef USING_ROCM
+#include "maga_transformer/cpp/devices/rocm_impl/ROCmDevice.h"
+#else
 #include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#endif
 #include "maga_transformer/cpp/devices/OpData.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/core/BufferHelper.h"
 #include "maga_transformer/cpp/devices/DeviceFactory.h"
-
 using namespace rtp_llm;
 
 namespace unittest {
