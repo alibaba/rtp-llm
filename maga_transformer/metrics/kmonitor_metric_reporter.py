@@ -36,7 +36,7 @@ class MetricReporter(object):
 
     def report(self, metric: Union[AccMetrics,GaugeMetrics], value: float = 1, tags: Dict[str, Any] = {}):
         if g_parallel_info.dp_size > 1:
-            tags['dp_rank'] = g_parallel_info.dp_rank
+            tags['dp_rank'] = str(g_parallel_info.dp_rank)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
             logging.warn(f"no metric named {metric.name}")
