@@ -68,6 +68,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokens) {
     int num_new_tokens = 2;
     int max_token_num = std::min((int)params.max_seq_len_, (int)builder.generate_config_->max_new_tokens + builder.generate_input_->inputLength());
     int input_length = builder.generate_input_->inputLength();
+    int in_think_mode = 1;
     int max_thinking_tokens = builder.generate_config_->max_thinking_tokens;
     int end_think_token_id = builder.generate_config_->end_think_token_id;
     int num_beams = builder.generate_input_->generate_config->num_beams;
@@ -76,9 +77,9 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokens) {
     ASSERT_EQ(complete_token_ids->seq_length_, 5);
     
     bool ret = complete_token_ids->update(new_tokens_ptr, begin_time_us, 
-        num_new_tokens, input_length, max_token_num, max_thinking_tokens,
-        end_think_token_id, params.vocab_size_, num_beams, stream_id, 
-        error_token_id);
+        num_new_tokens, input_length, max_token_num, in_think_mode, 
+        max_thinking_tokens, end_think_token_id, params.vocab_size_, 
+        num_beams, stream_id, error_token_id);
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 7);
 
