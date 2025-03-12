@@ -90,14 +90,14 @@ WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
         device_status.device_memory_status.max_consumed_bytes});
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery() {
+std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
     FT_LOG_DEBUG("enqueue min fake query");
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer(
                                                 {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
     fake_input->generate_config               = make_shared<GenerateConfig>();
-    fake_input->generate_config->max_new_tokens = 3;
+    fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->generate_config->top_k = 1;
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query = true;
@@ -109,7 +109,7 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery() {
 
 void NormalEngine::initLoadBalance() {
     FT_LOG_INFO("init load balance start");
-    auto stream = enqueueMinFakeQuery();
+    auto stream = enqueueMinFakeQuery(3);
     while(!stream->finished() && !stream->stopped()) {
         FT_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
@@ -213,7 +213,7 @@ absl::Status NormalEngine::step() {
             if (params_.dp_size_ > 1) {
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
                 if (streams.empty()) {
-                    enqueueMinFakeQuery();
+                    enqueueMinFakeQuery(1);
                     return absl::OkStatus();
                 }
             } else {
