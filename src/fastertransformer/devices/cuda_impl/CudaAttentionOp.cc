@@ -249,7 +249,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
             params->page_indptr_host_t,
             params->kvlen_host_t,
             local_head_num,
-            attn_configs.v_head_dim,
+            attn_configs.kv_lora_rank,
             true,
             reinterpret_cast<int64_t>(cuda_device->getStream())
         );        
