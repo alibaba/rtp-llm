@@ -97,7 +97,7 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
                                                 {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
     fake_input->generate_config               = make_shared<GenerateConfig>();
-    fake_input->generate_config->max_new_tokens = max_new_tokens;
+    fake_input->generate_config->max_new_tokens = 1;
     fake_input->generate_config->top_k = 1;
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query = true;

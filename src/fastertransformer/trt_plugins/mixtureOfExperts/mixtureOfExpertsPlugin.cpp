@@ -140,3 +140,35 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, f
 
     return 0;
 }
+
+void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                    input,
+                                                    float const*                    input_with_bias,
+                                                    float*                          output,
+                                                    float*                          mixer_temp_output,
+                                                    float*                          softmax_temp_output,
+                                                    int*                            indices,
+                                                    int*                            source_row,
+                                                    int64_t const                   num_rows,
+                                                    int const                       num_experts,
+                                                    int const                       k,
+                                                    int const                       start_expert,
+                                                    int const                       end_expert,
+                                                    float                           mixer_epsilon,
+                                                    MOEExpertScaleNormalizationMode norm_mode,
+                                                    cudaStream_t                    stream) {
+    selectExpertsForTokensImpl(input,
+                               input_with_bias,
+                               output,
+                               mixer_temp_output,
+                               softmax_temp_output,
+                               indices,
+                               source_row,
+                               num_rows,
+                               num_experts,
+                               k,
+                               start_expert,
+                               end_expert,
+                               mixer_epsilon,
+                               norm_mode,
+                               stream);
+}

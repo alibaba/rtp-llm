@@ -175,8 +175,8 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
-    MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params);
-    FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params) override;
+    FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     GreedyOutput sampleGreedy(const GreedyParams& params) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;

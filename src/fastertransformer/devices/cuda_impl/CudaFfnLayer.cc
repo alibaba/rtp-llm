@@ -201,21 +201,21 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     at::Tensor gate_with_bias_tensor;  // hold the tensor to prevent it from being released
     prepareMoEGate(params, gate, gate_with_bias_tensor, gate_with_bias);
 
-    tensorrt_llm::kernels::selectExpertsForTokens(gate->data<float>(),
-                                                  gate_with_bias->data<float>(),
-                                                  expert_scales->data<float>(),
-                                                  sparse_mixer_out->data<float>(),
-                                                  softmax_out->data<float>(),
-                                                  expert_for_source_row->data<int>(),
-                                                  source_rows->data<int>(),
-                                                  token_num,
-                                                  num_expert,
-                                                  top_k,
-                                                  0,
-                                                  num_expert,
-                                                  0,
-                                                  normalization_mode,
-                                                  stream_);
+    moe_plugin_->selectExpertsForTokens(gate->data<float>(),
+                                        gate_with_bias->data<float>(),
+                                        expert_scales->data<float>(),
+                                        sparse_mixer_out->data<float>(),
+                                        softmax_out->data<float>(),
+                                        expert_for_source_row->data<int>(),
+                                        source_rows->data<int>(),
+                                        token_num,
+                                        num_expert,
+                                        top_k,
+                                        0,
+                                        num_expert,
+                                        0,
+                                        normalization_mode,
+                                        stream_);
     return {expert_for_source_row, expert_scales};
 }
 
