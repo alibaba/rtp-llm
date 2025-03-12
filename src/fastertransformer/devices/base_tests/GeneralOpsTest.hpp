@@ -232,4 +232,66 @@ void testLoss() {
     assertTensorClose(bufferToTensor(*res), expected);
 }
 
+void testSigmoid() {
+    {
+        vector<float> gate_v = {1, 2, 3, 4, 5, 6, 7, 8};
+        vector<float> expect_v = {0.7311, 0.8808, 0.9526, 0.9820, 0.9933, 0.9975, 0.9991, 0.9997};
+        for (size_t i = 1; i <= gate_v.size(); ++i) {
+            vector<float> sub_gate(gate_v.begin(), gate_v.begin() + i);
+            vector<float> sub_expect(expect_v.begin(), expect_v.begin() + i);
+            auto         gate     = createBuffer<float>({i}, sub_gate);
+            auto res      = device_->activation({ActivationType::Sigmoid, gate});
+            auto expected = torch::tensor(sub_expect, torch::kFloat32);
+            assertTensorClose(bufferToTensor(*res), expected);
+        }
+    }
+    {
+        vector<half> gate_v = {
+            __float2half(1.0f), __float2half(2.0f), __float2half(3.0f),
+            __float2half(4.0f), __float2half(5.0f), __float2half(6.0f),
+            __float2half(7.0f), __float2half(8.0f)
+        };
+        vector<float> expect_v_float = {0.7310, 0.8809, 0.9526, 0.9819, 0.9932, 0.9976, 0.9990, 0.9995};
+        
+        for (size_t i = 1; i <= gate_v.size(); ++i) {
+            vector<half> sub_gate(gate_v.begin(), gate_v.begin() + i);
+            vector<float> sub_expect_float(expect_v_float.begin(), expect_v_float.begin() + i);
+            
+            auto gate = createBuffer<half>({i}, sub_gate);
+            
+            auto res = device_->activation({ActivationType::Sigmoid, gate});
+            
+            auto expected = torch::tensor(sub_expect_float, torch::kFloat32)
+                            .to(torch::kFloat16);  // 显式转换为FP16
+            
+            assertTensorClose(bufferToTensor(*res), expected);
+        }
+    }
+    #ifdef ENABLE_BF16
+    {
+        // BF16测试用例修改
+        vector<__nv_bfloat16> gate_v = {
+            __float2bfloat16(1.0f), __float2bfloat16(2.0f), __float2bfloat16(3.0f),
+            __float2bfloat16(4.0f), __float2bfloat16(5.0f), __float2bfloat16(6.0f),
+            __float2bfloat16(7.0f), __float2bfloat16(8.0f)
+        };
+        vector<float> expect_v_float = {0.7305, 0.8789, 0.9531, 0.9805, 0.9922, 0.9961, 1.0000, 1.0000};
+        
+        for (size_t i = 1; i <= gate_v.size(); ++i) {
+            vector<__nv_bfloat16> sub_gate(gate_v.begin(), gate_v.begin() + i);
+            vector<float> sub_expect_float(expect_v_float.begin(), expect_v_float.begin() + i);
+            
+            auto gate = createBuffer<__nv_bfloat16>({i}, sub_gate);
+            
+            auto res = device_->activation({ActivationType::Sigmoid, gate});
+            
+            auto expected = torch::tensor(sub_expect_float, torch::kFloat32)
+                            .to(torch::kBFloat16);  // 显式转换为BF16
+            
+            assertTensorClose(bufferToTensor(*res), expected);
+        }
+    }
+    #endif
+}
+
 };
