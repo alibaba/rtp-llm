@@ -120,6 +120,7 @@ class GangServer:
                 return
             except Exception as e:
                 logging.warning(f"gang worker rank:{g_parallel_info.world_rank} is not complete, error_msg: {str(e)}, retry times: {retry_time}")
+                logging.warning(f"stack trace: {traceback.format_exc()}")
                 cur_time = datetime.datetime.now()
                 if cur_time - start_time > datetime.timedelta(minutes=timeout_minutes):
                     raise Exception("failed to start gang server")
