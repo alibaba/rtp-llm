@@ -22,7 +22,7 @@ public:
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 
-    bool update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id);
+    bool update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int in_think_mode, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id);
     void copyTokensTo(int batch_id, void *dst, int offset, size_t token_num);
     void appendTokens(int batch_id, size_t token_num, const ft::Buffer &src);
     const std::vector<int>& isThinkEndTokenIdExist();

@@ -570,9 +570,13 @@ size_t GenerateStream::maxTokenNum() const {
         generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
-size_t GenerateStream::maxThinkingNum() const {
-    return std::min(maxTokenNum(),
-        (size_t) generate_input_->generate_config->max_thinking_tokens + generate_input_->inputLength());
+int GenerateStream::inThinkMode() const {
+    return generate_input_->generate_config->in_think_mode;
+}
+
+int GenerateStream::maxThinkingNum() const {
+    return std::min((int) maxTokenNum(),
+        generate_input_->generate_config->max_thinking_tokens + generate_input_->inputLength());
 }
 
 int GenerateStream::endThinkTokenId() const {
@@ -650,7 +654,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     auto num_new_tokens = update_info.num_new_tokens;
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), maxThinkingNum(), endThinkTokenId(), vocab_size_, numBeams(), streamId(), error_token_id)) {
+    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), inThinkMode(), maxThinkingNum(), endThinkTokenId(), vocab_size_, numBeams(), streamId(), error_token_id)) {
         setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                         "output token id:" + std::to_string(error_token_id) +
                         " out of vocab size: " + std::to_string(vocab_size_));

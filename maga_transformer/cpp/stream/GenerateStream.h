@@ -96,7 +96,8 @@ public:
     int reuseLength() const;
     int initialReuseLength() const;
     size_t maxTokenNum() const;
-    size_t maxThinkingNum() const;
+    int inThinkMode() const;
+    int maxThinkingNum() const;
     int endThinkTokenId() const;
     void setReuseLength(int reuse_length);
     void setInitialReuseLength(int initial_reuse_length);

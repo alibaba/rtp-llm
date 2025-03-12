@@ -33,7 +33,7 @@ public:
         generate_input_->generate_config = generate_config_;
         generate_input_->input_ids = ft::vector2Buffer(input_ids);
         auto tileNum = std::max((int)generate_config_->num_beams, (int)generate_config_->num_return_sequences);
-        std::cout << "tileNum: " << tileNum << " <<<<<<<<<<<<" << std::endl;
+
         auto complete_token_ids = std::make_shared<CompleteTokenIds>(device_, tileNum, params_.max_seq_len_, params_.seq_size_per_block_);
         complete_token_ids->init(generate_input_);
         return complete_token_ids;

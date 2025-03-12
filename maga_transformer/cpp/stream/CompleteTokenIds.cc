@@ -110,7 +110,7 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int> &
     return false;
 }
 
-bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
+bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int in_think_mode, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
     if (seq_length_ == input_length) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
@@ -137,7 +137,7 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
                 is_think_end_token_id_exist_[i] = 1;
             }
         }
-        if (seq_length_ + num_new_tokens >= max_thinking_tokens && is_think_end_token_id_exist_[i] == 0) {
+        if (in_think_mode && seq_length_ + num_new_tokens >= max_thinking_tokens && is_think_end_token_id_exist_[i] == 0) {
             *(*new_tokens)[i].dataWithOffset<int>(num_new_tokens - 1) = end_think_token_id;
             is_think_end_token_id_exist_[i] = 1;
         }
