@@ -704,19 +704,40 @@ __global__ void sigmoid_kernel(half2* data, const int size, const float scale)
         data[index]       = cuda_cast<half2>(val_float2);
     }
 }
+#ifdef ENABLE_BF16
+template<>
+__global__ void sigmoid_kernel(__nv_bfloat162* data, const int size, const float scale)
+{
+    const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < size / 2) {
+        __nv_bfloat162  val        = data[index];
+        float2 val_float2 = cuda_cast<float2>(val);
+        val_float2.x      = 1.0f / (1.0f + exp(-val_float2.x)) * scale;
+        val_float2.y      = 1.0f / (1.0f + exp(-val_float2.y)) * scale;
+        data[index]       = cuda_cast<__nv_bfloat162>(val_float2);
+    }
+}
+#endif
 
 template<typename T>
 void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stream)
 {
-    if (std::is_same<T, float>::value || (size % 2 != 0)) {
-        dim3 block(128);
-        dim3 grid((size + 127) / 128);
-        sigmoid_kernel<<<grid, block, 0, stream>>>(data, size, scale);
-    }
-    else {
+    if (std::is_same<T, half>::value && (size %2 == 0)) {
         dim3 block(128);
         dim3 grid((size + 255) / 256);
         sigmoid_kernel<<<grid, block, 0, stream>>>((half2*)data, size, scale);
+    }
+#ifdef ENABLE_BF16
+    else if (std::is_same<T, __nv_bfloat16>::value && (size %2 == 0)) {
+        dim3 block(128);
+        dim3 grid((size + 255) / 256);
+        sigmoid_kernel<<<grid, block, 0, stream>>>((__nv_bfloat162*)data, size, scale);
+    }
+#endif
+    else {
+        dim3 block(128);
+        dim3 grid((size + 127) / 128);
+        sigmoid_kernel<<<grid, block, 0, stream>>>(data, size, scale);
     }
 }
 
