@@ -1592,7 +1592,11 @@ __global__ void scatter_add_kernel(T const* src, int N, int K, int32_t const* in
 #pragma unroll
     for (int i = 0; i < ELEM_PER_THREAD; ++i) {
         if (thread_idx + i < (size_t)N * K) {
+#if USING_ROCM
+            unsafeAtomicAdd(out + new_idx + k + i, src[thread_idx + i]);
+#else
             atomicAdd(out + new_idx + k + i, src[thread_idx + i]);
+#endif
         }
     }
 }
@@ -1608,7 +1612,11 @@ void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, 
         const dim3 grid(((size_t)N * K + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
         scatter_add_kernel<float, elem_per_thread><<<grid, block, 0, stream>>>(src, N, K, index, out);
     } else if (K % 2 == 0) {
-        using Tp = typename packed_as<T, 2>::type;
+#if USING_ROCM
+        using Tp = typename rocm::packed_type_2<T>::type;
+#else
+        using Tp = typename packed_type_2<T>::type;
+#endif
         const dim3 grid(((size_t)N * K / 2 + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
         scatter_add_kernel<Tp, elem_per_thread><<<grid, block, 0, stream>>>((Tp*)src, N, K / 2, index, (Tp*)out);
 

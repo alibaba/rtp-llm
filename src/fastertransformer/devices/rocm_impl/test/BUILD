@@ -47,7 +47,7 @@ test_linkopts = [
 test_deps = [
     "@local_config_rocm//rocm:rocm_headers",
     "@local_config_rocm//rocm:rocblas",
-    "//src/fastertransformer/cuda:nccl",
+    "//src/fastertransformer/cuda:nccl_util",
     "//src/fastertransformer/devices/rocm_impl:rocm_impl",
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/base_tests:base_tests",

@@ -23,7 +23,7 @@ cc_library(
         "//src/fastertransformer/rocm:rocm_utils",
         "//src/fastertransformer/kernels:hello_kernel",
         "//src/fastertransformer/kernels:gpt_kernels_rocm",
-        "//src/fastertransformer/cuda:nccl",
+        "//src/fastertransformer/cuda:nccl_util",
         "//:th_utils",
         "//src/fastertransformer/devices/torch_impl:torch_beam_search_op_impl",
     ] + torch_deps(),
