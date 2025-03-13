@@ -119,10 +119,11 @@ class GangTest(unittest.TestCase):
 
 
     @mock.patch('torch.cuda.device_count')
-    @mock.patch.dict('os.environ', {"TP_SIZE": "3",
+    @mock.patch.dict('os.environ', {"TP_SIZE": "2",
                                     "PP_SIZE": "1",
-                                    "WORLD_SIZE": "3",
+                                    "WORLD_SIZE": "2",
                                     "WORLD_RANK": "0",
+                                    "LOCAL_WORLD_SIZE": "2",
                                     "START_PORT": str(random.randint(10000, 40000)),
                                     "GANG_SLEEP_TIME": '1',
                                     "FAKE_GANG_ENV": "1",
@@ -130,9 +131,9 @@ class GangTest(unittest.TestCase):
                                     "TOKENIZER_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/tokenizer"),
                                     "CHECKPOINT_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/cpt"),
                                     "DIST_BARRIER_TIMEOUT": "10",
-                                    "CUDA_VISIBLE_DEVICES": "0,1,2"})
+                                    "CUDA_VISIBLE_DEVICES": "0,1"})
     def test_server_start(self, torch_device_count):
-        torch_device_count.return_value = 3
+        torch_device_count.return_value = 2
         g_parallel_info.reload()
 
         procs: List[Process] = list()
