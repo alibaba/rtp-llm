@@ -208,6 +208,18 @@ protected:
                            BufferPtr               output);
     void selectCuFMHARunner(const DevicePrepParams& params);
 
+    KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
+                                 const Buffer&                kv_cache_offset_pointers,
+                                 int                          batch_size,
+                                 bool                         use_fp8_fmha);                                 
+
+    void prefillAttention(const AttentionModuleParams& params,
+                          KVBlockArray                 kv_block_array,
+                          const BufferPtr&             q_output,
+                          const BufferPtr&             k_output,
+                          const BufferPtr&             v_output,
+                          const BufferPtr&             qkv_buf_fp8);
+
 protected:
     cudaStream_t stream_;
     cudaStream_t no_block_copy_stream_;

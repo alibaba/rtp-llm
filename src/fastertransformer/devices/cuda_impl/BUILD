@@ -17,6 +17,7 @@ cc_library(
         "CudaFfnLayer.cc",
         "CudaMlaAttentionOp.cc",
         "CudaGemmOp.cc",
+        "CudaPrefillAttention.cc",
         "CudaGroupGemmOp.cc",
         "CudaLoraLinearWithActOp.cc",
     ]),
