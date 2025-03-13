@@ -92,8 +92,6 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
     auto const rope_head_dim = params.configs.rope_head_dim;
     auto const v_head_dim    = params.configs.v_head_dim;
     auto const nope_rope_dim = nope_head_dim + rope_head_dim;
-    auto const batch_size    = params.common.context_batch_size;
-    auto const seq_len       = params.common.context_max_seq_len;
 
     writeCacheStore(params);
 
@@ -123,30 +121,16 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
 
     printBufferData(*qkv, "mla_qkv");
 
-    switch (fmha_type_) {
-        case FMHAType::OPEN_SOURCE: {
-            const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(batch_size, seq_len);
-            auto ws = allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_fmha_ws"});
-            const size_t hidden_units = head_num * nope_rope_dim;
-
-            cufmha_runner_->runOpenSourceFmha(
-                qkv->data(),
-                qkv->dataWithOffset(hidden_units),
-                qkv->dataWithOffset(hidden_units * 2),
-                params.qkv_output->data(),
-                params.common.cu_seqlens->data<int>(),
-                batch_size,
-                seq_len,
-                ws->data(),
-                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr,
-                params.configs.softmax_extra_scale);
-            break;
-        }
-        default: {
-            throw std::runtime_error("Unsupported FMHA type");
-            break;
-        }
-    }
+    AttentionModuleParams attn_params = AttentionModuleParams(
+        {params.layer_id, *qkv, *params.qkv_output, params.common, params.weights, params.configs, params.qscheme});
+    // only paged fmha use kv_block_array, mld not use paged fmha
+    prefillAttention(
+        attn_params,
+        KVBlockArray(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr);
 }
 
 void transpose_qk_inplace(torch::Tensor& q, torch::Tensor& k) {

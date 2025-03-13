@@ -101,6 +101,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
     }
     switch (fmha_type) {
         case FMHAType::PAGED_TRT_V2: {
+            FT_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");
             cufmha_runner->runTrtV2FmhaPaged(q_output->data(),
                                              params.common.cu_seqlens->data(),
                                              params.common.cu_kv_seqlens->data(),
@@ -120,6 +121,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         case FMHAType::TRT_V2: {
             void*  fmha_input_ptr                    = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
             void*  fmha_output_ptr                   = params.output.data();
+            FT_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
             float* attention_output_orig_quant_scale = nullptr;
             if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {
                 printBufferData(*(params.weights.static_scale_reciprocal_weight->kernel), "attn scale");
@@ -137,6 +139,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
                 fmha_output_ptr = tmp_fmha_output->data();
             }
+            FT_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
             cufmha_runner->runTrtV2Fmha(fmha_input_ptr,
                                         params.common.cu_seqlens->data(),
                                         fmha_output_ptr,
@@ -223,6 +226,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         default: {
+            FT_CHECK_WITH_INFO(q_output && k_output && v_output, "q_output/k_output/v_output must be provided for default context attention implementation");
             q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
             auto qk_output = gemm({*q_output,
                                            *k_output,

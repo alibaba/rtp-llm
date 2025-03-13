@@ -291,7 +291,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
-            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport() && !params.configs.use_mla_ops) {
+            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;

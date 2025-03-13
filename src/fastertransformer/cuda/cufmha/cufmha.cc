@@ -43,7 +43,8 @@ cufmha::cufmha(DataType dtype,
         support_trt_v1_fmha_       = can_use_trtv1_fmha && initTrtV1FmhaAndCheckSupport();
         support_trt_v2_fhma_       = can_use_trtv2_fmha && initTrtV2FmhaAndCheckSupport();
         support_trt_v2_paged_fmha_ = can_use_trtv2_fmha_paged && initTrtV2FmhaPagedAndCheckSupport();
-        support_open_source_fmha_  = (can_use_open_source_fmha || can_use_open_source_fmha_paged) && initOpenSourceFmhaAndCheckSupport();
+        // sm 90 use open source has bug currently
+        support_open_source_fmha_  = (can_use_open_source_fmha || can_use_open_source_fmha_paged) && initOpenSourceFmhaAndCheckSupport() && get_sm() < 90;
         stream_ = stream;
     }
 
