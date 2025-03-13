@@ -25,7 +25,7 @@ public:
 
     CompleteTokenIdsPtr createCompleteTokenIds(std::vector<int> input_ids) {
         generate_config_->in_think_mode = true;
-        generate_config_->max_thinking_tokens = 6;
+        generate_config_->max_thinking_tokens = 1;
         generate_config_->end_think_token_id = 101;
         generate_config_->num_beams = 1;
         generate_config_->num_return_sequences = 1;
