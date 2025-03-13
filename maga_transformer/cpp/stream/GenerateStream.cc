@@ -46,7 +46,11 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                 {ft::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
-    complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
+    complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_,
+                                                                    generate_input_->generate_config->in_think_mode,
+                                                                    generate_input_->generate_config->max_thinking_tokens,
+                                                                    generate_input_->inputLength(),
+                                                                    generate_input_->generate_config->end_think_token_id);
     complete_token_ids_->init(input);
 
     last_output_pos_ = seqLength();
@@ -570,19 +574,6 @@ size_t GenerateStream::maxTokenNum() const {
         generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
-int GenerateStream::inThinkMode() const {
-    return generate_input_->generate_config->in_think_mode;
-}
-
-int GenerateStream::maxThinkingNum() const {
-    return std::min((int) maxTokenNum(),
-        generate_input_->generate_config->max_thinking_tokens + generate_input_->inputLength());
-}
-
-int GenerateStream::endThinkTokenId() const {
-    return generate_input_->generate_config->end_think_token_id;
-}
-
 bool GenerateStream::needFinish() {
     return seqLength() >= maxTokenNum() || needFinishBySPTokens();
 }
@@ -654,7 +645,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     auto num_new_tokens = update_info.num_new_tokens;
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), inThinkMode(), maxThinkingNum(), endThinkTokenId(), vocab_size_, numBeams(), streamId(), error_token_id)) {
+    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), vocab_size_, numBeams(), streamId(), error_token_id)) {
         setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                         "output token id:" + std::to_string(error_token_id) +
                         " out of vocab size: " + std::to_string(vocab_size_));

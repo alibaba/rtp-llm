@@ -19,7 +19,7 @@ class GenerateConfig(BaseModel):
     max_input_tokens: int = 32000
     max_thinking_tokens: int = 32000
     end_think_token_id: int = -1
-    in_think_mode: int = 0
+    in_think_mode: bool = False
     num_beams: int = 1
     # 0 mean not use num_return_sequences,
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
@@ -127,7 +127,7 @@ class GenerateConfig(BaseModel):
             tokenized_result: List[int] = tokenizer.encode(text=think_end_tag, add_special_tokens=False)
             if len(tokenized_result) == 1:
                 self.end_think_token_id = tokenized_result[0]
-        self.in_think_mode = int(os.environ.get("THINK_MODE", "0")) and self.end_think_token_id >= 0
+        self.in_think_mode = bool(os.environ.get("THINK_MODE", "0")) and self.end_think_token_id >= 0
 
     def validate(self):
         try:

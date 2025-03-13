@@ -59,7 +59,7 @@ message GenerateConfigPB {
     bool can_use_pd_separation = 29;
     bool return_softmax_probs = 30;
     bool return_cum_log_probs = 31;
-    int32 in_think_mode = 32;
+    bool in_think_mode = 32;
     int32 max_thinking_tokens = 33;
     int32 end_think_token_id = 34;
 }

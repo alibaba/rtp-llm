@@ -67,7 +67,7 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation  = false;
 
-    int in_think_mode       = 0;
+    bool in_think_mode      = false;
     int max_thinking_tokens = 0;
     int end_think_token_id  = 0;
 

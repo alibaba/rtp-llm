@@ -4,11 +4,15 @@
 
 namespace rtp_llm {
 
-CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block) 
+CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block, bool in_think_mode, int max_thinking_tokens, int input_length, int end_think_token_id) 
     : device_(device)
     , batch_size_(batch_size)
     , max_seq_len_(max_seq_len)
     , seq_size_per_block_(seq_size_per_block)
+    , in_think_mode_(in_think_mode)
+    , max_thinking_tokens_(max_thinking_tokens)
+    , input_length_(input_length)
+    , end_think_token_id_(end_think_token_id)
     , is_think_end_token_id_exist_(batch_size, 0) {
 }
 
@@ -17,6 +21,10 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
     , batch_size_(other.batch_size_)
     , max_seq_len_(other.max_seq_len_)
     , seq_size_per_block_(other.seq_size_per_block_)
+    , in_think_mode_(other.in_think_mode_)
+    , max_thinking_tokens_(other.max_thinking_tokens_)
+    , input_length_(other.input_length_)
+    , end_think_token_id_(other.end_think_token_id_)
     , seq_length_(other.seq_length_)
     , common_len_(other.common_len_)
     , start_check_seq_length_(other.start_check_seq_length_)
@@ -33,6 +41,10 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     common_len_ = seq_length_;
     start_check_seq_length_ = seq_length_;
     init_seq_size_ = seq_length_;
+    in_think_mode_ = generate_input->generate_config->in_think_mode;
+    max_thinking_tokens_ = generate_input->generate_config->max_thinking_tokens;
+    input_length_ = generate_input->inputLength();
+    end_think_token_id_ = generate_input->generate_config->end_think_token_id;
 
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
@@ -110,7 +122,7 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int> &
     return false;
 }
 
-bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int in_think_mode, int max_thinking_tokens, int end_think_token_id, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
+bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
     if (seq_length_ == input_length) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
@@ -133,12 +145,12 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
                 error_token_id = current_token_id; 
                 return false;
             }
-            if (current_token_id == end_think_token_id) {
+            if (current_token_id == end_think_token_id_) {
                 is_think_end_token_id_exist_[i] = 1;
             }
         }
-        if (in_think_mode && seq_length_ + num_new_tokens >= max_thinking_tokens && is_think_end_token_id_exist_[i] == 0) {
-            *(*new_tokens)[i].dataWithOffset<int>(num_new_tokens - 1) = end_think_token_id;
+        if (in_think_mode_ && seq_length_ + num_new_tokens >= max_thinking_tokens_ + input_length_ && is_think_end_token_id_exist_[i] == 0) {
+            *(*new_tokens)[i].dataWithOffset<int>(num_new_tokens - 1) = end_think_token_id_;
             is_think_end_token_id_exist_[i] = 1;
         }
         if (num_beams > 1) {
@@ -181,7 +193,7 @@ void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const ft::Bu
     setSeqLength(seq_length_ + token_num);
 }
 
-const std::vector<int>& CompleteTokenIds::isThinkEndTokenIdExist() {
+const std::deque<bool>& CompleteTokenIds::isThinkEndTokenIdExist() {
     return is_think_end_token_id_exist_;
 }
 

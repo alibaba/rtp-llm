@@ -24,7 +24,7 @@ public:
     }
 
     CompleteTokenIdsPtr createCompleteTokenIds(std::vector<int> input_ids) {
-        generate_config_->in_think_mode = 1;
+        generate_config_->in_think_mode = true;
         generate_config_->max_thinking_tokens = 6;
         generate_config_->end_think_token_id = 101;
         generate_config_->num_beams = 1;
@@ -34,7 +34,8 @@ public:
         generate_input_->input_ids = ft::vector2Buffer(input_ids);
         auto tileNum = std::max((int)generate_config_->num_beams, (int)generate_config_->num_return_sequences);
 
-        auto complete_token_ids = std::make_shared<CompleteTokenIds>(device_, tileNum, params_.max_seq_len_, params_.seq_size_per_block_);
+        auto complete_token_ids = std::make_shared<CompleteTokenIds>(device_, tileNum, params_.max_seq_len_, params_.seq_size_per_block_,
+            generate_config_->in_think_mode, generate_config_->max_thinking_tokens, 0, generate_config_->end_think_token_id);
         complete_token_ids->init(generate_input_);
         return complete_token_ids;
     };
@@ -68,22 +69,18 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokens) {
     int num_new_tokens = 2;
     int max_token_num = std::min((int)params.max_seq_len_, (int)builder.generate_config_->max_new_tokens + builder.generate_input_->inputLength());
     int input_length = builder.generate_input_->inputLength();
-    int in_think_mode = 1;
-    int max_thinking_tokens = builder.generate_config_->max_thinking_tokens;
-    int end_think_token_id = builder.generate_config_->end_think_token_id;
     int num_beams = builder.generate_input_->generate_config->num_beams;
     int64_t stream_id = builder.generate_input_->request_id;
     int error_token_id = 0;
     ASSERT_EQ(complete_token_ids->seq_length_, 5);
     
     bool ret = complete_token_ids->update(new_tokens_ptr, begin_time_us, 
-        num_new_tokens, input_length, max_token_num, in_think_mode, 
-        max_thinking_tokens, end_think_token_id, params.vocab_size_, 
+        num_new_tokens, input_length, max_token_num, params.vocab_size_, 
         num_beams, stream_id, error_token_id);
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 7);
 
-    const std::vector<int>& isThinkEndTokenIdExist = complete_token_ids->isThinkEndTokenIdExist();
+    const std::deque<bool>& isThinkEndTokenIdExist = complete_token_ids->isThinkEndTokenIdExist();
     ASSERT_EQ((size_t)1, isThinkEndTokenIdExist.size());
     ASSERT_EQ(1, isThinkEndTokenIdExist[0]);
 }

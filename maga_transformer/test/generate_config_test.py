@@ -117,7 +117,7 @@ class GenerateConfigTest(TestCase):
         generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
                                                           special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
         self.assertEqual(generate_config.max_thinking_tokens, 109)
-        self.assertEqual(generate_config.in_think_mode, 1)
+        self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_id, 102)
 
     def test_add_thinking_params_with_think_token(self):
@@ -134,7 +134,7 @@ class GenerateConfigTest(TestCase):
         generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
                                                           special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
         self.assertEqual(generate_config.max_thinking_tokens, 20)
-        self.assertEqual(generate_config.in_think_mode, 1)
+        self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_id, 151649)
 
 if __name__ == '__main__':
