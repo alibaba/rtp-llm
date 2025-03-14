@@ -104,6 +104,13 @@ class ModelWeightsLoader:
     def static_lora_adapter_name(self):
         return self._static_lora_adapter_name
 
+    @staticmethod
+    def force_clean_cuda_memory():
+        """安全清理显存，避免残留引用"""
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    
     def set_data_type(self, data_type):
         self._data_type = data_type
 
@@ -162,6 +169,8 @@ class ModelWeightsLoader:
             else:
                 weights.set_global_weight(name, tensor)
 
+            self.force_clean_cuda_memory()
+
         return weights
 
 
@@ -178,6 +187,7 @@ class ModelWeightsLoader:
         model_mem = model_size / self._tp_size / (1024.0 ** 2)
         return current_device if free_mem * 0.8 > model_mem else "cpu"
 
+    @torch.no_grad()
     def prepare_weights_from_scratch(self, device):
         if self._vit_separation != 1:
             for id in range(self._num_layers):
@@ -483,8 +493,6 @@ class ModelWeightsLoader:
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif quant_algo.isWeightOnlyPerCol():
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
-        gc.collect()
-        torch.cuda.empty_cache()
         return results, self._weight_log, self._lora_log
 
     def _trunc_layer_weights_for_partial_moe(self, layer_weights: List[WeightInfo]):

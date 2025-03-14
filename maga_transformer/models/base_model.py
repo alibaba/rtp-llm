@@ -412,7 +412,7 @@ class BaseModel(object):
                     raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
                                     are quired for per tensor quantization")
 
-        torch.cuda.empty_cache()
+        ModelWeightsLoader.force_clean_cuda_memory()
 
     def _initialize_rope(self):
         pass
@@ -498,8 +498,7 @@ class BaseModel(object):
             current_dict[tensor_name] = tensor.cpu().contiguous()
             current_size += tensor_size
             maybe_save()
-            gc.collect()
-            torch.cuda.empty_cache()
+            self.model_weights_loader.force_clean_cuda_memory()
 
         # 保存最后剩余部分
         if current_dict:
