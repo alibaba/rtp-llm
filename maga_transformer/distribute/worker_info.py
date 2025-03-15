@@ -49,11 +49,6 @@ class ParallelInfo(object):
         return self.world_rank % self.ep_size
 
     @property
-    def dp_rank(self) -> int:
-        return int(self.world_rank / self.tp_size) % self.dp_size
-
-
-    @property
     def local_rank(self) -> int:
         return self.world_rank % self.local_world_size
 
