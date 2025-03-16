@@ -253,3 +253,26 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+
+py_test(
+    name = "bench_mla_attention_layer",
+    srcs = [
+        "mla/bench_mla_attention_layer.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "manual",
+    ]
+)
+
