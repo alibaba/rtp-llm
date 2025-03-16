@@ -191,6 +191,7 @@ struct LayernormParams {
                     is_inplace(is_inplace),
                     qscheme(qscheme),
                     offset(0),
+                    hidden_size(0),
                     stride(0) {};
 
     // for qk norm
@@ -199,6 +200,7 @@ struct LayernormParams {
                     double eps,
                     NormType norm_type,
                     size_t offset,
+                    size_t hidden_size,
                     size_t stride
                 ):
                     input(std::move(input)),
@@ -214,6 +216,7 @@ struct LayernormParams {
                     is_inplace(true),
                     qscheme(QScheme::NoQuantize),
                     offset(offset),
+                    hidden_size(hidden_size),
                     stride(stride) {};
 
 
@@ -236,6 +239,7 @@ struct LayernormParams {
     const QScheme qscheme;
 
     const int offset;
+    const int hidden_size;
     const int stride;
 };
 

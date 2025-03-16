@@ -71,62 +71,76 @@ qkLayerNorm(T* __restrict qkv, const T* __restrict gamma, const float layernorm_
     }
 }
 
-template<typename T>
+
+template<typename T, bool IS_BIAS>
 __global__ void layerNormWithStride(T* __restrict data,
-                                    const T* __restrict gamma,
-                                    const T* __restrict beta,
-                                    const float layernorm_eps,
-                                    const int   n,
-                                    const int   stride) {
-    constexpr auto   num_elems_T = num_elems<T>::value;
-    constexpr size_t warp_size   = 32;
-    const int        n_elems     = n / num_elems_T / warp_size;
-    using float_packed_t         = typename packed_as<float, num_elems_T>::type;
+                                   const T* __restrict gamma,
+                                   const T* __restrict beta,
+                                   const float layernorm_eps,
+                                   const int n,          // 总特征维度
+                                   const int norm_size,  // 归一化窗口大小
+                                   const int stride) 
+{
+    constexpr auto num_elems_T = num_elems<T>::value;    // 向量化元素数
+    constexpr size_t warp_size = 32;
+    const int n_elems = norm_size / num_elems_T / warp_size;
+    using float_packed_t = typename packed_as<float, num_elems_T>::type;
 
     const int tid = threadIdx.x;
+    const int sample_idx = blockIdx.x / (n / norm_size);  // 样本索引
+    const int head_idx = blockIdx.x % (n / norm_size);    // 头/窗口索引
 
     __shared__ float s_mean;
     __shared__ float s_variance;
-    float            mean     = 0.0f;
-    float            variance = 0.0f;
 
+    // 计算当前窗口的起始位置
+    T* sample_start = data + sample_idx * (stride / num_elems_T);
+    T* head_start = sample_start + head_idx * (norm_size / num_elems_T);
+
+    // Stage 1: 计算均值
     float local_sum = 0.0f;
 #pragma unroll
     for (int i = 0; i < n_elems; i++) {
-        auto index = loadOffsetStrided(stride, num_elems_T) + tid * n_elems + i;
-        auto val_f = cuda_cast<float_packed_t>(ldg(&data[index]));
+        int elem_idx = i * warp_size + tid;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&head_start[elem_idx]));
         local_sum += cuda_sum<float>(val_f);
     }
-
-    mean = warpReduceSum(local_sum);
-
-    if (threadIdx.x == 0) {
-        s_mean = mean / n;
+    
+    float mean = warpReduceSum(local_sum);
+    if (tid == 0) {
+        s_mean = mean / norm_size;
     }
     __syncthreads();
 
     float local_var_sum = 0.0f;
 #pragma unroll
     for (int i = 0; i < n_elems; i++) {
-        auto index = loadOffsetStrided(stride, num_elems_T) + tid * n_elems + i;
-        auto val_f = cuda_cast<float_packed_t>(ldg(&data[index]));
-        auto diff  = val_f - s_mean;
+        int elem_idx = i * warp_size + tid;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&head_start[elem_idx]));
+        auto diff = val_f - s_mean;
         local_var_sum += cuda_sum<float>(diff * diff);
     }
-    variance = warpReduceSum(local_var_sum);
-
-    if (threadIdx.x == 0) {
-        s_variance = rsqrtf(variance / n + layernorm_eps);
+    
+    float variance = warpReduceSum(local_var_sum);
+    if (tid == 0) {
+        s_variance = rsqrtf(variance / norm_size + layernorm_eps);
     }
     __syncthreads();
+
 #pragma unroll
     for (int i = 0; i < n_elems; i++) {
-        auto index       = loadOffsetStrided(stride, num_elems_T) + tid * n_elems + i;
-        auto gamma_index = tid * n_elems + i;
-        auto val_f       = cuda_cast<float_packed_t>(ldg(&data[index]));
-        auto val_gamma   = cuda_cast<float_packed_t>(gamma[gamma_index]);
-        auto val_beta    = cuda_cast<float_packed_t>(beta[gamma_index]);
-        data[index]      = cuda_cast<T>((val_f - s_mean) * s_variance * val_gamma + val_beta);
+        int elem_idx = i * warp_size + tid;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&head_start[elem_idx]));
+        
+        auto gamma_val = cuda_cast<float_packed_t>(gamma[elem_idx]);
+        if (IS_BIAS) {
+           auto beta_val = cuda_cast<float_packed_t>(beta[elem_idx]);
+
+            val_f = (val_f - s_mean) * s_variance * gamma_val + beta_val;
+        } else {
+            val_f = (val_f - s_mean) * s_variance * gamma_val;
+        }
+        head_start[elem_idx] = cuda_cast<T>(val_f);
     }
 }
 
@@ -161,25 +175,39 @@ void invokeLayerNormWithStride(T* __restrict data,
                                const float  layernorm_eps,
                                const int    m,
                                const int    n,
+                               const int    norm_size,
                                const int    stride,
                                const int    offset,
                                cudaStream_t stream) {
-    constexpr size_t vec_size  = 2;
+     constexpr size_t vec_size = 2;
     constexpr size_t warp_size = 32;
-    data                       = data + offset;
-    if (n % (warp_size * vec_size) != 0) {
-        throw std::invalid_argument("not supported size_per_head: " + std::to_string(n));
+    data = data + offset;
+
+    // 参数校验
+    if (n % norm_size != 0) {
+        throw std::invalid_argument("n must be divisible by norm_size");
     }
-    dim3 grid(m);
-    dim3 block(32);
+    if (norm_size % (warp_size * vec_size) != 0) {
+        throw std::invalid_argument("norm_size must be multiple of " + 
+                                   std::to_string(warp_size * vec_size));
+    }
+
+    const int num_heads = n / norm_size;
+    dim3 grid(m * num_heads);  // 每个block处理一个样本的一个头
+    dim3 block(warp_size);
 
     using Tp = typename packed_as<T, vec_size>::type;
-    layerNormWithStride<Tp><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data),
-                                                        reinterpret_cast<const Tp*>(gamma),
-                                                        reinterpret_cast<const Tp*>(beta),
-                                                        layernorm_eps,
-                                                        n,
-                                                        stride);
+    bool is_bias = beta != nullptr;
+    if (is_bias) {
+       layerNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma),
+       			        reinterpret_cast<const Tp*>(beta),
+							layernorm_eps, n, norm_size, stride);
+   }
+   else {
+       layerNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma),
+       			        reinterpret_cast<const Tp*>(beta),
+							layernorm_eps, n, norm_size, stride);
+   }
 }
 
 #define INSTANTIATE_QK_LAYERNORM(T)                                                                                    \
@@ -204,7 +232,8 @@ INSTANTIATE_QK_LAYERNORM(__nv_bfloat16);
                                             const T* __restrict beta,                                                  \
                                             const float  layernorm_eps,                                                \
                                             const int    m,                                                            \
-                                            const int    n,                                                            \
+                                            const int    n,                                                            \ 
+                                            const int    norm_size,                                                    \
                                             const int    stride,                                                       \
                                             const int    offset,                                                       \
                                             cudaStream_t stream);

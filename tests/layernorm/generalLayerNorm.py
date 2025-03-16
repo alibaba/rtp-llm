@@ -76,6 +76,48 @@ class TestLayerNorm(unittest.TestCase):
                 actual= fp8_res.view(torch.float8_e4m3fn).view(-1)[:batch_size*hidden_units].view(batch_size,hidden_units).to(torch.float32)
                 loss = criterion(expect_fp16, actual).cpu().item()
                 self.assertTrue(loss <= 0.00026, f"scale 1.0, loss is too big, actual:{actual}, expect:{expect_fp16}, loss:{loss}")
+        
+    def test_stride_layer_norm(self):
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
 
+        eps = 1e-6
+        for batch_size in [1, 2, 12, 192]:
+            for (hidden_units_1, hidden_units_2) in [(128, 128), (1024, 256), (4096, 512), (1024, 128)]:
+                size_per_head = 128
+    
+                self.LayerNormOp = torch.classes.unittest.LayerNormOp(eps)
+                self.gamm1 = torch.rand(size_per_head).cuda()
+                self.bias = torch.zeros_like(self.gamm1).cuda()
+                self.LayerNorm1 = LayerNorm(size_per_head, eps)
+                self.LayerNorm1.weight = torch.nn.Parameter(self.gamm1)
+                self.LayerNorm1.bias = torch.nn.Parameter(self.bias)
+                
+                self.gamm2 = torch.rand(size_per_head).cuda()
+                self.LayerNorm2 = LayerNorm(size_per_head, eps)
+                self.LayerNorm2.weight = torch.nn.Parameter(self.gamm2)
+                self.LayerNorm2.bias = torch.nn.Parameter(self.bias)
+                
+                hidden_states_1 = torch.rand(batch_size, hidden_units_1).cuda()
+                hidden_states_2 = torch.rand(batch_size, hidden_units_2).cuda()
+                hidden_states_3 = torch.rand(batch_size, hidden_units_2).cuda()
+
+                hidden_states = torch.cat([hidden_states_1, hidden_states_2, hidden_states_3], dim=1)
+                
+                expect_result_1 = self.LayerNorm1(hidden_states_1.reshape([batch_size, -1, size_per_head])).reshape([batch_size, -1]).cpu()
+                expect_result_2 = self.LayerNorm2(hidden_states_2.reshape([batch_size, -1, size_per_head])).reshape([batch_size, -1]).cpu()
+
+                stride = hidden_units_1 + hidden_units_2*2
+                torch.set_printoptions(threshold=float('inf'))
+
+                actual_1 = self.LayerNormOp.stride_forward(hidden_states, self.gamm1, self.bias,
+                                                           hidden_units_1, 0, stride).reshape([batch_size, -1]).cpu()
+                actual_2 = self.LayerNormOp.stride_forward(hidden_states, self.gamm2, self.bias,
+                                                           hidden_units_2, hidden_units_1 , stride).reshape([batch_size, -1]).cpu()
+                
+                torch.testing.assert_close(actual_1, expect_result_1, rtol=0.001, atol=0.001, 
+                                           msg=f"[{batch_size}, {hidden_units_1}, {hidden_units_2}], input_1: {hidden_states_1}, actual_1: {actual_1}, expect_1:{expect_result_1}")
+                torch.testing.assert_close(actual_2, expect_result_2, rtol=0.001, atol=0.001, 
+                                           msg=f"[{batch_size}, {hidden_units_1}, {hidden_units_2}], input_2: {hidden_states_2}, actual_2: {actual_2}, expect_2:{expect_result_2}")
+            
 if __name__ == '__main__':
     unittest.main()

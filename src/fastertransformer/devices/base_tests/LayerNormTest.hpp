@@ -199,4 +199,75 @@ protected:
 
     }
 
+    void testGeneralLayernormStride(DataType data_type, NormType norm_type, uint16_t m, uint16_t n, uint16_t norm_size) {
+        const auto torch_dtype = dataTypeToTorchType(data_type);
+        auto hidden_states_1 = (torch::arange(m * n, m * n * 2) / ( n * n * 9))
+            .reshape({m, n})
+            .to(torch_dtype);
+        auto hidden_states_2 = (torch::arange(m * n * 2,  m * n * 3) /( n * n * 9))
+            .reshape({m, n})
+            .to(torch_dtype);
+
+        auto hidden_states_3 = (torch::arange(m * n * 3,  m * n * 4) /( n * n * 9)) 
+            .reshape({m, n})
+            .to(torch_dtype);
+            
+        // 拼接三个张量（最终维度为 [batch_size, 3n]）
+        auto input_tensor = torch::cat({hidden_states_1, hidden_states_2, hidden_states_3}, /*dim=*/1);
+
+        uint16_t stride = n * 3;
+        // auto input_tensor = (torch::arange(m * n, m * n * 2) / (n * n)).reshape({m, n}).to(torch_dtype);
+        
+        auto gamma_tensor = (torch::ones({norm_size}) / 2).to(torch_dtype);
+        auto beta_tensor = (torch::ones({norm_size}) / 3).to(torch_dtype);
+        auto residual_tensor = torch::arange(m * n, - m * n, -2).reshape({m, n}).to(torch_dtype);
+
+        auto input = tensorToBuffer(input_tensor);
+        auto gamma = tensorToBuffer(gamma_tensor);
+        auto beta = tensorToBuffer(beta_tensor);
+        auto weights = LayerNormWeights(gamma, beta);
+        BufferPtr empty;
+        gamma = tensorToBuffer(gamma_tensor);
+        auto gamma_only_weights = LayerNormWeights(gamma, empty);
+        auto residual = tensorToBuffer(residual_tensor);
+        
+        auto expected_output_1 = norm_type == NormType::layernorm ? torch::layer_norm(
+                    hidden_states_1.reshape({-1, norm_size}).to(torch::kFloat32), {norm_size},
+                    gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32), 1e-6)
+                    .reshape({m, -1}) : rmsNorm(
+            hidden_states_1.reshape({-1, norm_size}).to(torch::kFloat32),
+            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32)).reshape({m, -1});
+        
+
+        auto expected_output_2 = norm_type == NormType::layernorm ? torch::layer_norm(
+                    hidden_states_2.reshape({-1, norm_size}).to(torch::kFloat32), {norm_size},
+                    gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32), 1e-6)
+                    .reshape({m, -1}) : rmsNorm(
+            hidden_states_2.reshape({-1, norm_size}).to(torch::kFloat32),
+            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32)).reshape({m, -1});
+
+        {
+            auto testcase1_output_stride0 = device_->layernorm(LayernormParams(input, 
+                                                        weights, 
+                                                        1e-6, 
+                                                        norm_type,
+                                                        0, 
+                                                        n, 
+                                                        stride));
+            auto actual_output = bufferToTensor(*(testcase1_output_stride0.output)).slice(1, 0, n);
+            assertTensorClose(expected_output_1, actual_output);
+        }
+        {
+            auto testcase1_output = device_->layernorm(LayernormParams(input, 
+                                                        weights, 
+                                                        1e-6, 
+                                                        norm_type,
+                                                        n, 
+                                                        n, 
+                                                        stride));
+            auto actual_output = bufferToTensor(*(testcase1_output.output)).slice(1, n, n + n);
+            assertTensorClose(expected_output_2, actual_output);
+        }
+    }
+
 };

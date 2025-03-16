@@ -89,6 +89,67 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                 const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
                 cout << "hidden_size: " << hidden_size << ", batch_size: " << batch_size << ", duration: " << duration << "us" << endl;
             }
+
+            {   
+                vector<size_t> norm_sizes = vector<size_t>({128});
+                size_t n = hidden_size / 2;
+                norm_sizes.push_back(n / 2);
+                norm_sizes.push_back(n);
+                for (auto norm_size : norm_sizes) {
+                    const auto start = chrono::high_resolution_clock::now();
+                    for (size_t i = 0; i < repeat_time; i++) {
+                        invokeLayerNormWithStride(
+                            (TestType*)input->data(),
+                            (TestType*)gamma->data(),
+                            (TestType*)beta->data(),
+                            1e-6,
+                            batch_size,
+                            n,
+                            norm_size,
+                            hidden_size,
+                            0,
+                            stream
+                        );
+                    }
+                    cudaDeviceSynchronize();
+                    sync_check_cuda_error();
+
+                    const auto end = chrono::high_resolution_clock::now();
+                    const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
+                    cout << "[stride layer norm] hidden_size: " << hidden_size << ", batch_size: " << batch_size <<  ", norm_size: " << norm_size << ", duration: " << duration << "us" << endl;
+                }
+            }
+
+                        {   
+                vector<size_t> norm_sizes = vector<size_t>({128});
+                size_t n = hidden_size / 2;
+                norm_sizes.push_back(n / 2);
+                norm_sizes.push_back(n);
+                for (auto norm_size : norm_sizes) {
+                    const auto start = chrono::high_resolution_clock::now();
+                    for (size_t i = 0; i < repeat_time; i++) {
+                        invokeRmsNormWithStride(
+                            (TestType*)input->data(),
+                            (TestType*)gamma->data(),
+                            (TestType*)beta->data(),
+                            1e-6,
+                            batch_size,
+                            n,
+                            norm_size,
+                            hidden_size,
+                            0,
+                            stream
+                        );
+                    }
+                    cudaDeviceSynchronize();
+                    sync_check_cuda_error();
+
+                    const auto end = chrono::high_resolution_clock::now();
+                    const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
+                    cout << "[stride rms norm] hidden_size: " << hidden_size << ", batch_size: " << batch_size <<  ", norm_size: " << norm_size << ", duration: " << duration << "us" << endl;
+                }
+            }
+
         }
     }
 }
@@ -124,3 +185,25 @@ TEST_F(LayerNormTest, testSimpleLayernorm) {
     }
 }
 
+
+TEST_F(LayerNormTest, testSimpleLayernormStride) {
+    const auto test_m = vector<uint16_t>({1, 2, 4, 8, 10, 20});
+    const auto test_n = vector<uint16_t>({128, 256, 1024});
+    for (const auto& m: test_m) {
+        for (const auto& n: test_n) {
+            printf("testing m = %d, n = %d \n", m, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::rmsnorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::rmsnorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::rmsnorm, m, n, n / 2);
+        }
+    }
+}

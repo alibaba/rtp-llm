@@ -16,6 +16,8 @@ public:
 
     torch::Tensor forward(torch::Tensor input, torch::Tensor gamma);
     torch::Tensor forward_fp8(torch::Tensor input, torch::Tensor input_scale, torch::Tensor gamma);
+    torch::Tensor stride_forward(torch::Tensor input, torch::Tensor gamma,
+                                 int64_t d_model, int64_t offset, int64_t stride);
 
 private:
     int64_t eps;
@@ -52,10 +54,33 @@ torch::Tensor T5LayerNormOp::forward_fp8(torch::Tensor input, torch::Tensor inpu
     return output;
 }
 
+torch::Tensor T5LayerNormOp::stride_forward(torch::Tensor input, torch::Tensor gamma,
+                                            int64_t d_model, int64_t offset, int64_t stride) {
+
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+    auto batch_size = input.size(0);
+    auto norm_size = gamma.size(0);
+    torch::Tensor output     = torch::zeros_like(input);
+    fastertransformer::invokeRmsNormWithStride((float*)input.data_ptr(),
+                                                 (float*)gamma.data_ptr(),
+                                                 (float*)nullptr,
+                                                 (float)eps,
+                                                 (int)batch_size,
+                                                 (int)d_model,
+                                                 (int)norm_size,
+                                                 (int)stride,
+                                                 (int)offset,
+                                                 stream);
+    auto input_slice = input.slice(1, offset, offset + d_model);
+    return input_slice;
+}
+
 }  // namespace unittest
 
 static auto T5LayerNormTHS =
     torch::jit::class_<unittest::T5LayerNormOp>("unittest", "T5LayerNormOp")
         .def(torch::jit::init<double>())
         .def("forward", &unittest::T5LayerNormOp::forward)
-        .def("forward_fp8", &unittest::T5LayerNormOp::forward_fp8);
+        .def("forward_fp8", &unittest::T5LayerNormOp::forward_fp8)
+        .def("stride_forward",  &unittest::T5LayerNormOp::stride_forward);

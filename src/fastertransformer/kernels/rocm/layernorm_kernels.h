@@ -63,6 +63,7 @@ void invokeLayerNormWithStride(T* __restrict data,
                                const float  layernorm_eps,
                                const int    tokens,
                                const int    hidden_size,
+                               const int    norm_size,
                                const int    stride,
                                const int    offset,
                                cudaStream_t stream);

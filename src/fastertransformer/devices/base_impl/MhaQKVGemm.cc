@@ -34,8 +34,13 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     printBufferData(*qkv, "qkv");
 
     if (params.weights.q_norm_weight) {
-        auto after_q_norm = layernorm(LayernormParams(
-            qkv, *params.weights.q_norm_weight, params.ln_params.eps, params.ln_params.norm_type, 0, qkv_merged_size));
+        auto after_q_norm = layernorm(LayernormParams(qkv, 
+                                                      *params.weights.q_norm_weight, 
+                                                      params.ln_params.eps, 
+                                                      params.ln_params.norm_type, 
+                                                      0, 
+                                                      params.configs.size_per_head * params.configs.head_num, 
+                                                      qkv_merged_size));
 
         qkv = std::move(after_q_norm.output);
         printBufferData(*qkv, "qkv_after_q_norm");
@@ -47,6 +52,7 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
                                                       params.ln_params.eps,
                                                       params.ln_params.norm_type,
                                                       params.configs.size_per_head * params.configs.head_num,
+                                                      params.configs.size_per_head * params.configs.kv_head_num,
                                                       qkv_merged_size));
 
         qkv = std::move(after_k_norm.output);

@@ -49,7 +49,7 @@ void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* g
     float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr, bool return_normed_output = false);
 
 
-template<typename T>
+template<typename T, bool IS_BIAS>
 void invokeQkLayerNorm(T* __restrict qkv,
                        const T* __restrict gamma,
                        const float layernorm_eps,
@@ -66,6 +66,7 @@ void invokeLayerNormWithStride(T* __restrict data,
                                const float  layernorm_eps,
                                const int    tokens,
                                const int    hidden_size,
+                               const int    norm_size,
                                const int    stride,
                                const int    offset,
                                cudaStream_t stream);
