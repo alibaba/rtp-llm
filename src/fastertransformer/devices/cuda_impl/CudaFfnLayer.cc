@@ -190,8 +190,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
     const auto expert_for_source_row =
         allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expert_for_src"});
-    const auto sparse_mixer_out = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"sparse_mixer_out"});
-    const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_softmax_out"});
+    const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
     const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
 
     auto       normalization_mode = moe_conf.has_moe_norm ?
@@ -204,7 +203,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     moe_plugin_->selectExpertsForTokens(gate->data<float>(),
                                         gate_with_bias->data<float>(),
                                         expert_scales->data<float>(),
-                                        sparse_mixer_out->data<float>(),
+                                        nullptr, // sparse_mixer_out
                                         softmax_out->data<float>(),
                                         expert_for_source_row->data<int>(),
                                         source_rows->data<int>(),
