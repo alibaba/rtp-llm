@@ -13,6 +13,15 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.model_factory_register import register_model
 
 class QWenV2MoeWeight(QWenV2Weight):
+    def _get_hf_layer_weight_info(self, layer_id: int):
+        layer_weights = super()._get_hf_layer_weight_info(layer_id)
+        layer_weights.extend([ 
+            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')]),
+            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')]),
+        ])
+        
+        return layer_weights
+    
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         # TODO: fix me
         # inter_padding_size: int = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
@@ -36,7 +45,7 @@ class Qwen2Moe(QWenV2):
         config = super()._create_config(ckpt_path)
         Qwen2Moe.load_moe_config(ckpt_path, config)
         return config
-
+    
     @classmethod
     def load_moe_config(cls, ckpt_path: str, config: GptInitModelParameters):
         config_path = os.path.join(ckpt_path, "config.json")
@@ -50,7 +59,7 @@ class Qwen2Moe(QWenV2):
         config.moe_inter_padding_size=config_json['moe_intermediate_size']
         config.inter_size = config_json['shared_expert_intermediate_size']
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
-        config.has_moe_norm = False
+        config.has_moe_norm = config_json.get("norm_topk_prob", False)
         # step for moe layer
         config.moe_style = 2
         moe_step = config_json['decoder_sparse_step']

@@ -713,6 +713,8 @@ class W:
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,
+        q_ln_gamma: sp_id,
+        k_ln_gamma: sp_id,
         attn_qkv_w: sp_head,
         vision_attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,

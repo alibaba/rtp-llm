@@ -193,7 +193,7 @@ class QWenV2(QWen):
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
         config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
-        config.size_per_head = config_json["hidden_size"] // config.head_num
+        config.size_per_head = int(config_json.get("head_dim")) if "head_dim" in config_json else config_json["hidden_size"] // config.head_num
         config.layer_num = config_json["num_hidden_layers"]
         config.rotary_embedding_base = config_json.get("rope_theta", config.rotary_embedding_base)
         config.vocab_size = config_json["vocab_size"]
