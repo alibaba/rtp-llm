@@ -1,8 +1,10 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "cuda_register")
 
 
 ################################ py test ################################
+fa_deps()
+cuda_register()
 
 cc_library(
     name = "test_ops_libs",
@@ -25,13 +27,19 @@ cc_library(
             "int8_gemm/*.cc",
         ]),
         "//conditions:default": [],
-    }),
+    }) + [":fa"],
     deps = torch_deps() + [
-        "//:th_transformer_lib",
+        ":fa_hdrs",
+        "//src/fastertransformer/cuda:allocator_torch",
+        "//src/fastertransformer/cuda:cuda",
+        "//src/fastertransformer/kernels:kernels",
+        "//:th_utils",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",        
         "//:gpt_init_params",
     ],
     copts = cuda_copts(),
     alwayslink = True,
+    visibility = ["//visibility:public"],
 )
 
 cc_binary(
