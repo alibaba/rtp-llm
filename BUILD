@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "th_transformer_so")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 config_setting(
     name = "enable_triton",
@@ -95,16 +95,6 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "th_transformer_gpu_files",
-    srcs = select({
-        "@//:using_cuda": [
-            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
-        ],
-        "//conditions:default": [],
-    }),
-)
-
 cc_library(
     name = "th_transformer_lib",
     srcs = [
@@ -132,9 +122,15 @@ cc_library(
 
 cc_library(
     name = "th_transformer_gpu",
-    srcs = [
-        ":th_transformer_gpu_files"
-    ],
+    srcs = select({
+        "@//:using_cuda11": [
+            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+        ],
+        "@//:using_cuda12": [
+            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         ":gpt_init_params",
     	":th_op_hdrs",

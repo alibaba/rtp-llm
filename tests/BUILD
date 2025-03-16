@@ -10,21 +10,24 @@ cc_library(
         "layernorm/*.cpp",
         "rotary_embedding/*.cpp",
         "attention_logn/*.cpp",
-        "gemm_dequantize/*.cc",
         "gemm_group/*.cc",
-        "int8_gemm/*.cc",
         "mla/*.cc",
-	    "fp8_gemm/*.cc",
         "unittests/test_activation.cu",
-    ]),
+    ]) + select({
+        "@//:using_cuda11": glob([
+            "fp8_gemm/*.cc",
+            "gemm_dequantize/*.cc",
+            "int8_gemm/*.cc",
+        ]),
+        "@//:using_cuda12": glob([
+            "fp8_gemm/*.cc",
+            "gemm_dequantize/*.cc",
+            "int8_gemm/*.cc",
+        ]),
+        "//conditions:default": [],
+    }),
     deps = torch_deps() + [
-        "//src/fastertransformer/cuda:allocator_torch",
-        "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/kernels:kernels",
-        "//:th_utils",
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "@flash_attention//:flash_attention2_impl",
+        "//:th_transformer_lib",
         "//:gpt_init_params",
     ],
     copts = cuda_copts(),
@@ -202,6 +205,8 @@ py_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+
 
 py_test(
     name = "mla_decode_attention",
