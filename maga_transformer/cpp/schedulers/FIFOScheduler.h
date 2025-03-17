@@ -44,24 +44,25 @@ private:
     bool waitPredicate();
 
 private:
-    std::list<GenerateStreamPtr>        waiting_streams_;
-    std::list<GenerateStreamPtr>        running_streams_;
-    std::list<GenerateStreamPtr>        remote_running_streams_;
-    std::shared_ptr<CacheManager>       cache_manager_;
-    std::atomic<int64_t>                last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                              max_seq_len_                 = 0;
-    size_t                              max_context_batch_size_ = 1;
-    int                                 reserve_block_num_  = 0;
-    bool                                enable_partial_fallback_ = false;
-    bool                                enable_whole_fallback_ = true;
-    bool                                enable_fast_gen_    = false;
-    const bool                          need_fill_fake_stream_ = false;
-    int                                 fast_gen_max_context_len_    = 0;
-    int                                 token_capacity_     = 0;
-    std::atomic<bool>                   stop_               = false;
-    std::mutex                          lock_;
-    std::condition_variable             cond_;
-    kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
+    std::list<GenerateStreamPtr>  waiting_streams_;
+    std::list<GenerateStreamPtr>  running_streams_;
+    std::list<GenerateStreamPtr>  remote_running_streams_;
+    std::shared_ptr<CacheManager> cache_manager_;
+    std::atomic<int64_t>          last_schedule_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                        max_seq_len_              = 0;
+    size_t                        max_context_batch_size_   = 1;
+    size_t                        max_generate_batch_size_  = 1;
+    int                           reserve_block_num_        = 0;
+    bool                          enable_partial_fallback_  = false;
+    bool                          enable_whole_fallback_    = true;
+    bool                          enable_fast_gen_          = false;
+    const bool                    need_fill_fake_stream_    = false;
+    int                           fast_gen_max_context_len_ = 0;
+    int                           token_capacity_           = 0;
+    std::atomic<bool>             stop_                     = false;
+    std::mutex                    lock_;
+    std::condition_variable       cond_;
+    kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
     // TODO @wangyin support different beams run togather
 };
 

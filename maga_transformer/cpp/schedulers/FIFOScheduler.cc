@@ -14,6 +14,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
     max_context_batch_size_(params.max_context_batch_size_),
+    max_generate_batch_size_(params.max_generate_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store
     enable_partial_fallback_(params.enable_partial_fallback_ && params.use_cache_store_ == false),
@@ -156,6 +157,10 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
+    if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
+        return false;
+    }
+
     if (!enable_fast_gen_) {
         int max_token_size = new_stream->contextLength();
         for (auto& stream : streams) {
