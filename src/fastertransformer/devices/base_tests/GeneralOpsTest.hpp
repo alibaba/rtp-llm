@@ -41,6 +41,20 @@ void testTranspose() {
     assertBufferValueEqual(*output, expected);
 }
 
+void testSplit() {
+    auto input_t = torch::rand({255, 2062}, torch::kFloat16);
+    auto input_buf = tensorToBuffer(input_t);
+    input_buf->updateTypeAndShape(ft::DataType::TYPE_BYTES, {255, 2062 * 2});
+    auto outputs = device_->split({*input_buf, {2048 * 2, 12 * 2, 2 * 2}, 1}).outputs;
+    auto outputs_t = input_t.split_with_sizes({2048, 12, 2}, 1);
+    outputs[0]->updateTypeAndShape(ft::DataType::TYPE_FP16, {255, 2048});
+    outputs[1]->updateTypeAndShape(ft::DataType::TYPE_FP16, {255, 12});
+    outputs[2]->updateTypeAndShape(ft::DataType::TYPE_FP16, {255, 2});
+    assertTensorClose(bufferToTensor(*outputs[0]), outputs_t[0].contiguous());
+    assertTensorClose(bufferToTensor(*outputs[1]), outputs_t[1].contiguous());
+    assertTensorClose(bufferToTensor(*outputs[2]), outputs_t[2].contiguous());
+}
+
 void testConvert() {
     auto source = createBuffer<float>({7}, {0, -10, -1234, 1, 100, 10000, 3456});
     auto tensor = bufferToTensor(*source);
