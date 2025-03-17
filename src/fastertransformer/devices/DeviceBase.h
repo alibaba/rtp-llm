@@ -50,6 +50,7 @@ public:
     CloneOutput clone(const CloneParams& params) override;
     SelectOutput select(const SelectParams& params) override;
     ConcatOutput concat(const ConcatParams& params) override;
+    SplitOutput split(const SplitParams& params) override;
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;

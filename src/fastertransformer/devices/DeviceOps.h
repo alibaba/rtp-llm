@@ -17,6 +17,7 @@ public:
     virtual ConvertOutput convert(const ConvertParams& params);
     virtual SelectOutput select(const SelectParams& params);
     virtual ConcatOutput concat(const ConcatParams& params);
+    virtual SplitOutput split(const SplitParams& params);
     virtual void         bufMemset(Buffer& buf, int val);
 
     // basic compuation ops

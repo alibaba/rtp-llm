@@ -1644,5 +1644,77 @@ INSTANTIATE_INVOKE_SCATTER_ADD(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_INVOKE_SCATTER_ADD
 
+template<typename T>
+__global__ void sliceDim1CopyKernel(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out) {
+    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < dim0 * dim1_size; index += blockDim.x * gridDim.x) {
+        const int    col_index = index % dim1_size;
+        const size_t batch_id  = index / dim1_size;
+        out[index]             = src[batch_id * dim1 + dim1_start + col_index];
+    }
+}
+
+template<typename T>
+void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream) {
+    if constexpr (std::is_same<uint8_t, T>::value) {
+        if (dim1 % 16 == 0 && dim1_start % 16 == 0 && dim1_size % 16 == 0) {
+            dim1 /= 16;
+            dim1_start /= 16;
+            dim1_size /= 16;
+            const int grid_size = (int)(ceil((size_t)dim0 * dim1_size / 512.));
+            dim3      grid(min(grid_size, 65536));
+            dim3      block(512);
+            sliceDim1CopyKernel<uint4>
+                <<<grid, block, 0, stream>>>((uint4 const*)src, dim0, dim1, dim1_start, dim1_size, (uint4*)out);
+        } else if (dim1 % 8 == 0 && dim1_start % 8 == 0 && dim1_size % 8 == 0) {
+            dim1 /= 8;
+            dim1_start /= 8;
+            dim1_size /= 8;
+            const int grid_size = (int)(ceil((size_t)dim0 * dim1_size / 512.));
+            dim3      grid(min(grid_size, 65536));
+            dim3      block(512);
+            sliceDim1CopyKernel<uint2>
+                <<<grid, block, 0, stream>>>((uint2 const*)src, dim0, dim1, dim1_start, dim1_size, (uint2*)out);
+        } else if (dim1 % 4 == 0 && dim1_start % 4 == 0 && dim1_size % 4 == 0) {
+            dim1 /= 4;
+            dim1_start /= 4;
+            dim1_size /= 4;
+            const int grid_size = (int)(ceil((size_t)dim0 * dim1_size / 512.));
+            dim3      grid(min(grid_size, 65536));
+            dim3      block(512);
+            sliceDim1CopyKernel<uint>
+                <<<grid, block, 0, stream>>>((uint const*)src, dim0, dim1, dim1_start, dim1_size, (uint*)out);
+        } else {
+            const int grid_size = (int)(ceil((size_t)dim0 * dim1_size / 512.));
+            dim3      grid(min(grid_size, 65536));
+            dim3      block(512);
+            sliceDim1CopyKernel<T><<<grid, block, 0, stream>>>(src, dim0, dim1, dim1_start, dim1_size, out);
+        }
+    } else {
+        const int grid_size = (int)(ceil((size_t)dim0 * dim1_size / 512.));
+        dim3      grid(min(grid_size, 65536));
+        dim3      block(512);
+        sliceDim1CopyKernel<T><<<grid, block, 0, stream>>>(src, dim0, dim1, dim1_start, dim1_size, out);
+    }
+}
+
+#define INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(T)                                                                         \
+    template void invokeSliceDim1Copy(                                                                                 \
+        T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream)
+
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(float);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(half);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(int32_t);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(int8_t);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(uint8_t);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(uint32_t);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(int64_t);
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(uint64_t);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_bfloat16);
+#endif
+
+#ifdef ENABLE_FP8
+INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_fp8_e4m3);
+#endif
 
 }  // namespace fastertransformer

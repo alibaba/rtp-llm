@@ -30,6 +30,10 @@ ConcatOutput DeviceOps::concat(const ConcatParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+SplitOutput DeviceOps::split(const SplitParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

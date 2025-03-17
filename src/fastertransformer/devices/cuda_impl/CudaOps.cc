@@ -239,6 +239,43 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
     return output;
 }
 
+SplitOutput CudaDevice::split(const SplitParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.input.dim() == 2 && params.dim < params.input.dim()
+                              && std::accumulate(params.split_sizes.begin(), params.split_sizes.end(), 0)
+                                     == params.input.shape()[params.dim],
+                          "split params args error, dim [%ld] split_size_sum [%d] input[%s]",
+                          params.dim,
+                          std::accumulate(params.split_sizes.begin(), params.split_sizes.end(), 0),
+                          params.input.debugString().c_str());
+    cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    std::vector<BufferPtr> outputs;
+    size_t                 offset = 0;
+    if (params.dim == 0) {
+        for (auto& size : params.split_sizes) {
+            outputs.emplace_back(clone({params.input.view(offset, size)}));
+            offset += size;
+        }
+    } else {
+        vector<size_t> new_shape = params.input.shape();
+        for (auto& size : params.split_sizes) {
+            new_shape[params.dim] = size;
+            BufferPtr output      = allocateBuffer({params.input.type(), new_shape});
+            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(params.input.type(),
+                                                invokeSliceDim1Copy,
+                                                params.input.data(),
+                                                params.input.shape()[0],
+                                                params.input.shape()[1],
+                                                offset,
+                                                size,
+                                                output->data(),
+                                                stream);
+            outputs.emplace_back(output);
+            offset += size;
+        }
+    }
+    return {outputs};
+}
+
 inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
         case DataType::TYPE_BOOL: return ncclInt8;
@@ -497,17 +534,13 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
                     std::make_shared<Buffer>(MemoryType::MEMORY_GPU, params.buffers[i]->type(), new_shape, nullptr));
             }
         } else {
-            auto   trans_output = transpose({*output, params.overlapped});
-            size_t offset       = 0;
+            outputs = split({*output, dim1_split_size, 1, params.overlapped}).outputs;
             for (int i = 0; i < dim1_split_size.size(); ++i) {
-                BufferPtr output_now = transpose({trans_output->view(offset, dim1_split_size[i]), params.overlapped});
-                offset += dim1_split_size[i];
-                vector<size_t> new_shape = output_now->shape();
+                vector<size_t> new_shape = outputs[i]->shape();
                 assert(new_shape[0] == output_batch_size);
                 new_shape[1] /= getTypeSize(params.buffers[i]->type());
                 assert(new_shape[1] == params.buffers[i]->shape()[1]);
-                output_now->updateTypeAndShape(params.buffers[i]->type(), new_shape);
-                outputs.emplace_back(output_now);
+                outputs[i]->updateTypeAndShape(params.buffers[i]->type(), new_shape);
             }
         }
         return {outputs};

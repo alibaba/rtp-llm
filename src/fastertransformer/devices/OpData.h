@@ -158,6 +158,17 @@ struct ConcatParams {
     const size_t dim = 0;
 };
 
+struct SplitOutput {
+    std::vector<BufferPtr> outputs;
+};
+
+struct SplitParams {
+    const Buffer& input;
+    const std::vector<size_t>& split_sizes;
+    const size_t dim = 0;
+    bool overlapped = false;
+};
+
 struct LayernormOutput {
     BufferPtr output;
     BufferPtr before_norm_output;
@@ -608,8 +619,8 @@ struct MoeCombineParams {
     const BufferPtr           input;
     const BufferPtr           indices;
     const BufferPtr           output;
-    const std::vector<size_t> input_split_sizes;
-    const std::vector<size_t> output_split_sizes;
+    const std::vector<size_t>& input_split_sizes;
+    const std::vector<size_t>& output_split_sizes;
     const MoeConfigs&         moe_configs;
     size_t                    origin_token_num;
     bool                      overlapped = false;

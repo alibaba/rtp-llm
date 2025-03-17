@@ -164,6 +164,7 @@ public:
     AddBiasOutput addbias(const AddBiasParams& params) override;
     ConvertOutput convert(const ConvertParams& params) override;
     SelectOutput select(const SelectParams& params) override;
+    SplitOutput split(const SplitParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;

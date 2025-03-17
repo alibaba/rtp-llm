@@ -277,6 +277,27 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
     return concated;
 }
 
+SplitOutput DeviceBase::split(const SplitParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.dim < params.input.dim()
+                              && std::accumulate(params.split_sizes.begin(), params.split_sizes.end(), 0)
+                                     == params.input.shape()[params.dim],
+                          "split params args error, dim [%ld] split_size_sum [%d] input[%s]",
+                          params.dim,
+                          std::accumulate(params.split_sizes.begin(), params.split_sizes.end(), 0),
+                          params.input.debugString().c_str());
+    RUNTIME_ASSERT_OP_ARG(!params.overlapped, "split base impl not support overlap");
+
+    torch::Tensor              input_t = Buffer2torchTensor(params.input, false);
+    at::IntArrayRef            split_sizes((int64_t*)params.split_sizes.data(), params.split_sizes.size());
+    std::vector<torch::Tensor> outputs_t = input_t.split_with_sizes(split_sizes, params.dim);
+    assert(params.split_sizes.size() == outputs_t.size());
+    std::vector<BufferPtr> outputs;
+    for (int i = 0; i < params.split_sizes.size(); ++i) {
+        outputs.emplace_back(clone({*torchTensor2Buffer(outputs_t[i].contiguous())}));
+    }
+    return {outputs};
+}
+
 LossOutput DeviceBase::loss(const LossParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.logits.where() == params.labels.where(), "logits and labels must be same device, but got %d and %d.", (int)params.logits.where(), (int)params.labels.where());
     RUNTIME_ASSERT_OP_ARG(params.logits.shape()[0] == params.labels.shape()[0], "logits and labels must be same dim0, but got %d and %d.", (int)params.logits.shape()[0], (int)params.labels.shape()[0]);

@@ -303,4 +303,7 @@ void invokeGetCuSeqLens(int* cu_seqlens,
 template<typename T>
 void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream);
 
+template<typename T>
+void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream);
+
 }  // namespace fastertransformer
