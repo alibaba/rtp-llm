@@ -204,12 +204,15 @@ class GptInitModelParameters:
             self.is_sparse_head = True
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
+        if tp_size * dp_size != ep_size:
+            raise ValueError(f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}")
         # new tp_size just only for moe
-        tp_size = tp_size * dp_size // ep_size
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
+            moe_align_size = self.quant_algo.getGroupSize()
         else:
             align_size = tp_size * 64
+            moe_align_size = 64
         if self.layer_inter_size:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
@@ -222,11 +225,14 @@ class GptInitModelParameters:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
             self.inter_padding_size = self.inter_size
+        
         if self.moe_inter_padding_size <= 0:
-            self.moe_inter_padding_size = self.inter_size
+            self.moe_inter_padding_size = self.inter_size    
         if self.moe_inter_padding_size > 0:
-            moe_align_size = align_size if self.quant_algo.isQuant() else  8 * tp_size
+            moe_align_size = moe_align_size if self.quant_algo.isQuant() else  8
             self.moe_inter_padding_size = self.moe_inter_padding_size + (get_pad_size(self.moe_inter_padding_size, moe_align_size))
+
+        logging.info(f"update_inter_padding_size: {self.inter_padding_size}, moe_inter_padding_size: {self.moe_inter_padding_size}, layer_inter_size: {self.layer_inter_size}")
 
     def update_task_prompt_tokens_id(self, tokenizer):
         if self.multi_task_prompt:
