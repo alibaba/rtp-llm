@@ -19,6 +19,7 @@ cc_library(
         "CudaGemmOp.cc",
         "CudaPrefillAttention.cc",
         "CudaGroupGemmOp.cc",
+        "CudaNvtxOp.cc",
         "CudaLoraLinearWithActOp.cc",
     ]),
     deps = [

@@ -69,6 +69,10 @@ public:
     // for multi thread no block copy
     virtual void noBlockCopy(const CopyParams& params);
 
+    // for perf
+    virtual void perfRangePush(const std::string& name) const;
+    virtual void perfRangePop() const;
+
     // for device-specific weights preprocess
     static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);

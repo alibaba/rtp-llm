@@ -26,6 +26,8 @@ DeviceBase::DeviceBase(const DeviceInitParams& params)
 
 void DeviceBase::init() {
     buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));
+    static char* enable_device_perf_env_char = std::getenv("ENABLE_DEVICE_PERF");
+    enable_device_perf_ = (enable_device_perf_env_char != nullptr && std::string(enable_device_perf_env_char) == "ON") ? true : false;
 }
 
 void DeviceBase::setTraceMemory(bool trace_memory) {

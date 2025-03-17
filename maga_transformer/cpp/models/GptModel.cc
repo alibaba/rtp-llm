@@ -8,6 +8,7 @@
 #include "src/fastertransformer/models/W.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
+#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include <memory>
 
 
@@ -246,6 +247,7 @@ void GptModel::prepareAttentionInputs(
 }
 
 GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
+    DevicePerfWrapper wrapper(device_, "forwardPreLayers");
     const auto combo_tokens = device_->clone(
         {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
 
@@ -322,6 +324,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     const int32_t layer_id,
     ft::lora::LoraModelInputPtr lora_model_input)
 {
+    DevicePerfWrapper wrapper(device_, "forwardGptLayer");
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     auto attention_common_inputs = move(inputs.attention_common_inputs);
@@ -388,6 +391,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto attn_hidden = std::move(attn_output.hidden_states);
     if (device_props_.tp_size > 1) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
+        auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=" + std::to_string(attn_hidden->sizeBytes()));
         attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
     }
     if (residual_scale_) {
@@ -440,6 +444,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     hidden = ffn_output.hidden_states;
     if (device_props_.tp_size > 1 && !(device_props_.dp_size > 1 && layer.ffn_weights.moe_gating_weight)) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
+        auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=" + std::to_string(hidden->sizeBytes()));
         hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
     }
     if (residual_scale_) {
@@ -472,6 +477,7 @@ GptModelOutputs GptModel::forwardPostLayers(
     const bool need_all_logits,
     const ft::BufferPtr lm_output_indexes)
 {
+    DevicePerfWrapper wrapper(device_, "forwardPostLayers");
     auto hidden = input;
     if (weights_.final_layernorm) {
         auto final_layernorm = device_->layernorm(LayernormParams(hidden,

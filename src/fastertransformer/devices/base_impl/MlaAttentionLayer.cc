@@ -2,13 +2,14 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-
+#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include <numeric>
 
 using namespace std;
 
 namespace fastertransformer {
 AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& params) {
+    DevicePerfWrapper wrapper(this, "mla_layer_" + std::to_string(params.layer_id));
     const auto& input            = params.input;
     const auto& input_lengths    = *params.common.input_lengths;
     const auto& sequence_lengths = *params.common.sequence_lengths;
@@ -55,6 +56,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         }
     }
     BufferPtr q = nullptr;
+    DevicePerfWrapper pre_mla_wrapper(this, "pre_mla_layer");
     if (params.weights.q_a_weight != nullptr) {
         // auto q_output_size = params.configs.nope_head_dim;
         BufferPtr q_a                = gemm(GemmParams(input, *(params.weights.q_a_weight->kernel)));
@@ -95,8 +97,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     mlaRotaryWriteKVCache({*q, *kv_a, *k_rope, params.common, params.weights, params.configs, params.qscheme});
     printBufferData(*q, "q_after_rotary");
     printBufferData(*k_rope, "k_rope_after_rotary");
-
-
+    pre_mla_wrapper.stop();
     auto      qscheme       = params.qscheme;
     auto      dtype         = input.type();
     BufferPtr attention_out = nullptr;

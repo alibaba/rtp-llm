@@ -196,7 +196,10 @@ public:
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
 
+    void perfRangePush(const std::string& name) const override;
+    void perfRangePop() const override;
 protected:
+
     void InvokeSmoothQaunt(const GemmParams&       params,
                            const CudaGemmArguments arguments,
                            BufferPtr               output);

@@ -5,6 +5,7 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/kernels/mla_kernels/mla_merge_transpose_kernel.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -35,6 +36,7 @@ params) {
 }
 
 void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
+    DevicePerfWrapper wrapper(this, "mlaDecoder_layer_" + std::to_string(params.layer_id));
     auto absorb_q_input = QInputBatchMatmulWrapper(params);
     printBufferData(*torchTensor2Buffer(absorb_q_input), "mla_absorb_q_input");
     auto q_reshape = params.q.reshape({params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
@@ -82,6 +84,7 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params
 }
 
 AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModuleParams& params) {
+    DevicePerfWrapper wrapper(this, "mlaContext_layer_" + std::to_string(params.layer_id));
     auto& q = params.q;
     auto& k_rope = params.k_rope;
     auto& kv_a   = params.kv_a;
@@ -143,7 +146,8 @@ void transpose_qk_inplace(torch::Tensor& q, torch::Tensor& k) {
     k.copy_(k_transpose, true);
 }
 
-void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
+void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {    
+    DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
     auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.flash_infer_attn_params.get();
     if (!flash_infer_attn_params) {
         throw std::runtime_error("flash_infer_attn_params must be setting when using mla");

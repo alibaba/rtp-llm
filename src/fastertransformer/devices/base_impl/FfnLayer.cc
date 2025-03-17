@@ -2,6 +2,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include <numeric>
 
 using namespace std;
@@ -26,7 +27,10 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             dp_max_tokens = *std::max_element(dp_token_nums.data<uint32_t>(), dp_token_nums.dataWithOffset<uint32_t>(dp_size));
             hidden = allocateBuffer({params.input.type(), {dp_max_tokens * dp_size, params.input.shape()[1]}});
             copy({hidden->view(dp_max_tokens * dp_rank, params.input.shape()[0]), params.input});
-            allGather({{hidden}, ParallelMode::DP_AND_TP});
+            {
+                auto wrapper = DevicePerfWrapper(this, "pre_moe_dp_allGather, sizeBytes=" + std::to_string(hidden->sizeBytes()));
+                allGather({{hidden}, ParallelMode::DP_AND_TP});
+            }            
             std::vector<BufferPtr> dp_hiddens;
             for (int i = 0; i < dp_token_nums.size(); ++i) {
                 dp_hiddens.emplace_back(hidden->slice(dp_max_tokens * i, *dp_token_nums.dataWithOffset<uint32_t>(i)));
@@ -46,6 +50,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 params.qscheme});
         hidden = moeFfnLayer(moe_ffn_params).hidden_states;
         if (dp_size > 1) {
+            auto wrapper = DevicePerfWrapper(this, "post_moe_dp_allReduce, sizeBytes=" + std::to_string(hidden->sizeBytes()));
             allReduce({hidden, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
         }
 
@@ -70,6 +75,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
             const auto& moe_conf = params.configs.moe_configs.value();
             if (moe_conf.dp_size > 1 && moe_conf.tp_size > 1) {
+                auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=" + std::to_string(shared_expert_output->sizeBytes()));
                 shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
             }
         }
