@@ -40,7 +40,7 @@ class LlavaTokenizer(object):
         self.default_im_end_token = special_tokens["default_im_end_token"]
         self.bos_id = bos_id
 
-    def encode(self, s: str) -> List[int]:
+    def encode(self, s: str, **kwargs) -> List[int]:
         replace_token = self.default_image_token
         if self.mm_use_im_start_end:
             replace_token = self.default_im_start_token + replace_token + self.default_im_end_token
