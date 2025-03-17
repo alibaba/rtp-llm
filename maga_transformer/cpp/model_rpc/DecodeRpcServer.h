@@ -55,6 +55,7 @@ private:
     ErrorInfo loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     ErrorInfo loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_ips) const;
+    BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_ips) const;
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;

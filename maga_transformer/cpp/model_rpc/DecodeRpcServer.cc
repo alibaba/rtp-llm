@@ -164,6 +164,34 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     FT_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
+    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+    BroadcastLoadRequestPB request;
+    request.set_request_id(load_context.request_id);
+    request.set_request_key(load_context.request_key);
+    request.set_dp_rank(maga_init_params_.gpt_init_parameter.dp_rank_);
+    request.set_partition_count(1);
+    request.set_partition_id(0);
+
+    // D >= P
+    if (resource_.workers.size() % peer_addrs.size() == 0) {
+        int part_cnt = resource_.workers.size() / peer_addrs.size();
+        request.add_peer_addrs(peer_addrs[index / part_cnt]);
+    } else {
+        // P >= D, load multi block of prefill
+        int group_num = peer_addrs.size() / resource_.workers.size();
+        request.add_peer_addrs(peer_addrs[index * group_num]);
+    }
+    for (auto& cache_key : load_context.cache_keys) {
+        request.add_cache_keys(cache_key);
+    }
+    for (auto& block_id : load_context.block_ids) {
+        request.add_block_ids(block_id);
+    }
+    request.set_timeout_ms(load_context.timeout_ms);
+    return request;
+}
+
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                                    int                             index,
                                                                    const std::vector<std::string>& peer_addrs) const {
@@ -290,7 +318,12 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         all_context.push_back(WorkerRpcContext());
         auto& rpc_context                   = all_context[i];
         rpc_context.stub                    = connect_status.value().stub;
-        BroadcastLoadRequestPB load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+        BroadcastLoadRequestPB load_request;
+        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+            load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
+        } else {
+            load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+        }
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
         reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
@@ -407,7 +440,12 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             }
             auto                    stub = connect_status.value().stub.get();
             ClientContext           client_context;
-            BroadcastLoadRequestPB  load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+            BroadcastLoadRequestPB load_request;
+            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+                load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
+            } else {
+                load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
+            }
             BroadcastLoadResponsePB response;
             auto                    grpc_status      = stub->RemoteLoad(&client_context, load_request, &response);
             const auto&             pb_error_code    = response.error_info().error_code();
