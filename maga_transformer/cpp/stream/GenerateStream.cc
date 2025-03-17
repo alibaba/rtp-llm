@@ -50,7 +50,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                     generate_input_->generate_config->in_think_mode,
                                                                     generate_input_->generate_config->max_thinking_tokens,
                                                                     generate_input_->inputLength(),
-                                                                    generate_input_->generate_config->end_think_token_id);
+                                                                    generate_input_->generate_config->end_think_token_ids);
     complete_token_ids_->init(input);
 
     last_output_pos_ = seqLength();

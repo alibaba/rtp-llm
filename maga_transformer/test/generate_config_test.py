@@ -118,12 +118,12 @@ class GenerateConfigTest(TestCase):
                                                           special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
         self.assertEqual(generate_config.max_thinking_tokens, 109)
         self.assertEqual(generate_config.in_think_mode, True)
-        self.assertEqual(generate_config.end_think_token_id, 102)
+        self.assertEqual(generate_config.end_think_token_ids, [102])
 
     def test_add_thinking_params_with_think_token(self):
         os.environ["THINK_MODE"] = "1"
         os.environ["THINK_END_TOKEN_ID"] = "-1"
-        os.environ["THINK_END_TOKEN"] = "</think>"
+        os.environ["THINK_END_TAG"] = "</think>"
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -135,7 +135,24 @@ class GenerateConfigTest(TestCase):
                                                           special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
         self.assertEqual(generate_config.max_thinking_tokens, 20)
         self.assertEqual(generate_config.in_think_mode, True)
-        self.assertEqual(generate_config.end_think_token_id, 151649)
+        self.assertEqual(generate_config.end_think_token_ids, [151649])
+
+    def test_add_thinking_params_with_think_token_2(self):
+        os.environ["THINK_MODE"] = "1"
+        os.environ["THINK_END_TOKEN_ID"] = "-1"
+        os.environ["THINK_END_TAG"] = "</think>\n\n"
+        parameter = GptInitModelParameters(0, 0, 0, 0, 0)
+        tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        generate_config_dict = self._create_generate_config()
+        generate_config_dict.update({
+            "max_thinking_tokens": 20
+        })
+        generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config=generate_config_dict)
+        self.assertEqual(generate_config.max_thinking_tokens, 20)
+        self.assertEqual(generate_config.in_think_mode, True)
+        self.assertEqual(generate_config.end_think_token_ids, [151649, 271])
 
 if __name__ == '__main__':
     main()

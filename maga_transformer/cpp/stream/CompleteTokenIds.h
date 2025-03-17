@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 class CompleteTokenIds {
 public:
-    CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block, bool in_think_mode, int max_thinking_tokens, int input_length, int end_think_token_id);
+    CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block, bool in_think_mode, int max_thinking_tokens, int input_length, std::vector<int> end_think_token_ids);
     CompleteTokenIds(const CompleteTokenIds& other);
 
 public:
@@ -25,7 +25,7 @@ public:
     bool update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id);
     void copyTokensTo(int batch_id, void *dst, int offset, size_t token_num);
     void appendTokens(int batch_id, size_t token_num, const ft::Buffer &src);
-    const std::deque<bool>& isThinkEndTokenIdExist();
+    const std::vector<size_t>& thinkEndTokensStatus();
 
     int seqLength() const;
     void setSeqLength(int seq_length);
@@ -52,14 +52,14 @@ private:
     bool in_think_mode_;
     int max_thinking_tokens_;
     int input_length_;
-    int end_think_token_id_;
+    std::vector<int> end_think_token_ids_;
 
     int seq_length_; 
     int common_len_;
     int start_check_seq_length_;
     int64_t first_token_time_us_  = 0;
     int64_t first_token_latency_us_ = 0; 
-    std::deque<bool> is_think_end_token_id_exist_;
+    std::vector<size_t> think_end_tokens_status_;
 
     ft::BufferPtr complete_token_ids_;
 };

@@ -61,7 +61,7 @@ message GenerateConfigPB {
     bool return_cum_log_probs = 31;
     bool in_think_mode = 32;
     int32 max_thinking_tokens = 33;
-    int32 end_think_token_id = 34;
+    repeated int32 end_think_token_ids = 34;
 }
 
 message MMPreprocessConfigPB {

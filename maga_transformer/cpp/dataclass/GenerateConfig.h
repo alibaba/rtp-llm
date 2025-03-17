@@ -69,7 +69,7 @@ public:
 
     bool in_think_mode      = false;
     int max_thinking_tokens = 0;
-    int end_think_token_id  = 0;
+    std::vector<int> end_think_token_ids;
 
     bool top1() {
         return top_k == 1;
@@ -124,7 +124,7 @@ public:
                      << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode
                      << ", max_thinking_tokens: " << max_thinking_tokens
-                     << ", end_think_token_id: " << end_think_token_id
+                     << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << "}";
         return debug_string.str();
     }
@@ -190,7 +190,7 @@ public:
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
-        JSONIZE(end_think_token_id);
+        JSONIZE(end_think_token_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
