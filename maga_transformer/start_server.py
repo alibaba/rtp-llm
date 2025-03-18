@@ -36,8 +36,14 @@ def local_rank_start():
     return app
 
 def multi_rank_start():
-    local_world_size = g_parallel_info.local_world_size
+    local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
+    if 'LOCAL_WORLD_SIZE' in os.environ:
+        logging.info(f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}")
+        local_world_size = int(os.environ['LOCAL_WORLD_SIZE'])
+    else:
+        logging.info(f"multi rank starts with default local world size: {local_world_size}, device count = {torch.cuda.device_count()}, world size = {g_parallel_info.world_size}")
     os.environ['LOCAL_WORLD_SIZE'] = str(local_world_size)
+
     try:
         multiprocessing.set_start_method('spawn')
     except RuntimeError as e:
