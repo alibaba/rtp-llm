@@ -17,7 +17,9 @@ void setUniqueId(ncclUniqueId* id, const std::string& store_key, c10d::TCPStore*
         auto vec =
             std::vector<uint8_t>(reinterpret_cast<uint8_t*>(id), reinterpret_cast<uint8_t*>(id) + NCCL_UNIQUE_ID_BYTES);
         tcp_store->set(store_key, vec);
-    } catch (const std::exception& e) { FT_FAIL("failed to set unique id"); }
+    } catch (const std::exception& e) {
+        FT_FAIL("failed to set unique id, exception: %s", e.what());
+    }
 }
 
 void getUniqueId(ncclUniqueId* id, const std::string& store_key, c10d::TCPStore* tcp_store) {
@@ -25,7 +27,9 @@ void getUniqueId(ncclUniqueId* id, const std::string& store_key, c10d::TCPStore*
         auto vec = tcp_store->get(store_key);
         TORCH_CHECK(vec.size() == NCCL_UNIQUE_ID_BYTES);
         std::memcpy(id, vec.data(), vec.size());
-    } catch (const std::exception& e) { FT_FAIL("failed to get unique id"); }
+    } catch (const std::exception& e) {
+        FT_FAIL("failed to get unique id, exception: %s", e.what());
+    }
 }
 
 }  // namespace fastertransformer
