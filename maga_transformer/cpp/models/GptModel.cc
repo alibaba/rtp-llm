@@ -391,7 +391,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto attn_hidden = std::move(attn_output.hidden_states);
     if (device_props_.tp_size > 1) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
-        auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=" + std::to_string(attn_hidden->sizeBytes()));
+        auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=%ld", (long)attn_hidden->sizeBytes());
         attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
     }
     if (residual_scale_) {
@@ -444,7 +444,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     hidden = ffn_output.hidden_states;
     if (device_props_.tp_size > 1 && !(device_props_.dp_size > 1 && layer.ffn_weights.moe_gating_weight)) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
-        auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=" + std::to_string(hidden->sizeBytes()));
+        auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=%ld", (long)hidden->sizeBytes());
         hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
     }
     if (residual_scale_) {

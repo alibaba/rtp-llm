@@ -28,7 +28,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             hidden = allocateBuffer({params.input.type(), {dp_max_tokens * dp_size, params.input.shape()[1]}});
             copy({hidden->view(dp_max_tokens * dp_rank, params.input.shape()[0]), params.input});
             {
-                auto wrapper = DevicePerfWrapper(this, "pre_moe_dp_allGather, sizeBytes=" + std::to_string(hidden->sizeBytes()));
+                auto wrapper = DevicePerfWrapper(this, "pre_moe_dp_allGather, sizeBytes=%ld", (long)hidden->sizeBytes());
                 allGather({{hidden}, ParallelMode::DP_AND_TP});
             }            
             std::vector<BufferPtr> dp_hiddens;
@@ -50,7 +50,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 params.qscheme});
         hidden = moeFfnLayer(moe_ffn_params).hidden_states;
         if (dp_size > 1) {
-            auto wrapper = DevicePerfWrapper(this, "post_moe_dp_allReduce, sizeBytes=" + std::to_string(hidden->sizeBytes()));
+            auto wrapper = DevicePerfWrapper(this, "post_moe_dp_allReduce, sizeBytes=%ld", (long)hidden->sizeBytes());
             allReduce({hidden, ReduceOp::Sum, false, ParallelMode::DP_AND_TP}).buffer;
         }
 
@@ -75,7 +75,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
             const auto& moe_conf = params.configs.moe_configs.value();
             if (moe_conf.dp_size > 1 && moe_conf.tp_size > 1) {
-                auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=" + std::to_string(shared_expert_output->sizeBytes()));
+                auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
                 shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
             }
         }

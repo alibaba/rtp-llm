@@ -36,7 +36,7 @@ params) {
 }
 
 void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
-    DevicePerfWrapper wrapper(this, "mlaDecoder_layer_" + std::to_string(params.layer_id));
+    DevicePerfWrapper wrapper(this, "mlaDecoder_layer_%d", params.layer_id);
     auto absorb_q_input = QInputBatchMatmulWrapper(params);
     printBufferData(*torchTensor2Buffer(absorb_q_input), "mla_absorb_q_input");
     auto q_reshape = params.q.reshape({params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
@@ -84,7 +84,7 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params
 }
 
 AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModuleParams& params) {
-    DevicePerfWrapper wrapper(this, "mlaContext_layer_" + std::to_string(params.layer_id));
+    DevicePerfWrapper wrapper(this, "mlaContext_layer_%d", params.layer_id);
     auto& q = params.q;
     auto& k_rope = params.k_rope;
     auto& kv_a   = params.kv_a;

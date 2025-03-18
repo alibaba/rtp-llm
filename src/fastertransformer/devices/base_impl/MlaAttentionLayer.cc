@@ -9,7 +9,7 @@ using namespace std;
 
 namespace fastertransformer {
 AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& params) {
-    DevicePerfWrapper wrapper(this, "mla_layer_" + std::to_string(params.layer_id));
+    DevicePerfWrapper wrapper(this, "mla_layer_%d", params.layer_id);
     const auto& input            = params.input;
     const auto& input_lengths    = *params.common.input_lengths;
     const auto& sequence_lengths = *params.common.sequence_lengths;
