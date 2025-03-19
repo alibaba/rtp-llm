@@ -20,11 +20,14 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         output = moeFfnLayer(params).hidden_states;
         // deal with moe layers with parallel dense ffn layer
         if (params.weights.shared_expert) {
+            shared_expert_output = allocateBufferLike({params.input}, AllocationType::DEVICE, {"shared_expert_buf"});
+            shared_expert_output = prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
             auto ffn_params = FfnLayerParams({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
                                              params.residual,
-                                             params.qscheme});
+                                             params.qscheme,
+                                             shared_expert_output});
             ffn_params.lora_input = params.lora_input;
             shared_expert_output = ffnLayer(ffn_params).hidden_states;
 
@@ -34,7 +37,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
                 activation({ActivationType::Sigmoid, shared_gate});
                 shared_expert_output = multiply({
-                    shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
+                        shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
             }
             if (moe_conf.tp_size > 1) {
                 auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());

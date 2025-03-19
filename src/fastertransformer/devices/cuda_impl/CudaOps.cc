@@ -215,7 +215,7 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
         RUNTIME_ASSERT_OP_ARG(output->type() == data_type,
                               "Output type must be same as A and B, but got %d vs %d",
                               output->type(), data_type);
-        RUNTIME_ASSERT_OP_ARG(output->shape()[0] == n,
+        RUNTIME_ASSERT_OP_ARG(output->shape()[0] == m,
                               "Output 0-d size must be %d, but got %ld", n, output->shape()[0]);
         RUNTIME_ASSERT_OP_ARG(output->size() == B.size(),
                               "Output size must be %ld, but got %ld", B.size(), output->size());
