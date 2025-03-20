@@ -32,7 +32,7 @@ def local_rank_start(global_controller: ConcurrencyController):
         g_parallel_info.reload()
         g_worker_info.reload()
         if g_parallel_info.world_size > 1:
-            setproctitle(f"rank-{g_parallel_info.local_rank}")
+            setproctitle(f"maga_ft_rank-{g_parallel_info.local_rank}")
         logging.info(f'start local {g_worker_info}, {g_parallel_info}')
         set_global_controller(global_controller)
         app = BackendApp()
@@ -50,7 +50,7 @@ def multi_rank_start(global_controller: ConcurrencyController):
     except RuntimeError as e:
         logging.warn(str(e))
         pass
-    
+
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
     if 'LOCAL_WORLD_SIZE' in os.environ:
         logging.info(f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}")
@@ -72,10 +72,10 @@ def multi_rank_start(global_controller: ConcurrencyController):
         proc = Process(target=local_rank_start, args=(global_controller, ), name=f"rank-{world_rank}")
         proc.start()
         procs.append(proc)
-        
+
     if os.environ.get('FAKE_GANG_ENV', None) is not None:
         return procs
-    
+
     while any(proc.is_alive() for proc in procs):
         if not all(proc.is_alive() for proc in procs):
             [proc.terminate() for proc in procs]
@@ -124,7 +124,7 @@ def load_gpu_nic_affinity():
         return False
 
 def start_backend_server(global_controller: ConcurrencyController):
-    setproctitle("backend_server") 
+    setproctitle("maga_ft_backend_server")
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
 

@@ -16,7 +16,7 @@ from maga_transformer.server.frontend_app import FrontendApp
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, init_controller, set_global_controller
 
 def start_frontend_server(server_id: int, global_controller: ConcurrencyController):
-    setproctitle(f"frontend_server_{server_id}")     
+    setproctitle(f"maga_ft_frontend_server_{server_id}")
     app = None
     try:
         set_global_controller(global_controller)
