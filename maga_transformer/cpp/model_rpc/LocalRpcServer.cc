@@ -20,6 +20,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Multimodal processing is not supported for speculative engine");
         }
+        pybind11::gil_scoped_release release;
+        FT_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
         std::unique_ptr<SpeculativeEngine> sp_engine = std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
         auto status = sp_engine->init();
         if (!status.ok()) {
@@ -28,7 +30,11 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
         engine_ = std::move(sp_engine);
     } else {
         FT_LOG_INFO("init normal engine");
-        engine_.reset(new NormalEngine(maga_init_params));
+        {
+            pybind11::gil_scoped_release release;
+            FT_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
+            engine_.reset(new NormalEngine(maga_init_params));
+        }
         if (!mm_process_engine.is_none()) {
             auto vit_separation = maga_init_params.gpt_init_parameter.vit_separation_;
             if (vit_separation == 2) {
