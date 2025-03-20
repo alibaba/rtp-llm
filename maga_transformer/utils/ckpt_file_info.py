@@ -192,8 +192,9 @@ class CkptFileInfo:
         if self.is_safetensor():
             try:
                 from fast_safetensors import load_safetensors_to_device
-                logging.info(f"use fast_safetensors to device: {device} direct_io:{direct_io}")
-                res =  load_safetensors_to_device(self.file_name, max_buf_size=2*1024*1024*1024, direct_io=direct_io, device=device)
+                use_shm = True
+                logging.info(f"use fast_safetensors to device: {device} direct_io:{direct_io} use_shm:{use_shm}")
+                res =  load_safetensors_to_device(self.file_name, max_buf_size=2*1024*1024*1024, direct_io=direct_io, use_shm=use_shm, device=device)
                 logging.debug(f"load_safetensors_to_device result: {list(res.keys())}")
                 return res
             except ModuleNotFoundError:
