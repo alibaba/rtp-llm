@@ -51,6 +51,7 @@ def members_from_test_env(env_str: str) -> List[WorkerInfo]:
             gang_hb_port=-1,
             http_port=-1,
             rpc_server_port=-1,
+            backend_server_port=-1,
             remote_rpc_server_port=-1,
             cache_store_listen_port=-1,
             cache_store_connect_port=-1,
@@ -103,7 +104,7 @@ class GangInfo(NamedTuple):
     def workers(self) -> List[WorkerInfo]:
         return [member for member in self.members if not member.equals(self.master)]
 
-def get_gang_info() -> GangInfo:  
+def get_gang_info() -> GangInfo:
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
         if os.environ.get(CONFIG_FILE_ENV):
