@@ -76,6 +76,7 @@ cc_library(
         ":models",
         ":cache",
         ":dataclass",
+        ":utils",
     ],
     visibility = ["//visibility:public"],
 )

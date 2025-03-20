@@ -1,6 +1,7 @@
 #pragma once
 
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/utils/DFAUtil.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 
 namespace rtp_llm {
@@ -25,7 +26,7 @@ public:
     bool update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id);
     void copyTokensTo(int batch_id, void *dst, int offset, size_t token_num);
     void appendTokens(int batch_id, size_t token_num, const ft::Buffer &src);
-    const std::vector<size_t>& thinkEndTokensStatus();
+    std::vector<size_t> thinkEndTokensStatus();
 
     int seqLength() const;
     void setSeqLength(int seq_length);
@@ -59,7 +60,7 @@ private:
     int start_check_seq_length_;
     int64_t first_token_time_us_  = 0;
     int64_t first_token_latency_us_ = 0; 
-    std::vector<size_t> think_end_tokens_status_;
+    std::vector<StringContainDFA<size_t, int>> think_end_status_dfa_;
 
     ft::BufferPtr complete_token_ids_;
 };

@@ -13,7 +13,7 @@ CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int m
     , max_thinking_tokens_(max_thinking_tokens)
     , input_length_(input_length)
     , end_think_token_ids_(end_think_token_ids)
-    , think_end_tokens_status_(batch_size, 0) {
+    , think_end_status_dfa_(batch_size, StringContainDFA<size_t, int>(end_think_token_ids)) {
 }
 
 CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
@@ -30,7 +30,7 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
     , start_check_seq_length_(other.start_check_seq_length_)
     , first_token_time_us_(other.first_token_time_us_)
     , first_token_latency_us_(other.first_token_latency_us_)
-    , think_end_tokens_status_(other.think_end_tokens_status_) {
+    , think_end_status_dfa_(other.think_end_status_dfa_) {
     complete_token_ids_ = device_->clone({*(other.complete_token_ids_), ft::AllocationType::HOST});
 }
 
@@ -45,6 +45,9 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     max_thinking_tokens_ = generate_input->generate_config->max_thinking_tokens;
     input_length_ = generate_input->inputLength();
     end_think_token_ids_ = generate_input->generate_config->end_think_token_ids;
+    for (auto& dfa: think_end_status_dfa_) {
+        dfa.compile(end_think_token_ids_);
+    }
 
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
@@ -139,31 +142,23 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
     FT_CHECK(new_tokens->dim() == 2);
     
     for (size_t i = 0; i < batch_size_; ++i) {
-        size_t think_end_tokens_status = this->think_end_tokens_status_[i];
+        size_t original_think_end_tokens_status = think_end_status_dfa_[i].status();
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) { // check tokenid
                 error_token_id = current_token_id; 
                 return false;
             }
-            if (in_think_mode_ && think_end_tokens_status < this->end_think_token_ids_.size()) {
-                if (current_token_id == this->end_think_token_ids_[think_end_tokens_status]) {
-                    think_end_tokens_status++;
-                } else {
-                    think_end_tokens_status = 0;
-                }
+            if (in_think_mode_ && !think_end_status_dfa_[i].isFinished()) {
+                think_end_status_dfa_[i].next(current_token_id);
             }
         }
-        if (in_think_mode_) {
-            if (seq_length_ + num_new_tokens < max_thinking_tokens_ + input_length_
-                || think_end_tokens_status == this->end_think_token_ids_.size()) {
-                this->think_end_tokens_status_[i] = think_end_tokens_status;
-            } else {
-                int offset = 0;
-                for (size_t pos = this->think_end_tokens_status_[i]; pos < this->end_think_token_ids_.size() && offset < num_new_tokens; pos++, offset++) {
-                    *(*new_tokens)[i].dataWithOffset<int>(offset) = this->end_think_token_ids_[pos];
-                    this->think_end_tokens_status_[i]++;
-                }
+        if (in_think_mode_ && !think_end_status_dfa_[i].isFinished()
+            && seq_length_ + num_new_tokens >= max_thinking_tokens_ + input_length_) {
+            int offset = 0;
+            for (size_t pos = original_think_end_tokens_status; pos < this->end_think_token_ids_.size() && offset < num_new_tokens; pos++, offset++) {
+                *(*new_tokens)[i].dataWithOffset<int>(offset) = this->end_think_token_ids_[pos];
+                this->think_end_status_dfa_[i].forceSetStatus(pos + 1);
             }
         }
         if (num_beams > 1) {
@@ -206,8 +201,12 @@ void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const ft::Bu
     setSeqLength(seq_length_ + token_num);
 }
 
-const std::vector<size_t>& CompleteTokenIds::thinkEndTokensStatus() {
-    return think_end_tokens_status_;
+std::vector<size_t> CompleteTokenIds::thinkEndTokensStatus() {
+    std::vector<size_t> status;
+    for (auto& dfa: this->think_end_status_dfa_) {
+        status.push_back(dfa.status());
+    }
+    return status;
 }
 
 int64_t CompleteTokenIds::firstTokenTimeUs() const {

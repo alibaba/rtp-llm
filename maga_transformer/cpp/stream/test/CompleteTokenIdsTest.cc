@@ -81,7 +81,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokens) {
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 8);
 
-    const std::vector<size_t>& think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
+    std::vector<size_t> think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(2, think_end_tokens_status[0]);
 
@@ -94,6 +94,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStep) {
     params.max_seq_len_ = 100;
     auto builder = CompleteTokenIdsBuilder(params);
     auto complete_token_ids = builder.createCompleteTokenIds({1, 2, 3, 4, 5}, 1);
+    int input_len = 5;
 
     torch::Tensor tensor = torch::tensor({{6}}, torch::dtype(torch::kInt));
     auto new_tokens_ptr = torchTensor2Buffer(tensor);
@@ -107,12 +108,12 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStep) {
     ASSERT_EQ(complete_token_ids->seq_length_, 5);
     
     bool ret = complete_token_ids->update(new_tokens_ptr, begin_time_us, 
-        num_new_tokens, 5, max_token_num, params.vocab_size_, 
+        num_new_tokens, input_len, max_token_num, params.vocab_size_, 
         num_beams, stream_id, error_token_id);
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 6);
     printf("--%s\n", complete_token_ids->toString(0).c_str());
-    const std::vector<size_t>& think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
+    std::vector<size_t> think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(1, think_end_tokens_status[0]);
 
@@ -121,11 +122,12 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStep) {
     torch::Tensor tensor2 = torch::tensor({{7}}, torch::dtype(torch::kInt));
     auto new_tokens_ptr2 = torchTensor2Buffer(tensor2);
     ret = complete_token_ids->update(new_tokens_ptr2, begin_time_us, 
-        num_new_tokens, 5, max_token_num, params.vocab_size_, 
+        num_new_tokens, input_len, max_token_num, params.vocab_size_, 
         num_beams, stream_id, error_token_id);
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 7);
     printf("--%s\n", complete_token_ids->toString(0).c_str());
+    think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(2, think_end_tokens_status[0]);
 
@@ -157,7 +159,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStepWithEarlyT
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 2);
     printf("%s\n", complete_token_ids->toString(0).c_str());
-    const std::vector<size_t>& think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
+    std::vector<size_t> think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(1, think_end_tokens_status[0]);
 
@@ -171,6 +173,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStepWithEarlyT
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 3);
     printf("%s\n", complete_token_ids->toString(0).c_str());
+    think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(0, think_end_tokens_status[0]);
 
@@ -184,6 +187,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStepWithEarlyT
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 4);
     printf("%s\n", complete_token_ids->toString(0).c_str());
+    think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(1, think_end_tokens_status[0]);
 
@@ -197,6 +201,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStepWithEarlyT
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 5);
     printf("%s\n", complete_token_ids->toString(0).c_str());
+    think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(2, think_end_tokens_status[0]);
 
@@ -209,6 +214,7 @@ TEST_F(CompleteTokenIdsTest, testUpdateWithMaxThinkingTokensStepbyStepWithEarlyT
     ASSERT_EQ(ret, true);
     ASSERT_EQ(complete_token_ids->seq_length_, 6);
     printf("%s\n", complete_token_ids->toString(0).c_str());
+    think_end_tokens_status = complete_token_ids->thinkEndTokensStatus();
     ASSERT_EQ((size_t)1, think_end_tokens_status.size());
     ASSERT_EQ(2, think_end_tokens_status[0]);
 

@@ -42,3 +42,16 @@ cc_test(
     deps = test_deps,
 )
 
+
+cc_test(
+    name = "dfa_util_test",
+    srcs = [
+        "DFAUtilTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
