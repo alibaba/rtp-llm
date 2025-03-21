@@ -1,9 +1,10 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps")
+load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps", "flashmla_deps")
 
 cuda_register()
 trt_plugins()
 flashinfer_deps()
+flashmla_deps()
 
 cc_library(
     name = "gpu_base",
@@ -38,6 +39,7 @@ cc_library(
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
+        ":flashmla",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

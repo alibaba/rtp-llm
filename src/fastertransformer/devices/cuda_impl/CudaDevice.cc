@@ -133,6 +133,13 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
         &cublas_wrapper_mutex_, allocator_.get()));
+    
+    // select mla type
+    if (params.mla_ops_type != MlaOpsType::AUTO) {
+        mla_ops_type = params.mla_ops_type;
+    } else {
+        mla_ops_type = device_prop_.major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
+    }
 }
 
 CudaDevice::~CudaDevice() {
@@ -295,7 +302,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;
-            } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && !params.configs.use_mla_ops) {
+            } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && mla_ops_type == MlaOpsType::MHA) {
                 fmha_type_ = FMHAType::TRT_V1;
             }
         } else {

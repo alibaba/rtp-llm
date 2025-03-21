@@ -63,7 +63,8 @@ public:
 
 class MlaDecoderAttnOp: public torch::jit::CustomClassHolder {
 public:
-    MlaDecoderAttnOp(int64_t head_num,
+    MlaDecoderAttnOp(int64_t mla_ops_type,
+                     int64_t head_num,
                      int64_t nope_head_dim,
                      int64_t rope_head_dim,
                      int64_t v_head_dim,
@@ -79,7 +80,6 @@ public:
                           torch::Tensor sequence_length_t,
                           torch::Tensor kvcache_block_id,
                           int64_t       page_size);
-
     c10::intrusive_ptr<FlashInferParams> createFlashInferParams(torch::Tensor sequence_length,
                                                                 torch::Tensor input_length,
                                                                 int64_t       page_size,
@@ -88,7 +88,8 @@ public:
     DeviceBase*                          device_;
 };
 
-MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t head_num,
+MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t mla_ops_type,
+                                   int64_t head_num,
                                    int64_t nope_head_dim,
                                    int64_t rope_head_dim,
                                    int64_t v_head_dim,
@@ -96,7 +97,11 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t head_num,
                                    int64_t kv_lora_rank,
                                    int64_t hidden_size,
                                    double  softmax_extra_scale) {
-    fastertransformer::DeviceFactory::initDevices(GptInitParameter());
+    rtp_llm::initLogger();
+    
+    auto gpt_params = GptInitParameter();
+    gpt_params.mla_ops_type_ = MlaOpsType(mla_ops_type);
+    fastertransformer::DeviceFactory::initDevices(gpt_params);
     device_      = fastertransformer::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
@@ -109,7 +114,6 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t head_num,
         1.0f,
         true,
         false,
-        true,
         true,
         static_cast<size_t>(q_lora_rank),
         static_cast<size_t>(kv_lora_rank),
@@ -214,6 +218,6 @@ static auto FlashInferParamsReg =
 
 static auto MlaDecoderAttnOp =
     torch::jit::class_<unittest::MlaDecoderAttnOp>("unittest", "MlaDecoderAttnOp")
-        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
+        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
         .def("createFlashInferParams", &unittest::MlaDecoderAttnOp::createFlashInferParams)
         .def("forward", &unittest::MlaDecoderAttnOp::forward);

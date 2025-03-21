@@ -198,7 +198,8 @@ py_test(
 py_test(
     name = "mla_context_attention",
     srcs = [
-        "mla/mla_context_attention.py"
+        "mla/mla_context_attention.py",
+        "mla/test_util.py"
     ],
     data = [
         "//:th_transformer",

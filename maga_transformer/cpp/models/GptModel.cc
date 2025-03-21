@@ -382,7 +382,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
             {description_.layernorm_eps, description_.norm_type},
             act_qscheme
     });
-    if (description_.attention_conf.use_mla_ops) {
+    if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
     } else {
         attn_output = device_->attentionLayer(attn_params);

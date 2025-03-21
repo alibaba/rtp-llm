@@ -75,6 +75,16 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "flashmla",
+        remote = "https://github.com/deepseek-ai/FlashMLA.git",
+        commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",
+        build_file = str(Label("//3rdparty/flashmla:flashmla.BUILD")),
+        patches = [
+            "//3rdparty/flashmla:0001-add-interface.patch",
+        ],
+    )
+
+    new_git_repository(
         name = "flash_attention",
         remote = "https://github.com/Dao-AILab/flash-attention.git",
         # v2.5.6

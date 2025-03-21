@@ -12,12 +12,11 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     DevicePerfWrapper wrapper(this, "mla_layer_%d", params.layer_id);
     const auto& input            = params.input;
     const auto& input_lengths    = *params.common.input_lengths;
-    const auto& sequence_lengths = *params.common.sequence_lengths;
 
 //    const auto& output_weight = params.weights.output_weight;
 
-    const auto generate_batch_size = sequence_lengths.shape()[0];
-    const auto context_batch_size  = input_lengths.shape()[0] - generate_batch_size;
+    const auto generate_batch_size = params.common.decoder_batch_size;
+    const auto context_batch_size  = params.common.context_batch_size;
     const auto context_token_num   = params.common.context_token_num;
     const auto h_token_num         = context_token_num + generate_batch_size;
 
@@ -39,7 +38,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         RUNTIME_ASSERT_OP_ARG(
             ((k_cache_shape.size() == 3) && (v_cache_shape.size() == 3) && (k_cache_shape[0] == v_cache_shape[0])
             && (k_cache_shape[1] == v_cache_shape[1]) && (k_cache_shape[1] == params.configs.tokens_per_block)
-            && (k_cache_shape[2] == params.configs.kv_lora_rank) && (v_cache_shape[2] == params.configs.rope_head_dim)),
+            && (k_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim) && (v_cache_shape[2] == 0)),
             "mla kv cache buffer check shape failed. k_cache_buffer: %s, v_cache_buffer: %s",
             kv_cache.k_cache_buffer->debugString().c_str(),
             kv_cache.v_cache_buffer->debugString().c_str());

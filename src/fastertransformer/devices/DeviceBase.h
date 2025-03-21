@@ -87,6 +87,9 @@ protected:
 
 private:
     std::unique_ptr<BufferManager> buffer_manager_;
+
+public:
+    MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 };
 
 };  // namespace fastertransformer

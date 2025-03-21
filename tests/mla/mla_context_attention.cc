@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
@@ -8,7 +9,8 @@ using namespace fastertransformer;
 namespace unittest {
 class MlaContextAttnOp: public torch::jit::CustomClassHolder {
 public:
-    MlaContextAttnOp(int64_t head_num,
+    MlaContextAttnOp(int64_t mla_type,
+                     int64_t head_num,
                      int64_t nope_head_dim,
                      int64_t rope_head_dim,
                      int64_t v_head_dim,
@@ -24,11 +26,12 @@ public:
                           torch::Tensor seq_len);
 
 private:
-    CudaDevice       device       = CudaDevice({});
+    DeviceBase*      device_;
     AttentionConfigs attn_configs = AttentionConfigs({});
 };
 
-MlaContextAttnOp::MlaContextAttnOp(int64_t head_num,
+MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
+                                   int64_t head_num,
                                    int64_t nope_head_dim,
                                    int64_t rope_head_dim,
                                    int64_t v_head_dim,
@@ -36,7 +39,12 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t head_num,
                                    int64_t kv_lora_rank,
                                    int64_t hidden_size,
                                    double  softmax_extra_scale) {
-    device.init();
+    rtp_llm::initLogger();
+    
+    auto gpt_params = GptInitParameter();
+    gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
+    fastertransformer::DeviceFactory::initDevices(gpt_params);
+    device_ = fastertransformer::DeviceFactory::getDefaultDevice();;
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
         static_cast<size_t>(head_num),
@@ -48,7 +56,6 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t head_num,
         1.0f,
         true,
         false,
-        true,
         true,
         static_cast<size_t>(q_lora_rank),
         static_cast<size_t>(kv_lora_rank),
@@ -99,9 +106,9 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         0,
     });
 
-    device.prepareModelRun(device_prep_params);
+    device_->prepareModelRun(device_prep_params);
     auto output =
-        device.allocateBuffer({datatype, {token_num, attn_configs.head_num * attn_configs.size_per_head}}, {"output"});
+        device_->allocateBuffer({datatype, {token_num, attn_configs.head_num * attn_configs.size_per_head}}, {"output"});
 
     auto k_nope_w = std::make_shared<DenseWeights>(k_nope_weight_b);
     auto v_w      = std::make_shared<DenseWeights>(v_weight_b);
@@ -111,7 +118,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     attn_layer_weight.v_weight      = v_w;
     auto attn_common_inputs         = AttentionCommonInputs();
     attn_common_inputs.cu_seqlens =
-        device.clone({*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
+        device_->clone({*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
     attn_common_inputs.context_batch_size  = batch_size;
     attn_common_inputs.decoder_batch_size  = 0;
     attn_common_inputs.context_max_seq_len = token_num;
@@ -119,7 +126,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     auto mla_params = MlaAttentionModuleParams{
         0, *q_b, *kv_a_b, *k_rope_b, output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};
 
-    device.mlaContextAttention(mla_params);
+    device_->mlaContextAttention(mla_params);
 
     auto output_t = Buffer2torchTensor(*output, false);
     return output_t.detach().clone();
@@ -129,5 +136,5 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
 
 static auto MergeTransposeTHS =
     torch::jit::class_<unittest::MlaContextAttnOp>("unittest", "MlaContextAttnOp")
-        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
+        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
         .def("forward", &unittest::MlaContextAttnOp::forward);

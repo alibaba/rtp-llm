@@ -84,6 +84,15 @@ struct FlashInferAttnParams {
     torch::Tensor total_page_indptr_t;
     torch::Tensor total_kv_last_page_len_1_t;
 
+    // for flashmla only
+    BufferPtr kv_cache_block_id;
+    BufferPtr kvlen;
+
+    torch::Tensor kv_cache_block_id_t;
+    torch::Tensor kvlen_t;
+
+    std::vector<torch::Tensor> flash_mla_plan;
+
     bool decode = true;
     torch::Tensor plan;
 

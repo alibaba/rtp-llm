@@ -94,6 +94,11 @@ def flashinfer_deps():
         actual = "@flashinfer//:flashinfer"
     )
 
+def flashmla_deps():
+    native.alias(
+        name = "flashmla",
+        actual = "@flashmla//:flashmla"
+    )
 
 def kernel_so_deps():
     return select({

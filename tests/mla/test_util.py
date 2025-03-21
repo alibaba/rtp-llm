@@ -1,5 +1,12 @@
 import torch
 import logging
+from enum import IntEnum
+
+class MlaOpsType(IntEnum):
+    AUTO = 0
+    MHA = 1
+    FLASH_INFER = 2
+    FLASH_MLA = 3
 
 def check_with_info(condition: bool, error_msg: str):
     if not condition:

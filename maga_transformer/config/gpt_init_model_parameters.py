@@ -11,7 +11,7 @@ from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
-from maga_transformer.ops import GptInitParameter
+from maga_transformer.ops import GptInitParameter, MlaOpsType
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
 updated_params: Set[str] = set()
@@ -84,6 +84,7 @@ class TemplateType(Enum):
 class ConfigMode(Enum):
     SimpleMode = 1
     ComplexMode = 2
+
 
 class GptInitModelParameters:
     __slots__ = {

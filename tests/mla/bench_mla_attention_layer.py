@@ -116,8 +116,8 @@ class TestMlaAttentionLayer(unittest.TestCase):
         ]
         
         total_page_num = sum(seq_page_sizes)
-        ckv_cache = torch.randn([total_page_num, page_size, self.config.kv_lora], dtype=torch.bfloat16, device=torch.device("cuda"))
-        kpe_cache = torch.randn([total_page_num, page_size, self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
+        ckv_cache = torch.randn([total_page_num, page_size, self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
+        kpe_cache = torch.randn([total_page_num, page_size, 0], dtype=torch.bfloat16, device=torch.device("cuda"))
         
         sequence_lengths_mius_1 = [x - 1 for x in sequence_lengths]
         sequence_lengths_t = torch.tensor(sequence_lengths_mius_1, dtype=torch.int32)

@@ -64,6 +64,49 @@ class DeviceType:
     @property
     def value(self) -> int:
         ...
+class MlaOpsType:
+    """
+    Members:
+    
+      AUTO
+
+      MHA
+
+      FLASH_INFER
+
+      FLASH_MLA
+    """
+    AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
+    MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
+    FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
+    FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
+    __members__: typing.ClassVar[dict[str, MlaOpsType]]
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class EmbeddingHandlerOp:
     def __init__(self) -> None:
         ...

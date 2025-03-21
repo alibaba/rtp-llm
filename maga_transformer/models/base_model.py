@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 import safetensors.torch
 
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode, MlaOpsType
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
@@ -370,7 +370,7 @@ class BaseModel(object):
         if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
 
-        if self.config.use_mla_ops:
+        if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
             for layer_weight in self.weight.weights:
                 mla_k_nope_weight  = layer_weight[W.mla_k_nope_w]
                 mla_v_weight = layer_weight[W.mla_v_w]

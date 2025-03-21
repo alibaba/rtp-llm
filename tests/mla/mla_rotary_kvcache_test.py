@@ -13,10 +13,10 @@ import random
 
 from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 from rotary_util import apply_rotary_pos_emb
-from test_util import compare_tensor_diff_with_ratio
+from test_util import compare_tensor_diff_with_ratio, MlaOpsType
 
 logging.basicConfig(
-    level="DEBUG",
+    level="INFO",
     format='%(message)s')
 
 def set_seed(seed: int):
@@ -68,8 +68,11 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         super().__init__(methodName)
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
         self.config = DeepSeekConfig()
+        # self.mla_ops_type = MlaOpsType.FLASH_MLA
+        self.mla_ops_type = MlaOpsType.FLASH_INFER
         self.rotary_config = RotaryConfig()
         self.mla_rotary_kvcache_op = torch.classes.unittest.MlaRotaryKVCacheOp(
+            self.mla_ops_type,
             self.config.head_num,
             self.config.nope_head_size,
             self.config.rope_head_size,
@@ -109,6 +112,7 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         return q_rope, k_rope
 
     def _test_one_case(self, sequence_lengths: List[int], intput_lengths: List[int], page_size: int):
+        logging.info(f'--------------------{self.mla_ops_type}, {sequence_lengths}, {intput_lengths}, {page_size}--------------------')
         batch_page_sizes = [math.ceil(x / page_size) for x in sequence_lengths] + [math.ceil(x / page_size) for x in intput_lengths[len(sequence_lengths):]]
         total_page_num = max(batch_page_sizes) * len(intput_lengths)
         block_id_map = torch.zeros([len(intput_lengths), max(batch_page_sizes)], dtype=torch.int32)
@@ -130,13 +134,15 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         # q[..., self.config.nope_head_size:] = q[..., self.config.nope_head_size:].reshape(token_num, self.config.head_num, self.config.rope_head_size // 2, 2).transpose(2, 3).reshape(token_num, self.config.head_num, self.config.rope_head_size).contiguous()
         # k_rope = k_rope.reshape(token_num, self.config.rope_head_size // 2, 2).transpose(1, 2).reshape(token_num, self.config.rope_head_size).contiguous()
 
-        ckv_cache = torch.zeros([total_page_num, page_size, self.config.kv_lora], dtype=torch.bfloat16, device=torch.device("cuda"))
-        kpe_cache = torch.zeros([total_page_num, page_size, self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
         #TODO: CHECK COS SIN CACHE TYPE
         cos_sin_cache = self.cos_sin_cache
         sequence_length_mins_one = torch.tensor([x - 1 for x in sequence_lengths], dtype=torch.int32)
         self.mla_rotary_kvcache_op.init(sequence_length_mins_one, torch.tensor(intput_lengths, dtype=torch.int32), page_size, block_id_map)
-        self.mla_rotary_kvcache_op.applyRotaryKVCache(q, ckv, k_rope, ckv_cache, kpe_cache, cos_sin_cache)
+        
+        kv_cache = torch.zeros([total_page_num, page_size, self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
+        ckv_cache = kv_cache[:, :, :self.config.kv_lora]
+        kpe_cache = kv_cache[:, :, self.config.kv_lora:]
+        self.mla_rotary_kvcache_op.applyRotaryKVCache(q, ckv, k_rope, kv_cache, torch.empty(tuple(), dtype=torch.bfloat16, device=torch.device("cuda")), cos_sin_cache)
 
         # check kvcache not empty
         page_offset = 0
@@ -176,13 +182,14 @@ class TestRotaryKVcacheTest(unittest.TestCase):
 
     def test_rotary_kvcache(self):
         set_seed(42)
+
         self._test_one_case([], [25], 16)
         self._test_one_case([], [1024], 16)
         self._test_one_case([30], [25], 16)
         self._test_one_case([26], [25], 64)
         self._test_one_case([26], [25, 65], 64)
         self._test_one_case([84], [25, 953], 64)
-        self._test_one_case([30], [25, 300], 16)        
+        self._test_one_case([30], [25, 300], 16)
         self._test_one_case([30], [25, 34, 65, 123, 2345], 64)
         self._test_one_case([130], [39], 64)
         self._test_one_case([129], [39], 64)
@@ -190,5 +197,6 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         self._test_one_case([128], [39], 64)
         self._test_one_case([129], [39], 64)
         self._test_one_case([126], [39], 64)
+
 if __name__ == '__main__':
     unittest.main()

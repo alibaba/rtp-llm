@@ -4,6 +4,7 @@
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
+#include "src/fastertransformer/utils/MlaConfig.h"
 #include "src/fastertransformer/utils/QuantInfo.h"
 #include "src/fastertransformer/core/Types.h"
 
@@ -58,13 +59,13 @@ public:
     int64_t hidden_size_            = 0;
 
     // mla extra params
-    bool    use_mla_       = false;
-    int64_t q_lora_rank_   = 0;
-    int64_t kv_lora_rank_  = 0;
-    int64_t nope_head_dim_ = 0;
-    int64_t rope_head_dim_ = 0;
-    int64_t v_head_dim_    = 0;
-    bool    use_mla_ops_ = false;
+    bool       use_mla_       = false;
+    int64_t    q_lora_rank_   = 0;
+    int64_t    kv_lora_rank_  = 0;
+    int64_t    nope_head_dim_ = 0;
+    int64_t    rope_head_dim_ = 0;
+    int64_t    v_head_dim_    = 0;
+    MlaOpsType mla_ops_type_  = MlaOpsType::AUTO;
 
     // rope config for deepseek
     double deepseek_rope_mscale_    = 1.0;

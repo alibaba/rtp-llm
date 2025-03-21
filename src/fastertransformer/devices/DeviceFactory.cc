@@ -68,6 +68,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.dp_master_port    = params.dp_nccl_port_;
     device_params.dp_tp_master_port = params.dp_tp_nccl_port_;
     device_params.tokens_per_block  = params.seq_size_per_block_;
+    device_params.mla_ops_type      = params.mla_ops_type_;
+
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
 

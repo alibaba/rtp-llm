@@ -34,6 +34,8 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                int64_t kv_lora_rank,
                                int64_t hidden_size,
                                double  softmax_extra_scale) {
+    rtp_llm::initLogger();
+
     fastertransformer::DeviceFactory::initDevices(GptInitParameter());
     device_      = fastertransformer::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
@@ -47,7 +49,6 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
         1.0f,
         true,
         false,
-        true,
         true,
         static_cast<size_t>(q_lora_rank),
         static_cast<size_t>(kv_lora_rank),

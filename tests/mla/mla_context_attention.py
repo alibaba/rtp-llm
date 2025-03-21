@@ -1,3 +1,10 @@
+
+import logging
+
+logging.basicConfig(
+    level="INFO",
+    format='%(message)s')
+
 import math
 import os
 import unittest
@@ -5,6 +12,7 @@ import torch
 
 from dataclasses import dataclass
 from flash_attn import flash_attn_varlen_func
+from test_util import MlaOpsType
 import random
 
 os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
@@ -96,7 +104,11 @@ class TestRope(unittest.TestCase):
         super().__init__(methodName)
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
         self.config = DeepSeekConfig()
+        
+        # self.mla_ops_type = MlaOpsType.FLASH_MLA
+        self.mla_ops_type = MlaOpsType.FLASH_INFER
         self.mla_context_attn_op = torch.classes.unittest.MlaContextAttnOp(
+            self.mla_ops_type,
             self.config.head_num,
             self.config.nope_head_size,
             self.config.rope_head_size,
@@ -109,6 +121,7 @@ class TestRope(unittest.TestCase):
 
     def test_mla_context_attn(self):
         set_seed(0)
+
         with torch.no_grad():
             config = self.config
             head_num = config.head_num
@@ -135,10 +148,11 @@ class TestRope(unittest.TestCase):
             # [1, token_num, head_num, nope_size]
             attn_output_expect = torch_attention(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len, config)
             print(attn_output_expect.shape)
-
+            
             attn_output = self.mla_context_attn_op.forward(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len)
             attn_output = attn_output.reshape(1, token_nums, head_num, nope_rope_size)
             torch.testing.assert_close(attn_output_expect, attn_output_expect, atol=1e-2, rtol=2e-3)
+            torch.cuda.synchronize()
 
 if __name__ == '__main__':
     unittest.main()

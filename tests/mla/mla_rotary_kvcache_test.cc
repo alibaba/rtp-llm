@@ -9,7 +9,8 @@ namespace unittest {
 
 class MlaRotaryKVCacheOp: public torch::jit::CustomClassHolder {
 public:
-    MlaRotaryKVCacheOp(int64_t head_num,
+    MlaRotaryKVCacheOp(int64_t mla_type, 
+                       int64_t head_num,
                        int64_t nope_head_dim,
                        int64_t rope_head_dim,
                        int64_t v_head_dim,
@@ -28,7 +29,8 @@ public:
     int64_t decoder_batch_size_;
 };
 
-MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t head_num,
+MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type, 
+                                       int64_t head_num,
                                        int64_t nope_head_dim,
                                        int64_t rope_head_dim,
                                        int64_t v_head_dim,
@@ -36,7 +38,11 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t head_num,
                                        int64_t kv_lora_rank,
                                        int64_t hidden_size,
                                        double  softmax_extra_scale) {
-    fastertransformer::DeviceFactory::initDevices(GptInitParameter());
+    rtp_llm::initLogger();
+    
+    auto gpt_params = GptInitParameter();
+    gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
+    fastertransformer::DeviceFactory::initDevices(gpt_params);
     device_      = fastertransformer::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
@@ -49,7 +55,6 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t head_num,
         1.0f,
         true,
         false,
-        true,
         true,
         static_cast<size_t>(q_lora_rank),
         static_cast<size_t>(kv_lora_rank),
@@ -106,6 +111,6 @@ void MlaRotaryKVCacheOp::applyRotaryKVCache(
 
 static auto MlaRotaryKVCacheOp =
     torch::jit::class_<unittest::MlaRotaryKVCacheOp>("unittest", "MlaRotaryKVCacheOp")
-        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
+        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
         .def("init", &unittest::MlaRotaryKVCacheOp::init)
         .def("applyRotaryKVCache", &unittest::MlaRotaryKVCacheOp::applyRotaryKVCache);

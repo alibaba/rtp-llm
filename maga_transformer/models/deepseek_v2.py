@@ -25,7 +25,7 @@ from maga_transformer.utils.model_weight import (
     multipy_identity,
     stack_moe_w1
 )
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, MlaOpsType
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 
@@ -116,7 +116,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                        identity),
         ]
 
-        # if self.config.use_mla_ops:
+        # if self.config.mla_ops_type != MlaOpsType.HMA:
         #     mla_layer_weights.append(
         #         WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
         #                    functools.partial(transpose_slice_k, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
@@ -223,8 +223,8 @@ class DeepSeekV2(BaseModel):
 
             # MLA config
             config.use_mla = True
-            config.use_mla_ops = os.environ.get('USE_MLA_OPS', "1") == "1"
-            logging.info(f"deepseek2 use_mla_ops: {config.use_mla_ops}")
+            config.mla_ops_type = MlaOpsType.__members__[os.environ.get('MLA_OPS_TYPE', 'AUTO')]
+            logging.info(f"deepseek2 mla_ops_type: {config.mla_ops_type.name}")
             config.q_lora_rank = config_json['q_lora_rank']
             config.kv_lora_rank = config_json['kv_lora_rank']
             config.nope_head_dim = config_json['qk_nope_head_dim']
@@ -234,7 +234,7 @@ class DeepSeekV2(BaseModel):
             config.rotary_embedding_dim = config.rope_head_dim
 
             # yarn rotary config
-            if config.use_mla_ops:
+            if config.mla_ops_type != MlaOpsType.MHA:
                 config.rotary_embedding_style = 0
             else:
                 config.rotary_embedding_style = 5
@@ -298,7 +298,7 @@ class DeepSeekV2(BaseModel):
         return DeepSeekV2Weight
 
     def _initialize_rope(self):
-        if not self.config.use_mla_ops:
+        if self.config.mla_ops_type == MlaOpsType.MHA:
             return
         assert self.weight
         config = self.config

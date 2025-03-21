@@ -5,6 +5,7 @@
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
+#include "src/fastertransformer/utils/MlaConfig.h"
 
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/QBuffer.h"
@@ -443,13 +444,12 @@ struct AttentionConfigs {
     bool use_logn_attn = false;
 
     // mla config
-    bool   use_mla = false;
-    bool   use_mla_ops = false;
-    size_t q_lora_rank;
-    size_t kv_lora_rank;
-    size_t nope_head_dim;
-    size_t rope_head_dim;
-    size_t v_head_dim;
+    bool       use_mla = false;
+    size_t     q_lora_rank;
+    size_t     kv_lora_rank;
+    size_t     nope_head_dim;
+    size_t     rope_head_dim;
+    size_t     v_head_dim;
 
     // softmax config
     float softmax_extra_scale = 1.0f;
@@ -509,12 +509,13 @@ struct MlaDecoderAttentionParams{
 struct WriteCacheParams {
     AttentionCommonInputs&          common;
     const AttentionConfigs&         configs;
+    bool                            mla_kvcache = false;
 
     WriteCacheParams(const AttentionModuleParams& params)
     : common(params.common), configs(params.configs) {}
 
     WriteCacheParams(const MlaAttentionModuleParams& params)
-    : common(params.common), configs(params.configs) {}
+    : common(params.common), configs(params.configs), mla_kvcache(true) {}
 };
 
 struct AttentionLayerOutput {

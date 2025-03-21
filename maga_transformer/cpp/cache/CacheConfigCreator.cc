@@ -14,11 +14,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& pa
         dtype = param.kv_cache_data_type_ == ft::DataType::TYPE_INT8 ? ft::TYPE_INT8 : ft::TYPE_FP32;
     }
 
-    if (param.use_mla_ && param.use_mla_ops_) {
+    if (param.use_mla_ && param.mla_ops_type_ != ft::MlaOpsType::MHA) {
         return CacheConfig(MlaCacheParam{(uint)param.num_layers_,
                                          (uint)0,
-                                         (uint)param.kv_lora_rank_,
-                                         (uint)param.rope_head_dim_,
+                                         (uint)(param.kv_lora_rank_ + param.rope_head_dim_),
+                                         (uint)0,
                                          (uint)param.seq_size_per_block_,
                                          dtype});
     }

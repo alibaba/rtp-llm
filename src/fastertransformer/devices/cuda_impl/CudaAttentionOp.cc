@@ -15,6 +15,7 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/utils/RpcErrorCode.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "flashmla/flashmla.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -105,7 +106,6 @@ void prepareMLAFlashInferAttnParams(FlashInferAttnParams*                      p
                                     const uint64_t                             tokens_per_block,
                                     const uint64_t                             max_batch_blocks,
                                     const uint64_t                             batch_size) {
-
     params->total_batch_indices_host = device->allocateBuffer(
         {DataType::TYPE_INT32, {total_token_num}, AllocationType::HOST}, {"total_batch_indices_host"});
     params->total_positions_host = device->allocateBuffer(
@@ -158,12 +158,27 @@ void prepareMLAFlashInferAttnParams(FlashInferAttnParams*                      p
     }
     if (kv_cache_block_id_host) {
         params->total_page_indices_host =
-            device->allocateBuffer({DataType::TYPE_INT32, {size_t(total_page_indices_vec.size())}, AllocationType::HOST},                               {"total_page_indices_host"});
+            device->allocateBuffer({DataType::TYPE_INT32, {size_t(total_page_indices_vec.size())}, AllocationType::HOST}, 
+                                   {"total_page_indices_host"});
         std::copy(
             total_page_indices_vec.begin(), total_page_indices_vec.end(), params->total_page_indices_host->data<int>());
         params->total_page_indices       = device->clone({*params->total_page_indices_host, AllocationType::DEVICE});
         params->total_page_indices_t       = Buffer2torchTensor(params->total_page_indices, false);
 
+        if (device->mla_ops_type == MlaOpsType::FLASH_MLA) {
+            params->kv_cache_block_id   = device->clone({*kv_cache_block_id_host, AllocationType::DEVICE});
+            params->kv_cache_block_id_t = Buffer2torchTensor(params->kv_cache_block_id, false);
+        }
+    }
+    if (device->mla_ops_type == MlaOpsType::FLASH_MLA && batch_size > 0) {
+        params->kvlen_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"kvlen_host"});
+        for (int i = 0; i < int(batch_size); i++) {
+            params->kvlen_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] + 1;
+        }
+        params->kvlen_host_t = Buffer2torchTensor(params->kvlen_host, false);
+
+        params->kvlen   = device->clone({*params->kvlen_host, AllocationType::DEVICE});
+        params->kvlen_t = Buffer2torchTensor(params->kvlen, false);
     }
 
     params->total_batch_indices      = device->clone({*params->total_batch_indices_host, AllocationType::DEVICE});
@@ -233,14 +248,54 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
     }
 
     // prepare flashinfer params for mla rotary and write kvcache
-    if (attn_configs.use_mla_ops){
+    if (device->mla_ops_type != MlaOpsType::MHA){
         prepareMLAFlashInferAttnParams(params, device, attn_configs, sequence_lengths_host, input_lengths_host, kv_cache_block_id_host, total_token_num, context_batch_size, tokens_per_block, max_batch_blocks, batch_size);
     }
     // set plan
     if (batch_size == 0) {
         return ret;
     }
-    if (attn_configs.use_mla_ops) {
+
+    if (!attn_configs.use_mla || device->mla_ops_type == MlaOpsType::MHA) {
+        if (params->decode) {
+            params->plan = BatchDecodeWithPagedKVCachePlan(
+                    params->float_workspace_t, // float_workspace_buffer
+                    params->int_workspace_t, // int_workspace_buffer
+                    params->int_host_workspace_t, // page_locked_int_workspace_buffer
+                    params->page_indptr_host_t, // indptr
+                    batch_size, // batch_size
+                    local_head_num, // num_qo_heads
+                    local_head_num_kv, // num_kv_heads
+                    tokens_per_block, // page_size
+                    false, // enable_cuda_graph,
+                    -1, // window_left
+                    -1, // logits_soft_cap
+                    size_per_head, // head_dim_qk
+                    size_per_head, // head_dim_vo
+                    torch::empty(0, dataTypeToTorchType(dtype)), // empty_q_data
+                    torch::empty(0, dataTypeToTorchType(dtype)), // empty_kv_data
+                    reinterpret_cast<int64_t>(cuda_device->getStream()) // cuda_stream
+                    );
+        } else {
+            params->plan = BatchPrefillWithKVCachePlan(
+                    params->float_workspace_t, // float_workspace_buffer
+                    params->int_workspace_t, // int_workspace_buffer
+                    params->int_host_workspace_t, // page_locked_int_workspace_buffer
+                    params->qo_indptr_host_t, // qo_indptr
+                    params->page_indptr_host_t, // kv_indptr
+                    torch::empty(0, dataTypeToTorchType(dtype)), // kv_len_arr, not in use yet
+                    batch_size, // total_num_rows
+                    batch_size, // batch_size
+                    local_head_num, // num_qo_heads
+                    local_head_num_kv, // num_kv_heads
+                    tokens_per_block, // page_size
+                    false, // enable_cuda_graph
+                    size_per_head, // head_dim_qk
+                    size_per_head, // head_dim_vo
+                    true, // causal
+                    reinterpret_cast<int64_t>(cuda_device->getStream()));
+        }
+    } else if (device->mla_ops_type == MlaOpsType::FLASH_INFER) {
         params->plan = BatchMLAPagedAttentionPlan(
             params->float_workspace_t,
             params->int_workspace_t,
@@ -252,46 +307,20 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
             attn_configs.kv_lora_rank,
             true,
             reinterpret_cast<int64_t>(cuda_device->getStream())
-        );        
-    }
-    else if (params->decode) {
-        params->plan = BatchDecodeWithPagedKVCachePlan(
-                params->float_workspace_t, // float_workspace_buffer
-                params->int_workspace_t, // int_workspace_buffer
-                params->int_host_workspace_t, // page_locked_int_workspace_buffer
-                params->page_indptr_host_t, // indptr
-                batch_size, // batch_size
-                local_head_num, // num_qo_heads
-                local_head_num_kv, // num_kv_heads
-                tokens_per_block, // page_size
-                false, // enable_cuda_graph,
-                -1, // window_left
-                -1, // logits_soft_cap
-                size_per_head, // head_dim_qk
-                size_per_head, // head_dim_vo
-                torch::empty(0, dataTypeToTorchType(dtype)), // empty_q_data
-                torch::empty(0, dataTypeToTorchType(dtype)), // empty_kv_data
-                reinterpret_cast<int64_t>(cuda_device->getStream()) // cuda_stream
-                );
+        );
+    } else if (device->mla_ops_type == MlaOpsType::FLASH_MLA) {
+        printBufferData(*torchTensor2Buffer(params->kvlen_t), "metadata kvlen_t");
+        FT_LOG_TRACE("batch_size = %zu", batch_size);
+        FT_LOG_TRACE("local_head_num = %zu", local_head_num);
+        params->flash_mla_plan = get_mla_metadata(
+            params->kvlen_t,
+            local_head_num,
+            1
+        );
     } else {
-        params->plan = BatchPrefillWithKVCachePlan(
-                params->float_workspace_t, // float_workspace_buffer
-                params->int_workspace_t, // int_workspace_buffer
-                params->int_host_workspace_t, // page_locked_int_workspace_buffer
-                params->qo_indptr_host_t, // qo_indptr
-                params->page_indptr_host_t, // kv_indptr
-                torch::empty(0, dataTypeToTorchType(dtype)), // kv_len_arr, not in use yet
-                batch_size, // total_num_rows
-                batch_size, // batch_size
-                local_head_num, // num_qo_heads
-                local_head_num_kv, // num_kv_heads
-                tokens_per_block, // page_size
-                false, // enable_cuda_graph
-                size_per_head, // head_dim_qk
-                size_per_head, // head_dim_vo
-                true, // causal
-                reinterpret_cast<int64_t>(cuda_device->getStream()));
+        FT_FAIL("unexpected mla ops type: %d", int(device->mla_ops_type));
     }
+
     return ret;
 }
 

@@ -137,6 +137,11 @@ RopeConfig GptInitParameter::getRopeConfig() const {
 }
 
 void registerGptInitParameter(py::module m) {
+    py::enum_<MlaOpsType>(m, "MlaOpsType")
+        .value("AUTO", MlaOpsType::AUTO)
+        .value("MHA", MlaOpsType::MHA)
+        .value("FLASH_INFER", MlaOpsType::FLASH_INFER)
+        .value("FLASH_MLA", MlaOpsType::FLASH_MLA);
 
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
@@ -329,7 +334,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)     \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)     \
     DEF_PROPERTY(use_mla, use_mla_)                                     \
-    DEF_PROPERTY(use_mla_ops, use_mla_ops_)                             \
+    DEF_PROPERTY(mla_ops_type, mla_ops_type_)                           \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                             \
     DEF_PROPERTY(kv_lora_rank, kv_lora_rank_)                           \
     DEF_PROPERTY(nope_head_dim, nope_head_dim_)                         \
