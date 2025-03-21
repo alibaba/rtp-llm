@@ -75,7 +75,7 @@ rm $DIR/$WHL_FILE -f
 docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/maga_transformer/$WHL_FILE $DIR/
 
 # prepare start script
-START_SH_DIR="$DIR/../../internal_source/maga_start.sh"
+START_SH_DIR="$DIR/../../internal_source/package/maga_start.sh"
 if [[ ! -f $START_SH_DIR ]]; then
     echo "internal source start script not found, use open source"
     START_SH_DIR="$DIR/../maga_start.sh"
