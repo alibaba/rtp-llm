@@ -142,24 +142,16 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
     FT_CHECK(new_tokens->dim() == 2);
     
     for (size_t i = 0; i < batch_size_; ++i) {
-        size_t original_think_end_tokens_status = think_end_status_dfa_[i].status();
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) { // check tokenid
                 error_token_id = current_token_id; 
                 return false;
             }
-            if (in_think_mode_ && !think_end_status_dfa_[i].isFinished()) {
-                think_end_status_dfa_[i].next(current_token_id);
-            }
         }
-        if (in_think_mode_ && !think_end_status_dfa_[i].isFinished()
-            && seq_length_ + num_new_tokens >= max_thinking_tokens_ + input_length_) {
-            int offset = 0;
-            for (size_t pos = original_think_end_tokens_status; pos < this->end_think_token_ids_.size() && offset < num_new_tokens; pos++, offset++) {
-                *(*new_tokens)[i].dataWithOffset<int>(offset) = this->end_think_token_ids_[pos];
-                this->think_end_status_dfa_[i].forceSetStatus(pos + 1);
-            }
+        if (in_think_mode_) {
+            dfaStatusForward(think_end_status_dfa_[i], (*new_tokens)[i], num_new_tokens, end_think_token_ids_,
+                (seq_length_ + num_new_tokens >= max_thinking_tokens_ + input_length_));
         }
         if (num_beams > 1) {
             auto new_tokens_num = (*new_tokens)[i].shape()[0];
