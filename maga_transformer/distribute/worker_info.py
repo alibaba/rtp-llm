@@ -74,14 +74,20 @@ class ParallelInfo(object):
 
     @staticmethod
     def from_params(params: Dict[str, str]) -> ParallelInfo:
+        world_size = int(params.get('WORLD_SIZE', '1'))
+        if 'LOCAL_WORLD_SIZE' in params:
+            local_world_size = int(params['LOCAL_WORLD_SIZE'])
+        else:
+            local_world_size = min(torch.cuda.device_count(), world_size)
+            local_world_size = max(local_world_size, 1) # make sure local_world_size >= 1
         info = ParallelInfo(
                 tp_size=int(params.get('TP_SIZE', '1')),
                 ep_size=int(params.get('EP_SIZE', params.get('WORLD_SIZE', '1'))),
                 pp_size=int(params.get('PP_SIZE', '1')),
                 dp_size=int(params.get('DP_SIZE', 1)),
-                world_size=int(params.get('WORLD_SIZE', '1')),
+                world_size=world_size,
                 world_rank=int(params.get('WORLD_RANK', '0')),
-                local_world_size=int(params.get('LOCAL_WORLD_SIZE', '1')))
+                local_world_size=local_world_size)
         if (torch.cuda.is_available() and (info.local_world_size > torch.cuda.device_count())):
             raise Exception(f'local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}')
         if (info.tp_size * info.pp_size * info.dp_size != info.world_size or
@@ -129,10 +135,10 @@ class ParallelInfo(object):
 g_parallel_info = ParallelInfo.from_env()
 
 class WorkerInfo(object):
-    def __init__(self, ip: str, server_port: int, gang_hb_port: int, 
-                 http_port: int, rpc_server_port: int, remote_rpc_server_port: int, 
-                 cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int, 
-                 cache_store_rdma_connect_port: int, backend_server_port: int, 
+    def __init__(self, ip: str, server_port: int, gang_hb_port: int,
+                 http_port: int, rpc_server_port: int, remote_rpc_server_port: int,
+                 cache_store_listen_port: int, cache_store_connect_port: int, cache_store_rdma_listen_port: int,
+                 cache_store_rdma_connect_port: int, backend_server_port: int,
                  local_rank: int, world_rank: int, name: str, info: Any):
         self.ip = ip
         self.server_port = server_port

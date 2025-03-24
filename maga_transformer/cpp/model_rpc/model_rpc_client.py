@@ -138,9 +138,15 @@ class ModelRpcClient(object):
             address = f'localhost:{g_worker_info.rpc_server_port}'
         self._addresses = []
         if g_parallel_info.dp_size > 1:
-            for member in get_gang_info().members:
+            members_info_str = f"[world_rank: {g_parallel_info.world_rank}]"+ \
+                f"[tp_size: {g_parallel_info.tp_size}] all members: " + "{"
+            members = get_gang_info().members
+            for member in members:
+                members_info_str += f"{member}\n"
                 if member.local_rank % g_parallel_info.tp_size == 0:
                     self._addresses.append(f'{member.ip}:{member.rpc_server_port}')
+            members_info_str += "}"
+            logging.info(f"{members_info_str}")
         else:
             self._addresses = [address]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
