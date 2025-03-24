@@ -28,7 +28,7 @@ def check_server_health(server_port):
         else:
             logging.info(f"health check is not ready")
             return False
-    except BaseException:
+    except BaseException as e:
         logging.info(f"health check is not ready, {e.message()}")
         return False
 
