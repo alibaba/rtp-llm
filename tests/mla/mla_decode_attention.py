@@ -9,7 +9,7 @@ from test_util import compare_tensor_diff_with_ratio, MlaOpsType
 from typing import List
 import random
 
-os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '256000000'
 
 logging.basicConfig(
     level="INFO",
@@ -93,7 +93,7 @@ def attention_ref(
 class TestMlaDecodeAttention(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")        
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
         self.config = DeepSeekConfig()
         # self.mla_ops_type = MlaOpsType.FLASH_MLA
         self.mla_ops_type = MlaOpsType.FLASH_INFER
@@ -151,7 +151,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
     def _test_prepare_flash_infer_params(self, input_lengths: List[int], sequence_lengths: List[int], page_size: int):
         batch_size = len(input_lengths)
         decode_batch_size = len(sequence_lengths)
-    
+
         sequence_length_minus_1_t = torch.tensor([x - 1 for x in sequence_lengths], dtype=torch.int32)
         input_length_t = torch.tensor(input_lengths, dtype=torch.int32)
         page_nums = [math.ceil(x / page_size) for x in sequence_lengths]  + [math.ceil(x / page_size) for x in input_lengths[decode_batch_size:]]
@@ -170,7 +170,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
             expect_page_indptr.append(int(page_nums[i] + expect_page_indptr[-1]))
             expect_page_indices.extend(block_id_map[i, :page_nums[i]])
 
-        # decode 
+        # decode
         for i in range(len(sequence_lengths)):
             expect_batch_indices.append(i)
             expect_positions.append(sequence_lengths[i] - 1)
@@ -185,7 +185,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
         self.assertEqual(flash_infer_params.kv_last_page_len.tolist(), expect_kv_last_page_len)
         self.assertEqual(flash_infer_params.page_indptr.tolist(), expect_page_indptr)
         self.assertEqual(flash_infer_params.page_indices.tolist(), expect_page_indices)
-    
+
     def test_prepare_flash_infer_params(self):
         self._test_prepare_flash_infer_params([25, 82], [26], 64)
         self._test_prepare_flash_infer_params([25], [26], 64)
