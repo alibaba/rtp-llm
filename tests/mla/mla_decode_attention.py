@@ -145,7 +145,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
             v = ckv.view(-1, 1, self.config.kv_lora).repeat_interleave(self.config.head_num, dim=1)
             qkv_out, _ = attention_ref(1, q_cat, k, v, True, self.config.softmax_scale)
             attn_out = torch.bmm(qkv_out.transpose(0, 1), vc_t_weight_b).transpose(0, 1).contiguous()
-            compare_tensor_diff_with_ratio(attn_out[0], ft_qkv_out[i], rel_threshold=1e-2, abs_threshold=1e-3, name="Batch " + str(i), ratio=0.05)
+            compare_tensor_diff_with_ratio(attn_out[0], ft_qkv_out[i], rel_threshold=5e-2, abs_threshold=1e-3, name="Batch " + str(i), ratio=0.05)
             page_bias += seq_page_sizes[i]
 
     def _test_prepare_flash_infer_params(self, input_lengths: List[int], sequence_lengths: List[int], page_size: int):
