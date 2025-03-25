@@ -187,12 +187,13 @@ void Sampler::thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx
 }
 
 void Sampler::dfaForwardWithLogits(shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-    ft::BufferPtr new_tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+    ft::BufferPtr tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
     std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
 {
+    const size_t step = tokens_ids->shape()[0];
     size_t original_status = dfa_ptr->status();
     for (size_t j = 0; j < num_new_tokens; ++j) {
-        auto current_token_id = *(new_tokens_ids->dataWithOffset<int>(j));
+        auto current_token_id = *(tokens_ids->dataWithOffset<int>(step - num_new_tokens + j));
         if (!dfa_ptr->isFinished()) {
             dfa_ptr->next(current_token_id);
         }
@@ -201,7 +202,7 @@ void Sampler::dfaForwardWithLogits(shared_ptr<StringContainDFA<size_t, int>> dfa
         int offset = 0;
         for (size_t pos = original_status; pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
             FT_LOG_INFO("sampler enforce transfer status");
-            *(new_tokens_ids->dataWithOffset<int>(offset)) = template_token_ids[pos];
+            *(tokens_ids->dataWithOffset<int>(step - num_new_tokens + offset)) = template_token_ids[pos];
             memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[pos]);
             dfa_ptr->forceSetStatus(pos + 1);
         }

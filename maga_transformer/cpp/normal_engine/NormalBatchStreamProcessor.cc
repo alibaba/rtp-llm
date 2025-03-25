@@ -285,7 +285,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     SamplerInputs sampler_inputs;
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
-    sampler_inputs.sequence_lengths = sequence_lengths;
+    sampler_inputs.sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.max_thinking_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.think_modes         = stream_groups.thinkMode();
     sampler_inputs.end_think_token_ids = stream_groups.endThinkTokenIds();
@@ -314,6 +314,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
 void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
     int* input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
     int* max_thinking_tokens  = sampler_inputs.max_thinking_tokens->data<int32_t>();
+    int* sequence_lengths     = sampler_inputs.sequence_lengths->data<int32_t>();
     uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
     uint32_t* top_k           = sampler_inputs.top_k->data<uint32_t>();
     float* top_p              = sampler_inputs.top_p->data<float>();
@@ -340,6 +341,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
         for (int i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
             max_thinking_tokens[batch_idx] = stream->maxThinkingTokens();
+            sequence_lengths[batch_idx]   = stream->seqLength();
             sampler_inputs.think_status_dfa_ptrs[batch_idx] = stream->thinkEndStatusDfa(i);
             beam_search_sequence_lengths[batch_idx]  = stream->seqLength();
             // TODO(xinfei.sxf) fix num beams after sampler support

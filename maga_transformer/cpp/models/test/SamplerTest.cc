@@ -357,7 +357,7 @@ TEST_F(SamplerTest, testThinkLogicProcessExceedThinkEnd) {
         sampler.thinkLogicProcess(sampler_inputs, 0, 3);
         
         string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(5, ...... 0, )";
+        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
@@ -396,7 +396,7 @@ TEST_F(SamplerTest, testThinkLogicProcessThinkEndTokenMoreThanOne) {
         sampler.thinkLogicProcess(sampler_inputs, 0, 3);
         
         string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(5, ...... 0, )";
+        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
@@ -439,7 +439,7 @@ TEST_F(SamplerTest, testThinkLogicProcessThinkEndTokenMoreThanOneAndInProcess) {
         sampler.thinkLogicProcess(sampler_inputs, 0, 3);
         
         string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(6, ...... 0, )";
+        string expect_string_1 = "BufferData Detail(0, ...... 6, )";
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
@@ -483,7 +483,7 @@ TEST_F(SamplerTest, testThinkLogicProcessThinkEndReached) {
         sampler.thinkLogicProcess(sampler_inputs, 0, 3);
         
         string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(5, ...... 0, )";
+        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
         EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
