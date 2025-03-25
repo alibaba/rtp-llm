@@ -244,6 +244,26 @@ public:
     void incBatchWithPrefillTimes(int32_t times);
     void incBatchWithPrefillLen(int32_t len);
 
+    bool thinkMode() {
+        return complete_token_ids_->thinkMode();
+    }
+
+    int maxThinkingTokens() {
+        return complete_token_ids_->maxThinkingTokens();
+    }
+
+    std::vector<size_t> thinkEndTokensStatus() {
+        return complete_token_ids_->thinkEndTokensStatus();
+    }
+
+    const std::vector<int> endThinkTokenIds() {
+        return complete_token_ids_->endThinkTokenIds();
+    }
+
+    std::shared_ptr<StringContainDFA<size_t, int>> thinkEndStatusDfa(size_t idx) {
+        return complete_token_ids_->thinkEndStatusDfa()[idx];
+    }
+
 public:
     struct TimeInfo {
         int64_t begin_time_us;

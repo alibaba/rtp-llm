@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include <unordered_set>
 
 using namespace std;
@@ -154,7 +155,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         if (inputs.cum_log_probs) {
             device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
         }
-
+        thinkLogicProcess(inputs, from_seq_idx, sample_seq_num);
+        
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
         from_seq_idx = sample_to_seq_idx;
@@ -165,6 +167,51 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           move(inputs.all_probs),
                           move(inputs.beam_index),
                           move(success)});
+}
+
+void Sampler::thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
+    int* input_lengths = inputs.input_lengths->data<int32_t>();
+    int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
+    int* max_thinking_tokens  = inputs.max_thinking_tokens->data<int32_t>();
+    for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
+        bool think_mode = inputs.think_modes;
+        auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
+        int num_new_tokens = 1;
+        if (think_mode) {
+            bool enforce = (sequence_lengths[idx] + num_new_tokens >= max_thinking_tokens[idx] + input_lengths[idx]);
+            auto token_ids = inputs.token_ids->index(idx);
+            auto logits = inputs.logits->index(idx);
+            dfaForwardWithLogits(dfa_ptr, token_ids, logits, num_new_tokens, inputs.end_think_token_ids, inputs.vocab_size, enforce);
+        }
+    }
+}
+
+void Sampler::dfaForwardWithLogits(shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
+    ft::BufferPtr new_tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+    std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
+{
+    size_t original_status = dfa_ptr->status();
+    for (size_t j = 0; j < num_new_tokens; ++j) {
+        auto current_token_id = *(new_tokens_ids->dataWithOffset<int>(j));
+        if (!dfa_ptr->isFinished()) {
+            dfa_ptr->next(current_token_id);
+        }
+    }
+    if (!dfa_ptr->isFinished() && enforce) {
+        int offset = 0;
+        for (size_t pos = original_status; pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
+            FT_LOG_INFO("sampler enforce transfer status");
+            *(new_tokens_ids->dataWithOffset<int>(offset)) = template_token_ids[pos];
+            memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[pos]);
+            dfa_ptr->forceSetStatus(pos + 1);
+        }
+    }
+}
+
+void Sampler::memFill(ft::BufferPtr new_tokens_logits, size_t vocab_size, size_t index) {
+    device_->bufMemset(*new_tokens_logits, 0);
+    auto tensor = Buffer2torchTensor(*new_tokens_logits, false);
+    tensor[index] = 1;
 }
 
 } // namespace rtp_llm

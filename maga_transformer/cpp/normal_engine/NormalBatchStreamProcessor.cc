@@ -248,6 +248,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     }
 
     auto vocab_size = model_output.logits->shape()[1];
+    sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs) {
         sampler_inputs.all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
@@ -285,6 +286,10 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.sequence_lengths = sequence_lengths;
+    sampler_inputs.max_thinking_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.think_modes         = stream_groups.thinkMode();
+    sampler_inputs.end_think_token_ids = stream_groups.endThinkTokenIds();
+    sampler_inputs.think_status_dfa_ptrs.resize(total_batch_size, nullptr);
     sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.beam_index   =  device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
@@ -308,6 +313,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
 
 void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
     int* input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
+    int* max_thinking_tokens  = sampler_inputs.max_thinking_tokens->data<int32_t>();
     uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
     uint32_t* top_k           = sampler_inputs.top_k->data<uint32_t>();
     float* top_p              = sampler_inputs.top_p->data<float>();
@@ -333,6 +339,8 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
         }
         for (int i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
+            max_thinking_tokens[batch_idx] = stream->maxThinkingTokens();
+            sampler_inputs.think_status_dfa_ptrs[batch_idx] = stream->thinkEndStatusDfa(i);
             beam_search_sequence_lengths[batch_idx]  = stream->seqLength();
             // TODO(xinfei.sxf) fix num beams after sampler support
             num_beams[batch_idx]          = stream->numBeams();

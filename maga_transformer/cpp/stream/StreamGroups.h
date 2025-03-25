@@ -131,6 +131,28 @@ public:
         return false;
     }
 
+    bool thinkMode() const {
+        for (auto& stream : context_streams_) {
+            return stream->thinkMode();
+        }
+        for (auto& stream : decode_streams_) {
+            return stream->thinkMode();
+        }
+        return false;
+    }
+
+    std::vector<int> endThinkTokenIds() const {
+        for (auto& stream : context_streams_) {
+            std::vector<int> end_think_token_ids = stream->endThinkTokenIds();
+            return end_think_token_ids;
+        }
+        for (auto& stream : decode_streams_) {
+            std::vector<int> end_think_token_ids = stream->endThinkTokenIds();
+            return end_think_token_ids;
+        }
+        return std::vector<int>();
+    }
+
     std::list<GenerateStreamPtr> allStreams() const {
         std::list<GenerateStreamPtr> all_streams = decode_streams_;
         all_streams.splice(all_streams.end(), std::list<GenerateStreamPtr>(context_streams_));

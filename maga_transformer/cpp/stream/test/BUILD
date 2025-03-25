@@ -27,17 +27,3 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
-
-cc_test(
-    name = "complete_token_ids_test",
-    srcs = [
-        "CompleteTokenIdsTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
-)

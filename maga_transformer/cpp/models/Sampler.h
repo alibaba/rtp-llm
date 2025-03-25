@@ -1,6 +1,8 @@
 #pragma once
 
 #include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/utils/DFAUtil.h"
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 
 namespace ft = fastertransformer;
@@ -35,6 +37,11 @@ public:
     ft::BufferPtr input_lengths;     // shape: [batch_size]
     // shape: [decoder_batch_size]
     ft::BufferPtr sequence_lengths;
+    ft::BufferPtr max_thinking_tokens;
+    bool think_modes;
+    std::vector<int> end_think_token_ids;
+    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
+    size_t    vocab_size;
     size_t    step;                  // typically largest sequence length in the batch
 
     size_t    batch_size;
@@ -72,6 +79,13 @@ public:
     ~Sampler(){};
 
     SamplerOutput forward(const SamplerInputs& inputs);
+
+public:
+    void thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
+    void dfaForwardWithLogits(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
+        ft::BufferPtr new_tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+        std::vector<int> template_token_ids, size_t vocab_size, bool enforce);
+    void memFill(ft::BufferPtr new_tokens_logits, size_t vocab_size, size_t index);
 
 private:
     ft::DeviceBase* device_;

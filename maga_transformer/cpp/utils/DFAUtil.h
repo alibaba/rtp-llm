@@ -91,24 +91,4 @@ private:
     std::vector<size_t> next_array_;
 };
 
-template<typename InputType>
-void dfaStatusForward(StringContainDFA<size_t, InputType>& dfa, ft::Buffer new_tokens, int num_new_tokens, 
-    std::vector<int> template_token_ids, bool enforce) 
-{
-    size_t original_status = dfa.status();
-    for (size_t j = 0; j < num_new_tokens; ++j) {
-        auto current_token_id = *new_tokens.dataWithOffset<int>(j);
-        if (!dfa.isFinished()) {
-            dfa.next(current_token_id);
-        }
-    }
-    if (!dfa.isFinished() && enforce) {
-        int offset = 0;
-        for (size_t pos = original_status; pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
-            *new_tokens.dataWithOffset<int>(offset) = template_token_ids[pos];
-            dfa.forceSetStatus(pos + 1);
-        }
-    }
-}
-
 }
