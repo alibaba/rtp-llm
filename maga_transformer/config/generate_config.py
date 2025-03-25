@@ -124,7 +124,7 @@ class GenerateConfig(BaseModel):
         end_think_token_id = int(os.environ.get("THINK_END_TOKEN_ID", "-1"))
         self.end_think_token_ids = [end_think_token_id] if end_think_token_id != -1 else []
         if bool(os.environ.get("THINK_MODE", "0")) and tokenizer and end_think_token_id == -1:
-            think_end_tag: str = os.environ.get("THINK_END_TAG", "</think>\n\n")
+            think_end_tag: str = os.environ.get("THINK_END_TAG", "</think>\n\n").encode('utf-8').decode('unicode_escape')
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag, add_special_tokens=False)
             else:
