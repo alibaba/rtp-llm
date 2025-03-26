@@ -258,10 +258,7 @@ class Pipeline(object):
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
 
-        if platform.processor() == 'aarch64':
-            token_ids = torch.tensor(token_ids, dtype=torch.int)
-        else:
-            token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
+        token_ids = torch.tensor(token_ids, dtype=torch.int)
 
         input = GenerateInput(request_id=request_id,
                               token_ids=token_ids,
