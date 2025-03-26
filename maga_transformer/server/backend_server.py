@@ -54,7 +54,6 @@ class BackendServer(object):
         self._gang_server = GangServer()
         self._openai_endpoint = None
         self._lora_manager = None
-        self._request_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
@@ -111,7 +110,7 @@ class BackendServer(object):
         start_time = time.time()
         if isinstance(request, str):
             request = json.loads(request)
-        request[request_id_field_name] = self._request_count.increment()
+        request[request_id_field_name] = self._global_controller.get_request_counter()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
         try:
             with self._global_controller:
@@ -183,7 +182,7 @@ class BackendServer(object):
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()
-        request[request_id_field_name] = self._request_count.increment()
+        request[request_id_field_name] = self._global_controller.get_request_counter()
         lora_infos: Dict[str, Any] = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})

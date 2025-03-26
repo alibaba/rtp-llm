@@ -41,7 +41,6 @@ class FrontendServer(object):
         self._access_logger = AccessLogger()
         self._frontend_worker = None
         self._openai_endpoint = None
-        self._request_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         logging.info(f"global_controller here2 = {self._global_controller}")
@@ -103,13 +102,12 @@ class FrontendServer(object):
         if isinstance(req, str):
             req = json.loads(req)
         assert isinstance(req, dict)
-        req[request_id_field_name] = self._request_count.increment()
         if 'master_info' in req:
             request_id = req['master_info'].get("request_id")
             check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
             req[request_id_field_name] = request_id
         else:
-            req[request_id_field_name] = self._request_count.increment()
+            req[request_id_field_name] = self._global_controller.get_request_counter()
 
         def generate_call():
             assert self._frontend_worker is not None
@@ -129,7 +127,7 @@ class FrontendServer(object):
             request_id = request.master_info.get("request_id")
             check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
         else:
-            request_id = self._request_count.increment()
+            request_id = self._global_controller.get_request_counter()
         def generate_call():
             assert (self._openai_endpoint != None)
             response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
