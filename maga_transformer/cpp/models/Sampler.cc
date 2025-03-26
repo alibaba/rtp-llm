@@ -59,6 +59,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                     {inputs.cum_log_probs->type(), {sample_seq_num}});
             device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
         }
+        thinkLogicProcessBeforeSample(inputs, from_seq_idx, sample_seq_num);
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
         (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
@@ -155,7 +156,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         if (inputs.cum_log_probs) {
             device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
         }
-        thinkLogicProcess(inputs, from_seq_idx, sample_seq_num);
+        thinkLogicProcessAfterSample(inputs, from_seq_idx, sample_seq_num);
         
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
@@ -169,7 +170,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           move(success)});
 }
 
-void Sampler::thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
+void Sampler::thinkLogicProcessBeforeSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
     int* input_lengths = inputs.input_lengths->data<int32_t>();
     int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
     int* max_thinking_tokens  = inputs.max_thinking_tokens->data<int32_t>();
@@ -179,32 +180,40 @@ void Sampler::thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx
         int num_new_tokens = 1;
         if (think_mode) {
             bool enforce = (sequence_lengths[idx] + num_new_tokens >= max_thinking_tokens[idx] + input_lengths[idx]);
-            auto token_ids = inputs.token_ids->index(idx);
             auto logits = inputs.logits->index(idx);
-            dfaForwardWithLogits(dfa_ptr, token_ids, logits, num_new_tokens, inputs.end_think_token_ids, inputs.vocab_size, enforce);
+            setVocabMask(dfa_ptr, logits, num_new_tokens, inputs.end_think_token_ids, inputs.vocab_size, enforce);
         }
     }
 }
 
-void Sampler::dfaForwardWithLogits(shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-    ft::BufferPtr tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+void Sampler::setVocabMask(
+    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
+    ft::BufferPtr new_tokens_logits, int num_new_tokens, 
     std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
 {
-    const size_t step = tokens_ids->shape()[0];
-    size_t original_status = dfa_ptr->status();
-    for (size_t j = 0; j < num_new_tokens; ++j) {
-        auto current_token_id = *(tokens_ids->dataWithOffset<int>(step - num_new_tokens + j));
-        if (!dfa_ptr->isFinished()) {
-            dfa_ptr->next(current_token_id);
-        }
-    }
     if (!dfa_ptr->isFinished() && enforce) {
         int offset = 0;
-        for (size_t pos = original_status; pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
+        for (size_t pos = dfa_ptr->status(); pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
             FT_LOG_INFO("sampler enforce transfer status");
-            *(tokens_ids->dataWithOffset<int>(step - num_new_tokens + offset)) = template_token_ids[pos];
             memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[pos]);
-            dfa_ptr->forceSetStatus(pos + 1);
+        }
+    }
+}
+
+void Sampler::thinkLogicProcessAfterSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
+    for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
+        bool think_mode = inputs.think_modes;
+        auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
+        auto token_ids = inputs.token_ids->index(idx);
+        int num_new_tokens = 1;
+        if (think_mode) {
+            const size_t step = token_ids->shape()[0];
+            for (size_t j = 0; j < num_new_tokens; ++j) {
+                auto current_token_id = *(token_ids->dataWithOffset<int>(step - num_new_tokens + j));
+                if (!dfa_ptr->isFinished()) {
+                    dfa_ptr->next(current_token_id);
+                }
+            }
         }
     }
 }

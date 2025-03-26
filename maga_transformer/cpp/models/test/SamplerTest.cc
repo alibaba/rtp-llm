@@ -69,6 +69,17 @@ public:
         sampler_inputs.max_thinking_tokens = ft::vector2Buffer(max_thinking_tokens);
     };
 
+    void setTokenIds(SamplerInputs& sampler_inputs, std::vector<std::vector<int>>& token_ids) {
+        FT_CHECK(token_ids.size() == sampler_inputs.batch_size);
+        FT_CHECK(token_ids[0].size() == sampler_inputs.step + 1);
+        for (auto i = 0; i < sampler_inputs.batch_size; i++) {
+            auto tensor = Buffer2torchTensor(*sampler_inputs.token_ids->index(i), false);
+            for (auto j = 0; j < sampler_inputs.step + 1; j++) {
+                tensor[j] = token_ids[i][j];
+            }
+        }
+    }
+
     ft::DeviceBase* device_;
 };
 
@@ -149,85 +160,39 @@ TEST_F(SamplerTest, testMemFill) {
 }
 
 
-TEST_F(SamplerTest, testDfaForwardWithLogits) {
+TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
         size_t vocab_size = 10;
         size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {7, 8};
+        std::vector<int> end_think_token_ids = {5};
         SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
 
-        std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+
+        std::vector<std::vector<int>> token_ids = {
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
+        };
+        builder.setTokenIds(sampler_inputs, token_ids);
 
         SamplerInitParams params;
         params.device = builder.device_;
         params.max_batch_size = batch_size;
         params.eos_id = 1;
         Sampler sampler(params);
-
-        auto dfa_ptr = sampler_inputs.think_status_dfa_ptrs[0];
-
-        torch::Tensor tokens_ids_tensor = torch::tensor({1}, torch::dtype(torch::kInt));
-        auto new_tokens_ids = torchTensor2Buffer(tokens_ids_tensor);
-
-        torch::Tensor logits_tensor = torch::tensor({0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, torch::dtype(torch::kInt));
-        auto new_tokens_logits = torchTensor2Buffer(logits_tensor);
         
-        int num_new_tokens = 1;
-        std::vector<int> template_token_ids = sampler_inputs.end_think_token_ids;
-
-        bool enforce = false;
-
-        sampler.dfaForwardWithLogits(dfa_ptr, new_tokens_ids, new_tokens_logits, num_new_tokens,
-            template_token_ids, vocab_size, enforce);
-
-        string expect_string = "BufferData Detail(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, )";
-        EXPECT_EQ(expect_string, new_tokens_logits->debugDataString<int>((size_t) 10));
-    }
-
-
-    {
-        SamplerDataBuilder builder;
-        size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {7};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
-
-        auto dfa_ptr = sampler_inputs.think_status_dfa_ptrs[0];
-
-        torch::Tensor tokens_ids_tensor = torch::tensor({7}, torch::dtype(torch::kInt));
-        auto new_tokens_ids = torchTensor2Buffer(tokens_ids_tensor);
-
-        torch::Tensor logits_tensor = torch::tensor({0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, torch::dtype(torch::kInt));
-        auto new_tokens_logits = torchTensor2Buffer(logits_tensor);
-        
-        int num_new_tokens = 1;
-        std::vector<int> template_token_ids = sampler_inputs.end_think_token_ids;
-
-        bool enforce = false;
-
-        sampler.dfaForwardWithLogits(dfa_ptr, new_tokens_ids, new_tokens_logits, num_new_tokens,
-            template_token_ids, vocab_size, enforce);
-
-        string expect_string = "BufferData Detail(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, )";
-        EXPECT_EQ(expect_string, new_tokens_logits->debugDataString<int>((size_t) 10));
-        EXPECT_TRUE(dfa_ptr->isFinished());
+        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[0]->status());
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
+        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[2]->status());
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[3]->status());
     }
 
     {
@@ -235,13 +200,21 @@ TEST_F(SamplerTest, testDfaForwardWithLogits) {
         size_t batch_size = 4;
         size_t vocab_size = 10;
         size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {7};
+        std::vector<int> end_think_token_ids = {5, 5};
         SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
 
-        std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+
+        std::vector<std::vector<int>> token_ids = {
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
+        };
+        builder.setTokenIds(sampler_inputs, token_ids);
 
         SamplerInitParams params;
         params.device = builder.device_;
@@ -249,26 +222,16 @@ TEST_F(SamplerTest, testDfaForwardWithLogits) {
         params.eos_id = 1;
         Sampler sampler(params);
 
-        auto dfa_ptr = sampler_inputs.think_status_dfa_ptrs[0];
-
-        dfa_ptr->forceSetStatus(1);
-        EXPECT_TRUE(dfa_ptr->isFinished());
-
-        torch::Tensor tokens_ids_tensor = torch::tensor({2}, torch::dtype(torch::kInt));
-        auto new_tokens_ids = torchTensor2Buffer(tokens_ids_tensor);
-
-        torch::Tensor logits_tensor = torch::tensor({0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, torch::dtype(torch::kInt));
-        auto new_tokens_logits = torchTensor2Buffer(logits_tensor);
+        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
+        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
         
-        int num_new_tokens = 1;
-        std::vector<int> template_token_ids = sampler_inputs.end_think_token_ids;
-
-        bool enforce = true;
-        sampler.dfaForwardWithLogits(dfa_ptr, new_tokens_ids, new_tokens_logits, num_new_tokens,
-            template_token_ids, vocab_size, enforce);
-
-        string expect_string = "BufferData Detail(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, )";
-        EXPECT_EQ(expect_string, new_tokens_logits->debugDataString<int>((size_t) 10));
+        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[0]->status());
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
+        EXPECT_EQ(2, sampler_inputs.think_status_dfa_ptrs[2]->status());
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[3]->status());
     }
 
     {
@@ -276,13 +239,21 @@ TEST_F(SamplerTest, testDfaForwardWithLogits) {
         size_t batch_size = 4;
         size_t vocab_size = 10;
         size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {7};
+        std::vector<int> end_think_token_ids = {5, 6};
         SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
 
-        std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+
+        std::vector<std::vector<int>> token_ids = {
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6}
+        };
+        builder.setTokenIds(sampler_inputs, token_ids);
 
         SamplerInitParams params;
         params.device = builder.device_;
@@ -290,28 +261,19 @@ TEST_F(SamplerTest, testDfaForwardWithLogits) {
         params.eos_id = 1;
         Sampler sampler(params);
 
-        auto dfa_ptr = sampler_inputs.think_status_dfa_ptrs[0];
-
-        EXPECT_FALSE(dfa_ptr->isFinished());
-
-        torch::Tensor tokens_ids_tensor = torch::tensor({2}, torch::dtype(torch::kInt));
-        auto new_tokens_ids = torchTensor2Buffer(tokens_ids_tensor);
-
-        torch::Tensor logits_tensor = torch::tensor({0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, torch::dtype(torch::kInt));
-        auto new_tokens_logits = torchTensor2Buffer(logits_tensor);
+        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
+        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
         
-        int num_new_tokens = 1;
-        std::vector<int> template_token_ids = sampler_inputs.end_think_token_ids;
-
-        bool enforce = true;
-        sampler.dfaForwardWithLogits(dfa_ptr, new_tokens_ids, new_tokens_logits, num_new_tokens,
-            template_token_ids, vocab_size, enforce);
-
-        string expect_string = "BufferData Detail(0, 0, 0, 0, 0, 0, 0, 1, 0, 0, )";
-        EXPECT_EQ(expect_string, new_tokens_logits->debugDataString<int>((size_t) 10));
-        EXPECT_TRUE(dfa_ptr->isFinished());
+        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
+        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[0]->status());
+        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
+        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[2]->status());
+        EXPECT_EQ(2, sampler_inputs.think_status_dfa_ptrs[3]->status());
     }
 }
+
 
 std::string tensorToString(const at::Tensor& tensor, size_t size) {
     std::ostringstream oss;
@@ -333,47 +295,8 @@ std::string tensorToString(const at::Tensor& tensor, size_t size) {
     return oss.str();
 }
 
+TEST_F(SamplerTest, testSetVocabMask) {
 
-TEST_F(SamplerTest, testThinkLogicProcessExceedThinkEnd) {
-    {
-        SamplerDataBuilder builder;
-        size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {5};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
-        
-        sampler.thinkLogicProcess(sampler_inputs, 0, 3);
-        
-        string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(3)->debugDataString<int>((size_t) 1));
-
-        string expect_tensor_string_0 = "Tensor values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
-        string expect_tensor_string_1 = "Tensor values: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]";
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10));
-    }
-}
-
-
-TEST_F(SamplerTest, testThinkLogicProcessThinkEndTokenMoreThanOne) {
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
@@ -392,108 +315,24 @@ TEST_F(SamplerTest, testThinkLogicProcessThinkEndTokenMoreThanOne) {
         params.max_batch_size = batch_size;
         params.eos_id = 1;
         Sampler sampler(params);
+
+        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
+        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
+        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
         
-        sampler.thinkLogicProcess(sampler_inputs, 0, 3);
-        
-        string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(3)->debugDataString<int>((size_t) 1));
+        for (size_t i = 0; i < batch_size; i++) {
+            sampler.setVocabMask(sampler_inputs.think_status_dfa_ptrs[i],
+                sampler_inputs.logits->index(i), 1, end_think_token_ids,
+                vocab_size, i % 2 == 0 ? true : false);
+        }
 
         string expect_tensor_string_0 = "Tensor values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
         string expect_tensor_string_1 = "Tensor values: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]";
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10));
-    }
-}
-
-TEST_F(SamplerTest, testThinkLogicProcessThinkEndTokenMoreThanOneAndInProcess) {
-    {
-        SamplerDataBuilder builder;
-        size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {5, 6};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
-
-        for (size_t i = 0; i < batch_size; i++) {
-            sampler_inputs.think_status_dfa_ptrs[i]->forceSetStatus(1);
-        }
-
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
-        
-        sampler.thinkLogicProcess(sampler_inputs, 0, 3);
-        
-        string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(0, ...... 6, )";
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_1, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(3)->debugDataString<int>((size_t) 1));
-
-        string expect_tensor_string_0 = "Tensor values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
-        string expect_tensor_string_1 = "Tensor values: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0]";
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10));
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10));
-    }
-}
-
-TEST_F(SamplerTest, testThinkLogicProcessThinkEndReached) {
-    {
-        SamplerDataBuilder builder;
-        size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
-        std::vector<int> end_think_token_ids = {5};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
-
-        for (size_t i = 0; i < batch_size; i++) {
-            sampler_inputs.think_status_dfa_ptrs[i]->forceSetStatus(1);
-            EXPECT_TRUE(sampler_inputs.think_status_dfa_ptrs[i]->isFinished());
-        }
-
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
-        
-        sampler.thinkLogicProcess(sampler_inputs, 0, 3);
-        
-        string expect_string_0 = "BufferData Detail(0, ...... 0, )";
-        string expect_string_1 = "BufferData Detail(0, ...... 5, )";
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(0)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(1)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(2)->debugDataString<int>((size_t) 1));
-        EXPECT_EQ(expect_string_0, sampler_inputs.token_ids->index(3)->debugDataString<int>((size_t) 1));
-
-        string expect_tensor_string_0 = "Tensor values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
-        string expect_tensor_string_1 = "Tensor values: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]";
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
+        string expect_tensor_string_2 = "Tensor values: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0]";
+        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
         EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
+        EXPECT_EQ(expect_tensor_string_2, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
         EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10));
     }
 }

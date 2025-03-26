@@ -81,10 +81,11 @@ public:
     SamplerOutput forward(const SamplerInputs& inputs);
 
 public:
-    void thinkLogicProcess(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
-    void dfaForwardWithLogits(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-        ft::BufferPtr new_tokens_ids, ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+    void thinkLogicProcessBeforeSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
+    void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
+        ft::BufferPtr new_tokens_logits, int num_new_tokens, 
         std::vector<int> template_token_ids, size_t vocab_size, bool enforce);
+    void thinkLogicProcessAfterSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
     void memFill(ft::BufferPtr new_tokens_logits, size_t vocab_size, size_t index);
 
 private:
