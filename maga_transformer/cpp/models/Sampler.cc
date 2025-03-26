@@ -171,14 +171,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 }
 
 void Sampler::thinkLogicProcessBeforeSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
-    int* input_lengths = inputs.input_lengths->data<int32_t>();
-    int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
-    int* max_thinking_tokens  = inputs.max_thinking_tokens->data<int32_t>();
     for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
-        bool think_mode = inputs.think_modes;
-        auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
-        int num_new_tokens = 1;
-        if (think_mode) {
+        if (inputs.think_modes) {
+            int* input_lengths = inputs.input_lengths->data<int32_t>();
+            int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
+            int* max_thinking_tokens  = inputs.max_thinking_tokens->data<int32_t>();
+            auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
+            int num_new_tokens = 1;
             bool enforce = (sequence_lengths[idx] + num_new_tokens >= max_thinking_tokens[idx] + input_lengths[idx]);
             auto logits = inputs.logits->index(idx);
             setVocabMask(dfa_ptr, logits, num_new_tokens, inputs.end_think_token_ids, inputs.vocab_size, enforce);
@@ -202,11 +201,10 @@ void Sampler::setVocabMask(
 
 void Sampler::thinkLogicProcessAfterSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
     for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
-        bool think_mode = inputs.think_modes;
-        auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
-        auto token_ids = inputs.token_ids->index(idx);
-        int num_new_tokens = 1;
-        if (think_mode) {
+        if (inputs.think_modes) {
+            auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
+            auto token_ids = inputs.token_ids->index(idx);
+            int num_new_tokens = 1;
             const size_t step = token_ids->shape()[0];
             for (size_t j = 0; j < num_new_tokens; ++j) {
                 auto current_token_id = *(token_ids->dataWithOffset<int>(step - num_new_tokens + j));
