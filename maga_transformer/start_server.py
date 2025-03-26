@@ -29,7 +29,7 @@ def check_server_health(server_port):
             logging.info(f"health check is not ready")
             return False
     except BaseException as e:
-        logging.info(f"health check is not ready, {e.message()}")
+        logging.info(f"health check is not ready, {str(e)}")
         return False
 
 def start_backend_server_impl(global_controller):
@@ -120,8 +120,16 @@ def monitor_and_release_process(backend_process, frontend_process):
         if not all(proc.is_alive() for proc in all_process):
             logging.error(f'server monitor : some process is not alive, exit!')
             if backend_process:
-                os.killpg(os.getpgid(backend_process.pid), signal.SIGTERM)
-            [proc.terminate() for proc in all_process]
+                try:
+                    os.killpg(os.getpgid(backend_process.pid), signal.SIGTERM)
+                except Exception as e:
+                    logging.error(f"catch exception when kill backend process : {str(e)}")
+        
+            for proc in all_process:
+                try:
+                    proc.terminate()
+                except Exception as e:
+                    logging.error(f"catch exception when process terminate : {str(e)}")
         time.sleep(1)
     [proc.join() for proc in all_process]
 
