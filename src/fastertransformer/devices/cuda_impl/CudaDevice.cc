@@ -90,11 +90,24 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         dp_tp_custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, dp_tp_ranks, stream_);
     }
 
-    auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
-    allocator_ptr->setStream(stream_);
+    // cudaHostMalloc needs page table on GPU memory, retain this part first.
     auto host_allocator_ptr = new Allocator<AllocatorType::CUDA_HOST>(device_id_);
     host_allocator_ptr->setStream(stream_);
+    if (params.host_reserve_memory_bytes) {
+        RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
+            "cuda host memory can not reserve as much as possible (%lu), must specify concrete size.",
+            params.host_reserve_memory_bytes);
+        TrackerAllocatorParams tracker_params;
+        tracker_params.real_allocator = host_allocator_ptr;
+        tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
+        tracker_params.align_size = 32; // required by avx512
+        host_allocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        host_allocator_.reset(host_allocator_ptr);
+    }
 
+    auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
+    allocator_ptr->setStream(stream_);
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -117,18 +130,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
     at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
 
-    if (params.host_reserve_memory_bytes) {
-        RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
-            "cuda host memory can not reserve as much as possible (%lu), must specify concrete size.",
-            params.host_reserve_memory_bytes);
-        TrackerAllocatorParams tracker_params;
-        tracker_params.real_allocator = host_allocator_ptr;
-        tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
-        tracker_params.align_size = 32; // required by avx512
-        host_allocator_.reset(new TrackerAllocator(tracker_params));
-    } else {
-        host_allocator_.reset(host_allocator_ptr);
-    }
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
