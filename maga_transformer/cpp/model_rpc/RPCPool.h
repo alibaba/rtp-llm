@@ -29,7 +29,7 @@ public:
             args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
             args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
             args.SetInt(GRPC_ARG_MAX_CONNECTION_IDLE_MS, 60000);
-            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 5000);
+            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
             args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
             auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
             if (!grpc_channel) {

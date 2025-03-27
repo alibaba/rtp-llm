@@ -141,7 +141,7 @@ void RtpLLMOp::initRPCServer(
         }
     }
     grpc::ServerBuilder builder;
-    builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 200);
+    builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
     grpc_server_ = builder.BuildAndStart();
