@@ -7,10 +7,11 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+class StreamThinkInfo;
+
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor {
 public:
-    ThinkModeLogitsProcessor(ft::DeviceBase* device, std::deque<bool> think_modes, std::vector<int> max_thinking_tokens, 
-        std::vector<std::vector<int>> end_think_token_ids, std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs);
+    ThinkModeLogitsProcessor(ft::DeviceBase* device, std::vector<StreamThinkInfo> think_infos);
     virtual ~ThinkModeLogitsProcessor() {}
 
 public:
@@ -26,10 +27,7 @@ public:
     std::vector<size_t> thinkEndTokensStatus();
 
 private:
-    std::deque<bool> think_modes_;
-    std::vector<int> max_thinking_tokens_;
-    std::vector<std::vector<int>> end_think_token_ids_;
-    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs_;
+    std::vector<StreamThinkInfo> think_infos_;
 };
 typedef std::shared_ptr<ThinkModeLogitsProcessor> ThinkModeLogitsProcessorPtr;
 

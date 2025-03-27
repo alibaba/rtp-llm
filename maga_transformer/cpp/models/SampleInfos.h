@@ -72,5 +72,20 @@ public:
     ft::BufferPtr success;
 };
 
+struct StreamThinkInfo {
+    bool in_think_mode;
+    int max_thinking_tokens;
+    std::vector<int> end_think_token_ids;
+    std::shared_ptr<StringContainDFA<size_t, int>> think_end_status_dfa_ptr;
+    
+    StreamThinkInfo() = default;
+
+    StreamThinkInfo(
+        bool think_mode, int max_thinking_tokens, std::vector<int> end_think_token_ids, 
+        std::shared_ptr<StringContainDFA<size_t, int>> think_end_status_dfa_ptr) : 
+        in_think_mode(think_mode), max_thinking_tokens(max_thinking_tokens), 
+        end_think_token_ids(end_think_token_ids), 
+        think_end_status_dfa_ptr(think_end_status_dfa_ptr) {}
+};
 
 }  // namespace rtp_llm

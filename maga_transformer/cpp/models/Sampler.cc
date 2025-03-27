@@ -1,6 +1,5 @@
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include <unordered_set>
 
 using namespace std;
@@ -157,13 +156,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         if (inputs.cum_log_probs) {
             device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
         }
-        
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
     updateGrammarStatus(inputs);
-
     // TODO(xinfei.sxf) 优化copy token_ids
     return SamplerOutput({move(inputs.token_ids),
                           move(inputs.cum_log_probs),

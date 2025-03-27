@@ -30,10 +30,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
-    , in_think_mode_(generate_input_->generate_config->in_think_mode)
-    , max_thinking_tokens_(generate_input_->generate_config->max_thinking_tokens)
-    , end_think_token_ids_(generate_input_->generate_config->end_think_token_ids)
-    , think_end_status_dfa_ptr_(batchSize(), std::make_shared<StringContainDFA<size_t, int>>(generate_input_->generate_config->end_think_token_ids)) 
 {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -74,6 +70,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     perf_test_ = true;
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
+
+    for (size_t i = 0; i < batchSize(); i++) {
+        StreamThinkInfo think_info(generate_input_->generate_config->in_think_mode,
+            generate_input_->generate_config->max_thinking_tokens,
+            generate_input_->generate_config->end_think_token_ids,
+            std::make_shared<StringContainDFA<size_t, int>>(generate_input_->generate_config->end_think_token_ids));
+        think_infos_.push_back(think_info);
+    }
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {

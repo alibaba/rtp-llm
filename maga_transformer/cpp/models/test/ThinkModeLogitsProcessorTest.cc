@@ -26,20 +26,18 @@ public:
     };
 
     BaseLogitsProcessorPtr generateLogitsProcessor(bool think_mode, std::vector<int> max_thinking_tokens, std::vector<int> end_think_token_ids, std::vector<int> think_status) {
+        std::vector<StreamThinkInfo> think_infos;
+
         size_t batch_size = max_thinking_tokens.size();
-        std::deque<bool> think_modes(batch_size, think_mode);
-        std::vector<std::vector<int>> batch_end_think_token_ids(batch_size, end_think_token_ids);
-        std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
-
         for (size_t i = 0; i < batch_size; i++) {
-            think_status_dfa_ptrs.push_back(std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+            auto think_info = StreamThinkInfo(
+                think_mode, max_thinking_tokens[i], end_think_token_ids, std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids)
+            );
+            think_info.think_end_status_dfa_ptr->forceSetStatus(think_status[i]);
+            think_infos.push_back(think_info);
         }
 
-        for (size_t i = 0; i < batch_size; i++) {
-            think_status_dfa_ptrs[i]->forceSetStatus(think_status[i]);
-        }
-
-        BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_modes, max_thinking_tokens, batch_end_think_token_ids, think_status_dfa_ptrs);
+        BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_infos);
         return processor_ptr;
     }
 
@@ -300,7 +298,7 @@ TEST_F(SamplerTest, testSetVocabMask) {
         auto grammar = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(sampler_inputs.grammars[0]);
         
         for (size_t i = 0; i < batch_size; i++) {
-            grammar->setVocabMask(grammar->think_status_dfa_ptrs_[i],
+            grammar->setVocabMask(grammar->think_infos_[i].think_end_status_dfa_ptr,
                 sampler_inputs.logits->index(i), 1, end_think_token_ids,
                 vocab_size, i % 2 == 0 ? true : false);
         }

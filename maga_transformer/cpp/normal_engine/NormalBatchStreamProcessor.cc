@@ -367,36 +367,13 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
 
 
 void NormalBatchStreamProcessor::setThinkModeLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
-    
-    int batch_idx   = 0;
-    std::deque<bool> think_modes;
-    std::vector<int> max_thinking_tokens;
-    std::vector<std::vector<int>> end_think_token_ids;
-    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
-
+    std::vector<StreamThinkInfo> think_infos;
     for (auto& stream : all_streams) {
-        int current_batch_size;
-        if (!score_batch) {
-            current_batch_size = stream->tileNum();
-        } else {
-            current_batch_size = stream->scoreLen();
-        }
-        for (int i = 0; i < current_batch_size; ++i) {
-            think_modes.push_back(stream->thinkMode());
-            max_thinking_tokens.push_back(stream->maxThinkingTokens());
-            end_think_token_ids.push_back(stream->endThinkTokenIds());
-            think_status_dfa_ptrs.push_back(stream->thinkEndStatusDfa(i));            
-            batch_idx += 1;
-        }
+        const std::vector<StreamThinkInfo> streamThinkInfo = stream->streamThinkInfo();
+        think_infos.insert(think_infos.end(), streamThinkInfo.begin(), streamThinkInfo.end());
     }
-
-    FT_CHECK(think_modes.size() == sampler_inputs.batch_size);
-    FT_CHECK(max_thinking_tokens.size() == sampler_inputs.batch_size);
-    FT_CHECK(end_think_token_ids.size() == sampler_inputs.batch_size);
-    FT_CHECK(think_status_dfa_ptrs.size() == sampler_inputs.batch_size);
-
-    BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_modes, max_thinking_tokens, end_think_token_ids, think_status_dfa_ptrs);
-
+    FT_CHECK(think_infos.size() == sampler_inputs.batch_size);
+    BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_infos);
     sampler_inputs.grammars.push_back(processor_ptr);
 }
 

@@ -7,22 +7,18 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(
-    ft::DeviceBase* device, std::deque<bool> think_modes, std::vector<int> max_thinking_tokens,
-    std::vector<std::vector<int>> end_think_token_ids,
-    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs) :
-    BaseLogitsProcessor(device),
-    think_modes_(think_modes), max_thinking_tokens_(max_thinking_tokens),
-    end_think_token_ids_(end_think_token_ids), think_status_dfa_ptrs_(think_status_dfa_ptrs) {};
+    ft::DeviceBase* device, std::vector<StreamThinkInfo> think_infos) :
+    BaseLogitsProcessor(device), think_infos_(think_infos) {};
 
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs) {
     for (size_t i = 0; i < inputs.batch_size; i++) {
-        if (think_modes_[i]) {
+        if (think_infos_[i].in_think_mode) {
             int* input_lengths = inputs.input_lengths->data<int32_t>();
             int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
             int num_new_tokens = 1;
-            bool enforce = (sequence_lengths[i] + num_new_tokens >= max_thinking_tokens_[i] + input_lengths[i]);
+            bool enforce = (sequence_lengths[i] + num_new_tokens >= think_infos_[i].max_thinking_tokens + input_lengths[i]);
             auto logits = inputs.logits->index(i);
-            setVocabMask(think_status_dfa_ptrs_[i], logits, num_new_tokens, end_think_token_ids_[i], inputs.vocab_size, enforce);
+            setVocabMask(think_infos_[i].think_end_status_dfa_ptr, logits, num_new_tokens, think_infos_[i].end_think_token_ids, inputs.vocab_size, enforce);
         }
     }
 }
@@ -43,8 +39,8 @@ void ThinkModeLogitsProcessor::setVocabMask(
 
 void ThinkModeLogitsProcessor::updateStatus(const SamplerInputs& inputs) {
     for (size_t i = 0; i < inputs.batch_size; i++) {
-        if (think_modes_[i]) {
-            auto dfa_ptr = think_status_dfa_ptrs_[i];
+        if (think_infos_[i].in_think_mode) {
+            auto dfa_ptr = think_infos_[i].think_end_status_dfa_ptr;
             auto token_ids = inputs.token_ids->index(i);
             int num_new_tokens = 1;
             const size_t step = token_ids->shape()[0];
@@ -60,7 +56,8 @@ void ThinkModeLogitsProcessor::updateStatus(const SamplerInputs& inputs) {
 
 std::vector<size_t> ThinkModeLogitsProcessor::thinkEndTokensStatus() {
     std::vector<size_t> status;
-    for (auto dfa: think_status_dfa_ptrs_) {
+    for (auto think_info: think_infos_) {
+        auto dfa = think_info.think_end_status_dfa_ptr;
         status.push_back(dfa->status());
     }
     return status;
