@@ -166,7 +166,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
 
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
+        attention_inputs = model->prepareAttentionInputs(inputs, dtype, nullptr);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -184,7 +184,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
+        attention_inputs = model->prepareAttentionInputs(inputs, dtype, nullptr);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -202,7 +202,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
+        attention_inputs = model->prepareAttentionInputs(inputs, dtype, nullptr);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);

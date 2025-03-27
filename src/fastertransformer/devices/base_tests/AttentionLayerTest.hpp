@@ -97,12 +97,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
 
     auto input_lengths_device = device_->clone({*model_inputs.input_lengths});
     auto sequence_lengths_device = device_->clone({*model_inputs.sequence_lengths});
-    AttentionCommonInputs common_inputs({
-            input_lengths_device,
-            sequence_lengths_device
-        });
-
-    model.prepareAttentionInputs(model_inputs, dtype, common_inputs);
+    auto common_inputs = model.prepareAttentionInputs(model_inputs, dtype, nullptr);
 
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
