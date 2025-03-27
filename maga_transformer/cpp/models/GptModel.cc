@@ -78,6 +78,7 @@ GptModel::GptModel(const GptModelInitParams& params)
             residual_scale_fp32_ = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
             residual_scale_ = residual_scale_fp32_;
         }
+        micro_batch_comm_overlap_ = autil::EnvUtil::getEnv("MICRO_BATCH_COMM_OVERLAP", 1L);;
     }
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
@@ -133,11 +134,16 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
     return ret;
 }
 
-void GptModel::prepareAttentionInputs(
+ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
         ft::DataType dtype,
-        AttentionCommonInputs& attention_inputs)
+        ft::BufferPtr combo_position_ids)
 {
+    AttentionCommonInputs attention_inputs({
+        device_->clone({*inputs.input_lengths}),
+        device_->clone({*inputs.sequence_lengths}),
+    });
+    attention_inputs.position_ids = combo_position_ids;
     attention_inputs.warmup = inputs.warmup;
     if (!inputs.warmup && inputs.pd_separation) {
         FT_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id, "failed to get information for pd seperation store cache");
@@ -212,6 +218,11 @@ void GptModel::prepareAttentionInputs(
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
 
+    FT_LOG_DEBUG("prepare model run sequence lengths: %s, input_lengths: %s, kv cache: %s, context batch size: %ld, decoder batch size: %ld",
+                inputs.sequence_lengths->debugStringWithData<int32_t>().c_str(),
+                inputs.input_lengths->debugStringWithData<int32_t>().c_str(),
+                inputs.kv_cache_block_id ? inputs.kv_cache_block_id->debugString().c_str() : "NULL",
+                context_batch_size, decoder_batch_size);
     auto prep_output = device_->prepareModelRun({
             description_.attention_conf,
             inputs.sequence_lengths,
@@ -244,6 +255,84 @@ void GptModel::prepareAttentionInputs(
                 description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
             });
     }
+
+    return attention_inputs;
+}
+
+MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
+    if (!device_props_.enable_layer_micro_batch) {
+        FT_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    const auto& input_lengths = inputs.input_lengths;
+    const auto& sequence_lengths = inputs.sequence_lengths;
+    const auto decoder_batch_size = sequence_lengths->shape()[0];
+    const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
+
+    // NOTE: when context batch size > 0, to keep micro batching behavior consistent within dp ranks,
+    // we still need to enable micro batching, but send empty query to the second micro batch
+    if (context_batch_size || decoder_batch_size < 2) {
+        FT_LOG_DEBUG("micro batch disable when context batch size > 0");
+        return {true, {decoder_batch_size, 0}};
+    }
+
+    // NOTE: for now, we simply split the decode batch into two micro batches equally
+    // TODO: design better split strategy that consider the computational workload of each request
+    const auto batch_0_size = decoder_batch_size / 2;
+    const auto batch_1_size = decoder_batch_size - batch_0_size;
+    FT_LOG_DEBUG("micro batch enable, split decoder batch into two micro batches %ld, %ld",
+                batch_0_size, batch_1_size);
+    return {true, {batch_0_size, batch_1_size}};
+}
+
+vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
+    const GptModelInputs& inputs,
+    const BufferPtr& hidden,
+    const BufferPtr& pre_decoder_residual,
+    const ft::DataType dtype,
+    const MicroBatchPlan& micro_batch_plan)
+{
+    vector<LayerMicroBatchInputs> micro_batch_inputs;
+    size_t sliced_token_idx = 0;
+
+    const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
+    const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+
+    if (context_batch_size || decoder_batch_size < 2) {
+        // if context request exists, then micro bacthing is de facto disabled
+        // we put everything into the first micro batch, and send empty query to the second micro batch
+        auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, nullptr);
+        micro_batch_inputs.push_back({hidden, pre_decoder_residual, attention_common_inputs});
+
+        // The fake query
+        GptModelInputs fake_inputs;
+        fake_inputs.kv_cache_block_id = nullptr;
+        fake_inputs.combo_tokens = inputs.combo_tokens->slice(0, 1);
+        fake_inputs.input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
+        fake_inputs.input_lengths->data<int32_t>()[0] = 1;
+        fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
+        auto fake_hidden = device_->allocateBuffer({dtype, {1, hidden->shape()[1]}});
+        auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, dtype, nullptr);
+        micro_batch_inputs.push_back({move(fake_hidden), nullptr, move(attention_common_inputs_fake)});
+    } else {
+        // if context request does not exist, do normal micro batching
+        for (size_t i = 0; i < micro_batch_plan.decoder_sizes.size(); ++i) {
+            const auto& decode_batch_size = micro_batch_plan.decoder_sizes[i];
+            GptModelInputs micro_model_inputs = inputs;
+            micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, decode_batch_size);
+            micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_token_idx, decode_batch_size);
+            micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(sliced_token_idx, decode_batch_size);
+            micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_token_idx, decode_batch_size);
+            auto micro_hidden = hidden->slice(sliced_token_idx, decode_batch_size);
+            auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, decode_batch_size) : nullptr;
+            auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
+            micro_batch_inputs.push_back({
+                move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
+            sliced_token_idx += decode_batch_size;
+        }
+    }
+    return micro_batch_inputs;
 }
 
 GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
@@ -308,15 +397,156 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     printBufferData(*hidden, "input_hidden");
 
-    // prepare resources for all layers
-    AttentionCommonInputs attention_common_inputs({
-        device_->clone({*inputs.input_lengths}),
-        device_->clone({*inputs.sequence_lengths}),
-    });
-    prepareAttentionInputs(inputs, dtype, attention_common_inputs);
-    attention_common_inputs.position_ids = combo_position_ids;
+    auto micro_batch_plan = planMicroBatches(inputs);
+    if (micro_batch_plan.enable) {
+        auto micro_batch_inputs = prepareMicroBatchInputs(
+            inputs, hidden, pre_decoder_residual, dtype,  micro_batch_plan);
+        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), dtype, micro_batch_inputs};
+    } else {
+        // prepare resources for all layers
+        auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, combo_position_ids);
+        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype};
+    }
+}
 
-    return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype};
+GptLayerOutputs GptModel::forwardMicroBatchedLayers(
+        const GptLayerInputs& layer_inputs, const GptModelInputs& inputs)
+{
+    std::vector<GptLayerInputs> micro_batch_layer_inputs;
+    for (auto& micro_batch_input : layer_inputs.micro_batch_inputs) {
+        micro_batch_layer_inputs.push_back({
+            micro_batch_input.hidden,
+            micro_batch_input.pre_decoder_residual,
+            micro_batch_input.attention_common_inputs,
+            layer_inputs.dtype
+        });
+    }
+
+    std::vector<LastLayerDeferedParams> last_layer_defered_params(micro_batch_layer_inputs.size());
+
+    for (int32_t i = 0; i < layer_num_; ++i) {
+        const auto& layer = weights_.layers[i];
+        bool moe_layer = weights_.layers[i].ffn_weights.moe_gate_weight != nullptr;
+        const auto& moe_conf = description_.ffn_conf.moe_configs.value();
+
+        // dense layer does not need micro batching.
+        if (!moe_layer) {
+            for (auto& layer_input : micro_batch_layer_inputs) {
+                auto layer_outputs = forwardGptLayer(layer_input, i, inputs.lora_model_input);
+                layer_input.hidden = move(layer_outputs.hidden);
+            }
+            continue;
+        }
+
+        std::vector<EpFfnInputs> ep_inputs;
+        for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+            auto batch_ep_input = forwardAttentionAndMoeGate(
+                layer_input, last_layer_defered_params[micro_batch_idx], i);
+            ep_inputs.push_back(move(batch_ep_input));
+        }
+
+        std::vector<EpFfnOutputs> ep_outputs;
+        for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            if (micro_batch_idx > 0 && ep_inputs[micro_batch_idx].dispatch_output.comm_barrier_hook) {
+                FT_LOG_DEBUG("synchronize barrier event for layer %ld, micro batch %ld", i, micro_batch_idx);
+                ep_inputs[micro_batch_idx].dispatch_output.comm_barrier_hook->hook_sync();
+            }
+
+            DevicePerfWrapper wrapper(device_, "mb_moe_layer_" + std::to_string(i) + "_idx_" + std::to_string(micro_batch_idx));
+            // auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+            auto& batch_ep_input = ep_inputs[micro_batch_idx];
+            const auto& ffn_params = batch_ep_input.moe_ffn_params;
+            const auto& dispatched_output = batch_ep_input.dispatch_output;
+            auto hidden_states = dispatched_output.hidden;
+            if (hidden_states->shape()[0]) {
+                auto moe_ffn_params = FfnLayerParams({
+                    *hidden_states,
+                    ffn_params.configs,
+                    ffn_params.weights,
+                    ffn_params.residual,
+                    ffn_params.qscheme});
+                hidden_states = device_->moeFfn(
+                    moe_ffn_params,
+                    {dispatched_output.expert_ids, dispatched_output.expert_scales
+                }).hidden_states;
+            }
+
+            auto out = device_->epCombine({
+                hidden_states,
+                dispatched_output.indices,
+                ffn_params.output,
+                dispatched_output.input_split_sizes,
+                dispatched_output.output_split_sizes,
+                moe_conf,
+                ffn_params.input.shape()[0],
+                micro_batch_comm_overlap_});
+
+            auto output = out.hidden_states;
+            printBufferData(*output, "moe_ffn_ep_out");
+
+            ep_outputs.push_back(EpFfnOutputs({output, move(out.comm_barrier_hook)}));
+        }
+
+        // std::vector<BufferPtr>
+
+        for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            // last layer: add residual and shared expert output
+            auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+            auto& batch_ep_input = ep_inputs[micro_batch_idx];
+            auto& batch_ep_output = ep_outputs[micro_batch_idx];
+
+            if (i == layer_num_ - 1) {
+                if (batch_ep_output.comm_barrier_hook) {
+                    FT_LOG_DEBUG("synchronize barrier event for layer %ld, micro batch %ld", i, micro_batch_idx);
+                    batch_ep_output.comm_barrier_hook->hook_sync();
+                }
+                auto& output = batch_ep_output.hidden;
+
+                printBufferData(*output, "layer_" + to_string(i) + "_ffn_output");
+
+                auto ffn_layernorm_output = device_->layernorm({
+                    output,
+                    nullptr,
+                    ft::mayGetRef(layer.post_ffn_layernorm),
+                    ft::mayGetRef(batch_ep_input.residual),
+                    ft::mayGetRef(batch_ep_input.shared_expert_output),
+                    nullopt,
+                    1.0f,
+                    description_.layernorm_eps,
+                    true,
+                    description_.post_layernorm,
+                    description_.norm_type,
+                    QScheme::NoQuantize
+                });
+                layer_input.hidden = move(ffn_layernorm_output.output);
+                printBufferData(*layer_input.hidden, "layer_" + to_string(i) + "_final_hidden");
+            } else {
+                // not last layer: defer add residual and bias to next layer
+                last_layer_defered_params[micro_batch_idx].residual = batch_ep_input.residual;
+                last_layer_defered_params[micro_batch_idx].shared_expert_output = batch_ep_input.shared_expert_output;
+                last_layer_defered_params[micro_batch_idx].post_ffn_layernorm_weights = layer.post_ffn_layernorm;
+                last_layer_defered_params[micro_batch_idx].comm_barrier_hook = move(batch_ep_output.comm_barrier_hook);
+                layer_input.hidden = move(batch_ep_output.hidden);
+            }
+        }
+    }
+
+    const auto& hidden = layer_inputs.hidden;
+    size_t copy_from_token_idx = 0;
+    if ((inputs.sequence_lengths->shape()[0] == inputs.input_lengths->shape()[0]) && inputs.input_lengths->shape()[0] > 1) {
+        for (size_t i = 0; i < micro_batch_layer_inputs.size(); ++i) {
+            const auto& micro_batch_hidden = micro_batch_layer_inputs[i].hidden;
+            const auto micro_batch_token_num = micro_batch_hidden->shape()[0];
+            const auto target_hidden = hidden->slice(copy_from_token_idx, micro_batch_token_num);
+            device_->copy({*target_hidden, *micro_batch_hidden});
+            copy_from_token_idx += micro_batch_token_num;
+        }
+    } else {
+        device_->copy({*hidden, *(micro_batch_layer_inputs[0].hidden)});
+    }
+
+    return {hidden, nullptr};
 }
 
 GptLayerOutputs GptModel::forwardGptLayer(
@@ -324,10 +554,11 @@ GptLayerOutputs GptModel::forwardGptLayer(
     const int32_t layer_id,
     ft::lora::LoraModelInputPtr lora_model_input)
 {
-    DevicePerfWrapper wrapper(device_, "forwardGptLayer");
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     auto attention_common_inputs = move(inputs.attention_common_inputs);
+    DevicePerfWrapper wrapper(device_, "forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
+    FT_LOG_DEBUG("forward layer %ld, hidden shape %s", layer_id, hidden->debugString().c_str());
 
     attention_common_inputs.layer_id = layer_id;
     const auto& layer = weights_.layers[layer_id];
@@ -359,7 +590,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
         hidden = std::move(pre_layernorm_output.output);
     }
 
-    if (k_cache_buffer_) {
+    if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
         attention_common_inputs.kv_cache->k_cache_buffer = k_cache_buffer_->index(layer_id);
         attention_common_inputs.kv_cache->v_cache_buffer = v_cache_buffer_->index(layer_id);
         if (k_scale_buffer_) {
@@ -470,6 +701,187 @@ GptLayerOutputs GptModel::forwardGptLayer(
     return {hidden, pre_decoder_residual};
 }
 
+EpFfnInputs GptModel::forwardAttentionAndMoeGate(
+        const GptLayerInputs& inputs,
+        LastLayerDeferedParams& last_layer_defered_params,
+        const int32_t layer_id)
+{
+    auto hidden = inputs.hidden;
+    auto pre_decoder_residual = inputs.pre_decoder_residual;
+    auto attention_common_inputs = move(inputs.attention_common_inputs);
+
+    if (last_layer_defered_params.comm_barrier_hook) {
+        FT_LOG_DEBUG("synchronize previous layer barrier event for layer %ld", layer_id);
+        move(last_layer_defered_params.comm_barrier_hook)->hook_sync();
+    }
+
+    if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
+        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
+
+        auto prev_ffn_layernorm_output = device_->layernorm({
+            hidden,
+            nullptr,
+            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
+            ft::mayGetRef(last_layer_defered_params.residual),
+            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+            nullopt,
+            1.0f,
+            description_.layernorm_eps,
+            true,
+            description_.post_layernorm,
+            description_.norm_type,
+            QScheme::NoQuantize
+        });
+        hidden = move(prev_ffn_layernorm_output.output);
+        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
+    }
+
+    DevicePerfWrapper wrapper(device_, "mb_forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
+
+    attention_common_inputs.layer_id = layer_id;
+    const auto& layer = weights_.layers[layer_id];
+    ft::QScheme act_qscheme = description_.act_qscheme;
+
+    // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
+    auto attn_out_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"attn_out_buf"});
+    // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
+    // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
+    // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
+    attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
+    auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
+    printBufferData(*residual, "in residual");
+    BufferPtr residual2 = nullptr;
+    if (layer.pre_layernorm) {
+        residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+        auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
+                                                                        nullptr,
+                                                                        *layer.pre_layernorm,
+                                                                        std::nullopt,
+                                                                        std::nullopt,
+                                                                        std::nullopt,
+                                                                        0.f,
+                                                                        description_.layernorm_eps,
+                                                                        true,
+                                                                        false,
+                                                                        description_.norm_type,
+                                                                        act_qscheme));
+        hidden = std::move(pre_layernorm_output.output);
+    }
+
+    if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
+        attention_common_inputs.kv_cache->k_cache_buffer = k_cache_buffer_->index(layer_id);
+        attention_common_inputs.kv_cache->v_cache_buffer = v_cache_buffer_->index(layer_id);
+        if (k_scale_buffer_) {
+            attention_common_inputs.kv_cache->k_scale_buffer = k_scale_buffer_->index(layer_id);
+            attention_common_inputs.kv_cache->v_scale_buffer = v_scale_buffer_->index(layer_id);
+        }
+    }
+
+    AttentionLayerOutput attn_output;
+    auto attn_params = AttentionLayerParams({
+            layer_id,
+            *hidden,
+            move(attn_out_buf),
+            description_.attention_conf,
+            layer.self_attention_weights,
+            attention_common_inputs,
+            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+            {description_.layernorm_eps, description_.norm_type},
+            act_qscheme
+    });
+    if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
+        attn_output = device_->mlaAttentionLayer(attn_params);
+    } else {
+        attn_output = device_->attentionLayer(attn_params);
+    }
+
+    auto attn_hidden = std::move(attn_output.hidden_states);
+    if (device_props_.tp_size > 1) {
+        // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
+        auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=%ld", (long)attn_hidden->sizeBytes());
+        attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
+    }
+    if (residual_scale_) {
+        attn_hidden = device_->multiply({*residual_scale_, *attn_hidden});
+    }
+    printBufferData(*attn_hidden, "layer_" + to_string(layer_id) + "_attn_output");
+
+    if (layer.post_layernorm) {
+        // attn_hidden = attn_hidden + residual
+        // hidden = layernorm(attn_hidden)
+        printBufferData(*residual, "post layernorm residual");
+        auto post_layernorm_params = LayernormParams(attn_hidden,
+                                                        attn_hidden,
+                                                        ft::mayGetRef(layer.post_layernorm),
+                                                        device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
+                                                        nullopt,
+                                                        ft::mayGetRef(layer.self_attention_weights.output_weight->bias),
+                                                        0.f,
+                                                        description_.layernorm_eps,
+                                                        false,
+                                                        description_.post_layernorm,
+                                                        description_.norm_type,
+                                                        act_qscheme);
+
+        auto post_layernorm_output = device_->layernorm(post_layernorm_params);
+        hidden = std::move(post_layernorm_output.output);
+        attn_hidden = std::move(post_layernorm_output.before_norm_output);
+        residual = attn_hidden;
+        printBufferData(*residual, "post_layernorm_residual");
+    } else {
+        residual2 = attn_hidden;
+    }
+
+    printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
+    auto ffn_output_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"ffn_out_buf"});
+    auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
+                                            layer.ffn_weights,
+                                            device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+                                            act_qscheme,
+                                            std::move(ffn_output_buf)});
+
+    BufferPtr shared_expert_output = nullptr;
+    if (layer.ffn_weights.shared_expert) {
+        shared_expert_output = device_->allocateBufferLike({*hidden}, AllocationType::DEVICE, {"shared_expert_buf"});
+        shared_expert_output = device_->prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
+        auto ffn_params = FfnLayerParams({ffn_layer_params.input,
+                                            ffn_layer_params.configs,
+                                            *(ffn_layer_params.weights.shared_expert),
+                                            ffn_layer_params.residual,
+                                            ffn_layer_params.qscheme,
+                                            shared_expert_output});
+        shared_expert_output = device_->ffnLayer(ffn_params).hidden_states;
+
+        // for qwen moe
+        // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+        if (ffn_layer_params.weights.shared_expert_gate) {
+            auto shared_gate = device_->gemm({ffn_layer_params.input, *(ffn_layer_params.weights.shared_expert_gate->kernel)});
+            device_->activation({ActivationType::Sigmoid, shared_gate});
+            shared_expert_output = device_->multiply({
+                    shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
+        }
+        if (device_props_.tp_size > 1) {
+            auto wrapper = DevicePerfWrapper(device_, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
+            shared_expert_output = device_->allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
+        }
+    }
+
+    MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
+    MoeDispatchOutput dispatched_output = device_->epDispatch({
+        ffn_layer_params.input,
+        *gate_output.expert_ids,
+        *gate_output.expert_scales,
+        description_.ffn_conf.moe_configs.value(),
+        micro_batch_comm_overlap_
+    });
+
+    return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};
+}
+
+GptLayerOutputs GptModel::forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id) {
+    return inputs;
+}
+
 GptModelOutputs GptModel::forwardPostLayers(
     const ft::BufferPtr input,
     const bool has_context_request,
@@ -497,6 +909,7 @@ GptModelOutputs GptModel::forwardPostLayers(
     const auto& lm_head = weights_.lm_head;
     if (lm_head) {
         // gen last token hidden
+        printBufferData(*lm_output_indexes, "lm_output_indexes");
         auto last_hidden = has_context_request && !need_all_logits
                          ? device_->select({*hidden, *device_->clone({*lm_output_indexes})})
                          : hidden;
@@ -524,47 +937,26 @@ GptModelOutputs GptModel::forwardPostLayers(
     }
 }
 
-/*
- *          ┌───────────┐
- *          │  hidden   │
- *          └─────┬─────┘
- *                │
- *                │
- *        ┌───────▼───────┐
- *        │ pre_layernorm?├─────────┐
- *        └───────┬───────┘         │
- *                │                 │
- *          ┌─────▼─────┐           │
- *          │ attention │           │
- *          └─────┬─────┘           │
- *                │                 │
- *        ┌───────▼───────┐         │
- * ┌──────┤post_attn_norm?◄─────────┘
- * │      └───────┬───────┘
- * │              │
- * │         ┌────▼────┐
- * │         │   mlp   │
- * │         └────┬────┘
- * │              │
- * │         ┌────▼────┐
- * └─────────►   add   │
- *           └────┬────┘
- *                │
- *          ┌─────▼─────┐
- *          │ layernorm │
- *          └───────────┘
- */
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto layer_inputs = forwardPreLayers(inputs);
 
-    for (int32_t i = 0; i < layer_num_; ++i) {
-        auto layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
-        layer_inputs.hidden = move(layer_outputs.hidden);
-        layer_inputs.pre_decoder_residual = move(layer_outputs.pre_decoder_residual);
+    GptLayerOutputs layer_outputs;
+
+    if (layer_inputs.micro_batch_inputs.size()) {
+        layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs);
+    } else {
+        for (int32_t i = 0; i < layer_num_; ++i) {
+            layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
+            layer_inputs.hidden = layer_outputs.hidden;
+            layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
+        }
     }
 
-    auto outputs = forwardPostLayers(layer_inputs.hidden, layer_inputs.attention_common_inputs.context_batch_size,
-                                     inputs.need_all_logits, inputs.lm_output_indexes);
+    auto outputs = forwardPostLayers(
+        layer_outputs.hidden,
+        inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
+        inputs.need_all_logits,
+        inputs.lm_output_indexes);
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     return outputs;

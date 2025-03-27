@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/Event.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
@@ -118,11 +119,44 @@ struct GptLayerOutputs {
     ft::BufferPtr pre_decoder_residual;
 };
 
+struct MicroBatchPlan {
+    bool enable = false;
+    std::vector<size_t> decoder_sizes;
+};
+
+struct LayerMicroBatchInputs {
+    ft::BufferPtr hidden;
+    ft::BufferPtr pre_decoder_residual;
+    ft::AttentionCommonInputs attention_common_inputs;
+};
+
 struct GptLayerInputs {
     ft::BufferPtr hidden;
     ft::BufferPtr pre_decoder_residual;
     ft::AttentionCommonInputs attention_common_inputs;
     const ft::DataType dtype;
+    std::vector<LayerMicroBatchInputs> micro_batch_inputs;
+};
+
+struct EpFfnInputs {
+    ft::BufferPtr hidden;
+    ft::BufferPtr residual;
+    ft::BufferPtr shared_expert_output;
+    ft::FfnLayerParams moe_ffn_params;
+    ft::MoeGateSelectOutput gate_output;
+    ft::MoeDispatchOutput dispatch_output;
+};
+
+struct EpFfnOutputs {
+    ft::BufferPtr hidden;
+    ft::DeviceHookPtr comm_barrier_hook;
+};
+
+struct LastLayerDeferedParams {
+    ft::BufferPtr residual;
+    ft::BufferPtr shared_expert_output;
+    std::shared_ptr<const ft::LayerNormWeights> post_ffn_layernorm_weights;
+    ft::DeviceHookPtr comm_barrier_hook;
 };
 
 class GptModel {
@@ -133,11 +167,18 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
 private:
-    void prepareAttentionInputs(
+    ft::AttentionCommonInputs prepareAttentionInputs(
         const GptModelInputs& inputs,
         ft::DataType dtype,
-        ft::AttentionCommonInputs& attention_inputs);
+        ft::BufferPtr combo_position_ids);
 
+    MicroBatchPlan planMicroBatches(const GptModelInputs& inputs);
+    std::vector<LayerMicroBatchInputs> prepareMicroBatchInputs(
+        const GptModelInputs& model_inputs,
+        const ft::BufferPtr& hidden,
+        const ft::BufferPtr& pre_decoder_residual,
+        const ft::DataType dtype,
+        const MicroBatchPlan& micro_batch_plan);
     ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
 
     GptLayerInputs forwardPreLayers(const GptModelInputs& inputs);
@@ -146,6 +187,14 @@ private:
         GptLayerInputs inputs,
         const int32_t layer_id,
         ft::lora::LoraModelInputPtr lora_model_input);
+
+    // These methods are dedicated for moe ep micro batching
+    GptLayerOutputs forwardMicroBatchedLayers(const GptLayerInputs& layer_inputs, const GptModelInputs& inputs);
+    EpFfnInputs forwardAttentionAndMoeGate(
+        const GptLayerInputs& inputs,
+        LastLayerDeferedParams& last_layer_defered_params,
+        const int32_t layer_id);
+    GptLayerOutputs forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id);
 
     GptModelOutputs forwardPostLayers(
         const ft::BufferPtr hidden,
@@ -165,6 +214,8 @@ private:
     ft::BufferPtr              v_scale_buffer_;
     ft::BufferPtr              residual_scale_fp32_;
     ft::BufferPtr              residual_scale_;
+
+    bool micro_batch_comm_overlap_ = true;
 };
 
 }  // namespace rtp_llm

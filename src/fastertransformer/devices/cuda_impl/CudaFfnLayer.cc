@@ -7,6 +7,7 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include <cstring>
 #include <numeric>
 
@@ -15,6 +16,7 @@ using namespace std;
 namespace fastertransformer {
 
 MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
+    DevicePerfWrapper wrapper(this, "epDispatch");
     const auto& moe_conf = params.moe_configs;
 
     auto const ep_size    = moe_conf.ep_size;
@@ -83,21 +85,29 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     selected_buffers.emplace_back(select({*expert_ids, *all_token_indices}));
     selected_buffers.emplace_back(select({*expert_scales, *all_token_indices}));
 
-    auto global_buffers = allToAll({selected_buffers, input_split_sizes, output_split_sizes}).outputs;
+    auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
+    const auto& global_buffers = all2all_output.outputs;
     return {global_buffers[0],
             global_buffers[1],
             global_buffers[2],
             all_token_indices,
             input_split_sizes,
-            output_split_sizes};
+            output_split_sizes,
+            selected_buffers,
+            all2all_output.concated_input,
+            all2all_output.output_to_split,
+            move(all2all_output.comm_barrier_hook)
+        };
 }
 
 FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
+    DevicePerfWrapper wrapper(this, "epCombine");
     if (params.overlapped) {
         overlap_hold_buffers_.clear();
     }
-    auto all_output =
-        allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped}).outputs[0];
+    auto all2all_ret = allToAll({
+        {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
+    auto all_output = all2all_ret.outputs[0];
     if (params.overlapped) {
         overlap_hold_buffers_.emplace_back(all_output);
         overlap_hold_buffers_.emplace_back(params.input);
@@ -150,11 +160,11 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
         }
         allGather({{padding_output}, ParallelMode::TP, params.overlapped});
         if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size) {
-            return {padding_output};
+            return {padding_output, createCommHook()};
         } else {
             BufferPtr output = params.output ? params.output : allocateBufferLike(padding_output->view(0, params.origin_token_num));
             copy({*output, padding_output->view(0, params.origin_token_num), params.overlapped});
-            return {output};
+            return {output, createCommHook()};
         }
     } else {
         vector<size_t> new_shape = all_output->shape();
@@ -171,13 +181,12 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
                                              output->data(),
                                              stream);
         }
-        return {output};
+        return {output, createCommHook()};
     }
 }
 
 MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
-
     const auto& moe_conf = params.configs.moe_configs.value();
     const auto& hidden   = params.input;
 

@@ -7,6 +7,7 @@
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/MlaConfig.h"
 
+#include "src/fastertransformer/core/Event.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/QBuffer.h"
 #include "src/fastertransformer/utils/activation_types.h"
@@ -565,6 +566,7 @@ struct FfnConfigs {
 
 struct FfnLayerOutput {
     BufferPtr hidden_states;
+    DeviceHookPtr comm_barrier_hook;
 };
 
 struct FfnLayerParams {
@@ -595,25 +597,24 @@ struct MoeGateSelectOutput {
 };
 
 struct MoeDispatchOutput {
-    BufferPtr                 hidden;
-    BufferPtr                 expert_ids;
-    BufferPtr                 expert_scales;
-    BufferPtr                 indices;
-    const std::vector<size_t> input_split_sizes;
-    const std::vector<size_t> output_split_sizes;
+    BufferPtr                    hidden;
+    BufferPtr                    expert_ids;
+    BufferPtr                    expert_scales;
+    BufferPtr                    indices;
+    const std::vector<size_t>    input_split_sizes;
+    const std::vector<size_t>    output_split_sizes;
+    const std::vector<BufferPtr> dispatch_src_buffers; // to make them outlive async sendrecv
+    const BufferPtr              concated_src_buffers; // to make them outlive async sendrecv
+    const BufferPtr              split_dst_buffers;    // to make them outlive async sendrecv
+    DeviceHookPtr                comm_barrier_hook;
 };
 
 struct MoeDispatchParams {
-    MoeDispatchParams(const Buffer&     input,
-                      const Buffer&     expert_ids,
-                      const Buffer&     expert_scales,
-                      const MoeConfigs& moe_configs):
-        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs) {}
-
     const Buffer&     input;
     const Buffer&     expert_ids;
     const Buffer&     expert_scales;
     const MoeConfigs& moe_configs;
+    bool              overlapped = false;
 };
 
 struct MoeCombineParams {
@@ -717,6 +718,9 @@ struct AllToAllParams {
 
 struct AllToAllOutput {
     std::vector<BufferPtr> outputs;
+    BufferPtr              concated_input;
+    BufferPtr              output_to_split;
+    DeviceHookPtr          comm_barrier_hook;
 };
 
 // output = act(input) + bias

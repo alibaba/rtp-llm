@@ -55,6 +55,8 @@ public:
     virtual FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
     virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);
+    virtual MoeDispatchOutput epDispatch(const MoeDispatchParams& params);
+    virtual FfnLayerOutput epCombine(const MoeCombineParams& params);
 
     // for sampler
     virtual GreedyOutput sampleGreedy(const GreedyParams& params);

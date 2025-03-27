@@ -518,11 +518,12 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
         all2all_single_equal_split(
             input_buffer->data(), output->data(), output->sizeBytes(), nccl_param.nccl_comm_, stream);
     }
+    AllToAllOutput all_to_all_output;
     if (byte_buffers.size() < 2) {
         vector<size_t> new_shape = output->shape();
         new_shape[1] /= getTypeSize(params.buffers[0]->type());
         output->updateTypeAndShape(params.buffers[0]->type(), new_shape);
-        return {{output}};
+        all_to_all_output = {{output}};
     } else {
         vector<BufferPtr> outputs;
         size_t            output_batch_size = output->shape()[0];
@@ -543,8 +544,12 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
                 outputs[i]->updateTypeAndShape(params.buffers[i]->type(), new_shape);
             }
         }
-        return {outputs};
+        all_to_all_output = {{outputs}, input_buffer, output};
     }
+    if (params.overlapped) {
+        all_to_all_output.comm_barrier_hook = createCommHook();
+    }
+    return all_to_all_output;
 }
 
 void CudaDevice::allGather(const AllGatherParams& params) {

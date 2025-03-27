@@ -45,6 +45,7 @@ struct DeviceInitParams {
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
     bool enable_comm_overlap = true;
+    bool enable_layer_micro_batch  = false;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -65,6 +66,8 @@ struct DeviceProperties {
     bool attn_fuse_add_residual = false;
     bool ffn_fuse_add_residual  = false;
     bool sq_fuse_bias_activation = false;
+
+    bool enable_layer_micro_batch = false;
 };
 
 struct MemoryStatus {

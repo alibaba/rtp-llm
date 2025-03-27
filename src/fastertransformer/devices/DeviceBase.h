@@ -37,6 +37,7 @@ public:
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
     virtual void overlappedCommBarrier();
+    virtual DeviceHookPtr createCommHook();
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);

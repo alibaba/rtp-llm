@@ -146,6 +146,14 @@ LoraLinearOutput DeviceOps::loraLinearWithAllReduce(const LoraLinearParams& para
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+MoeDispatchOutput DeviceOps::epDispatch(const MoeDispatchParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput DeviceOps::epCombine(const MoeCombineParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 GreedyOutput DeviceOps::sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

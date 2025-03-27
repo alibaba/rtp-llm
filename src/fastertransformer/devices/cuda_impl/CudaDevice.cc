@@ -134,7 +134,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
         &cublas_wrapper_mutex_, allocator_.get()));
-    
+
     // select mla type
     if (params.mla_ops_type != MlaOpsType::AUTO) {
         mla_ops_type = params.mla_ops_type;
@@ -230,6 +230,10 @@ void CudaDevice::overlappedCommBarrier() {
     }
 }
 
+DeviceHookPtr CudaDevice::createCommHook() {
+    return std::make_unique<CudaCommHook>(stream_, communication_stream_);
+}
+
 DeviceProperties CudaDevice::getDeviceProperties() {
     static DeviceProperties* prop = nullptr;
     if (prop == nullptr) {
@@ -240,6 +244,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->tp_size = init_params_.tp_size;
         prop->dp_rank = init_params_.dp_rank;
         prop->dp_size = init_params_.dp_size;
+        prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
     }
     return *prop;
 }
@@ -500,6 +505,23 @@ CudaEvent::~CudaEvent() {
 
 void CudaEvent::synchronize() const {
     check_cuda_error(cudaEventSynchronize(event_));
+    check_cuda_error(cudaStreamSynchronize(stream_));
+    sync_check_cuda_error();
+    cudaDeviceSynchronize();
+}
+
+CudaCommHook::CudaCommHook(cudaStream_t main_stream, cudaStream_t comm_stream)
+    : main_stream_(main_stream), comm_stream_(comm_stream) {
+    check_cuda_error(cudaEventCreate(&hook_event_));
+    check_cuda_error(cudaEventRecord(hook_event_, comm_stream_));
+}
+
+CudaCommHook::~CudaCommHook() {
+    check_cuda_error(cudaEventDestroy(hook_event_));
+}
+
+void CudaCommHook::hook_sync() const {
+    check_cuda_error(cudaStreamWaitEvent(main_stream_, hook_event_, 0));
 }
 
 }; // namespace fastertransformer

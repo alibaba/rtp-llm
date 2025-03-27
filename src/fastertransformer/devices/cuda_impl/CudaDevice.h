@@ -101,7 +101,7 @@ struct FlashInferAttnParams {
             const fastertransformer::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,
             const BufferPtr &input_lengths_host,
-            const BufferPtr &kv_cache_block_id_host,            
+            const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
 
 };
@@ -122,6 +122,19 @@ private:
     cudaStream_t stream_;
 };
 
+class CudaCommHook : public DeviceHook {
+public:
+    CudaCommHook(cudaStream_t main_stream, cudaStream_t comm_stream);
+    ~CudaCommHook() override;
+
+    void hook_sync() const override;
+
+private:
+    cudaEvent_t hook_event_;
+    cudaStream_t main_stream_;
+    cudaStream_t comm_stream_;
+};
+
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -137,6 +150,7 @@ public:
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
     void overlappedCommBarrier() override;
+    DeviceHookPtr createCommHook() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     DeviceEventPtr createEvent() override;
     bool useGroupGemm() const;
@@ -205,8 +219,8 @@ public:
                         BufferPtr&            gate_with_bias);
     void mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
-    MoeDispatchOutput epDispatch(const MoeDispatchParams& params);
-    FfnLayerOutput epCombine(const MoeCombineParams& params);
+    MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
+    FfnLayerOutput epCombine(const MoeCombineParams& params) override;
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
@@ -230,7 +244,7 @@ protected:
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                                  const Buffer&                kv_cache_offset_pointers,
                                  int                          batch_size,
-                                 bool                         use_fp8_fmha);                                 
+                                 bool                         use_fp8_fmha);
 
     void prefillAttention(const AttentionModuleParams& params,
                           KVBlockArray                 kv_block_array,
