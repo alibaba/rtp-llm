@@ -129,13 +129,6 @@ def cuda_register():
         })
     )
 
-def libacext_so():
-    native.filegroup(
-        name = "libacext_so",
-        srcs = [],
-        visibility = ["//visibility:public"],
-    )
-
 def triton_deps(names):
     return select({
         "//conditions:default": [],

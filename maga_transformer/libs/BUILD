@@ -1,8 +1,6 @@
 load("//bazel:defs.bzl", "copy_so")
-load("//bazel:arch_select.bzl", "kernel_so_deps", "libacext_so")
+load("//bazel:arch_select.bzl", "kernel_so_deps")
 package(default_visibility = ["//maga_transformer:__subpackages__"])
-
-libacext_so()
 
 copy_so("//:th_transformer")
 copy_so("//src/fastertransformer/kernels:mmha1")
@@ -17,6 +15,9 @@ copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
 copy_so("@flashinfer//:flashinfer_batch_paged_decode")
 copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
 copy_so("@flashinfer//:flashinfer_sm90")
+copy_so("@acext//:acext_1")
+copy_so("@acext//:acext_2")
+copy_so("@acext//:acext_3")
 
 filegroup(
     name = "libs",
