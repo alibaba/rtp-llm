@@ -215,12 +215,7 @@ def InvokeNvcc(argv, log=False):
   if len(out_file) != 1:
     return 1
 
-  if "TF_KERNEL_O3=1" in defines_value:
-    opt = (' -O3' if (len(opt_option) > 0 and int(opt_option[0]) > 0)
-         else ' -g')
-  else:
-    opt = (' -O2' if (len(opt_option) > 0 and int(opt_option[0]) > 0)
-        else ' -g')
+  opt = ' -O' + opt_option[-1] + ' '
 
   includes = (' -I ' + ' -I '.join(include_options)
               if len(include_options) > 0
