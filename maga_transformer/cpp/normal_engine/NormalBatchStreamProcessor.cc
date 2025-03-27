@@ -226,6 +226,8 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size, model_inputs.sequence_lengths);
     setCommonSamplerInputs(sampler_inputs, all_streams);
 
+    setThinkModeLogitsProcessorInputs(sampler_inputs, all_streams);
+
     int batch_idx   = 0;
     bool return_logits = false;
     bool calculate_softmax_probs = false;
@@ -286,10 +288,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.max_thinking_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.think_modes         = stream_groups.thinkMode();
-    sampler_inputs.end_think_token_ids = stream_groups.endThinkTokenIds();
-    sampler_inputs.think_status_dfa_ptrs.resize(total_batch_size, nullptr);
+    sampler_inputs.grammars.clear();
     sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.beam_index   =  device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
@@ -313,7 +312,6 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
 
 void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
     int* input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
-    int* max_thinking_tokens  = sampler_inputs.max_thinking_tokens->data<int32_t>();
     int* sequence_lengths     = sampler_inputs.sequence_lengths->data<int32_t>();
     uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
     uint32_t* top_k           = sampler_inputs.top_k->data<uint32_t>();
@@ -340,9 +338,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
         }
         for (int i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            max_thinking_tokens[batch_idx] = stream->maxThinkingTokens();
             sequence_lengths[batch_idx]   = stream->seqLength();
-            sampler_inputs.think_status_dfa_ptrs[batch_idx] = stream->thinkEndStatusDfa(i);
             beam_search_sequence_lengths[batch_idx]  = stream->seqLength();
             // TODO(xinfei.sxf) fix num beams after sampler support
             num_beams[batch_idx]          = stream->numBeams();
@@ -367,6 +363,41 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
     if (!has_random_seed) {
         sampler_inputs.random_seeds.reset();
     }
+}
+
+
+void NormalBatchStreamProcessor::setThinkModeLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
+    
+    int batch_idx   = 0;
+    std::deque<bool> think_modes;
+    std::vector<int> max_thinking_tokens;
+    std::vector<std::vector<int>> end_think_token_ids;
+    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
+
+    for (auto& stream : all_streams) {
+        int current_batch_size;
+        if (!score_batch) {
+            current_batch_size = stream->tileNum();
+        } else {
+            current_batch_size = stream->scoreLen();
+        }
+        for (int i = 0; i < current_batch_size; ++i) {
+            think_modes.push_back(stream->thinkMode());
+            max_thinking_tokens.push_back(stream->maxThinkingTokens());
+            end_think_token_ids.push_back(stream->endThinkTokenIds());
+            think_status_dfa_ptrs.push_back(stream->thinkEndStatusDfa(i));            
+            batch_idx += 1;
+        }
+    }
+
+    FT_CHECK(think_modes.size() == sampler_inputs.batch_size);
+    FT_CHECK(max_thinking_tokens.size() == sampler_inputs.batch_size);
+    FT_CHECK(end_think_token_ids.size() == sampler_inputs.batch_size);
+    FT_CHECK(think_status_dfa_ptrs.size() == sampler_inputs.batch_size);
+
+    BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_modes, max_thinking_tokens, end_think_token_ids, think_status_dfa_ptrs);
+
+    sampler_inputs.grammars.push_back(processor_ptr);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,

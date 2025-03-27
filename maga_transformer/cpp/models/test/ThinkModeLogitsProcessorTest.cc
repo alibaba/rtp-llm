@@ -3,7 +3,7 @@
 
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/models/GptModel.h"
-#include "maga_transformer/cpp/models/Sampler.h"
+#include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 
 using namespace std;
@@ -22,27 +22,36 @@ public:
         size_t batch_size;
         size_t vocab_size;
         size_t max_length;
-        std::vector<int> end_think_token_ids;
         ft::DataType logits_type = ft::DataType::TYPE_FP32;
     };
 
-    SamplerInputs allocate(Config config) {
+    BaseLogitsProcessorPtr generateLogitsProcessor(bool think_mode, std::vector<int> max_thinking_tokens, std::vector<int> end_think_token_ids, std::vector<int> think_status) {
+        size_t batch_size = max_thinking_tokens.size();
+        std::deque<bool> think_modes(batch_size, think_mode);
+        std::vector<std::vector<int>> batch_end_think_token_ids(batch_size, end_think_token_ids);
+        std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
+
+        for (size_t i = 0; i < batch_size; i++) {
+            think_status_dfa_ptrs.push_back(std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+        }
+
+        for (size_t i = 0; i < batch_size; i++) {
+            think_status_dfa_ptrs[i]->forceSetStatus(think_status[i]);
+        }
+
+        BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_modes, max_thinking_tokens, batch_end_think_token_ids, think_status_dfa_ptrs);
+        return processor_ptr;
+    }
+
+    SamplerInputs allocate(Config config, std::vector<BaseLogitsProcessorPtr> grammars) {
         SamplerInputs sampler_inputs;
+
         sampler_inputs.step                 = config.max_length;
         sampler_inputs.batch_size           = config.batch_size;
         sampler_inputs.vocab_size           = config.vocab_size;
-        if (config.end_think_token_ids.size() > 0) {
-            sampler_inputs.think_modes = true;
-        } else {
-            sampler_inputs.think_modes = false;
-        }
-        sampler_inputs.end_think_token_ids  = config.end_think_token_ids;
-        sampler_inputs.think_status_dfa_ptrs.clear();
-        for (size_t i = 0; i < config.batch_size; i++) {
-            sampler_inputs.think_status_dfa_ptrs.push_back(std::make_shared<StringContainDFA<size_t, int>>(config.end_think_token_ids));
-        }
-        sampler_inputs.max_thinking_tokens  = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.logits               = device_->allocateBuffer({config.logits_type, {config.batch_size, config.vocab_size}, ft::AllocationType::DEVICE}, {});
+        sampler_inputs.grammars.clear();
+        sampler_inputs.grammars.insert(sampler_inputs.grammars.end(), grammars.begin(), grammars.end());
+        sampler_inputs.logits               = device_->allocateBuffer({config.logits_type, {config.batch_size, config.vocab_size}, ft::AllocationType::HOST}, {});
         sampler_inputs.sequence_lengths     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
         sampler_inputs.input_lengths        = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
         sampler_inputs.num_beams            = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {config.batch_size}, ft::AllocationType::HOST}, {});
@@ -62,11 +71,6 @@ public:
     void setSequenceLengths(SamplerInputs& sampler_inputs, std::vector<int>& sequence_lengths) {
         FT_CHECK(sequence_lengths.size() == sampler_inputs.batch_size);
         sampler_inputs.sequence_lengths = ft::vector2Buffer(sequence_lengths);
-    };
-
-    void setMaxThinkingTokens(SamplerInputs& sampler_inputs, std::vector<int>& max_thinking_tokens) {
-        FT_CHECK(max_thinking_tokens.size() == sampler_inputs.batch_size);
-        sampler_inputs.max_thinking_tokens = ft::vector2Buffer(max_thinking_tokens);
     };
 
     void setTokenIds(SamplerInputs& sampler_inputs, std::vector<std::vector<int>>& token_ids) {
@@ -109,21 +113,16 @@ protected:
 
 TEST_F(SamplerTest, testMemFill) {
     SamplerDataBuilder builder;
+
     std::vector<int> end_think_token_ids = {101, 102};
-    SamplerInputs sampler_inputs = builder.allocate({4, 1024, 1024, end_think_token_ids});
+    std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
+    std::vector<int> think_status = {0, 0, 0, 0};
+    BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+    
+    SamplerInputs sampler_inputs = builder.allocate({4, 1024, 1024}, {processor});
     std::vector<int> sequence_lengths = {1, 2, 3, 4};
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
-
-    std::vector<int> max_thinking_tokens = {3, 4, 5, 4};
-    builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-    EXPECT_EQ(buffer2vector<int>(*sampler_inputs.max_thinking_tokens), std::vector<int>({3, 4, 5, 4}));
-
-    SamplerInitParams params;
-    params.device = builder.device_;
-    params.max_batch_size = 4;
-    params.eos_id = 1;
-    Sampler sampler(params);
 
     torch::Tensor tensor = torch::tensor({{2, 2, 2, 2, 2},
                                           {2, 2, 2, 2, 2},
@@ -131,10 +130,10 @@ TEST_F(SamplerTest, testMemFill) {
                                           {2, 2, 2, 2, 2}}, 
                                         torch::dtype(torch::kInt));
     auto logits = torchTensor2Buffer(tensor);
-    sampler.memFill(logits->index(0), 5, 0);
-    sampler.memFill(logits->index(1), 5, 1);
-    sampler.memFill(logits->index(2), 5, 2);
-    sampler.memFill(logits->index(3), 5, 3);
+    processor->memFill(logits->index(0), 5, 0);
+    processor->memFill(logits->index(1), 5, 1);
+    processor->memFill(logits->index(2), 5, 2);
+    processor->memFill(logits->index(3), 5, 3);
 
     EXPECT_EQ(buffer2vector<int>(*logits->index(0)), std::vector<int>({1, 0, 0, 0, 0}));
     EXPECT_EQ(buffer2vector<int>(*logits->index(1)), std::vector<int>({0, 1, 0, 0, 0}));
@@ -148,10 +147,10 @@ TEST_F(SamplerTest, testMemFill) {
                                           {2, 2, 2, 2, 2}}, 
                                         torch::dtype(torch::kDouble));
     auto logits2 = torchTensor2Buffer(tensor2);
-    sampler.memFill(logits2->index(0), 5, 0);
-    sampler.memFill(logits2->index(1), 5, 1);
-    sampler.memFill(logits2->index(2), 5, 2);
-    sampler.memFill(logits2->index(3), 5, 3);
+    processor->memFill(logits2->index(0), 5, 0);
+    processor->memFill(logits2->index(1), 5, 1);
+    processor->memFill(logits2->index(2), 5, 2);
+    processor->memFill(logits2->index(3), 5, 3);
 
     EXPECT_EQ(buffer2vector<double>(*logits2->index(0)), std::vector<double>({1, 0, 0, 0, 0}));
     EXPECT_EQ(buffer2vector<double>(*logits2->index(1)), std::vector<double>({0, 1, 0, 0, 0}));
@@ -159,20 +158,21 @@ TEST_F(SamplerTest, testMemFill) {
     EXPECT_EQ(buffer2vector<double>(*logits2->index(3)), std::vector<double>({0, 0, 0, 1, 0}));
 }
 
-
-TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
+TEST_F(SamplerTest, testUpdateStatus) {
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
         size_t vocab_size = 10;
         size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
+        std::vector<int> think_status = {0, 0, 0, 0};
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+        
+        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
         std::vector<std::vector<int>> token_ids = {
             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -181,18 +181,15 @@ TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
         };
         builder.setTokenIds(sampler_inputs, token_ids);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
         
-        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[0]->status());
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
-        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[2]->status());
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[3]->status());
+        processor->updateStatus(sampler_inputs);
+
+        auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
+        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
+        EXPECT_EQ(0, think_end_tokens_status[0]);
+        EXPECT_EQ(0, think_end_tokens_status[1]);
+        EXPECT_EQ(1, think_end_tokens_status[2]);
+        EXPECT_EQ(0, think_end_tokens_status[3]);
     }
 
     {
@@ -201,12 +198,14 @@ TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
         size_t vocab_size = 10;
         size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5, 5};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
+        std::vector<int> think_status = {0, 0, 1, 1};
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+        
+        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
         std::vector<std::vector<int>> token_ids = {
             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -216,22 +215,14 @@ TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
         };
         builder.setTokenIds(sampler_inputs, token_ids);
 
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
+        processor->updateStatus(sampler_inputs);
 
-        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
-        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
-        
-        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[0]->status());
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
-        EXPECT_EQ(2, sampler_inputs.think_status_dfa_ptrs[2]->status());
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[3]->status());
+        auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
+        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
+        EXPECT_EQ(0, think_end_tokens_status[0]);
+        EXPECT_EQ(0, think_end_tokens_status[1]);
+        EXPECT_EQ(2, think_end_tokens_status[2]);
+        EXPECT_EQ(0, think_end_tokens_status[3]);
     }
 
     {
@@ -240,12 +231,14 @@ TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
         size_t vocab_size = 10;
         size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5, 6};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
+        std::vector<int> think_status = {0, 0, 1, 1};
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+        
+        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
+        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
         std::vector<std::vector<int>> token_ids = {
             {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
@@ -255,22 +248,14 @@ TEST_F(SamplerTest, testThinkLogicProcessAfterSample) {
         };
         builder.setTokenIds(sampler_inputs, token_ids);
 
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
+        processor->updateStatus(sampler_inputs);
 
-        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
-        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
-        
-        sampler.thinkLogicProcessAfterSample(sampler_inputs, 0, 4);
-        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[0]->status());
-        EXPECT_EQ(0, sampler_inputs.think_status_dfa_ptrs[1]->status());
-        EXPECT_EQ(1, sampler_inputs.think_status_dfa_ptrs[2]->status());
-        EXPECT_EQ(2, sampler_inputs.think_status_dfa_ptrs[3]->status());
+        auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
+        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
+        EXPECT_EQ(1, think_end_tokens_status[0]);
+        EXPECT_EQ(0, think_end_tokens_status[1]);
+        EXPECT_EQ(1, think_end_tokens_status[2]);
+        EXPECT_EQ(2, think_end_tokens_status[3]);
     }
 }
 
@@ -296,33 +281,26 @@ std::string tensorToString(const at::Tensor& tensor, size_t size) {
 }
 
 TEST_F(SamplerTest, testSetVocabMask) {
-
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
         size_t vocab_size = 10;
         size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5, 6};
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length, end_think_token_ids});
+        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
+        std::vector<int> think_status = {0, 0, 1, 1};
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
+        
+        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
+        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-        std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
-        builder.setMaxThinkingTokens(sampler_inputs, max_thinking_tokens);
-
-        SamplerInitParams params;
-        params.device = builder.device_;
-        params.max_batch_size = batch_size;
-        params.eos_id = 1;
-        Sampler sampler(params);
-
-        sampler_inputs.think_status_dfa_ptrs[0]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[1]->forceSetStatus(0);
-        sampler_inputs.think_status_dfa_ptrs[2]->forceSetStatus(1);
-        sampler_inputs.think_status_dfa_ptrs[3]->forceSetStatus(1);
+        EXPECT_EQ((size_t) 1, sampler_inputs.grammars.size());
+        auto grammar = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(sampler_inputs.grammars[0]);
         
         for (size_t i = 0; i < batch_size; i++) {
-            sampler.setVocabMask(sampler_inputs.think_status_dfa_ptrs[i],
+            grammar->setVocabMask(grammar->think_status_dfa_ptrs_[i],
                 sampler_inputs.logits->index(i), 1, end_think_token_ids,
                 vocab_size, i % 2 == 0 ? true : false);
         }

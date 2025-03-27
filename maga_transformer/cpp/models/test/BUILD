@@ -32,9 +32,9 @@ cc_test(
 )
 
 cc_test(
-    name = "sampler_test",
+    name = "think_mode_logits_processor_test",
     srcs = [
-        "SamplerTest.cc",
+        "ThinkModeLogitsProcessorTest.cc",
     ],
     data = [],
     copts = test_copts,

@@ -2,75 +2,14 @@
 
 #include "src/fastertransformer/core/Buffer.h"
 #include "maga_transformer/cpp/utils/DFAUtil.h"
+#include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
+#include "maga_transformer/cpp/models/SampleInfos.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 
 namespace ft = fastertransformer;
 
 namespace rtp_llm {
-
-struct SamplerInitParams {
-    ft::DeviceBase* device;
-    int32_t eos_id;
-    size_t max_batch_size = 256; // default max batch size
-};
-
-struct SamplerInputs {
-public:
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "SamplerInputs { "
-                     << "batch_size: " << batch_size
-                     << ", step: " << step
-                     << ", logits: " << logits->debugStringWithData<int32_t>()
-                     << ", token_ids: " << token_ids->debugStringWithData<int32_t>()
-                     << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
-                     << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
-                     << ", cum_log_probs: " << cum_log_probs->debugStringWithData<float>()
-                     << "}";
-        return debug_string.str();
-    }
-
-public:
-    ft::BufferPtr logits;            // shape: [batch_size * num_beams, vocab_size]
-    mutable ft::BufferPtr token_ids; // shape: [batch_size * num_beams, max_length]
-    ft::BufferPtr input_lengths;     // shape: [batch_size]
-    // shape: [decoder_batch_size]
-    ft::BufferPtr sequence_lengths;
-    ft::BufferPtr max_thinking_tokens;
-    bool think_modes;
-    std::vector<int> end_think_token_ids;
-    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_status_dfa_ptrs;
-    size_t    vocab_size;
-    size_t    step;                  // typically largest sequence length in the batch
-
-    size_t    batch_size;
-    ft::BufferPtr num_beams;           // shape: [batch_size]
-    ft::BufferPtr top_k;               // shape: [batch_size]
-    ft::BufferPtr top_p;               // shape: [batch_size]
-    ft::BufferPtr temperature;         // shape: [batch_size]
-    ft::BufferPtr random_seeds;        // shape: [batch_size]
-    ft::BufferPtr repetition_penalty;  // shape: [batch_size]
-    ft::BufferPtr min_lengths;         // shape: [batch_size]
-    ft::BufferPtr no_repeat_ngram_size;    // shape: [batch_size]
-
-    mutable ft::BufferPtr cum_log_probs; // shape: [batch_size * num_beams]
-    mutable ft::BufferPtr all_probs;     // shape: [batch_size * num_beams, vocab_size]
-
-    // for beam search
-    ft::BufferPtr beam_search_sequence_lengths;
-    ft::BufferPtr beam_index;
-};
-
-struct SamplerOutput {
-public:
-    ft::BufferPtr token_ids;
-    ft::BufferPtr cum_log_probs;
-    ft::BufferPtr all_probs;
-    ft::BufferPtr beam_index;
-    ft::BufferPtr success;
-};
-
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
 // and calls device sampling apis (greedy, beam search, etc) for each group
 class Sampler {
@@ -80,13 +19,9 @@ public:
 
     SamplerOutput forward(const SamplerInputs& inputs);
 
-public:
-    void thinkLogicProcessBeforeSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
-    void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-        ft::BufferPtr new_tokens_logits, int num_new_tokens, 
-        std::vector<int> template_token_ids, size_t vocab_size, bool enforce);
-    void thinkLogicProcessAfterSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num);
-    void memFill(ft::BufferPtr new_tokens_logits, size_t vocab_size, size_t index);
+private:
+    void preprocessLogits(const SamplerInputs& inputs);
+    void updateGrammarStatus(const SamplerInputs& inputs);
 
 private:
     ft::DeviceBase* device_;

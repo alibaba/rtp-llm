@@ -32,6 +32,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     const auto& input_tokens = *inputs.token_ids;
     auto success = device_->allocateBuffer({DataType::TYPE_BOOL, {inputs.batch_size}, AllocationType::HOST});
+    preprocessLogits(inputs);
+
     do {
         while (sample_to_batch_idx + 1 < inputs.batch_size &&
                beam_sizes[sample_to_batch_idx + 1] == current_beam_size)
@@ -59,7 +61,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                     {inputs.cum_log_probs->type(), {sample_seq_num}});
             device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
         }
-        thinkLogicProcessBeforeSample(inputs, from_seq_idx, sample_seq_num);
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
         (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
@@ -156,12 +157,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         if (inputs.cum_log_probs) {
             device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
         }
-        thinkLogicProcessAfterSample(inputs, from_seq_idx, sample_seq_num);
         
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
+    updateGrammarStatus(inputs);
+
     // TODO(xinfei.sxf) 优化copy token_ids
     return SamplerOutput({move(inputs.token_ids),
                           move(inputs.cum_log_probs),
@@ -170,56 +172,16 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           move(success)});
 }
 
-void Sampler::thinkLogicProcessBeforeSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
-    for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
-        if (inputs.think_modes) {
-            int* input_lengths = inputs.input_lengths->data<int32_t>();
-            int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
-            int* max_thinking_tokens  = inputs.max_thinking_tokens->data<int32_t>();
-            auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
-            int num_new_tokens = 1;
-            bool enforce = (sequence_lengths[idx] + num_new_tokens >= max_thinking_tokens[idx] + input_lengths[idx]);
-            auto logits = inputs.logits->index(idx);
-            setVocabMask(dfa_ptr, logits, num_new_tokens, inputs.end_think_token_ids, inputs.vocab_size, enforce);
-        }
+void Sampler::preprocessLogits(const SamplerInputs& inputs) {
+    for (auto grammar: inputs.grammars) {
+        grammar->process(inputs);
     }
 }
 
-void Sampler::setVocabMask(
-    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-    ft::BufferPtr new_tokens_logits, int num_new_tokens, 
-    std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
-{
-    if (!dfa_ptr->isFinished() && enforce) {
-        int offset = 0;
-        for (size_t pos = dfa_ptr->status(); pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
-            FT_LOG_INFO("sampler enforce transfer status");
-            memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[pos]);
-        }
+void Sampler::updateGrammarStatus(const SamplerInputs& inputs) {
+    for (auto grammar: inputs.grammars) {
+        grammar->updateStatus(inputs);
     }
-}
-
-void Sampler::thinkLogicProcessAfterSample(const SamplerInputs& inputs, size_t from_seq_idx, size_t sample_seq_num) {
-    for (size_t idx = from_seq_idx; idx < from_seq_idx + sample_seq_num; idx++) {
-        if (inputs.think_modes) {
-            auto dfa_ptr = inputs.think_status_dfa_ptrs[idx];
-            auto token_ids = inputs.token_ids->index(idx);
-            int num_new_tokens = 1;
-            const size_t step = token_ids->shape()[0];
-            for (size_t j = 0; j < num_new_tokens; ++j) {
-                auto current_token_id = *(token_ids->dataWithOffset<int>(step - num_new_tokens + j));
-                if (!dfa_ptr->isFinished()) {
-                    dfa_ptr->next(current_token_id);
-                }
-            }
-        }
-    }
-}
-
-void Sampler::memFill(ft::BufferPtr new_tokens_logits, size_t vocab_size, size_t index) {
-    device_->bufMemset(*new_tokens_logits, 0);
-    auto tensor = Buffer2torchTensor(*new_tokens_logits, false);
-    tensor[index] = 1;
 }
 
 } // namespace rtp_llm

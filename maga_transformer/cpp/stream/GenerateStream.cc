@@ -30,6 +30,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
+    , in_think_mode_(generate_input_->generate_config->in_think_mode)
+    , max_thinking_tokens_(generate_input_->generate_config->max_thinking_tokens)
+    , end_think_token_ids_(generate_input_->generate_config->end_think_token_ids)
+    , think_end_status_dfa_ptr_(batchSize(), std::make_shared<StringContainDFA<size_t, int>>(generate_input_->generate_config->end_think_token_ids)) 
 {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -46,11 +50,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                 {ft::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
-    complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_,
-                                                                    generate_input_->generate_config->in_think_mode,
-                                                                    generate_input_->generate_config->max_thinking_tokens,
-                                                                    generate_input_->inputLength(),
-                                                                    generate_input_->generate_config->end_think_token_ids);
+    complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input);
 
     last_output_pos_ = seqLength();

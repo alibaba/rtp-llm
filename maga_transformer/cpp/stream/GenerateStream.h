@@ -245,23 +245,19 @@ public:
     void incBatchWithPrefillLen(int32_t len);
 
     bool thinkMode() {
-        return complete_token_ids_->thinkMode();
+        return in_think_mode_;
     }
 
     int maxThinkingTokens() {
-        return complete_token_ids_->maxThinkingTokens();
-    }
-
-    std::vector<size_t> thinkEndTokensStatus() {
-        return complete_token_ids_->thinkEndTokensStatus();
+        return max_thinking_tokens_;
     }
 
     const std::vector<int> endThinkTokenIds() {
-        return complete_token_ids_->endThinkTokenIds();
+        return end_think_token_ids_;
     }
 
     std::shared_ptr<StringContainDFA<size_t, int>> thinkEndStatusDfa(size_t idx) {
-        return complete_token_ids_->thinkEndStatusDfa()[idx];
+        return think_end_status_dfa_ptr_[idx];
     }
 
 public:
@@ -330,6 +326,12 @@ protected:
 
     std::optional<ft::BufferPtr>        context_position_ids_;
     PositionIdsStyle                    mm_position_ids_style_;
+
+    // think mode params
+    bool in_think_mode_;
+    int max_thinking_tokens_;
+    std::vector<int> end_think_token_ids_;
+    std::vector<std::shared_ptr<StringContainDFA<size_t, int>>> think_end_status_dfa_ptr_;
 
     // just for bool test
     bool perf_test_ = false;
