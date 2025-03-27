@@ -504,6 +504,70 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 'reasoning_tokens': 5
             }
         )
+        
+    async def test_think_label_real_situation_union(self):     
+        custom_renderer.think_mode = 1
+        custom_renderer.think_start_tag = '<think>\n'
+        custom_renderer.think_end_tag = '</think>\n'
+        os.environ['MODEL_TYPE'] = 'qwen_2'
+        tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer")
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        
+        test_ids = [151648, 198, 73670, 73670, 73670, 151649, 271, 37029, 37029, 37029]
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        request = ChatCompletionRequest(messages=[])
+        input_length = 109
+        id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        # response = [x async for x in generate][-1]
+        async for x in generate:
+            pass
+        response = await generate.gen_complete_response_once()
+        print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        self.assertEqual(
+            json.loads(response.choices[0].model_dump_json()),
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": '\n使用使用使用',
+                    "reasoning_content": '可以可以可以',
+                    "function_call": None,
+                    "tool_calls": None,
+                    "partial": False,
+                },
+                "finish_reason": "stop",
+                "logprobs": None,
+            },
+        )
+        self.assertEqual(
+            json.loads(response.usage.completion_tokens_details.model_dump_json()),
+            {
+                'audio_tokens': None, 
+                'reasoning_tokens': 6
+            }
+        )
+        
+    async def test_escape(self):     
+        think_start_tag = '<think>\n'
+        self.assertEqual(think_start_tag, think_start_tag.encode('utf-8').decode('unicode_escape'))
+        think_end_tag = '</think>\n\n'
+        self.assertEqual(think_end_tag, think_end_tag.encode('utf-8').decode('unicode_escape'))
+        think_start_tag_from_env = '<think>\\n'
+        self.assertEqual(think_start_tag, think_start_tag_from_env.encode('utf-8').decode('unicode_escape'))
+        self.assertNotEqual(think_start_tag, think_start_tag_from_env)
+        think_end_tag_from_env = '</think>\\n\\n'
+        self.assertEqual(think_end_tag, think_end_tag_from_env.encode('utf-8').decode('unicode_escape'))
+        self.assertNotEqual(think_end_tag, think_end_tag_from_env)
 
 if __name__ == '__main__':
     main()
