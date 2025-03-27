@@ -83,12 +83,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
         custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
     }
-    if (dp_tp_nccl_param_.world_size_ > 1) {
-        auto& nccl_param = dp_tp_nccl_param_;
-        FT_LOG_INFO("Initialize dp_tp custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
-        std::vector<size_t> dp_tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
-        dp_tp_custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, dp_tp_ranks, stream_);
-    }
 
     // cudaHostMalloc needs page table on GPU memory, retain this part first.
     auto host_allocator_ptr = new Allocator<AllocatorType::CUDA_HOST>(device_id_);

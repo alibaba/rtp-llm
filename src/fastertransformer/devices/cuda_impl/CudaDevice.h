@@ -293,7 +293,6 @@ private:
     BufferPtr curandstate_buf_; // for sampler use.
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
-    std::unique_ptr<CustomAllReduceComm> dp_tp_custom_allreduce_comm_ = nullptr; // for custom dp tp allreduce use
 
     // BufferPtr will be error when multi stream, tmp hold
     std::vector<BufferPtr> overlap_hold_buffers_;
