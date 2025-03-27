@@ -160,15 +160,22 @@ class GangServer:
             if res.status_code != 200:
                 logging.error(f"Gang server {member.ip} status code is not 200, do abort")
                 os._exit(-1)
-            if res.json()['initializing'] == True:
-                logging.error(f"Gang server {member.ip}:{member.gang_hb_port} is restarted, do abort")
+            try:
+                if res.json()['initializing'] == True:
+                    logging.error(f"Gang server {member.ip}:{member.gang_hb_port} is restarted, do abort")
+                    os._exit(-1)
+            except Exception as e:
+                logging.error(f"Gang server {member.ip}:{member.gang_hb_port} hb failed {e}, do abort")
                 os._exit(-1)
 
     def start_health_check(self):
         sleep_time = int(os.environ.get('GANG_SLEEP_TIME', '10'))
         def wrapper():
             while True:
-                self._health_check_impl()
+                try:
+                    self._health_check_impl()
+                except:
+                    os._exit(-1)
                 time.sleep(sleep_time)
         t = Thread(target=wrapper)
         t.daemon = True
