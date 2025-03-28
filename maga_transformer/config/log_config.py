@@ -13,7 +13,7 @@ LOGGING_CONFIG = {
         "file_handler": {
             "formatter": "default",
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": "logs/main_{world_rank}.log",
+            "filename": f"logs/main_{world_rank}.log",
             "maxBytes": 256 * 1024 * 1024,
             "backupCount": 20,
         },
