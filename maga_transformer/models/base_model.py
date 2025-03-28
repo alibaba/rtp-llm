@@ -472,7 +472,7 @@ class BaseModel(object):
         filename_prefix = f"{output_dir}/model-{tp_rank:02d}-{dp_rank:02d}-"
         os.makedirs(output_dir, exist_ok=True)
 
-        max_size = 10 * 1024**3  # 10GB
+        max_size = 6 * 1024**3  # 6GB
         part_idx = 0
         current_size = 0
         current_dict = OrderedDict()

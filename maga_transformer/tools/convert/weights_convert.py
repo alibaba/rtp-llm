@@ -90,10 +90,14 @@ class WeightConverter:
         return free_memory
 
     def _estimate_convert_parallel_num(self):
+        max_pool_size = self._estimate_max_convert_parallel_num()
+        return self.world_size if max_pool_size > self.world_size else max_pool_size
+        
+    def _estimate_max_convert_parallel_num(self):
         try:
             cuda_count = torch.cuda.device_count()
             assert(cuda_count >= 1)
-            return cuda_count
+            return cuda_count * 8
         except Exception as _:
             logging.info("no cuda device convert by cpu")
             free_mb = self.get_free_mem_MB() * 0.8
