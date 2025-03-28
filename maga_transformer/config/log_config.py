@@ -1,4 +1,5 @@
-
+import os
+world_rank = os.environ.get('WORLD_RANK', '0')
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -12,7 +13,7 @@ LOGGING_CONFIG = {
         "file_handler": {
             "formatter": "default",
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": "logs/main.log",
+            "filename": "logs/main_{world_rank}.log",
             "maxBytes": 256 * 1024 * 1024,
             "backupCount": 20,
         },
