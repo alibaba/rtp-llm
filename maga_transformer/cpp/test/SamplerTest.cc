@@ -54,12 +54,15 @@ TEST_F(SamplerTest, testGeneralSampling) {
     auto top_k = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
     auto top_p = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
     auto temperature = createBuffer<float>({batch_size}, {0.1, 0.001, 0.2, 1.0, 100.0f}, AllocationType::HOST);
+    std::vector<BaseLogitsProcessorPtr> grammars;
 
     SamplerInputs inputs {
         move(logits),
         device_->clone({*output_token_ids, AllocationType::HOST}),
         move(input_lengths),
         move(sequence_lengths),
+        grammars,
+        size_t(vocab_size),
         size_t(step),
         batch_size,
         move(num_beams),
