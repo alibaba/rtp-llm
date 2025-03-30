@@ -71,23 +71,31 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
-    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
-    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
-    fake_input->generate_config               = make_shared<GenerateConfig>();
-    fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
-    fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
-    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    device_->setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
-    const auto device_status = device_->getDeviceStatus();
-    device_->setTraceMemory(false);
-    (void)executor_.reset(nullptr);
-    return WarmUpResult({
+    try {
+        std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+        fake_input->input_ids = device_->allocateBuffer(
+            {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+        std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
+        fake_input->generate_config               = make_shared<GenerateConfig>();
+        fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
+        fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
+        fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        device_->setTraceMemory(true);
+        executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
+        const auto device_status = device_->getDeviceStatus();
+        device_->setTraceMemory(false);
+        (void)executor_.reset(nullptr);
+        return WarmUpResult({
         device_status.device_memory_status.preserved_bytes,
-        device_status.device_memory_status.max_consumed_bytes});
+            device_status.device_memory_status.max_consumed_bytes});
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("warm up failed: %s", e.what());
+        throw;
+    } catch (...) {
+        FT_LOG_ERROR("catch unknown exception when warm up");
+        throw;
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
