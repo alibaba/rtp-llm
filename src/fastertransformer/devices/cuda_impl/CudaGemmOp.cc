@@ -361,7 +361,7 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
-    // params.check();
+    params.check();
     CudaGemmArguments arguments(params);
 
     BufferPtr output;

@@ -260,7 +260,6 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
     m = lhs.shape()[0]; k = lhs.shape()[1]; n = rhs.shape()[1];
     int num_groups = rhs.shape()[0];
     FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%d) % 64 or k(%d) % 128 != 0", n, k);
-    // FT_CHECK_WITH_INFO(rhs.shape()[2] == k && output.shape()[0] == m && output.shape()[1] == n && m_indices.size() == m && m_indices.size() == m, "lhs, rhs and output shape inconsistent");
     
     auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
@@ -351,7 +350,7 @@ void runDeepGemm(__nv_bfloat16*         output,
                  uint32_t               num_sms,
                  uint32_t               smem_size) 
 {
-    FT_LOG_INFO("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n", m, n, k , bm, bn, bk, num_groups, num_stages, num_tma_multicast);
+    FT_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n", m, n, k , bm, bn, bk, num_groups, num_stages, num_tma_multicast);
     
     if (m % bm != 0 || n % bn != 0 || k % bk != 0) {
         FT_FAIL("m:%d % bm:%d != 0 || n:%d % bn:%d != 0 || k:%d % bk:%d != 0; input not padded", m, bm, n, bn, k, bk);
