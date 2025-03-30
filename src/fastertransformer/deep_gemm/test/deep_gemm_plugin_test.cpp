@@ -85,7 +85,6 @@ public:
 };
 
 TEST_F(DeepGemmPluginTest, Test1) {
-    // RunDeepGeemPluginTest();
-    RunDeepGeemPluginGroupedContiguousTest();
+    RunDeepGeemPluginTest();
     RunDeepGeemPluginGroupedContiguousTest();
 }

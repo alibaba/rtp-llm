@@ -76,8 +76,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     }
     printBufferData(input, "kv_a_before_layernorm_input");
     if (params.weights.kv_a_weight->kernel->isQBuffer()) {
-      // printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).kernel(), "params.weights.kv_a_weight");
-      printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).scales(), "params.weights.kv_a_weight_scales");
+        printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).scales(), "params.weights.kv_a_weight_scales");
     }
     FT_LOG_DEBUG("params.weights.kv_a_weight->kernel:%s", params.weights.kv_a_weight->kernel->debugString().c_str());
     auto kv_a   = gemm(GemmParams(input, *(params.weights.kv_a_weight->kernel)));

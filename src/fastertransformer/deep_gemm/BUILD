@@ -203,7 +203,7 @@ cc_test(
         "//src/fastertransformer/devices/cuda_impl:gpu_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -232,5 +232,5 @@ cc_test(
         "//src/fastertransformer/devices/cuda_impl:gpu_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

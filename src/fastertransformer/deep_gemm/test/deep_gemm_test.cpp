@@ -24,7 +24,7 @@ public:
         auto weight_scale_t = weight_scale.repeat({128, 128}).reshape({(int)128, (int)(256 / 128), 128, (int)(128 / 128)}).permute({1, 0, 3, 2}).reshape({(int)(256), (int)(128)});
         auto ref_output = torch::matmul(input.to(torch::kFloat32) * input_scale_t, weight.to(torch::kFloat32) * weight_scale_t).to(torch::kBFloat16);
 
-	printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref", device_, true);
+        printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref", device_, true);
 
         auto input_scale_col_major = torch::transpose(torch::empty({2,16}).to(torch::kFloat32).to(torch::kCUDA), 0, 1);
         input_scale_col_major.index_put_({torch::indexing::Slice(), torch::indexing::Slice()}, input_scale);
@@ -39,7 +39,7 @@ public:
                           tma_a_desc, tma_b_desc, tma_scales_a_desc, tma_d_desc, 0, 72, (uint32_t)104800);
 
         auto gemm_output = torch::from_blob(output->data(), {(int64_t)16, (int64_t)128}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
-	printBufferData(*output, "output", device_, true);
+        printBufferData(*output, "output", device_, true);
         auto res = torch::all(torch::isclose(ref_output, gemm_output)).to(torch::kCPU);        
         printf("%d\n", *res.data_ptr<bool>());
     }

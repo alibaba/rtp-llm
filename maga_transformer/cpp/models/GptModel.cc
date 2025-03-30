@@ -750,6 +750,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         *gate_output.expert_scales,
         description_.ffn_conf.moe_configs.value(),
         device_props_.enable_comm_overlap,
+        description_.act_qscheme
     });
 
     return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};

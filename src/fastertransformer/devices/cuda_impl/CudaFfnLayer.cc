@@ -129,6 +129,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
                 all2all_output.output_to_split,
                 move(all2all_output.comm_barrier_hook)
             };
+    }
 }
 
 FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
