@@ -108,8 +108,9 @@ class ModelWeightsLoader:
     def force_clean_cuda_memory():
         """安全清理显存，避免残留引用"""
         gc.collect()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
     
     def set_data_type(self, data_type):
         self._data_type = data_type
