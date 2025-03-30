@@ -138,6 +138,12 @@ struct GptLayerInputs {
     std::vector<LayerMicroBatchInputs> micro_batch_inputs;
 };
 
+struct AttentionBlockOutputs {
+    ft::BufferPtr hidden;
+    ft::BufferPtr residual;
+    ft::BufferPtr residual2;
+};
+
 struct EpFfnInputs {
     ft::BufferPtr hidden;
     ft::BufferPtr residual;
@@ -185,6 +191,11 @@ private:
 
     GptLayerOutputs forwardGptLayer(
         GptLayerInputs inputs,
+        const int32_t layer_id,
+        ft::lora::LoraModelInputPtr lora_model_input);
+
+    AttentionBlockOutputs forwardAttentionBlock(
+        const GptLayerInputs& inputs,
         const int32_t layer_id,
         ft::lora::LoraModelInputPtr lora_model_input);
 

@@ -555,107 +555,13 @@ GptLayerOutputs GptModel::forwardGptLayer(
     const int32_t layer_id,
     ft::lora::LoraModelInputPtr lora_model_input)
 {
-    auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
-    auto attention_common_inputs = move(inputs.attention_common_inputs);
-    DevicePerfWrapper wrapper(device_, "forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
-    FT_LOG_DEBUG("forward layer %ld, hidden shape %s", layer_id, hidden->debugString().c_str());
+    auto attention_block_output = forwardAttentionBlock(inputs, layer_id, lora_model_input);
 
-    attention_common_inputs.layer_id = layer_id;
+    auto hidden = move(attention_block_output.hidden);
+    auto residual = move(attention_block_output.residual);
+    auto residual2 = move(attention_block_output.residual2);
     const auto& layer = weights_.layers[layer_id];
-    ft::QScheme act_qscheme = description_.act_qscheme;
-
-    // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
-    auto attn_out_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"attn_out_buf"});
-    // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
-    // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
-    // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
-    attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
-    auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
-    printBufferData(*residual, "in residual");
-    BufferPtr residual2 = nullptr;
-    if (layer.pre_layernorm) {
-        residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
-        auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
-                                                                        nullptr,
-                                                                        *layer.pre_layernorm,
-                                                                        std::nullopt,
-                                                                        std::nullopt,
-                                                                        std::nullopt,
-                                                                        0.f,
-                                                                        description_.layernorm_eps,
-                                                                        true,
-                                                                        false,
-                                                                        description_.norm_type,
-                                                                        act_qscheme));
-        hidden = std::move(pre_layernorm_output.output);
-    }
-
-    if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
-        attention_common_inputs.kv_cache->k_cache_buffer = k_cache_buffer_->index(layer_id);
-        attention_common_inputs.kv_cache->v_cache_buffer = v_cache_buffer_->index(layer_id);
-        if (k_scale_buffer_) {
-            attention_common_inputs.kv_cache->k_scale_buffer = k_scale_buffer_->index(layer_id);
-            attention_common_inputs.kv_cache->v_scale_buffer = v_scale_buffer_->index(layer_id);
-        }
-    }
-    if (lora_model_input) {
-        attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
-    }
-    AttentionLayerOutput attn_output;
-    auto attn_params = AttentionLayerParams({
-            layer_id,
-            *hidden,
-            move(attn_out_buf),
-            description_.attention_conf,
-            layer.self_attention_weights,
-            attention_common_inputs,
-            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-            {description_.layernorm_eps, description_.norm_type},
-            act_qscheme
-    });
-    if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
-        attn_output = device_->mlaAttentionLayer(attn_params);
-    } else {
-        attn_output = device_->attentionLayer(attn_params);
-    }
-
-    auto attn_hidden = std::move(attn_output.hidden_states);
-    if (device_props_.tp_size > 1) {
-        // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
-        auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=%ld", (long)attn_hidden->sizeBytes());
-        attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
-    }
-    if (residual_scale_) {
-        attn_hidden = device_->multiply({*residual_scale_, *attn_hidden});
-    }
-    printBufferData(*attn_hidden, "layer_" + to_string(layer_id) + "_attn_output");
-
-    if (layer.post_layernorm) {
-        // attn_hidden = attn_hidden + residual
-        // hidden = layernorm(attn_hidden)
-        printBufferData(*residual, "post layernorm residual");
-        auto post_layernorm_params = LayernormParams(attn_hidden,
-                                                        attn_hidden,
-                                                        ft::mayGetRef(layer.post_layernorm),
-                                                        device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
-                                                        nullopt,
-                                                        ft::mayGetRef(layer.self_attention_weights.output_weight->bias),
-                                                        0.f,
-                                                        description_.layernorm_eps,
-                                                        false,
-                                                        description_.post_layernorm,
-                                                        description_.norm_type,
-                                                        act_qscheme);
-
-        auto post_layernorm_output = device_->layernorm(post_layernorm_params);
-        hidden = std::move(post_layernorm_output.output);
-        attn_hidden = std::move(post_layernorm_output.before_norm_output);
-        residual = attn_hidden;
-        printBufferData(*residual, "post_layernorm_residual");
-    } else {
-        residual2 = attn_hidden;
-    }
 
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
     auto ffn_output_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"ffn_out_buf"});
@@ -666,7 +572,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-                                            act_qscheme,
+                                            description_.act_qscheme,
                                             std::move(ffn_output_buf)});
     if (lora_model_input) {
         ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
@@ -695,53 +601,25 @@ GptLayerOutputs GptModel::forwardGptLayer(
                                                                     true,
                                                                     description_.post_layernorm,
                                                                     description_.norm_type,
-                                                                    ((layer_id == layer_num_ - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: act_qscheme));
+                                                                    ((layer_id == layer_num_ - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: description_.act_qscheme));
     hidden = std::move(ffn_layernorm_output.output);
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_final_hidden");
 
     return {hidden, pre_decoder_residual};
 }
 
-EpFfnInputs GptModel::forwardAttentionAndMoeGate(
+AttentionBlockOutputs GptModel::forwardAttentionBlock(
         const GptLayerInputs& inputs,
-        LastLayerDeferedParams& last_layer_defered_params,
-        const int32_t layer_id)
+        const int32_t layer_id,
+        ft::lora::LoraModelInputPtr lora_model_input)
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     auto attention_common_inputs = move(inputs.attention_common_inputs);
-
-    if (last_layer_defered_params.comm_barrier_hook) {
-        FT_LOG_DEBUG("synchronize previous layer barrier event for layer %ld", layer_id);
-        move(last_layer_defered_params.comm_barrier_hook)->hook_sync();
-    }
-
-    if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
-        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
-
-        auto prev_ffn_layernorm_output = device_->layernorm({
-            hidden,
-            nullptr,
-            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
-            ft::mayGetRef(last_layer_defered_params.residual),
-            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
-            nullopt,
-            1.0f,
-            description_.layernorm_eps,
-            true,
-            description_.post_layernorm,
-            description_.norm_type,
-            QScheme::NoQuantize
-        });
-        hidden = move(prev_ffn_layernorm_output.output);
-        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
-    }
-
-    DevicePerfWrapper wrapper(device_, "mb_forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
+    DevicePerfWrapper wrapper(device_, "attention_block_layer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
 
     attention_common_inputs.layer_id = layer_id;
     const auto& layer = weights_.layers[layer_id];
-    ft::QScheme act_qscheme = description_.act_qscheme;
 
     // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
     auto attn_out_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"attn_out_buf"});
@@ -765,7 +643,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
                                                                         true,
                                                                         false,
                                                                         description_.norm_type,
-                                                                        act_qscheme));
+                                                                        description_.act_qscheme));
         hidden = std::move(pre_layernorm_output.output);
     }
 
@@ -777,7 +655,9 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
             attention_common_inputs.kv_cache->v_scale_buffer = v_scale_buffer_->index(layer_id);
         }
     }
-
+    if (lora_model_input) {
+        attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
+    }
     AttentionLayerOutput attn_output;
     auto attn_params = AttentionLayerParams({
             layer_id,
@@ -788,7 +668,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
             attention_common_inputs,
             device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             {description_.layernorm_eps, description_.norm_type},
-            act_qscheme
+            description_.act_qscheme,
     });
     if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
@@ -822,7 +702,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
                                                         false,
                                                         description_.post_layernorm,
                                                         description_.norm_type,
-                                                        act_qscheme);
+                                                        description_.act_qscheme);
 
         auto post_layernorm_output = device_->layernorm(post_layernorm_params);
         hidden = std::move(post_layernorm_output.output);
@@ -834,11 +714,59 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     }
 
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
+    return {hidden, residual, residual2};
+}
+
+EpFfnInputs GptModel::forwardAttentionAndMoeGate(
+        const GptLayerInputs& inputs,
+        LastLayerDeferedParams& last_layer_defered_params,
+        const int32_t layer_id)
+{
+    if (last_layer_defered_params.comm_barrier_hook) {
+        FT_LOG_DEBUG("synchronize previous layer barrier event for layer %ld", layer_id);
+        move(last_layer_defered_params.comm_barrier_hook)->hook_sync();
+    }
+
+    auto hidden = inputs.hidden;
+    auto pre_decoder_residual = inputs.pre_decoder_residual;
+    const auto& layer = weights_.layers[layer_id];
+
+    if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
+        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
+
+        auto prev_ffn_layernorm_output = device_->layernorm({
+            hidden,
+            nullptr,
+            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
+            ft::mayGetRef(last_layer_defered_params.residual),
+            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+            nullopt,
+            1.0f,
+            description_.layernorm_eps,
+            true,
+            description_.post_layernorm,
+            description_.norm_type,
+            QScheme::NoQuantize
+        });
+        hidden = move(prev_ffn_layernorm_output.output);
+        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
+    }
+
+    DevicePerfWrapper wrapper(device_, "mb_forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
+
+    GptLayerInputs real_layer_inputs = inputs;
+    real_layer_inputs.hidden = hidden;
+    auto attention_block_output = forwardAttentionBlock(real_layer_inputs, layer_id, nullptr);
+    hidden = move(attention_block_output.hidden);
+    auto residual = move(attention_block_output.residual);
+    auto residual2 = move(attention_block_output.residual2);
+
+    printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
     auto ffn_output_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"ffn_out_buf"});
     auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-                                            act_qscheme,
+                                            description_.act_qscheme,
                                             std::move(ffn_output_buf)});
 
     auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
