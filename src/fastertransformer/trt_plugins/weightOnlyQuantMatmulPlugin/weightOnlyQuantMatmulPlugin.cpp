@@ -63,7 +63,7 @@ void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId wei
 
 }
 
-size_t WeightOnlyQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
+size_t WeightOnlyQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k)
 {
     m_workspaceMaxSize = m_weightOnlyGemmRunner->getWorkspaceSize(m, n, k);
     return m_workspaceMaxSize;
@@ -77,7 +77,7 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
                                          const int    m,
                                          const int    n,
                                          const int    k,
-                                         cudaStream_t stream) noexcept
+                                         cudaStream_t stream)
 {
     const bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
 

@@ -39,9 +39,9 @@ public:
 
     ~SmoothQuantGemmPlugin() = default;
 
-    size_t getWorkspaceSize(const int m, const int n, const int k) noexcept;
+    size_t getWorkspaceSize(const int m, const int n, const int k);
     int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C, char* workspace,
-        void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept;
+        void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream);
 
     void init(tensorrt_llm::common::QuantMode quantMode,
               nvinfer1::DataType type);

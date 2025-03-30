@@ -64,7 +64,7 @@ void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool ha
     }
 }
 
-size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
+size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k)
 {
     m_workspaceMaxSize = m_weightOnlyGroupwiseGemmRunner->getWorkspaceSize(m, n, k);
     return m_workspaceMaxSize;
@@ -80,7 +80,7 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
                                                   const int    m,
                                                   const int    n,
                                                   const int    k,
-                                                  cudaStream_t stream) noexcept
+                                                  cudaStream_t stream)
 {
     // inputs
     //   0 activations      [M, K]

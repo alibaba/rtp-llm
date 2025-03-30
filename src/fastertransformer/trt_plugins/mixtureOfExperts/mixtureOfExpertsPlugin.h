@@ -60,7 +60,7 @@ public:
         void const* fc1_quant_zero, void const* fc1_expert_bias, void const* fc2_expert_weight,
         void const* fc2_quant_scale, void const* fc2_quant_zero, void const* fc2_expert_bias, int const num_rows,
         void* workspace, void* final_output, void* fc2_result, bool const* finished, void* expert_scale,
-        int* src_row_to_dst_row, int* export_for_src_row, cudaStream_t stream) noexcept;
+        int* src_row_to_dst_row, int* export_for_src_row, cudaStream_t stream);
     static void selectExpertsForTokens(float const*                    input,
                                        float const*                    input_with_bias,
                                        float*                          output,

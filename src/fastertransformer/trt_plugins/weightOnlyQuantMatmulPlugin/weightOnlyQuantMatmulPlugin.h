@@ -62,7 +62,7 @@ public:
 
     ~WeightOnlyQuantMatmulPlugin() = default;
 
-    size_t getWorkspaceSize(const int m, const int n, const int k) noexcept;
+    size_t getWorkspaceSize(const int m, const int n, const int k);
     int    enqueue(const void*  inputs,
                    const void*  weights,
                    const void*  scales,
@@ -71,9 +71,9 @@ public:
                    const int    m,
                    const int    n,
                    const int    k,
-                   cudaStream_t stream) noexcept;
+                   cudaStream_t stream);
 
-    int  initialize() noexcept;
+    int  initialize();
 
     void init(nvinfer1::DataType type, WeightTypeId weightTypeId);
 

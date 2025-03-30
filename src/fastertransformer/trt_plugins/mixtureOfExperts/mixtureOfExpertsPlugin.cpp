@@ -116,7 +116,7 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, f
     void const* fc2_expert_weight, void const* fc2_quant_scale, void const* fc2_quant_zeros,
     void const* fc2_expert_bias, int const num_rows, void* workspace, void* final_output, void* fc2_result,
     bool const* finished, void* expert_scale, int* src_row_to_dst_row, int* export_for_src_row,
-    cudaStream_t stream) noexcept
+    cudaStream_t stream)
 {
     int const num_not_finished = num_rows; // TODO Take this as an input
     MOEParallelismConfig parallelism_config = getParallelismConfig();

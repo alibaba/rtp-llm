@@ -79,14 +79,14 @@ CutlassActivationType SmoothQuantGemmPlugin::ActivationToCutlassType(fastertrans
         return CutlassActivationType::INVALID;
     }
 
-size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
+size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const int k)
 {
     m_workspaceMaxSize = m_sqGemmRunner->getWorkspaceSize(m, n, k);
     return m_workspaceMaxSize;
 }
 
 int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C,
-    char* workspace, void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept
+    char* workspace, void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream)
 {
     // inputs
     //     mat1           [M(*), K]
