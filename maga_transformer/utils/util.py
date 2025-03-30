@@ -174,6 +174,8 @@ def has_overlap(a: str, b: str) -> bool:
 
 # a's suffix is equal to b's prefix
 def has_overlap_kmp(a: str, b: str) -> bool:
+    if len(a) > len(b):
+        a = a[-(len(b) + 1):]
     s = b + '#' + a
     prefix = [0] * len(s)
     for i in range(1, len(s)):

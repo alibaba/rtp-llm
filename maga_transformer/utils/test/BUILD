@@ -51,3 +51,16 @@ py_test(
         "//maga_transformer:utils",
     ],
 )
+
+
+py_test(
+    name = "util_test",
+    srcs = [
+        "util_test.py",
+    ],
+    deps = [
+        "//maga_transformer:utils",
+        "//maga_transformer:_ft_pickler",
+        "//maga_transformer:pynvml",
+    ],
+)
