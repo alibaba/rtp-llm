@@ -53,8 +53,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             up_output = loraLinearWithActivation({lora_linear_params, activation_params});
         }
 
-        if (params.qscheme != QScheme::NoQuantize) {
-	        DataType quant_out_data_type = params.qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+        if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock) {
+	        DataType quant_out_data_type = params.qscheme == QScheme::Qfp8PerTensor ||  params.qscheme == QScheme::Qfp8PerTokenBlock ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
             auto quant_params = QuantizeParams(
                 *up_output,
                 quant_out_data_type,
@@ -138,8 +138,13 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
     if (hidden_states->shape()[0]) {
         auto moe_ffn_params = FfnLayerParams(
             {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
-        hidden_states =
-            moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
+        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            hidden_states =
+                moeFfnFp8(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
+        } else {
+            hidden_states =
+                moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;                
+        }
     }
     FfnLayerOutput out = epCombine({hidden_states,
                                     dispatched_output.indices,

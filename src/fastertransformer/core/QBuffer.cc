@@ -1,5 +1,6 @@
 #include "src/fastertransformer/core/QBuffer.h"
 #include "src/fastertransformer/core/BufferHelper.h"
+#include <memory>
 
 namespace fastertransformer {
 
@@ -27,6 +28,7 @@ QBuffer::QBuffer(BufferPtr kernel,
     kernel.reset();
     scales.reset();
     zeros.reset();
+
 
     type_ = BufferDtype2QBufferDtype(type_);
     FT_CHECK_WITH_INFO((type_ != DataType::TYPE_INVALID),
@@ -62,6 +64,14 @@ Buffer QBuffer::scales() const {
                   nullptr);
 }
 
+BufferPtr QBuffer::scalesPtr() const {
+    return std::make_shared<Buffer>(scales_->where(),
+                                    scales_->type(),
+                                    scales_->shape(),
+                                    scales_->data(),
+                                    nullptr);
+}
+
 Buffer QBuffer::zeros() const {
     return Buffer(zeros_->where(),
                   zeros_->type(),
@@ -76,6 +86,14 @@ Buffer QBuffer::kernel() const {
                   shape(),
                   data(),
                   nullptr);
+}
+
+BufferPtr QBuffer::kernelPtr() const {
+    return std::make_shared<Buffer>(where(),
+                                    QBufferDtype2BufferDtype(type()),
+                                    shape(),
+                                    data(),
+                                    nullptr);
 }
 
 void* QBuffer::scalesData() const {

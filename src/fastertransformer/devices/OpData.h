@@ -19,7 +19,7 @@
 #include <functional>
 #include <sstream>
 #include <memory>
-#include <torch/python.h>
+#include <torch/extension.h>
 
 namespace rtp_llm {
 class GptModelInputs;
@@ -505,6 +505,12 @@ struct MlaDecoderAttentionParams{
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
+
+    BufferPtr                       bmm_indices;
+
+    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common, 
+        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme, const BufferPtr bmm_indices = nullptr): 
+            layer_id(layer_id), q(q), qkv_output(qkv_output), common(common), weights(weights), configs(configs), qscheme(qscheme), bmm_indices(bmm_indices) {}
 };
 
 struct WriteCacheParams {
@@ -610,11 +616,20 @@ struct MoeDispatchOutput {
 };
 
 struct MoeDispatchParams {
+    MoeDispatchParams(const Buffer&     input,
+                      const Buffer&     expert_ids,
+                      const Buffer&     expert_scales,
+                      const MoeConfigs& moe_configs,
+                      bool              overlapped = false,
+                      const QScheme     qscheme  = QScheme::NoQuantize):
+        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs), overlapped(overlapped), qscheme(qscheme) {}
+
     const Buffer&     input;
     const Buffer&     expert_ids;
     const Buffer&     expert_scales;
     const MoeConfigs& moe_configs;
     bool              overlapped = false;
+    const QScheme     qscheme;
 };
 
 struct MoeCombineParams {

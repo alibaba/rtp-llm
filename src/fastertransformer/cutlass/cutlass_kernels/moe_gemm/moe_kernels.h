@@ -602,4 +602,17 @@ void invokeSelectExpertsForTokens(float const*                    input,
                                   MOEExpertScaleNormalizationMode norm_mode,
                                   cudaStream_t                    stream);
 
+void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int* permuted_experts, int* permuted_rows,
+                              int64_t* expert_first_token_offset, int64_t num_rows, int64_t num_experts, int64_t num_experts_per_node, int64_t k,
+                              CubKeyValueSorter& sorter, void* sorter_ws, cudaStream_t stream);
+
+void genSourceRow(int* expert_rows, int* source_rows, int token_num, int top_k, int num_experts, int start_expert, int end_expert, cudaStream_t stream);
+
+template <class T, class OutputType, class GemmOutputType, class ScaleBiasType>
+void finalizeMoeRoutingKernelLauncher(GemmOutputType const* expanded_permuted_rows,
+                                      OutputType* reduced_unpermuted_output, ScaleBiasType const* bias, float const* scales,
+                                      int const* expanded_source_row_to_expanded_dest_row, int const* expert_for_source_row, int64_t const num_rows,
+                                      int64_t const cols, int64_t const k, int64_t const* num_valid_ptr, MOEParallelismConfig parallelism_config,
+                                      MOEExpertScaleNormalizationMode normalization_mode, cudaStream_t stream);
+
 } // namespace tensorrt_llm::kernels

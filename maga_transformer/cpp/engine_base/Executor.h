@@ -65,8 +65,10 @@ public:
             act_qscheme = ft::QScheme::Qint8PerTensor;
         } else if (params.quant_algo_.isSmoothQuant() || params.quant_algo_.isOmniQuant()) {
             act_qscheme = ft::QScheme::Qint8PerToken;
-        } else if (params.quant_algo_.isFp8()) {
+        } else if (params.quant_algo_.isFp8() && !params.quant_algo_.isGroupwise()) {
             act_qscheme = ft::QScheme::Qfp8PerTensor;
+        } else if (params.quant_algo_.isFp8() && params.quant_algo_.isGroupwise()) {
+            act_qscheme = ft::QScheme::Qfp8PerTokenBlock;
         }
 
         return {attention_config,

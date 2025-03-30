@@ -200,6 +200,7 @@ public:
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    FfnLayerOutput moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     GreedyOutput sampleGreedy(const GreedyParams& params) override;
     void broadcast(const BroadcastParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;
@@ -221,6 +222,9 @@ public:
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
     FfnLayerOutput epCombine(const MoeCombineParams& params) override;
 
+    torch::Tensor QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params);
+    torch::Tensor DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams& params);
+
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
@@ -238,6 +242,9 @@ protected:
     void InvokeGeneralGemm(const GemmParams&       params,
                            const CudaGemmArguments arguments,
                            BufferPtr               output);
+    void InvokeDeepGemm(const GemmParams&       params,
+                        const CudaGemmArguments arguments,
+                        BufferPtr               output);
     void selectCuFMHARunner(const DevicePrepParams& params);
 
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,

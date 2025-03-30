@@ -88,7 +88,8 @@ requirement([
     "pyrsmi",
     "amdsmi",
     "fast-safetensors",
-    "setproctitle"
+    "setproctitle",
+    "bitsandbytes"
 ] + tensorrt)
 
 
@@ -423,6 +424,7 @@ whl_reqs = [
     "matplotlib",
     "av",
     "setproctitle",
+    "bitsandbytes",
 ] + whl_deps() + platform_deps() + xft_dep 
 
 # target for wheel

@@ -115,12 +115,12 @@ def _handle_num_wraps_and_compile(ctx, ty_idx, output_name, extra_input, py_impo
         ty_hdrs.append(ty_hdr)
         ty_srcs.append(ty_src)
     return ty_hdrs, ty_srcs
-    
+
 def _dispatch2(ctx, var_map):
     if len(var_map) != 2:
         fail("internal ERROR, script dispatch wrong")
 
-    extra_input, py_imports = _get_extra_input_and_imports(ctx) 
+    extra_input, py_imports = _get_extra_input_and_imports(ctx)
 
     keys = var_map.keys()
     key1 = keys[0]
@@ -153,7 +153,7 @@ def _dispatch2(ctx, var_map):
 def _dispatch3(ctx, var_map):
     if len(var_map) != 3:
         fail("internal ERROR, script dispatch wrong")
-    
+
     extra_input, py_imports = _get_extra_input_and_imports(ctx)
 
     keys = var_map.keys()

@@ -264,11 +264,25 @@ class BaseModel(object):
             config.quant_algo.setQuantAlgo('pertensor_quant', 0, 0)
 
         config_path = os.path.join(ckpt_path, "config.json")
-        if os.path.exists(config_path):
-            config_json = json.load(open(config_path))
-            quant_config = config_json.get("quantization_config", None)
-            if quant_config is not None:
-                config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config.get("group_size", 0))
+        if not os.path.exists(config_path):
+            return
+        
+        config_json = json.load(open(config_path))
+        quant_config = config_json.get("quantization_config", None)
+        if quant_config is None:
+            return
+        
+        quant_method = quant_config['quant_method'].lower()
+        group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
+        bits = quant_config['bits'] if 'bits' in quant_config else 0
+        if quant_method == 'fp8':
+            bits = 8
+            if 'weight_block_size' in quant_config:
+                weight_block = quant_config.get("weight_block_size")
+                assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
+                group_size = weight_block[0]
+        
+        config.quant_algo.setQuantAlgo(quant_method, bits, group_size)
 
     @classmethod
     def from_config(cls, config: Any, parallel_info:ParallelInfo=g_parallel_info) -> 'BaseModel':
@@ -372,12 +386,16 @@ class BaseModel(object):
 
         if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
             for layer_weight in self.weight.weights:
+                if W.mla_kc in layer_weight and W.mla_vc in layer_weight:
+                    continue
                 mla_k_nope_weight  = layer_weight[W.mla_k_nope_w]
                 mla_v_weight = layer_weight[W.mla_v_w]
                 kc_weight = mla_k_nope_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).permute(1, 2, 0).contiguous()
                 vc_weight = mla_v_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).transpose(0, 1).contiguous()
-                layer_weight[W.mla_kc] = kc_weight
-                layer_weight[W.mla_vc] = vc_weight
+                if W.mla_kc not in layer_weight:
+                    layer_weight[W.mla_kc] = kc_weight
+                if W.mla_vc not in layer_weight:
+                    layer_weight[W.mla_vc] = vc_weight
 
         if self.config.vit_separation != 1:
             if self.task_type == TaskType.LANGUAGE_MODEL:

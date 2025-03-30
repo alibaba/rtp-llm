@@ -38,3 +38,8 @@ TEST_F(CudaFfnLayerTest, NoGateFp16LoraOpTest) {
     FfnLayerLoraTest({1000, 1, 10, 2}, {8, 8, 16, 128}, {128, 8, 16, 64}, {64, 8, 16, 64}, 64, 64, DataType::TYPE_FP16, DataType::TYPE_FP16, ActivationType::Silu);
 }
 
+TEST_F(MoELayerTest, GateFp8MoEOpTest) {
+    MoEOpTest(10, 128, 256, 8, 6, ActivationType::Silu, DataType::TYPE_FP8_E4M3, 2e-1, 1e2);
+    MoEOpTest(4, 2048, 1408, 64, 8, ActivationType::Swiglu, DataType::TYPE_FP8_E4M3, 3e-1, 2e4);
+}
+

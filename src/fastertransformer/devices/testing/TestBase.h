@@ -395,7 +395,7 @@ protected:
     double rtol_ = 1e-03;
     double atol_ = 1e-03;
     rtp_llm::CacheManagerPtr cache_manager_;
-    size_t device_reserve_memory_size_ = 1L * 1024 * 1024; // 1MB;
+    size_t device_reserve_memory_size_ = 1024L * 1024 * 1024; // 1MB;
     size_t host_reserve_memory_size_ = 1L * 1024 * 1024 * 1024; // 1GB;
 };
 

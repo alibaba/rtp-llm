@@ -5,6 +5,7 @@ ADD $WHL_FILE /tmp/$WHL_FILE
 RUN /opt/conda310/bin/pip install /tmp/$WHL_FILE \
     -i https://artifacts.antgroup-inc.cn/simple/ \
     --extra-index-url=https://mirrors.aliyun.com/pypi/simple/ \
+    --extra-index-url=https://download.pytorch.org/whl/cu126 \
     && rm /tmp/$WHL_FILE
 
 ARG START_FILE

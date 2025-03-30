@@ -161,6 +161,18 @@ cc_test(
     ],
     data = [],
     env = test_envs,
+    linkopts = [
+        "-lpython3.10",
+        "-ltorch",
+        "-lc10",
+        "-ltorch_cpu",
+        "-ltorch_cuda",
+        "-ltorch_python",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
     copts = copts(),
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
@@ -248,5 +260,39 @@ cc_test(
     copts = copts(),
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "cuda_mla_bmm_test",
+    srcs = [
+        "CudaMlaBmmTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
+    deps = test_deps,
+)
+
+cc_test(
+    name = "cuda_quantize_test",
+    srcs = [
+        "CudaQuantizeTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    linkopts = [
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
+    deps = test_deps,
 )
 

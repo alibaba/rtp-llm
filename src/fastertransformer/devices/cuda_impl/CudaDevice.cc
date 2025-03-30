@@ -481,6 +481,7 @@ nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype)
         case fastertransformer::DataType::TYPE_FP32 : return nvinfer1::DataType::kFLOAT;
         case fastertransformer::DataType::TYPE_QINT8 : return nvinfer1::DataType::kINT8;
         case fastertransformer::DataType::TYPE_QINT4X2 : return nvinfer1::DataType::kINT4;
+        case fastertransformer::DataType::TYPE_QFP8_E4M3 : return nvinfer1::DataType::kFP8;
         default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }

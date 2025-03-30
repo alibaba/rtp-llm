@@ -59,7 +59,8 @@ static const std::string kv_a_ln_beta  = "self_attention_weights.mla.key_value_a
 // mla_absorb
 static const std::string mla_kc = "self_attention_weights.mla.kc.kernel";
 static const std::string mla_vc = "self_attention_weights.mla.vc.kernel";
-
+static const std::string mla_kc_s = "self_attention_weights.mla.kc.weight_only_quant_scale";
+static const std::string mla_vc_s = "self_attention_weights.mla.vc.weight_only_quant_scale";
 // rotary embedding cos sin cache
 static const std::string rope_cos_sin_cache = "rotary_embedding.cos_sin_cache";
 

@@ -13,6 +13,7 @@ cc_library(
         "rotary_embedding/*.cpp",
         "attention_logn/*.cpp",
         "gemm_group/*.cc",
+        "gemm/*.cc",
         "mla/*.cc",
         "unittests/test_activation.cu",
     ]) + select({
@@ -39,6 +40,11 @@ cc_library(
     ],
     copts = cuda_copts(),
     alwayslink = True,
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -122,6 +128,22 @@ py_test(
     data = [
         "//:th_transformer",
         ":test_ops"
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:numpy",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "gemm_op_test",
+    srcs = [
+        "gemm/gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
     ],
     deps = [
         "//maga_transformer:torch",

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/devices/OpData.h"
+#include "torch/extension.h"
 
 namespace fastertransformer {
 
@@ -54,6 +55,7 @@ public:
     virtual FfnLayerOutput moeSharedExpert(const FfnLayerParams& params);
     virtual MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params);
     virtual FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    virtual FfnLayerOutput moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     virtual FfnLayerOutput moeFfnAndCombine(const FfnLayerParams& params, const MoeDispatchOutput& dispatched_output);
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
     virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);

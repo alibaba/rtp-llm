@@ -435,7 +435,7 @@ class GptInitModelParameters:
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         if bool(int(os.environ.get('INT8_KV_CACHE', 0))):
             self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()
-        elif self.quant_algo.isFp8():
+        elif self.quant_algo.isFp8() and not self.quant_algo.isGroupwise():
             self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
         else:
             self.kv_cache_data_type = self.data_type

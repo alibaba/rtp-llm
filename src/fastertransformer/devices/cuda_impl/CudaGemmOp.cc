@@ -5,6 +5,8 @@
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
 #include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/deep_gemm/DeepGemmPlugin.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "autil/StringUtil.h"
 
 #include <numeric>
@@ -92,7 +94,7 @@ struct CudaGemmArguments {
         }
         // fp8 gemm
         if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            DDtype = DataType::TYPE_FP16;
+            DDtype = DataType::TYPE_BF16;
         }
 
         dim =  params.A.dim();
@@ -321,13 +323,45 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     }
 }
 
+
+void CudaDevice::InvokeDeepGemm(const GemmParams& params,
+                                CudaGemmArguments arguments,
+                                BufferPtr         output) {
+    FT_LOG_DEBUG("use deep gemm.");
+    FT_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
+    FT_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
+            // padding to 128 # hack block size
+    bool need_pad = params.A.shape()[0] % 128 != 0;
+    BufferPtr      quanted_input;
+    BufferPtr      gemm_output;
+    if (need_pad) {
+        vector<size_t> pad_shape = params.A.shape();
+        pad_shape[0] = (pad_shape[0] / 128 + 1) * 128;
+        auto padded_input = allocateBuffer({params.A.type(), pad_shape, AllocationType::DEVICE}, {"pad_gemm_input"});
+	cudaMemcpyAsync(padded_input->data(), params.A.data(), params.A.sizeBytes(), cudaMemcpyDeviceToDevice, stream_);
+        quanted_input = quantize(QuantizeParams(*padded_input, DataType::TYPE_QFP8_E4M3, padded_input->dim()-1, QScheme::Qfp8PerTokenBlock));
+	FT_LOG_DEBUG("padding input for deep_gemm");
+	printBufferData(*quanted_input, "quanted_input for deep_gemm");
+        vector<size_t> output_shape = output->shape();
+        output_shape[0] = (output_shape[0] / 128 + 1) * 128;
+        gemm_output = allocateBuffer({output->type(), output_shape, AllocationType::DEVICE}, {"pad_gemm_output"});
+    } else {
+        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock));
+        gemm_output = output;
+    }
+ 
+    DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
+    if (need_pad) {
+        this->copy({*output, gemm_output->view(0, output->shape()[0])});
+    }
+}
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C
 ///          A [b, ..., m, k]
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
-    params.check();
+    // params.check();
     CudaGemmArguments arguments(params);
 
     BufferPtr output;
@@ -344,9 +378,12 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
         InvokeSmoothQaunt(params, arguments, output);
+    } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
+        InvokeDeepGemm(params, arguments, output);
+
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
         InvokeWeightOnlyGemm(params, arguments, output);
-    } else {
+    } else { 
         InvokeGeneralGemm(params, arguments, output);
     }
     sync_check_cuda_error();

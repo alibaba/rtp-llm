@@ -1,0 +1,236 @@
+load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
+load("//bazel:arch_select.bzl", "torch_deps")
+load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
+
+sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + [
+    '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
+    '--compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi'
+]
+
+test_linkopts = [
+    "-lpython3.10",
+    "-ltorch",
+    "-lc10",
+    "-ltorch_cpu",
+    "-ltorch_python",
+    "-lnccl",
+    "-lnvToolsExt",
+    "-lcupti",
+] + select({
+    "@//:using_cuda": [
+        "-ltorch_cuda",
+        "-lc10_cuda",
+        "-L/usr/local/cuda/lib64",
+        "-lcudart",
+    ],
+    "@//:using_rocm": [
+        "-ltorch_hip",
+        "-lc10_hip",
+    ],
+    "//conditions:default": [
+    ],
+})
+
+
+
+N_K_GROUP_TYPE= [
+("2048", "7168", "1", "DeepGemmType::Normal"),
+("7168", "2048", "1", "DeepGemmType::Normal"),
+("1536", "7168", "1", "DeepGemmType::Normal"),
+("24576", "1536", "1", "DeepGemmType::Normal"),
+("512", "7168", "1", "DeepGemmType::Normal"),
+("64", "7168", "1", "DeepGemmType::Normal"),
+("768", "1024", "1", "DeepGemmType::Normal"),
+("384", "512", "1", "DeepGemmType::Normal"),
+("128", "256", "1", "DeepGemmType::Normal"),
+("256", "512", "1", "DeepGemmType::Normal"),
+("896", "1024", "1", "DeepGemmType::Normal"),
+("512", "1024", "1", "DeepGemmType::Normal"),
+("256", "1024", "1", "DeepGemmType::Normal"),
+("16384", "512", "1", "DeepGemmType::Normal"),
+("7168", "24576", "1", "DeepGemmType::Normal"),
+("18432", "7168", "1", "DeepGemmType::Normal"),
+("16384", "7168", "1", "DeepGemmType::Normal"),
+("7168", "16384", "1", "DeepGemmType::Normal"),
+("7168", "18432", "1", "DeepGemmType::Normal"),
+("12288", "1536", "1", "DeepGemmType::Normal"),
+
+("1024", "7168", "1", "DeepGemmType::Normal"),
+("7168", "1024", "1", "DeepGemmType::Normal"),
+("7168", "8192", "1", "DeepGemmType::Normal"),
+("7168", "9216", "1", "DeepGemmType::Normal"),
+("8192", "512" ,"1", "DeepGemmType::Normal"),
+("9216", "7168", "1", "DeepGemmType::Normal"),
+
+("512", "128", "128", "DeepGemmType::GroupedContiguous"),
+("128", "512", "128", "DeepGemmType::GroupedContiguous"),
+("4096", "7168", "256", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "256", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "256", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "32", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "16", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "16", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "16", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "8", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "8", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "8", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "4", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "4", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "4", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
+
+("2816", "2048", "64", "DeepGemmType::GroupedContiguous"),
+("2048", "1408", "64", "DeepGemmType::GroupedContiguous"),
+("256", "128", "8", "DeepGemmType::GroupedContiguous"),
+("128", "256", "8", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "128", "DeepGemmType::GroupedContiguous"),
+("128", "512", "64", "DeepGemmType::GroupedContiguous"),
+("4096", "7168", "128", "DeepGemmType::GroupedContiguous"),
+("512", "128", "64", "DeepGemmType::GroupedContiguous"),
+]
+template_header = """
+#include "src/fastertransformer/deep_gemm/deep_gemm_template.h"
+#include "src/fastertransformer/deep_gemm/utils.h"
+#include "src/fastertransformer/deep_gemm/include/fp8_gemm.cuh"
+#include <cuda.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
+namespace fastertransformer {
+"""
+template = """
+template void dispatchBlockNK<{0}, {1}, {2}, {3}>(__nv_bfloat16*         output,
+                     __nv_fp8_e4m3*         lhs,
+                     float*                 lhs_scale,
+                     __nv_fp8_e4m3*         rhs,
+                     float*                 rhs_scale,
+                     int*                   grouped_layout,
+                     uint32_t               m,
+                     uint32_t               bm,
+                     uint32_t               bn,
+                     uint32_t               bk,
+                     uint32_t               num_stages,
+                     uint32_t               num_tma_multicast,
+                     cudaStream_t           stream,
+                     uint32_t               num_sms,
+                     uint32_t               smem_size);
+"""
+template_tail = """
+}
+"""
+
+gen_cpp_code("deepgemm_inst", [N_K_GROUP_TYPE],
+             template_header, template, template_tail, element_per_file=4, suffix=".cu")
+
+
+cc_library(
+    name = "deep_gemm_cu",
+    hdrs = glob([
+        "deep_gemm_template.h",
+        "include/*.cuh",
+        "utils.h",
+
+    ]),
+    srcs = [
+        ":deepgemm_inst"
+    ],
+    deps = [
+        "//src/fastertransformer/core:buffer_torch",
+        "//src/fastertransformer/cuda:nvtx",
+        "//src/fastertransformer/utils",
+        "//src/fastertransformer/cuda:cuda_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@cutlass//:cutlass"
+    ] + torch_deps(),
+    copts = sm90_cuda_copts,
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "deep_gemm_plugins_impl",
+    hdrs = ["DeepGemmPlugin.h"],
+    srcs = ["DeepGemmPlugin.cpp"],
+    copts = copts(),
+    deps = [
+        ":deep_gemm_cu",
+        "//src/fastertransformer/core:buffer_torch",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "//src/fastertransformer/cuda:nvtx",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "deep_gemm_plugins_hdr",
+    hdrs = ["DeepGemmPlugin.h", "utils.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "deep_gemm_test",
+    srcs = [
+        "test/deep_gemm_test.cpp",
+    ],
+    copts = sm90_cuda_copts,
+    linkopts = [
+        "-lpython3.10",
+        "-ltorch",
+        "-lc10",
+        "-ltorch_cpu",
+        "-ltorch_python",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
+    deps = [
+        ":deep_gemm_cu",
+        "@com_google_googletest//:gtest",
+        "//src/fastertransformer/core:buffer_torch",
+        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//src/fastertransformer/devices/cuda_impl:gpu_base",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "deep_gemm_plugin_test",
+    srcs = [
+        "test/deep_gemm_plugin_test.cpp",
+    ],
+    copts = copts(),
+    linkopts = [
+        "-lpython3.10",
+        "-ltorch",
+        "-lc10",
+        "-ltorch_cpu",
+        "-ltorch_python",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
+    deps = [
+        ":deep_gemm_plugins_impl",
+        ":deep_gemm_plugins_hdr",
+        "@com_google_googletest//:gtest",
+        "//src/fastertransformer/core:buffer_torch",
+        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//src/fastertransformer/devices/cuda_impl:gpu_base",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    ],
+    exec_properties = {'gpu':'A10'},
+)

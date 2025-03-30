@@ -339,18 +339,27 @@ class ModelWeightsLoader:
                         qweight_tensor = qweight_tensor.reshape(qweight_tensor.shape[-1], -1)
                     results.append((layer_id, qweight[0].name, qweight_tensor))
 
-                    logging.debug(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}")
+                    logging.debug(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}, dtype:{qweight_tensor.dtype}, datatype:{datatype}")
 
                 except Exception as e:
-                    logging.error(f'load smooth_quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
+                    logging.error(f'load quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
                     raise e
 
+        if self._weights_info._quant_algo.isFp8() and self._weights_info._quant_algo.isGroupwise():
+            weight_list = W.int8_attn_weights + W.int8_ffn_weights + W.int8_ffn_weights_2 + W.int8_partial_moe_weights_2 + W.int8_partial_moe_weights
+            logging.info(f"load weight: {weight_list}");
+            load_weight([_[0] for _ in weight_list], torch.float8_e4m3fn)
+            load_weight([_[1] for _ in weight_list], torch.float32)
+            
+            return results
+        
         load_weight(W.sq_quant_weights, torch.int8)
         load_weight(W.sq_quant_scales, torch.float32)
         if self._weights_info._quant_algo.isOmniQuant():
             load_weight(W.sq_quant_shifts, torch.float32)
         elif self._weights_info._quant_algo.isPerTensorQuant():
             load_weight(W.static_quant_scales, torch.float32)
+            
         return results
 
     def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str):
@@ -488,7 +497,7 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
         quant_algo = self._weights_info._quant_algo
-        if quant_algo.isGroupwise():
+        if quant_algo.isGroupwise() and not quant_algo.isFp8():
             results.extend(self._load_groupwise_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif quant_algo.isSmoothQuant() or quant_algo.isOmniQuant() or quant_algo.isPerTensorQuant() or quant_algo.isFp8():
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
@@ -608,6 +617,7 @@ class ModelWeightsLoader:
 
         for ckpt_weight in weight_info.weights:
             name = ckpt_weight.tensor_name(layer_id)
+            logging.info(f"tensor name: {name}")
             try:
                 before_merge_tensors.append(ckpt_weight.merge_fun([x.to(device) for x in self.load_tensor(name, convert_type)]))
             except Exception as e:

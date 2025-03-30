@@ -74,7 +74,12 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     } else {
         q = gemm(GemmParams(input, *(params.weights.q_weight->kernel)));
     }
-
+    printBufferData(input, "kv_a_before_layernorm_input");
+    if (params.weights.kv_a_weight->kernel->isQBuffer()) {
+      // printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).kernel(), "params.weights.kv_a_weight");
+      printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).scales(), "params.weights.kv_a_weight_scales");
+    }
+    FT_LOG_DEBUG("params.weights.kv_a_weight->kernel:%s", params.weights.kv_a_weight->kernel->debugString().c_str());
     auto kv_a   = gemm(GemmParams(input, *(params.weights.kv_a_weight->kernel)));
     printBufferData(*kv_a, "kv_a_before_layernorm");
     layernorm(LayernormParams(kv_a,
@@ -114,13 +119,33 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
         auto generate_q = q->view(0, generate_batch_size);
         auto generate_qkv_output = qkv_output->slice(0, generate_batch_size);
-        mlaDecoderSelfAttention({params.layer_id,
-                                 generate_q,
-                                 generate_qkv_output,
-                                 params.common,
-                                 params.weights,
-                                 params.configs,
-                                 params.qscheme});
+        if (qscheme == QScheme::Qfp8PerTokenBlock) {
+            size_t m = generate_q.shape()[0];
+            size_t m_pad = (m + 127) / 128 * 128;
+            auto bmm_indices_host = allocateBuffer({DataType::TYPE_INT32, {m_pad * params.configs.head_num}, AllocationType::HOST}, {"bmm_indices_host"});
+            int* index = bmm_indices_host->data<int>();
+            for (int i = 0;i < m_pad * params.configs.head_num; ++i) {
+                index[i] = i / params.configs.head_num;
+            }
+            auto bmm_indices = clone({*bmm_indices_host, AllocationType::DEVICE});
+
+            mlaDecoderSelfAttention({params.layer_id,
+                                    generate_q,
+                                    generate_qkv_output,
+                                    params.common,
+                                    params.weights,
+                                    params.configs,
+                                    params.qscheme,
+                                    bmm_indices});
+        } else {
+            mlaDecoderSelfAttention({params.layer_id,
+                                    generate_q,
+                                    generate_qkv_output,
+                                    params.common,
+                                    params.weights,
+                                    params.configs,
+                                    params.qscheme});
+        }
     }
     if (context_batch_size) {
         // slice to get BufferPtr
@@ -143,7 +168,14 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                              params.configs,
                              params.qscheme});
     }
-    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel), nullopt, attention_out);
+    printBufferData(*qkv_output, "attent_projt_input");
+    auto seq_len = qkv_output->shape()[0];  
+    auto qkv_output_reshape = qkv_output->reshape({seq_len, params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
+    auto stride_qkv_output = Buffer2torchTensorWithStride(
+        qkv_output_reshape,
+        {(int64_t)seq_len, (int64_t)params.configs.head_num, (int64_t)params.configs.nope_head_dim}).reshape({(int64_t)seq_len, (int64_t)(params.configs.head_num*params.configs.nope_head_dim)}).contiguous();
+    auto strid_qkv_buffer = torchTensor2Buffer(stride_qkv_output);
+    auto output_gemm_params = GemmParams(*strid_qkv_buffer, *(params.weights.output_weight->kernel), nullopt, attention_out);
     loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     printBufferData(*attention_out, "attention_out");
     return {std::move(attention_out)};

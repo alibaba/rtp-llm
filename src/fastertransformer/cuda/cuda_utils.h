@@ -148,6 +148,11 @@ inline size_t pad_to_multiple_of_16(const size_t& input) {
     return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
 }
 
+inline size_t pad_to_multiple_of_128(const size_t& input) {
+    static constexpr int ALIGNMENT = 128;
+    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+}
+
 template<typename T>
 void check(T result, const char* const file, int const line);
 #define check_cuda_error(val) fastertransformer::check((val), __FILE__, __LINE__)

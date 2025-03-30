@@ -167,11 +167,11 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
     const auto& input = params.input;
     auto output_shape = input.shape();
     output_shape[0] = params.index.size();
-    auto num_selected_element = input.size() / input.shape()[0];
     auto output = allocateBuffer({input.type(), output_shape});
-    if (output_shape[0] == 0) {
+    if (output_shape[0] == 0 || input.shape()[0] ==0) {
         return output;
     }
+    auto num_selected_element = input.size() / input.shape()[0];
     DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
         input.type(),
         invokeLookupHiddenStateOfLastToken,
@@ -554,31 +554,23 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
 
 void CudaDevice::allGather(const AllGatherParams& params) {
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
-    if (params.mode == ParallelMode::DP_AND_TP && dp_nccl_param_.world_size_ != dp_tp_nccl_param_.world_size_) {
-        // 两种实现，一种是先dp gather 然后再tp broast
-        // 还有一种是直接all gather, 然后再transpose，再取第0个
-        // 目前是走第一种
-        allGather({params.buffers, ParallelMode::DP, params.overlapped});
-        broadcast({params.buffers, 0, ParallelMode::TP, params.overlapped});
-    } else {
-        auto nccl_param = getNcclParam(params.mode);
-        if (nccl_param.world_size_ < 2) {
-            return;
-        }
-        NCCLCHECK(ncclGroupStart());
-        for (auto i = 0; i < params.buffers.size(); ++i) {
-            auto& buffer = params.buffers[i];
-            const auto nccl_data_type = getNcclDataType(buffer->type());
-            const auto data_num = buffer->size() / nccl_param.world_size_;
-            RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == buffer->size(),
-                                  "Buffer size %ld must be divisible by world size %d",
-                                  buffer->size(), nccl_param.world_size_);
-            const auto data_size = data_num * buffer->typeSize();
-            NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param.rank_ * data_size, buffer->data(),
-                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
-        }
-        NCCLCHECK(ncclGroupEnd());
+    auto nccl_param = getNcclParam(params.mode);
+    if (nccl_param.world_size_ < 2) {
+        return;
     }
+    NCCLCHECK(ncclGroupStart());
+    for (auto i = 0; i < params.buffers.size(); ++i) {
+        auto& buffer = params.buffers[i];
+        const auto nccl_data_type = getNcclDataType(buffer->type());
+        const auto data_num = buffer->size() / nccl_param.world_size_;
+        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == buffer->size(),
+                              "Buffer size %ld must be divisible by world size %d",
+                              buffer->size(), nccl_param.world_size_);
+        const auto data_size = data_num * buffer->typeSize();
+        NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param.rank_ * data_size, buffer->data(),
+                                data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+    }
+    NCCLCHECK(ncclGroupEnd());
 }
 
 } // namespace fastertransformer

@@ -171,4 +171,48 @@ INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(half);
 INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(__nv_bfloat16);
 #endif
 
+#ifdef ENABLE_FP8
+template <typename T>
+__global__ void perTokenBlockQuantization(
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr)
+{
+    const T* srcRow = src + blockIdx.x * numCols;
+    int8_t* dstRow = dst + blockIdx.x * numCols;
+
+    T localMax = 1e-6f;
+    for (int i = threadIdx.x; i < numCols; i += blockDim.x)
+    {
+        T val = srcRow[i];
+        localMax = cuda_max(localMax, cuda_abs(val));
+    }
+    const float rowMax = blockAllReduceMax(cuda_cast<float>(localMax));
+
+    if (threadIdx.x == 0)
+    {
+        scalePtr[blockIdx.x] = rowMax / 127.f;
+    }
+
+    const float scaleOrigQuant = 127.f / rowMax;
+    for (int i = threadIdx.x; i < numCols; i += blockDim.x)
+    {
+        T val = srcRow[i];
+        dstRow[i] = cuda_cast<int8_t>(cuda_cast<float>(val) * scaleOrigQuant);
+    }
+}
+
+template<typename T>
+void invokePerTokenBlockQuantization(
+    __nv_fp8_e4m3* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, cudaStream_t stream)
+{
+    const dim3 block(512);
+    const dim3 grid(numRows);
+
+}
+#define INSTANTIATE_INVOKE_PER_TOKEN_BLOCK_QUANTIZATION(T)                                                                   \
+    template void invokePerTokenBlockQuantization(                                                                          \
+        __nv_fp8_e4m3* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, cudaStream_t stream)
+
+
+#endif
+
 }

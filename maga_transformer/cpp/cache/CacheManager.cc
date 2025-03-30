@@ -30,7 +30,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
     device_(device),
     metrics_reporter_(metrics_reporter) {
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
-    allocateAndTpSync();
+    allocateAndSync();
     FT_LOG_INFO("block nums is %d after tp sync", config_.block_nums);
     initFreeBlock();
     initKvCache();
@@ -134,17 +134,19 @@ void CacheManager::initFreeBlock() {
     block_ref_counter_ = BlockRefCounter(config_.block_nums);
 }
 
-void CacheManager::allocateAndTpSync() {
+void CacheManager::allocateAndSync() {
     const auto properties = device_->getDeviceProperties();
-    if (properties.tp_size > 1) {
+    size_t world_size = properties.tp_size * properties.dp_size;
+    if (world_size > 1) {
+        size_t local_rank = properties.tp_size * properties.dp_rank + properties.tp_rank;
         BufferPtr block_num_infos =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {properties.tp_size}, ft::AllocationType::HOST});
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {world_size}, ft::AllocationType::HOST});
         auto block_num_ptr                = block_num_infos->data<int>();
-        block_num_ptr[properties.tp_rank] = config_.block_nums;
-        device_->allGather({{block_num_infos}});
+        block_num_ptr[local_rank] = config_.block_nums;
+        device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
         device_->syncCommunication(false);
         device_->syncAndCheck();
-        config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + properties.tp_size);
+        config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
     }
     config_.refresh();
     cache_aligned_buffer_ =

@@ -7,6 +7,7 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include "flashmla/flashmla.h"
+#include "src/fastertransformer/deep_gemm/DeepGemmPlugin.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -15,7 +16,7 @@ namespace fastertransformer {
 
 // q_input_shape [batch_size, head_num, nope_head_dim + rope_head_dim]
 
-torch::Tensor QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params) {
+torch::Tensor CudaDevice::QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params) {
     // from [token, head_num * (nope_head_dim + rope_head_dim)] to [batch_size, head_num, nope_head_dim + rope_head_dim]
     auto q_input_reshape = params.q.reshape(
         {params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
@@ -23,17 +24,59 @@ torch::Tensor QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params) 
     auto q_nope_t = Buffer2torchTensorWithStride(
         q_input_reshape,
         {(int64_t)params.q.shape()[0], (int64_t)params.configs.head_num, (int64_t)params.configs.nope_head_dim});
-    // shape: [head_num, nope_head_dim, kv_lora_rank]
-    auto w_kc_t = Buffer2torchTensor(params.weights.kc_weight->kernel, false);
-    auto q_nope_out = torch::bmm(q_nope_t.transpose(0, 1), w_kc_t);
-    auto q_input_reshap_t = Buffer2torchTensor(q_input_reshape, false);
-    return q_nope_out.transpose(0, 1).contiguous();
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        FT_CHECK_WITH_INFO(params.bmm_indices != nullptr, "bmm indices is nullptr");
+        size_t m = params.q.shape()[0], m_pad = params.bmm_indices->size() / params.configs.head_num;
+
+        auto q_nope_t_pad = torch::zeros({(int64_t)m_pad, (int64_t)params.configs.head_num, (int64_t)params.configs.nope_head_dim}, torch::TensorOptions().dtype(q_nope_t.dtype()).device(torch::kCUDA));
+        q_nope_t_pad.index_put_({torch::indexing::Slice(0, m)}, q_nope_t);
+	FT_LOG_DEBUG("QInputBatchMatmulWrapper params.configs.head_num * m_pad:%lu, params.configs.nope_head_dim:%lu\n", params.configs.head_num * m_pad, params.configs.nope_head_dim);
+	FT_LOG_DEBUG("kc_weight->kernel:%s\n", params.weights.kc_weight->kernel->debugString().c_str());
+        q_nope_t_pad = q_nope_t_pad.transpose(0, 1).reshape({(int64_t)(params.configs.head_num * m_pad), (int64_t)params.configs.nope_head_dim}).contiguous();
+        auto q_nope_t_pad_quant = quantize({*torchTensor2Buffer(q_nope_t_pad),
+                                            DataType::TYPE_FP8_E4M3,
+                                            1,
+                                            QScheme::Qfp8PerTokenBlock});        
+
+        auto output_tensor = torch::empty({(int64_t)params.configs.head_num * (int64_t)m_pad, (int64_t)params.configs.kv_lora_rank}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
+        // num_groups = head_num
+        DeepGemmPlugin::groupedGemmFp8Contiguous(*q_nope_t_pad_quant, *params.weights.kc_weight->kernel, *torchTensor2Buffer(output_tensor), *params.bmm_indices, stream_);
+
+        return output_tensor.reshape({(int64_t)params.configs.head_num, (int64_t)m_pad, (int64_t)params.configs.kv_lora_rank}).transpose(0, 1).index({torch::indexing::Slice(0, m)}).contiguous();
+    } else {
+        // shape: [head_num, nope_head_dim, kv_lora_rank]
+        auto w_kc_t = Buffer2torchTensor(params.weights.kc_weight->kernel, false);
+        auto q_nope_out = torch::bmm(q_nope_t.transpose(0, 1), w_kc_t);
+        auto q_input_reshap_t = Buffer2torchTensor(q_input_reshape, false);
+        return q_nope_out.transpose(0, 1).contiguous();
+    }
 }
 
-torch::Tensor DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams&
+torch::Tensor CudaDevice::DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams&
 params) {
-    auto w_vc_t = Buffer2torchTensor(params.weights.vc_weight->kernel, false);
-    return torch::bmm(attn_out_t.transpose(0, 1), w_vc_t).transpose_(0, 1).contiguous();
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        FT_CHECK_WITH_INFO(params.bmm_indices != nullptr, "bmm indices is nullptr");
+        size_t m = attn_out_t.sizes()[0], m_pad = params.bmm_indices->size() / params.configs.head_num;
+        auto attn_out_t_pad = torch::zeros({(int64_t)m_pad, (int64_t)params.configs.head_num, (int64_t)params.configs.kv_lora_rank}, torch::TensorOptions().dtype(attn_out_t.dtype()).device(torch::kCUDA));
+
+        attn_out_t_pad.index_put_({torch::indexing::Slice(0, m)}, attn_out_t);
+        attn_out_t_pad = attn_out_t_pad.transpose(0, 1).reshape({(int64_t)(params.configs.head_num * m_pad), (int64_t)params.configs.kv_lora_rank}).contiguous();
+        auto attn_out_t_pad_quant = quantize({*torchTensor2Buffer(attn_out_t_pad),
+                                              DataType::TYPE_FP8_E4M3,
+                                              1,
+                                              QScheme::Qfp8PerTokenBlock});
+
+
+        auto output_tensor = torch::empty({(int64_t)params.configs.head_num * (int64_t)m_pad, (int64_t)params.configs.v_head_dim}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
+        // num_groups = head_num
+	FT_LOG_DEBUG("params.weights.vc_weight->kernel:%s\n", params.weights.vc_weight->kernel->debugString().c_str());
+        DeepGemmPlugin::groupedGemmFp8Contiguous(*attn_out_t_pad_quant, *params.weights.vc_weight->kernel, *torchTensor2Buffer(output_tensor), *params.bmm_indices, stream_);
+
+        return output_tensor.reshape({(int64_t)params.configs.head_num, (int64_t)m_pad, (int64_t)params.configs.v_head_dim}).transpose(0, 1).index({torch::indexing::Slice(0, m)}).contiguous();
+    } else {
+        auto w_vc_t = Buffer2torchTensor(params.weights.vc_weight->kernel, false);
+        return torch::bmm(attn_out_t.transpose(0, 1), w_vc_t).transpose_(0, 1).contiguous();
+    }
 }
 
 void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
@@ -208,6 +251,7 @@ void transpose_qk_inplace(torch::Tensor& q, torch::Tensor& k) {
     auto head_num_q = q.size(1);
     auto rope_size = q.size(2);
     auto q_transpose = q.reshape({token_num, head_num_q, rope_size / 2, 2}).transpose(2,3).reshape({token_num, head_num_q, rope_size}).contiguous();
+    FT_LOG_DEBUG("transpose_qk_inplace: token_num:%lu, rope_size:%lu\n", token_num, rope_size);
     auto k_transpose = k.reshape({token_num, rope_size / 2, 2}).transpose(1,2).reshape({token_num, rope_size}).contiguous();
     q.copy_(q_transpose, true);
     k.copy_(k_transpose, true);

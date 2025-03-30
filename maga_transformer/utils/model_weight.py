@@ -17,11 +17,18 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
 
-def w_half1(ts: List[torch.Tensor], inter_size: int):
+def w_half1_t(ts: List[torch.Tensor], inter_size: int):
     return ts[0][:inter_size, ...].T.contiguous()
 
-def w_half2(ts: List[torch.Tensor], inter_size: int):
+def w_half2_t(ts: List[torch.Tensor], inter_size: int):
     return ts[0][inter_size:, ...].T.contiguous()
+
+def w_half1(ts: List[torch.Tensor], inter_size: int):
+    return ts[0][:inter_size, ...].contiguous()
+
+def w_half2(ts: List[torch.Tensor], inter_size: int):
+    return ts[0][inter_size:, ...].contiguous()
+
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
@@ -407,6 +414,9 @@ class W:
     mla_kc = "self_attention_weights.mla.kc.kernel"
     mla_vc = "self_attention_weights.mla.vc.kernel"
 
+    mla_kc_s = "self_attention_weights.mla.kc.weight_only_quant_scale"
+    mla_vc_s = "self_attention_weights.mla.vc.weight_only_quant_scale"
+    
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'
     ffn_b1 = 'ffn_weights.intermediate_weight.bias'
@@ -563,7 +573,9 @@ class W:
         mla_kv_a_w,
         mla_k_rope_w,
         mla_k_nope_w,
-        mla_v_w
+        mla_v_w,
+        mla_kc,
+        mla_vc,
     ])
 
     groupwise_quant_params = set([
@@ -582,6 +594,20 @@ class W:
         moe_z2,
         moe_s2,
     ])
+
+    mla_quant_weights = [
+        mla_kv_a_w,
+        mla_k_rope_w,
+        mla_k_nope_w,
+        mla_v_w,
+        # mla_kv_a_ln_gamma,
+        mla_q_a_w,
+        mla_q_b_w,
+        # mla_q_a_ln_gamma,
+        mla_kc,
+        mla_vc,
+        mla_q_w
+    ]
 
     sq_quant_weights = [
         attn_qkv_w,
@@ -621,19 +647,6 @@ class W:
         post_ffn_ln_static_quant_reciprocal
     ]
 
-    static_quant_scales = [
-        pre_ln_static_quant,
-        pre_ln_static_quant_reciprocal,
-        attention_output_static_quant,
-        attention_output_static_quant_reciprocal,
-        post_ln_static_quant,
-        post_ln_static_quant_reciprocal,
-        ffn_intermediate_weight2_static_quant,
-        ffn_intermediate_weight2_static_quant_reciprocal,
-        post_ffn_ln_static_quant,
-        post_ffn_ln_static_quant_reciprocal
-    ]
-
     int8_attn_weights = [
         [attn_qkv_w, attn_qkv_s],
         [attn_o_w, attn_o_s],
@@ -644,6 +657,8 @@ class W:
         [mla_k_rope_w, mla_k_rope_s],
         [mla_k_nope_w, mla_k_nope_s],
         [mla_v_w, mla_v_s],
+        [mla_kc, mla_kc_s],
+        [mla_vc, mla_vc_s],
     ]
 
     int8_attn_vision_weights = [
@@ -738,6 +753,7 @@ class W:
         mla_k_rope_w: sp_id,
         mla_k_nope_w: sp_neg1,
         mla_v_w: sp_neg1,
+        mla_v_s: sp_neg1,
         mla_q_a_ln_gamma: sp_id,
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
@@ -748,7 +764,10 @@ class W:
         mla_kv_a_s: sp_id,
         mla_k_rope_s: sp_id,
         mla_k_nope_s: sp_neg1,
-        mla_v_s: sp_neg1,
+        mla_kc: sp_0,
+        mla_vc: sp_0,
+        mla_kc_s: sp_0,
+        mla_vc_s: sp_0,
 
         # mla cache
         mla_kc: sp_0,
@@ -877,6 +896,35 @@ class W:
         tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
         tp_strategy.update(gemm_a8_weight_tp_strategy)
         return tp_strategy
+
+    @staticmethod
+    def gemm_block_fp8_gpt_style_tp_strategy():
+        gemm_block_fp8_weight_tp_strategy: Dict[str, Any] = {
+            W.attn_o_w: sp_neg1,
+            W.attn_o_s: sp_neg1,
+
+            W.ffn_w1: sp_0,
+            W.ffn_s1: sp_0,
+            W.ffn_w3: sp_0,
+            W.ffn_s3: sp_0,
+            W.ffn_w2: sp_neg1,
+            W.ffn_s2: sp_neg1,
+            # mla
+            # W.mla_kv_a_w: sp_id,
+            W.mla_k_nope_w: sp_0,
+            W.mla_k_nope_s: sp_0,
+            W.mla_v_w: sp_0,
+            W.mla_v_s: sp_0,
+            W.mla_q_b_w: sp_0,
+            W.mla_q_b_s: sp_0,
+            W.mla_q_w: sp_0,
+            W.mla_q_s: sp_0
+        }
+        tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+        tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
+        return tp_strategy
+    
+    
 
 class CkptWeightInfo:
     name: str
@@ -1230,6 +1278,8 @@ class ModelDeployWeightInfo:
     def _get_gpt_style_tp_strategy(self):
         if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
             return W.gemm_int8_gpt_style_tp_strategy()
+        elif self._quant_algo.isFp8() and self._quant_algo.isGroupwise():
+            return W.gemm_block_fp8_gpt_style_tp_strategy()
         else:
             return W.gpt_style_tp_strategy
 

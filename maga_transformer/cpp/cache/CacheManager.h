@@ -137,7 +137,7 @@ protected:
     uint32_t                                totalBlocks() const;
     void                                    initFreeBlock();
     ft::BufferPtr                           tryAllocateMaxBuffer();
-    void                                    allocateAndTpSync();
+    void                                    allocateAndSync();
     void                                    initKvCache();
     void                                    initKvCacheNormal();
     void                                    initKvCacheMla();

@@ -29,20 +29,20 @@ def http_deps():
     )
 
     http_archive(
-        name = "torch_2.1_py310_cpu",
-        sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
+        name = "torch_2.6_py310_cpu",
+        sha256 = "35a9e78b7e4096968b54c1a198687b981569c50ae93e661aa430f9fd208da102",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
+            "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
     )
 
     http_archive(
-        name = "torch_2.1_py310_cuda",
-        sha256 = "b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
+        name = "torch_2.6_py310_cuda",
+        sha256 = "c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e",
         urls = [
-            "https://download.pytorch.org/whl/cu121/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
+            "https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

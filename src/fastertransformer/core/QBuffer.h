@@ -9,7 +9,8 @@ enum QScheme : size_t {
     Qint8WeightOnly,
     Qint8PerToken,
     Qint8PerTensor,
-    Qfp8PerTensor
+    Qfp8PerTensor,
+    Qfp8PerTokenBlock
 };
 
 class QBuffer final : public Buffer {
@@ -36,6 +37,8 @@ public:
     DataType        zerosType()            const;
     size_t          scalesSizebytes()      const;
     size_t          zerosSizebytes()       const;
+    BufferPtr       scalesPtr()            const;
+    BufferPtr       kernelPtr()            const;
 
     template<typename T>
     inline T* scalesData() const {

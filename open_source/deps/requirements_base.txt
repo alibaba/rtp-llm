@@ -49,3 +49,4 @@ av
 pillow-heif
 pillow-avif-plugin
 setproctitle
+bitsandbytes>=0.41.0

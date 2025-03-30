@@ -40,6 +40,9 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     int32_t*                          token_nums_per_rank_ptr = token_nums_per_rank->data<int32_t>();
     std::vector<std::vector<int32_t>> token_idx_per_rank;
     token_idx_per_rank.resize(ep_size);
+    for (int i = 0; i < ep_size; ++i) {
+        token_idx_per_rank.reserve(token_num);
+    }
     int const num_experts_per_node = expert_num / ep_size;
     for (int i = 0; i < token_num; ++i) {
         for (int j = 0; j < top_k; ++j) {
@@ -81,23 +84,51 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
         output_split_sizes[i] = *(all_token_nums_per_rank->dataWithOffset<int32_t>(i));
     }
     vector<BufferPtr> selected_buffers;
-    selected_buffers.emplace_back(select({*hidden, *all_token_indices}));
+    BufferPtr select_hidden = select({*hidden, *all_token_indices});
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        BufferPtr hidden_fp8 =
+            quantize({*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        selected_buffers.emplace_back(std::dynamic_pointer_cast<QBuffer>(hidden_fp8)->kernelPtr());
+        selected_buffers.emplace_back(std::dynamic_pointer_cast<QBuffer>(hidden_fp8)->scalesPtr());
+    } else {
+        selected_buffers.emplace_back(select_hidden);
+    }
     selected_buffers.emplace_back(select({*expert_ids, *all_token_indices}));
     selected_buffers.emplace_back(select({*expert_scales, *all_token_indices}));
 
     auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
     const auto& global_buffers = all2all_output.outputs;
-    return {global_buffers[0],
-            global_buffers[1],
-            global_buffers[2],
-            all_token_indices,
-            input_split_sizes,
-            output_split_sizes,
-            selected_buffers,
-            all2all_output.concated_input,
-            all2all_output.output_to_split,
-            move(all2all_output.comm_barrier_hook)
-        };
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        printBufferData(*global_buffers[1], "global_buffers[1]", this, true);
+        BufferPtr hidden_fp8(new QBuffer(std::move(global_buffers[0]),
+                                         std::move(global_buffers[1]),
+                                         std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                                                        DataType::TYPE_INVALID,
+                                                                        {0},
+                                                                        nullptr)))));
+        return {hidden_fp8,
+                global_buffers[2],
+                global_buffers[3],
+                all_token_indices,
+                input_split_sizes,
+                output_split_sizes,
+                selected_buffers,
+                all2all_output.concated_input,
+                all2all_output.output_to_split,
+                move(all2all_output.comm_barrier_hook)
+            };
+    } else {
+        return {global_buffers[0],
+                global_buffers[1],
+                global_buffers[2],
+                all_token_indices,
+                input_split_sizes,
+                output_split_sizes,
+                selected_buffers,
+                all2all_output.concated_input,
+                all2all_output.output_to_split,
+                move(all2all_output.comm_barrier_hook)
+            };
 }
 
 FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
@@ -260,7 +291,9 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     } else {
         output = allocateBuffer({type, {token_num, hidden_dim}});
     }
-
+    if (token_num == 0) {
+        return {output};
+    }
     moe_plugin_->init(num_expert,
                       top_k,
                       normalize_expert_scale,

@@ -12,8 +12,8 @@ from maga_transformer.utils.model_weight import (
     identity,
     zeros,
     transpose,
-    w_half1,
-    w_half2,
+    w_half1_t,
+    w_half2_t,
 )
 
 
@@ -45,10 +45,10 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                        transpose),
 
             WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.encoder.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
-                       functools.partial(w_half1, inter_size=self._inter_size)),
+                       functools.partial(w_half1_t, inter_size=self._inter_size)),
 
             WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.encoder.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
-                       functools.partial(w_half2, inter_size=self._inter_size)),
+                       functools.partial(w_half2_t, inter_size=self._inter_size)),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.encoder.layers.{i}.mlp.dense_4h_to_h.weight', identity)],
                        transpose),
@@ -65,7 +65,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                                                 functools.partial(extract_weight_to_half, source_bit_width = self._src_quantization_bit, sufix_func = layer_weight.process_fun))
 
         model_weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
-        model_weight_info.set_lora(qkv_fun=None, half1=functools.partial(w_half1, inter_size=self._inter_size),
-                                       half2=functools.partial(w_half2, inter_size=self._inter_size))
+        model_weight_info.set_lora(qkv_fun=None, half1=functools.partial(w_half1_t, inter_size=self._inter_size),
+                                       half2=functools.partial(w_half2_t, inter_size=self._inter_size))
 
         return model_weight_info

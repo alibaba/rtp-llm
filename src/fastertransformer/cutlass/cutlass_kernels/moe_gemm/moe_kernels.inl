@@ -68,12 +68,6 @@ using namespace tensorrt_llm::common;
 namespace tensorrt_llm::kernels
 {
 
-void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int* permuted_experts, int* permuted_rows,
-    int64_t* expert_first_token_offset, int64_t num_rows, int64_t num_experts, int64_t num_experts_per_node, int64_t k,
-    CubKeyValueSorter& sorter, void* sorter_ws, cudaStream_t stream);
-
-void genSourceRow(int* expert_rows, int* source_rows, int token_num, int top_k, int num_experts, int start_expert, int end_expert, cudaStream_t stream);
-
 // TODO Could linear search be better for small # experts
 template <class T>
 __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices, int64_t const arr_length, T const target)
@@ -217,7 +211,7 @@ __global__ void finalizeMoeRoutingKernel(GemmOutputType const* expanded_permuted
     int64_t const num_rows = gridDim.x;
     auto const offset = original_row * orig_cols;
     OutputType* reduced_row_ptr = reduced_unpermuted_output + offset;
-    int64_t const num_valid = *num_valid_ptr;
+    int64_t const num_valid = num_valid_ptr ? *num_valid_ptr: 0;
 
     // Load 128-bits per thread, according to the smallest data type we read/write
     constexpr int64_t FINALIZE_ELEM_PER_THREAD
@@ -253,7 +247,9 @@ __global__ void finalizeMoeRoutingKernel(GemmOutputType const* expanded_permuted
             {
                 row_rescale = row_rescale + row_scale;
             }
-
+            if (expanded_permuted_row < 0) {
+                continue;
+            }
             // Check after row_rescale has accumulated
             if (CHECK_SKIPPED && expanded_permuted_row >= num_valid)
             {
@@ -1260,5 +1256,11 @@ CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enable>::c
 
     return layout_info;
 }
+
+template void finalizeMoeRoutingKernelLauncher<__nv_bfloat16>(__nv_bfloat16 const* expanded_permuted_rows,
+                                                              __nv_bfloat16* reduced_unpermuted_output, __nv_bfloat16 const* bias, float const* scales,
+                                                              int const* expanded_source_row_to_expanded_dest_row, int const* expert_for_source_row, int64_t const num_rows,
+                                                              int64_t const cols, int64_t const k, int64_t const* num_valid_ptr, MOEParallelismConfig parallelism_config,
+                                                              MOEExpertScaleNormalizationMode normalization_mode, cudaStream_t stream);
 
 } // namespace tensorrt_llm::kernels

@@ -243,36 +243,102 @@ public:
         torch::Tensor out;
     };
 
+    std::pair<torch::Tensor, torch::Tensor> QuantizeFP8(const torch::Tensor& x) {
+        int64_t       m            = x.size(0);
+        int64_t       n            = x.size(1);
+        int64_t       padded_m     = m;
+        int64_t       padded_n     = n;
+        torch::Tensor x_padded     = x;
+        int64_t       num_blocks_m = padded_m / 128;
+        int64_t       num_blocks_n = padded_n / 128;
+        auto          x_view       = x_padded.view({num_blocks_m, 128, num_blocks_n, 128});
+        // 计算每个块的最大绝对值
+        auto x_abs  = x_view.abs().to(torch::kFloat32);
+        auto x_amax = torch::amax(x_abs, /*dim=*/{1, 3}, /*keepdim=*/true).clamp_min_(1e-4f);
+
+        // 缩放并转换为FP8
+        auto x_scaled = (x_view * (448.0 / x_amax)).to(torch::kFloat8_e4m3fn);
+
+        // 重塑结果并切片回原始尺寸
+        auto output = x_scaled.view({padded_m, padded_n}).contiguous();
+
+        // 计算缩放因子并调整形状
+        auto scale_factors = (x_amax / 448.0).view({num_blocks_m, num_blocks_n});
+
+        return {output, scale_factors};
+    }
+
+    BufferPtr QuantizeFP8Weights(const torch::Tensor& w) {
+        std::vector<size_t> w_shape;
+        for (auto &i: w.sizes()) {
+            w_shape.push_back(i);
+        }
+        assert(w_shape.size() ==  3);
+        BufferPtr     w_fp8   = this->device_->allocateBuffer({DataType::TYPE_FP8_E4M3, w_shape}, {"fc1_w_fp8"});
+        BufferPtr     w_scale = this->device_->allocateBuffer(
+                {DataType::TYPE_FP32, {w_shape[0], w_shape[1] / 128, w_shape[2] / 128}}, {"fc1_w_scale"});
+        torch::Tensor w_fp8_t   = Buffer2torchTensor(w_fp8, false);
+        torch::Tensor w_scale_t = Buffer2torchTensor(w_scale, false);
+        for (int i = 0; i < w_shape[0]; ++i) {
+            auto res         = QuantizeFP8(w[i]);
+            w_fp8_t[i]   = res.first;
+            w_scale_t[i] = res.second;
+        }
+        auto      zeros_type = w_scale->where();
+        return BufferPtr(new QBuffer(std::move(w_fp8),
+                                     std::move(w_scale),
+                                     std::move(BufferPtr(new Buffer(zeros_type, DataType::TYPE_INVALID, {0}, nullptr)))));
+    }
+
     MoELayerTestInput
     PrepareMoELayerInput(size_t token_num, size_t tok_dim, size_t inter_size, size_t expertNum, DataType type) {
+        if (type == DataType::TYPE_FP8_E4M3) {
+            type = DataType::TYPE_BF16;
+        }
         auto dtype  = dataTypeToTorchType(type);
         auto input  = torch::randn({(int)token_num, (int)tok_dim}, torch::Device(torch::kCPU)).to(dtype);
         auto gating = torch::randn({(int)tok_dim, (int)expertNum}, torch::Device(torch::kCPU)).to(dtype);
         auto gate = torch::randn({(int)expertNum, (int)tok_dim, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
         auto up   = torch::randn({(int)expertNum, (int)tok_dim, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
         auto down = torch::randn({(int)expertNum, (int)inter_size, (int)tok_dim}, torch::Device(torch::kCPU)).to(dtype);
-
         return MoELayerTestInput({input, gating, gate, up, down});
     }
 
-    MoELayerTestOutput MoELayerRun(MoELayerTestInput& params, size_t inter_size, size_t expertNum, size_t topK, ActivationType Atype) {
+    MoELayerTestOutput MoELayerRun(MoELayerTestInput& params, size_t inter_size, size_t expertNum, size_t topK, ActivationType Atype, DataType type) {
+        FfnLayerWeights weights;
         bool is_cpu     = (this->device_->getDeviceProperties().type == DeviceType::Cpu);
         auto alloc_type = is_cpu ? AllocationType::HOST : AllocationType::DEVICE;
         auto input      = tensorToBuffer(params.input, alloc_type);
         auto gating     = tensorToBuffer(params.gating, alloc_type);
-        auto gate       = tensorToBuffer(params.gate, alloc_type);
-        auto up         = tensorToBuffer(params.up, alloc_type);
-        auto down       = tensorToBuffer(params.down, alloc_type);
-
-        FfnLayerWeights weights;
-        weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
-        weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
-        weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
-
+        if (type == DataType::TYPE_FP8_E4M3) {
+            torch::Tensor gate_t;
+            if (isGatedActivation(Atype)) {
+                gate_t = torch::cat({params.up.transpose(2, 1), params.gate.transpose(2, 1)}, 1).contiguous();
+            } else {
+                gate_t = params.up.transpose(2, 1).contiguous();
+            }
+            auto down_t = params.down.transpose(2, 1).contiguous();
+            auto down = QuantizeFP8Weights(down_t);
+            auto gate = QuantizeFP8Weights(gate_t);
+            weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
+            weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
+            weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
+        } else {
+            torch::Tensor gate_t;
+            if (isGatedActivation(Atype)) {
+                gate_t = torch::cat({params.up, params.gate}, 1).contiguous();
+            } else {
+                gate_t = params.up;
+            }
+            auto gate       = tensorToBuffer(gate_t, alloc_type);
+            auto down       = tensorToBuffer(params.down, alloc_type);
+            weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
+            weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
+            weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
+        }
         MoeConfigs     moe_configs({expertNum, topK, false, (int64_t)inter_size, false});
         FfnConfigs     ffn_configs({Atype, moe_configs});
-        FfnLayerParams Opparams(*input, ffn_configs, weights);
-
+        FfnLayerParams Opparams(*input, ffn_configs, weights, std::nullopt, type == DataType::TYPE_FP8_E4M3 ? QScheme::Qfp8PerTokenBlock: QScheme::NoQuantize);
         auto output = this->device_->ffnLayer(Opparams);
         return MoELayerTestOutput({bufferToTensor(*(output.hidden_states))});
     }
@@ -290,7 +356,6 @@ public:
             state_dict[expertStr + ".up.weight"].set_data(params.up[i].t().to(torch::kFloat));
             state_dict[expertStr + ".down.weight"].set_data(params.down[i].t().to(torch::kFloat));
         }
-
         return MoELayerTestOutput({moe->forward(params.input.to(torch::kFloat))});
     }
 
@@ -300,10 +365,12 @@ public:
                    size_t         expertNum,
                    size_t         topK,
                    ActivationType act,
-                   DataType       type) {
+                   DataType       type,
+                   float          rel_diff = 1e2,
+                   float          abs_diff = 1e2) {
         auto input      = PrepareMoELayerInput(token_num, tok_dim, inter_size, expertNum, type);
-        auto result     = MoELayerRun(input, inter_size, expertNum, topK, act);
+        auto result     = MoELayerRun(input, inter_size, expertNum, topK, act, type);
         auto result_ref = MoETorchRefRun(input, expertNum, topK, act);
-        assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out, 1e2, 1e2);
+        assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out, rel_diff, abs_diff);
     }
 };

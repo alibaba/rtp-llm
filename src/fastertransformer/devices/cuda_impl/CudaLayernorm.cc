@@ -21,14 +21,21 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     const auto n = input->shape()[1];
     auto norm_weight = params.norm_weight;
     const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
+    if (gamma != nullptr) {
+      printBufferData(*norm_weight->get().gamma, "norm_weight->get().gamma.get()");
+    }
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    if (beta != nullptr) {
+       printBufferData(*norm_weight->get().beta, "norm_weight->get().beat.get()");
+    }
 
     const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;
     const auto eps = params.eps;
 
-    if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
+    if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock)) {
+        FT_LOG_DEBUG("allocate norm_output");
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme != QScheme::NoQuantize) {
+    } else if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock) {
         auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
         auto kernel = allocateBuffer({quant_data_type,
                                             {input->shape()},
@@ -37,12 +44,14 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         BufferPtr scales;
         // when QScheme::Qint8PerToken the scale is created by layernorm kernel
         if (params.qscheme == QScheme::Qint8PerToken) {
+	  FT_LOG_DEBUG("Qint8PerToken");
             scales = allocateBuffer({DataType::TYPE_FP32,
                                             {input->shape()[0]},
                                             AllocationType::DEVICE},
                                             {"scales"});
         // when QScheme::Qint8PerTensor, the scale is from ckpt
         } else if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qfp8PerTensor){
+	  FT_LOG_DEBUG("QScheme::Qint8PerTensor");
             FT_CHECK_WITH_INFO(norm_weight && norm_weight->get().static_scale_reciprocal, "static_scale_reciprocal should not be None");
             scales = BufferPtr(new Buffer(
                 norm_weight->get().static_scale_reciprocal->where(),
@@ -50,6 +59,8 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 norm_weight->get().static_scale_reciprocal->shape(),
                 norm_weight->get().static_scale_reciprocal->data()
             ));
+        } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            FT_LOG_DEBUG("now fp8 per token block not set scale");
         } else {
             FT_CHECK_WITH_INFO(false, "unknown qscheme type : %d", int(params.qscheme));
         }
@@ -100,7 +111,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             return LayernormOutput({norm_output, nullptr});
         }
     }
-    FT_LOG_DEBUG("params.norm_type: params.norm_type");
+    FT_LOG_DEBUG("params.norm_type:%d", params.norm_type);
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         // TODO(lidongjin)
         // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.
@@ -134,7 +145,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         }
     }
 
-    auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+    auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor || params.qscheme == QScheme::Qfp8PerTokenBlock) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
     FT_LOG_DEBUG("quant_data_type: %d, params.norm_type is layernorm\n", quant_data_type);
     if (params.norm_type == NormType::layernorm) {
         if (params.residual1.has_value() || params.bias.has_value()) {
