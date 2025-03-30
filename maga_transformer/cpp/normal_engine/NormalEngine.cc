@@ -242,12 +242,17 @@ absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status;
-    try {
+
+    if (params_.world_size_ > 1) {
         status = executor_->process(streams);
-    } catch (const std::exception& e) {
-        FT_LOG_ERROR("step running error: %s", e.what());
-        for (auto& stream: streams) {
-            stream->stopAndRelease(ErrorCode::EXECUTION_EXCEPTION, e.what());
+    } else {
+        try {
+            status = executor_->process(streams);
+        } catch (const std::exception& e) {
+            FT_LOG_ERROR("step running error: %s", e.what());
+            for (auto& stream: streams) {
+                stream->stopAndRelease(ErrorCode::EXECUTION_EXCEPTION, e.what());
+            }
         }
     }
 

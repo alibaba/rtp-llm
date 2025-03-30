@@ -169,6 +169,8 @@ class GptInitModelParameters:
 
         self.is_multimodal = False
         self.model_name = ""
+        
+        self.world_size = g_parallel_info.world_size
 
         for k, v in kwargs.items():
             setattr(self, k, v)

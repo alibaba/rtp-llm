@@ -201,6 +201,7 @@ public:
     int64_t     ffn_tp_rank_    = 0;
     bool        enable_sp_      = false;
 
+    int64_t     world_size_     = 1;
 
     // pd speration
     bool        pd_separation_                      = false;
