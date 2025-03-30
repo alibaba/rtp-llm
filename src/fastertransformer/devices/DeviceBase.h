@@ -54,6 +54,8 @@ public:
     SplitOutput split(const SplitParams& params) override;
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
+    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
+    FfnLayerOutput moeFfnAndCombine(const FfnLayerParams& params, const MoeDispatchOutput& dispatched_output) override;
     FfnLayerOutput moeSharedExpert(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
     AllReduceOutput allReduce(const AllReduceParams& params) override;

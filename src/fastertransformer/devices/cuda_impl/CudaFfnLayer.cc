@@ -304,37 +304,6 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     return FfnLayerOutput({move(output)});
 }
 
-FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
-    RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
-    const auto&         moe_conf    = params.configs.moe_configs.value();
-    MoeGateSelectOutput gate_output = moeGateSelect(params);
-
-    if (moe_conf.ep_size > 1) {
-        MoeDispatchOutput dispatched_output =
-            epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
-        BufferPtr hidden_states = dispatched_output.hidden;
-        if (hidden_states->shape()[0]) {
-            auto moe_ffn_params = FfnLayerParams(
-                {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
-            hidden_states =
-                moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
-        }
-        FfnLayerOutput out = epCombine({hidden_states,
-                                        dispatched_output.indices,
-                                        // nullptr,
-                                        params.output,
-                                        dispatched_output.input_split_sizes,
-                                        dispatched_output.output_split_sizes,
-                                        moe_conf,
-                                        params.input.shape()[0],
-                                        init_params_.enable_comm_overlap});
-        printBufferData(*out.hidden_states, "moe_ffn_ep_out");
-        return out;
-    } else {
-        return moeFfn(params, gate_output);
-    }
-}
-
 void CudaDevice::prepareMoEGate(const FfnLayerParams& params,
                                 BufferPtr             gate,
                                 torch::Tensor&        gate_with_bias_tensor,

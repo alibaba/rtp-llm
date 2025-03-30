@@ -142,6 +142,10 @@ FfnLayerOutput DeviceOps::moeFfn(const FfnLayerParams& params, const MoeGateSele
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+FfnLayerOutput DeviceOps::moeFfnAndCombine(const FfnLayerParams& params, const MoeDispatchOutput& dispatched_output) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 LoraLinearOutput DeviceOps::loraLinear(const LoraLinearParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

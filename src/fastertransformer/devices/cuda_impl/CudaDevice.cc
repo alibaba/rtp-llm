@@ -238,6 +238,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->tp_size = init_params_.tp_size;
         prop->dp_rank = init_params_.dp_rank;
         prop->dp_size = init_params_.dp_size;
+        prop->enable_comm_overlap = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
     }
     return *prop;

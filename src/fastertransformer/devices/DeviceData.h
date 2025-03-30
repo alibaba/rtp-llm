@@ -67,6 +67,7 @@ struct DeviceProperties {
     bool ffn_fuse_add_residual  = false;
     bool sq_fuse_bias_activation = false;
 
+    bool enable_comm_overlap = true;
     bool enable_layer_micro_batch = false;
 };
 

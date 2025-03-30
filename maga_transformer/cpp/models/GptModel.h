@@ -225,8 +225,6 @@ private:
     ft::BufferPtr              v_scale_buffer_;
     ft::BufferPtr              residual_scale_fp32_;
     ft::BufferPtr              residual_scale_;
-
-    bool micro_batch_comm_overlap_ = true;
 };
 
 }  // namespace rtp_llm

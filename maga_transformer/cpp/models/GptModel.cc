@@ -78,8 +78,6 @@ GptModel::GptModel(const GptModelInitParams& params)
             residual_scale_fp32_ = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
             residual_scale_ = residual_scale_fp32_;
         }
-        micro_batch_comm_overlap_ = autil::EnvUtil::getEnv("MICRO_BATCH_COMM_OVERLAP", 1L);
-        FT_LOG_INFO("gpt model micro_batch_comm_overlap: %d", micro_batch_comm_overlap_);
     }
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
@@ -428,7 +426,6 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
     for (int32_t i = 0; i < layer_num_; ++i) {
         const auto& layer = weights_.layers[i];
         bool moe_layer = weights_.layers[i].ffn_weights.moe_gate_weight != nullptr;
-        const auto& moe_conf = description_.ffn_conf.moe_configs.value();
 
         // dense layer does not need micro batching.
         if (!moe_layer) {
@@ -459,37 +456,13 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
             auto& batch_ep_input = ep_inputs[micro_batch_idx];
             const auto& ffn_params = batch_ep_input.moe_ffn_params;
             const auto& dispatched_output = batch_ep_input.dispatch_output;
-            auto hidden_states = dispatched_output.hidden;
-            if (hidden_states->shape()[0]) {
-                auto moe_ffn_params = FfnLayerParams({
-                    *hidden_states,
-                    ffn_params.configs,
-                    ffn_params.weights,
-                    ffn_params.residual,
-                    ffn_params.qscheme});
-                hidden_states = device_->moeFfn(
-                    moe_ffn_params,
-                    {dispatched_output.expert_ids, dispatched_output.expert_scales
-                }).hidden_states;
-            }
 
-            auto out = device_->epCombine({
-                hidden_states,
-                dispatched_output.indices,
-                ffn_params.output,
-                dispatched_output.input_split_sizes,
-                dispatched_output.output_split_sizes,
-                moe_conf,
-                ffn_params.input.shape()[0],
-                micro_batch_comm_overlap_});
-
+            auto out = device_->moeFfnAndCombine(ffn_params, dispatched_output);
             auto output = out.hidden_states;
             printBufferData(*output, "moe_ffn_ep_out");
 
             ep_outputs.push_back(EpFfnOutputs({output, move(out.comm_barrier_hook)}));
         }
-
-        // std::vector<BufferPtr>
 
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
             // last layer: add residual and shared expert output
@@ -746,7 +719,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
             true,
             description_.post_layernorm,
             description_.norm_type,
-            QScheme::NoQuantize
+            layer.post_ffn_layernorm ? description_.act_qscheme : QScheme::NoQuantize
         });
         hidden = move(prev_ffn_layernorm_output.output);
         printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
@@ -776,7 +749,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         *gate_output.expert_ids,
         *gate_output.expert_scales,
         description_.ffn_conf.moe_configs.value(),
-        micro_batch_comm_overlap_
+        device_props_.enable_comm_overlap,
     });
 
     return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};
