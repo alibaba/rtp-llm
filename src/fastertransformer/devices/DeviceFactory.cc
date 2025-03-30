@@ -89,6 +89,9 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.enable_comm_overlap = autil::EnvUtil::getEnv("ENABLE_COMM_OVERLAP", 1L);
     device_params.enable_layer_micro_batch = autil::EnvUtil::getEnv("ENABLE_LAYER_MICRO_BATCH", 0L);
 
+    FT_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
+                device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
+
     if (!global_params.device_params.size()) {
         FT_LOG_ERROR("No device is specified to init !");
         abort();

@@ -14,37 +14,11 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     BufferPtr output;
     if (params.weights.moe_gating_weight) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
-
-        const auto& moe_conf = params.configs.moe_configs.value();
-        BufferPtr shared_expert_output;
         output = moeFfnLayer(params).hidden_states;
-        // deal with moe layers with parallel dense ffn layer
-        if (params.weights.shared_expert) {
-            shared_expert_output = allocateBufferLike({params.input}, AllocationType::DEVICE, {"shared_expert_buf"});
-            shared_expert_output = prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
-            auto ffn_params = FfnLayerParams({params.input,
-                                             params.configs,
-                                             *(params.weights.shared_expert),
-                                             params.residual,
-                                             params.qscheme,
-                                             shared_expert_output});
-            ffn_params.lora_input = params.lora_input;
-            shared_expert_output = ffnLayer(ffn_params).hidden_states;
 
-            // for qwen moe
-            // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
-            if (params.weights.shared_expert_gate) {
-                auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
-                activation({ActivationType::Sigmoid, shared_gate});
-                shared_expert_output = multiply({
-                        shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
-            }
-            if (moe_conf.tp_size > 1) {
-                auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
-                shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
-            }
-        }
+        auto shared_expert_output = moeSharedExpert(params).hidden_states;
         overlappedCommBarrier();
+
         printBufferData(*output, "moe_out_after_barrier");
         if (shared_expert_output) {
             // just add bias to output
@@ -106,6 +80,39 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
     printBufferData(*output, "ffn_out");
     return FfnLayerOutput({std::move(output)});
+}
+
+FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
+    if (params.weights.shared_expert) {
+        RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
+        const auto& moe_conf = params.configs.moe_configs.value();
+        auto shared_expert_output = allocateBufferLike({params.input}, AllocationType::DEVICE, {"shared_expert_buf"});
+        shared_expert_output = prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
+        auto ffn_params = FfnLayerParams({params.input,
+                                            params.configs,
+                                            *(params.weights.shared_expert),
+                                            params.residual,
+                                            params.qscheme,
+                                            shared_expert_output});
+        ffn_params.lora_input = params.lora_input;
+        shared_expert_output = ffnLayer(ffn_params).hidden_states;
+
+        // for qwen moe
+        // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+        if (params.weights.shared_expert_gate) {
+            auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
+            activation({ActivationType::Sigmoid, shared_gate});
+            shared_expert_output = multiply({
+                    shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
+        }
+        if (moe_conf.tp_size > 1) {
+            auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
+            shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
+        }
+        return {shared_expert_output};
+    } else {
+        return {nullptr};
+    }
 }
 
 }; // namespace fastertransformer

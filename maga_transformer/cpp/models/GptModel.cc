@@ -78,7 +78,8 @@ GptModel::GptModel(const GptModelInitParams& params)
             residual_scale_fp32_ = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
             residual_scale_ = residual_scale_fp32_;
         }
-        micro_batch_comm_overlap_ = autil::EnvUtil::getEnv("MICRO_BATCH_COMM_OVERLAP", 1L);;
+        micro_batch_comm_overlap_ = autil::EnvUtil::getEnv("MICRO_BATCH_COMM_OVERLAP", 1L);
+        FT_LOG_INFO("gpt model micro_batch_comm_overlap: %d", micro_batch_comm_overlap_);
     }
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
@@ -840,32 +841,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
                                             act_qscheme,
                                             std::move(ffn_output_buf)});
 
-    BufferPtr shared_expert_output = nullptr;
-    if (layer.ffn_weights.shared_expert) {
-        shared_expert_output = device_->allocateBufferLike({*hidden}, AllocationType::DEVICE, {"shared_expert_buf"});
-        shared_expert_output = device_->prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
-        auto ffn_params = FfnLayerParams({ffn_layer_params.input,
-                                            ffn_layer_params.configs,
-                                            *(ffn_layer_params.weights.shared_expert),
-                                            ffn_layer_params.residual,
-                                            ffn_layer_params.qscheme,
-                                            shared_expert_output});
-        shared_expert_output = device_->ffnLayer(ffn_params).hidden_states;
-
-        // for qwen moe
-        // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
-        if (ffn_layer_params.weights.shared_expert_gate) {
-            auto shared_gate = device_->gemm({ffn_layer_params.input, *(ffn_layer_params.weights.shared_expert_gate->kernel)});
-            device_->activation({ActivationType::Sigmoid, shared_gate});
-            shared_expert_output = device_->multiply({
-                    shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
-        }
-        if (device_props_.tp_size > 1) {
-            auto wrapper = DevicePerfWrapper(device_, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
-            shared_expert_output = device_->allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
-        }
-    }
-
+    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
     MoeDispatchOutput dispatched_output = device_->epDispatch({
         ffn_layer_params.input,

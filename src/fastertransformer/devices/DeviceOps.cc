@@ -130,6 +130,10 @@ FfnLayerOutput DeviceOps::moeFfnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+FfnLayerOutput DeviceOps::moeSharedExpert(const FfnLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 MoeGateSelectOutput DeviceOps::moeGateSelect(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -184,7 +188,7 @@ BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
 
 PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams& params) {
     return PrepareAllReduceOutput{params.buffer};
-};
+}
 
 void DeviceOps::bufMemset(Buffer& buf, int val) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

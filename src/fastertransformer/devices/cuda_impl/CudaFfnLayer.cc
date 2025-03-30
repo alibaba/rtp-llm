@@ -315,7 +315,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
         BufferPtr hidden_states = dispatched_output.hidden;
         if (hidden_states->shape()[0]) {
             auto moe_ffn_params = FfnLayerParams(
-                {*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme});
+                {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
             hidden_states =
                 moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
         }
