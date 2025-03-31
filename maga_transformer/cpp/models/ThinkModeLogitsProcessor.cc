@@ -16,9 +16,10 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs) {
             int* input_lengths = inputs.input_lengths->data<int32_t>();
             int* sequence_lengths = inputs.sequence_lengths->data<int32_t>();
             int num_new_tokens = 1;
+            auto dfa_ptr = think_infos_[i].think_end_status_dfa_ptr;
             bool enforce = (sequence_lengths[i] + num_new_tokens >= think_infos_[i].max_thinking_tokens + input_lengths[i]);
             auto logits = inputs.logits->index(i);
-            setVocabMask(think_infos_[i].think_end_status_dfa_ptr, logits, num_new_tokens, think_infos_[i].end_think_token_ids, inputs.vocab_size, enforce);
+            setVocabMask(dfa_ptr, logits, num_new_tokens, think_infos_[i].end_think_token_ids, inputs.vocab_size, enforce);
         }
     }
 }
@@ -29,11 +30,8 @@ void ThinkModeLogitsProcessor::setVocabMask(
     std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
 {
     if (!dfa_ptr->isFinished() && enforce) {
-        int offset = 0;
-        for (size_t pos = dfa_ptr->status(); pos < template_token_ids.size() && offset < num_new_tokens; pos++, offset++) {
-            FT_LOG_INFO("sampler enforce transfer status");
-            memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[pos]);
-        }
+        FT_LOG_INFO("sampler enforce transfer status");
+        memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[dfa_ptr->status()]);
     }
 }
 

@@ -12,6 +12,7 @@ class BaseLogitsProcessor {
 public:
     BaseLogitsProcessor(ft::DeviceBase* device);
     virtual ~BaseLogitsProcessor() {}
+    static const float neg_inf;
 
 public:
     virtual void process(const SamplerInputs& inputs) = 0;

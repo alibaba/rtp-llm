@@ -109,6 +109,22 @@ protected:
     }
 };
 
+#define EXPECT_SIMILAR(vec1, vec2, eps)                              \
+    do {                                                             \
+        bool similar = true;                                         \
+        if (vec1.size() != vec2.size()) {                            \
+            similar = false;                                         \
+        } else {                                                     \
+            for (size_t i = 0; i < vec1.size(); ++i) {               \
+                if (std::fabs(vec1[i] - vec2[i]) >= eps) {           \
+                    similar = false;                                 \
+                    break;                                           \
+                }                                                    \
+            }                                                        \
+        }                                                            \
+        EXPECT_TRUE(similar) << "Vectors are not similar";           \
+    } while (0)
+
 TEST_F(SamplerTest, testMemFill) {
     SamplerDataBuilder builder;
 
@@ -122,23 +138,6 @@ TEST_F(SamplerTest, testMemFill) {
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-    torch::Tensor tensor = torch::tensor({{2, 2, 2, 2, 2},
-                                          {2, 2, 2, 2, 2},
-                                          {2, 2, 2, 2, 2},
-                                          {2, 2, 2, 2, 2}}, 
-                                        torch::dtype(torch::kInt));
-    auto logits = torchTensor2Buffer(tensor);
-    processor->memFill(logits->index(0), 5, 0);
-    processor->memFill(logits->index(1), 5, 1);
-    processor->memFill(logits->index(2), 5, 2);
-    processor->memFill(logits->index(3), 5, 3);
-
-    EXPECT_EQ(buffer2vector<int>(*logits->index(0)), std::vector<int>({1, 0, 0, 0, 0}));
-    EXPECT_EQ(buffer2vector<int>(*logits->index(1)), std::vector<int>({0, 1, 0, 0, 0}));
-    EXPECT_EQ(buffer2vector<int>(*logits->index(2)), std::vector<int>({0, 0, 1, 0, 0}));
-    EXPECT_EQ(buffer2vector<int>(*logits->index(3)), std::vector<int>({0, 0, 0, 1, 0}));
-
-
     torch::Tensor tensor2 = torch::tensor({{2, 2, 2, 2, 2},
                                           {2, 2, 2, 2, 2},
                                           {2, 2, 2, 2, 2},
@@ -150,10 +149,12 @@ TEST_F(SamplerTest, testMemFill) {
     processor->memFill(logits2->index(2), 5, 2);
     processor->memFill(logits2->index(3), 5, 3);
 
-    EXPECT_EQ(buffer2vector<double>(*logits2->index(0)), std::vector<double>({1, 0, 0, 0, 0}));
-    EXPECT_EQ(buffer2vector<double>(*logits2->index(1)), std::vector<double>({0, 1, 0, 0, 0}));
-    EXPECT_EQ(buffer2vector<double>(*logits2->index(2)), std::vector<double>({0, 0, 1, 0, 0}));
-    EXPECT_EQ(buffer2vector<double>(*logits2->index(3)), std::vector<double>({0, 0, 0, 1, 0}));
+    float neg_inf = -std::numeric_limits<float>::max();
+
+    EXPECT_SIMILAR(buffer2vector<double>(*logits2->index(0)), std::vector<double>({1, neg_inf, neg_inf, neg_inf, neg_inf}), 1e-6);
+    EXPECT_SIMILAR(buffer2vector<double>(*logits2->index(1)), std::vector<double>({neg_inf, 1, neg_inf, neg_inf, neg_inf}), 1e-6);
+    EXPECT_SIMILAR(buffer2vector<double>(*logits2->index(2)), std::vector<double>({neg_inf, neg_inf, 1, neg_inf, neg_inf}), 1e-6);
+    EXPECT_SIMILAR(buffer2vector<double>(*logits2->index(3)), std::vector<double>({neg_inf, neg_inf, neg_inf, 1, neg_inf}), 1e-6);
 }
 
 TEST_F(SamplerTest, testUpdateStatus) {
@@ -258,24 +259,12 @@ TEST_F(SamplerTest, testUpdateStatus) {
 }
 
 
-std::string tensorToString(const at::Tensor& tensor, size_t size) {
-    std::ostringstream oss;
-
-    if (tensor.dim() != 1 || tensor.size(0) != size) {
-        return "Error: Tensor must be one-dimensional with size 10.";
-    }
-
-    oss << "Tensor values: [";
-
+std::vector<float> tensorToVector(const at::Tensor& tensor, size_t size) {
+    std::vector<float> vec(size, 0);
     for (size_t i = 0; i < tensor.size(0); ++i) {
-        oss << tensor[i].item<int>();
-        if (i < tensor.size(0) - 1) {
-            oss << ", ";
-        }
+        vec[i] = tensor[i].item<float>();
     }
-
-    oss << "]";
-    return oss.str();
+    return vec;
 }
 
 TEST_F(SamplerTest, testSetVocabMask) {
@@ -303,14 +292,18 @@ TEST_F(SamplerTest, testSetVocabMask) {
                 vocab_size, i % 2 == 0 ? true : false);
         }
 
-        string expect_tensor_string_0 = "Tensor values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
-        string expect_tensor_string_1 = "Tensor values: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]";
-        string expect_tensor_string_2 = "Tensor values: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0]";
-        EXPECT_EQ(expect_tensor_string_1, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10));
-        EXPECT_EQ(expect_tensor_string_2, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10));
-        EXPECT_EQ(expect_tensor_string_0, tensorToString(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10));
+        float neg_inf = -std::numeric_limits<float>::max();
+        
+        std::vector<float> expect_vec_0 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        std::vector<float> expect_vec_1 = {neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, 1, neg_inf, neg_inf, neg_inf, neg_inf};
+        std::vector<float> expect_vec_2 = {neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, 1, neg_inf, neg_inf, neg_inf};
+        EXPECT_SIMILAR(expect_vec_1, tensorToVector(Buffer2torchTensor(*sampler_inputs.logits->index(0), false), 10), 1e-6);
+        EXPECT_SIMILAR(expect_vec_0, tensorToVector(Buffer2torchTensor(*sampler_inputs.logits->index(1), false), 10), 1e-6);
+        EXPECT_SIMILAR(expect_vec_2, tensorToVector(Buffer2torchTensor(*sampler_inputs.logits->index(2), false), 10), 1e-6);
+        EXPECT_SIMILAR(expect_vec_0, tensorToVector(Buffer2torchTensor(*sampler_inputs.logits->index(3), false), 10), 1e-6);
     }
 }
+
+#undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm
