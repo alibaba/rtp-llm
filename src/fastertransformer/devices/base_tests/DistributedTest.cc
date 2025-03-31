@@ -16,14 +16,14 @@ public:
         auto device_name = getenv("TEST_USING_DEVICE");
         ASSERT_TRUE(device_name);
         auto device_type = getDeviceType(device_name);
-        auto device_creator = DeviceFactory::getRegistrationMap().at(device_type);
+        auto device_reg = DeviceFactory::getRegistrationMap().at(device_type);
         DeviceInitParams params;
         params.device_id = rank;
         params.tp_rank = rank;
         params.tp_size = world_size;
         params.master_ip = "127.0.0.1";
         params.tp_master_port = port;
-        auto device = device_creator(params);
+        auto device = device_reg.create(params);
 
 #define copy_tensor_to_buffer(t, buf) {        \
         auto buf_host = torchTensor2Buffer(t); \
