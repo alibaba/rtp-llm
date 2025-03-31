@@ -347,6 +347,7 @@ class ModelWeightsLoader:
 
         if self._weights_info._quant_algo.isFp8() and self._weights_info._quant_algo.isGroupwise():
             weight_list = W.int8_attn_weights + W.int8_ffn_weights + W.int8_ffn_weights_2 + W.int8_partial_moe_weights_2 + W.int8_partial_moe_weights
+            weight_list = [[_[0],_[1]]for _ in set([(_[0],_[1]) for _ in weight_list ])]
             logging.info(f"load weight: {weight_list}");
             load_weight([_[0] for _ in weight_list], torch.float8_e4m3fn)
             load_weight([_[1] for _ in weight_list], torch.float32)
@@ -491,7 +492,7 @@ class ModelWeightsLoader:
 
                 if use_fp32:
                     tensor = tensor.float()
-
+                logging.debug(f"load qweight tensor {weight} in layer {layer_id} and shape is {tensor.shape}, dtype:{tensor.dtype}, datatype:{self._data_type}")
                 results.append((layer_id, weight.name, tensor))
             except Exception as e:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
