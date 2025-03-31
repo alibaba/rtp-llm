@@ -240,8 +240,8 @@ class WorkerInfo(object):
 
     def __str__(self):
         return f"""
-        WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port} http_port={self.http_port} rpc_port={self.rpc_server_port} \n
-        backend_server_port={self.backend_server_port}
+        WorkerInfo: [ip={self.ip} server_port={self.server_port} gang_hb_port={self.gang_hb_port}
+        http_port={self.http_port} rpc_port={self.rpc_server_port} backend_server_port={self.backend_server_port}
         cache_store_listen_port={self.cache_store_listen_port} cache_store_connect_port={self.cache_store_connect_port} remote_rpc_server_port={self.remote_rpc_server_port}
         local_rank={self.local_rank} world_rank={self.world_rank} name={self.name} info={self.info} ]
         """
