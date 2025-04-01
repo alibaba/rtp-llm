@@ -21,10 +21,10 @@ class ConcurrencyController:
     def increment(self) -> None:
         while True:
             with self.lock:
-                self.request_counter.value += 1
                 if self.current_concurrency.value < self.max_concurrency:
                     self.current_concurrency.value += 1
-                    break
+                    self.request_counter.value += 1
+                    return self.request_counter.value
 
             if not self.block:
                 raise ConcurrencyException(f"Concurrency limit {self.max_concurrency} reached")

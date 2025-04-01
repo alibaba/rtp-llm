@@ -110,24 +110,26 @@ class BackendServer(object):
         start_time = time.time()
         if isinstance(request, str):
             request = json.loads(request)
-        request[request_id_field_name] = self._global_controller.get_request_counter()
+        request[request_id_field_name] = self._global_controller.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+
         try:
-            with self._global_controller:
-                assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
-                result, logable_result = await self._embedding_endpoint.handle(request)
-                # do not log result since too big
-                if logable_result is not None:
-                    self._access_logger.log_success_access(request, logable_result)
-                end_time = time.time()
-                kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
-                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
-                usage = result.get('usage', {})
-                if not isinstance(usage, dict):
-                    usage = {}
-                return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
+            assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
+            result, logable_result = await self._embedding_endpoint.handle(request)
+            # do not log result since too big
+            if logable_result is not None:
+                self._access_logger.log_success_access(request, logable_result)
+            end_time = time.time()
+            kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
+            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+            usage = result.get('usage', {})
+            if not isinstance(usage, dict):
+                usage = {}
+            return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
         except BaseException as e:
             return self._handle_exception(request, e)
+        finally:
+            self._global_controller.decrement()
 
     async def similarity(self, request: Dict[str, Any], raw_request: Request):
         return await self.embedding(request, raw_request)
@@ -182,10 +184,11 @@ class BackendServer(object):
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()
-        request[request_id_field_name] = self._global_controller.get_request_counter()
+        request[request_id_field_name] = self._global_controller.increment()
         lora_infos: Dict[str, Any] = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})
+
         try:
             assert self._lora_manager
             with Timer() as t, self.thread_lock_:
@@ -204,6 +207,9 @@ class BackendServer(object):
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
             rep = ORJSONResponse(format_exception(e), status_code=error_code)
+        finally:
+            self._global_controller.decrement()
+            
         return rep
 
     def add_lora(self, req: Dict[str, str]):

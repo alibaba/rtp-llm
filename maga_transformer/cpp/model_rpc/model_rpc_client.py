@@ -25,8 +25,6 @@ from maga_transformer.utils.grpc_util import trans_option, trans_option_cast, tr
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
 from maga_transformer.utils.concurrency_controller import ConcurrencyException, get_global_controller
 
-request_counter = AtomicCounter()
-
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
 def trans_input(input_py: GenerateInput):
@@ -169,7 +167,7 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         try:
-            async with grpc.aio.insecure_channel(self._addresses[request_counter.increment() % len(self._addresses)]) as channel:
+            async with grpc.aio.insecure_channel(self._addresses[input_py.request_id % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(input_pb, timeout=grpc_timeout_seconds)
                 # 调用服务器方法并接收流式响应

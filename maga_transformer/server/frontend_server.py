@@ -43,7 +43,6 @@ class FrontendServer(object):
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
-        logging.info(f"global_controller here2 = {self._global_controller}")
         kmonitor.init()
 
     def start(self):
@@ -107,8 +106,9 @@ class FrontendServer(object):
             request_id = req['master_info'].get("request_id")
             check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
             req[request_id_field_name] = request_id
+            self._global_controller.increment()
         else:
-            req[request_id_field_name] = self._global_controller.get_request_counter()
+            req[request_id_field_name] = self._global_controller.increment()
 
         def generate_call():
             assert self._frontend_worker is not None
@@ -127,8 +127,9 @@ class FrontendServer(object):
         if request.master_info is not None:
             request_id = request.master_info.get("request_id")
             check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
+            self._global_controller.increment()
         else:
-            request_id = self._global_controller.get_request_counter()
+            request_id = self._global_controller.increment()
         def generate_call():
             assert (self._openai_endpoint != None)
             response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
@@ -169,26 +170,26 @@ class FrontendServer(object):
                 last_iterate_time = current_time_ms()
                 first_token = True
                 iter_count = 0
-                async for x in response_generator:
+                async for response in response_generator:
                     end_time = current_time_ms()
                     if first_token:
                         first_token = False
                         kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, end_time - last_iterate_time)
                     else:
                         step_output_len = 1
-                        if hasattr(x, 'aux_info'):
-                            if isinstance(x.aux_info, list):
+                        if hasattr(response, 'aux_info'):
+                            if isinstance(response.aux_info, list):
                                 step_output_len = 0
-                                for info in x.aux_info:
+                                for info in response.aux_info:
                                     step_output_len += info.get('step_output_len', 1)
-                            elif isinstance(x.aux_info, dict):
-                                step_output_len = max(x.aux_info.get('step_output_len', 1), step_output_len)
+                            elif isinstance(response.aux_info, dict):
+                                step_output_len = max(response.aux_info.get('step_output_len', 1), step_output_len)
 
                         kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, (end_time - last_iterate_time) / step_output_len)
                     kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
                     last_iterate_time = end_time
                     iter_count += 1
-                    yield x
+                    yield response
                 kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, current_time_ms()-start_time)
                 kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1)
@@ -217,7 +218,6 @@ class FrontendServer(object):
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": req.get("source", "unkown")})
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
-        self._global_controller.increment()
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = await self._call_generate_with_report(generate_call)
