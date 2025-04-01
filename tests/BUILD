@@ -147,7 +147,7 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
