@@ -68,5 +68,5 @@ class AccessLogger():
         if not self.is_private_request(request):
             self.log_access(request, response_log)
         else:
-            self.log_access({}, response_log)
+            self.log_access({request_id_field_name : request[request_id_field_name]}, response_log)
 
