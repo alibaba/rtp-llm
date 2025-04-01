@@ -205,16 +205,16 @@ class GangServer:
 
         init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 45))
         # 使用ProcessGroupNCCL自带的health check进行一次同步+nccl检测
-        if os.environ.get('FAKE_GANG_ENV', None) == None:
-            os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
-            dist.init_process_group(backend=dist.Backend.NCCL,
-                                    init_method=master_url,
-                                    rank=g_parallel_info.world_rank,
-                                    world_size=g_parallel_info.world_size,
-                                    timeout=timedelta(seconds=init_process_timeout))
-        else:
+        # if os.environ.get('FAKE_GANG_ENV', None) == None:
+        #     os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
+        #     dist.init_process_group(backend=dist.Backend.NCCL,
+        #                             init_method=master_url,
+        #                             rank=g_parallel_info.world_rank,
+        #                             world_size=g_parallel_info.world_size,
+        #                             timeout=timedelta(seconds=init_process_timeout))
+        # else:
             # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步
-            self.memory_barrier(master_url, timeout=init_process_timeout)
+        self.memory_barrier(master_url, timeout=init_process_timeout)
 
         self.start_health_check()
         logging.info(f'gang init done')
