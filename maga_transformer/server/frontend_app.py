@@ -126,7 +126,7 @@ class FrontendApp(object):
 
         @app.get("/")
         async def health():
-            return request_server("get", g_worker_info.backend_server_port, "/", {})
+            return request_server("get", g_worker_info.backend_server_port, "", {})
 
         @app.get("/worker_status")
         def worker_status():
@@ -154,7 +154,7 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 if self.frontend_server.is_embedding:
-                    return request_server("post", g_worker_info.backend_server_port, "/v1/embeddings", req)
+                    return request_server("post", g_worker_info.backend_server_port, "v1/embeddings", req)
                 else:
                     return await self.frontend_server.inference(req, raw_request)
             finally:
