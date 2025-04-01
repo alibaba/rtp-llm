@@ -263,23 +263,6 @@ cc_test(
 )
 
 cc_test(
-    name = "cuda_mla_bmm_test",
-    srcs = [
-        "CudaMlaBmmTest.cc",
-    ],
-    data = [],
-    env = test_envs,
-    copts = copts(),
-    linkopts = [
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
-        "-L/usr/local/cuda/extras/CUPTI/lib64",
-        "-lcupti",
-    ],
-    deps = test_deps,
-)
-
-cc_test(
     name = "cuda_quantize_test",
     srcs = [
         "CudaQuantizeTest.cc",

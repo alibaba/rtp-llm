@@ -1,11 +1,18 @@
 #pragma once
 
-#include "src/fastertransformer/deep_gemm/include/fp8_gemm.cuh"
+#include <cuda_runtime.h>
 #include "src/fastertransformer/deep_gemm/utils.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
+#include <cuda_fp8.h>
+#include <cuda_bf16.h>
+
+#if CUDA_VERSION >= 12060
+#include "src/fastertransformer/deep_gemm/include/fp8_gemm.cuh"
+#endif
 
 namespace fastertransformer {
 
+#if CUDA_VERSION >= 12060
 #define DISPATCH_NUM_STAGES_AND_TMA(NUM_STAGES, NUM_TMA_MULTICAST) \
     if (num_stages == NUM_STAGES && num_tma_multicast == NUM_TMA_MULTICAST) { \
         using gemm_runner = deep_gemm::Gemm<N, K, BM, BN, BK, GROUP_NUM, NUM_STAGES, NUM_TMA_MULTICAST, GEMM_TYPE>; \
@@ -59,6 +66,8 @@ void dispatchNumStagesAndTma(__nv_bfloat16*         output,
     DISPATCH_BLOCK_N(BM, 96, BK) \
     DISPATCH_BLOCK_N(BM, 128, BK)
 
+#endif
+
 template<uint32_t N, uint32_t K, uint32_t GROUP_NUM, DeepGemmType GEMM_TYPE>
 void dispatchBlockNK(__nv_bfloat16*         output,
                      __nv_fp8_e4m3*         lhs,
@@ -76,8 +85,10 @@ void dispatchBlockNK(__nv_bfloat16*         output,
                      uint32_t               num_sms,
                      uint32_t               smem_size) 
 {
+#if CUDA_VERSION >= 12060
     DISPATCH_BLOCK_MK(64, 128)
     DISPATCH_BLOCK_MK(128, 128)
     FT_FAIL("DISPATCH_DEEP_GEMM(BLOCK_M=%u, BLOCK_N=%u, BLOCK_K=%u) no template found", bm, bn, bk);
+#endif
 }
 }

@@ -14,7 +14,11 @@ bool TorchCudaAllocator::initialized() {
     return device_;
 }
 
+#ifdef UNDER_TORCH_2_6
 at::DataPtr TorchCudaAllocator::allocate(size_t size) {
+#else 
+at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
+#endif
     auto buffer = device_->allocateBuffer({size}, {"torch_allocated"});
     auto buffer_ctx = new BufferPtr(buffer);
     const auto ptr = buffer->data();
@@ -66,11 +70,11 @@ c10::cuda::CUDACachingAllocator::ShareableHandle TorchCudaAllocator::shareIpcHan
     throw std::runtime_error("not implemented.");
 }
 #else
-void TorchCudaAllocator::beginAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id, std::function<bool(cudaStream_t)> filter) {
+void TorchCudaAllocator::beginAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream, at::cuda::MempoolId_t mempool_id) {
     throw std::runtime_error("not implemented.");
 };
   
-void TorchCudaAllocator::endAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id){
+void TorchCudaAllocator::endAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream) {
     throw std::runtime_error("not implemented.");
 }
 #endif

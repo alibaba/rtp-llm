@@ -16,7 +16,6 @@ cc_library(
         "CudaWeights.cc",
         "CudaAttentionOp.cc",
         "CudaFfnLayer.cc",
-        "CudaFP8Moe.cc",
         "CudaMlaAttentionOp.cc",
         "CudaGemmOp.cc",
         "CudaPrefillAttention.cc",
@@ -74,6 +73,7 @@ cc_library(
         "CudaSampleOp.cc",
         "CudaSoftmaxOp.cc",
         "CudaBeamSearchOp.cc",
+        "CudaFP8Moe.cc",
     ]),
     deps = [
         ":cuda_register",

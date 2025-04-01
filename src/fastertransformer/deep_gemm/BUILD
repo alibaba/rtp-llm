@@ -134,15 +134,21 @@ gen_cpp_code("deepgemm_inst", [N_K_GROUP_TYPE],
 
 cc_library(
     name = "deep_gemm_cu",
-    hdrs = glob([
+    hdrs = [
         "deep_gemm_template.h",
-        "include/*.cuh",
         "utils.h",
-
-    ]),
-    srcs = [
-        ":deepgemm_inst"
-    ],
+    ] + select({
+        "@//:using_cuda12": glob([
+            "include/*.cuh"
+        ]),
+        "//conditions:default": [],
+    }),
+    srcs = select({
+        "@//:using_cuda12": [
+            "deepgemm_inst",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         "//src/fastertransformer/core:buffer_torch",
         "//src/fastertransformer/cuda:nvtx",

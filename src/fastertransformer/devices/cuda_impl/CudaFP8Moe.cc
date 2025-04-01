@@ -1,17 +1,22 @@
+#include <cuda.h>
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#if CUDA_VERSION >= 12060
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
 #include "src/fastertransformer/deep_gemm/DeepGemmPlugin.h"
 
 using namespace std;
 namespace trt = tensorrt_llm::kernels;
+#endif
+
 namespace fastertransformer {
 
 FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+#if CUDA_VERSION >= 12060
     using T = __nv_bfloat16;
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     RUNTIME_ASSERT_OP_ARG(params.input.isQBuffer(), "fp8 moe ffn must be qbuffer");
@@ -188,6 +193,10 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 
     sync_check_cuda_error();
     return {output};
+#else
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    return {nullptr};
+#endif
 }
 
 }  // namespace fastertransformer

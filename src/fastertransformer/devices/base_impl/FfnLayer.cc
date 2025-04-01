@@ -91,6 +91,8 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
         MoeDispatchOutput dispatched_output =
             epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
         return moeFfnAndCombine(params, dispatched_output);
+    } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        return moeFfnFp8(params, gate_output);
     } else {
         return moeFfn(params, gate_output);
     }

@@ -30,8 +30,8 @@ torch::Tensor CudaDevice::QInputBatchMatmulWrapper(const MlaDecoderAttentionPara
 
         auto q_nope_t_pad = torch::zeros({(int64_t)m_pad, (int64_t)params.configs.head_num, (int64_t)params.configs.nope_head_dim}, torch::TensorOptions().dtype(q_nope_t.dtype()).device(torch::kCUDA));
         q_nope_t_pad.index_put_({torch::indexing::Slice(0, m)}, q_nope_t);
-	FT_LOG_DEBUG("QInputBatchMatmulWrapper params.configs.head_num * m_pad:%lu, params.configs.nope_head_dim:%lu\n", params.configs.head_num * m_pad, params.configs.nope_head_dim);
-	FT_LOG_DEBUG("kc_weight->kernel:%s\n", params.weights.kc_weight->kernel->debugString().c_str());
+        FT_LOG_DEBUG("QInputBatchMatmulWrapper params.configs.head_num * m_pad:%lu, params.configs.nope_head_dim:%lu\n", params.configs.head_num * m_pad, params.configs.nope_head_dim);
+        FT_LOG_DEBUG("kc_weight->kernel:%s\n", params.weights.kc_weight->kernel->debugString().c_str());
         q_nope_t_pad = q_nope_t_pad.transpose(0, 1).reshape({(int64_t)(params.configs.head_num * m_pad), (int64_t)params.configs.nope_head_dim}).contiguous();
         auto q_nope_t_pad_quant = quantize({*torchTensor2Buffer(q_nope_t_pad),
                                             DataType::TYPE_FP8_E4M3,
@@ -69,7 +69,7 @@ params) {
 
         auto output_tensor = torch::empty({(int64_t)params.configs.head_num * (int64_t)m_pad, (int64_t)params.configs.v_head_dim}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
         // num_groups = head_num
-	FT_LOG_DEBUG("params.weights.vc_weight->kernel:%s\n", params.weights.vc_weight->kernel->debugString().c_str());
+        FT_LOG_DEBUG("params.weights.vc_weight->kernel:%s\n", params.weights.vc_weight->kernel->debugString().c_str());
         DeepGemmPlugin::groupedGemmFp8Contiguous(*attn_out_t_pad_quant, *params.weights.vc_weight->kernel, *torchTensor2Buffer(output_tensor), *params.bmm_indices, stream_);
 
         return output_tensor.reshape({(int64_t)params.configs.head_num, (int64_t)m_pad, (int64_t)params.configs.v_head_dim}).transpose(0, 1).index({torch::indexing::Slice(0, m)}).contiguous();
