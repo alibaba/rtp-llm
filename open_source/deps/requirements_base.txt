@@ -50,3 +50,5 @@ pillow-heif
 pillow-avif-plugin
 setproctitle
 bitsandbytes>=0.41.0
+portalocker
+concurrent_log_handler

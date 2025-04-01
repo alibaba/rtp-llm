@@ -3413,6 +3413,16 @@ zstandard==0.23.0 \
     --hash=sha256:fd7699e8fd9969f455ef2926221e0233f81a2542921471382e77a9e2f2b57f4b \
     --hash=sha256:fe3b385d996ee0822fd46528d9f0443b880d4d05528fd26a9119a54ec3f91c69
     # via autoawq
+concurrent-log-handler==0.9.25 \
+    --hash=sha256:157bee12914aa2a72246d1d0641ce07c1aa7a55faa3322bed02f21e60395eb82 \
+    --hash=sha256:1e2c6f021414e214d3dac66107894827a3e78db63018304a4f29e55ba549ac22
+    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+portalocker==3.1.1 \
+    --hash=sha256:80e984e24de292ff258a5bea0e4f3f778fff84c0ae1275dbaebc4658de4aacb3 \
+    --hash=sha256:ec20f6dda2ad9ce89fa399a5f31f4f1495f515958f0cb7ca6543cef7bb5a749e
+    # via
+    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   concurrent-log-handler
 
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==60.5.0 \

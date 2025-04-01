@@ -15,8 +15,8 @@ UVICORN_LOGGING_CONFIG = {
             "formatter": "access",
             "class": "logging.handlers.RotatingFileHandler",
             "filename": "logs/uvicorn_access.log",
-            "maxBytes": 256 * 1024,
-            "backupCount": 4,
+            "maxBytes": 50 * 1024 * 1024,
+            "backupCount": 10,
         },
     },
     "loggers": {

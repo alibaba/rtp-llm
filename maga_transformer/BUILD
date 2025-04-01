@@ -89,7 +89,9 @@ requirement([
     "amdsmi",
     "fast-safetensors",
     "setproctitle",
-    "bitsandbytes"
+    "bitsandbytes",
+    "portalocker",
+    "concurrent_log_handler"
 ] + tensorrt)
 
 
@@ -291,6 +293,8 @@ py_library(
         ":openai",
         ":librosa",
         ":setproctitle",
+        ":portalocker",
+        ":concurrent_log_handler",
     ],
     imports = ["."],
 )
@@ -425,6 +429,8 @@ whl_reqs = [
     "av",
     "setproctitle",
     "bitsandbytes",
+    "portalocker",
+    "concurrent_log_handler",
 ] + whl_deps() + platform_deps() + xft_dep 
 
 # target for wheel
