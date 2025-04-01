@@ -92,7 +92,11 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
             epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
         return moeFfnAndCombine(params, dispatched_output);
     } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        return moeFfnFp8(params, gate_output);
+        BufferPtr hidden_fp8 =
+                quantize({params.input, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        auto moe_ffn_params = FfnLayerParams(
+                {*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
+        return moeFfnFp8(moe_ffn_params, gate_output);
     } else {
         return moeFfn(params, gate_output);
     }
@@ -138,12 +142,16 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
     const auto& moe_conf = params.configs.moe_configs.value();
     auto hidden_states = dispatched_output.hidden;
     if (hidden_states->shape()[0]) {
-        auto moe_ffn_params = FfnLayerParams(
-            {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
         if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-            hidden_states =
+            BufferPtr hidden_fp8 =
+                    quantize({*hidden_states, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+            auto moe_ffn_params = FfnLayerParams(
+                {*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
+            hidden_states = 
                 moeFfnFp8(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
         } else {
+            auto moe_ffn_params = FfnLayerParams(
+                {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
             hidden_states =
                 moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;                
         }

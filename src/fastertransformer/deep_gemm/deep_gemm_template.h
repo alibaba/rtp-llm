@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include "src/fastertransformer/deep_gemm/utils.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
