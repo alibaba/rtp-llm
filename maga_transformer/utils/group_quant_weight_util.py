@@ -52,17 +52,7 @@ def get_qkv_quant_weight_info(weights: List[CkptWeightInfo]) -> List[WeightInfo]
                        identity),
             WeightInfo(W.attn_qkv_s, [CkptWeightInfo(qkv_name + QS_SUFFIX)],
                        identity)
-        ]
-
-def get_qkv_quant_weight_info(weights: List[CkptWeightInfo], quant_algo: Any, QW_SUFFIX = '.qweight', QZ_SUFFIX = '.qzeros', QS_SUFFIX = '.scales', W_SUFFIX = '.weight') -> List[WeightInfo]:
-    assert weights[0].name.endswith(W_SUFFIX)
-    w_name = weights[0].name[:-len(W_SUFFIX)]
-    group_size = quant_algo.getGroupSize()
-    pad_div = 32 // quant_algo.getWeightBits()
-    is_awq = quant_algo.isAwq()
-    is_gptq = quant_algo.isGptq()
-    is_fp8 = quant_algo.isFp8()
-    
+        ]    
 
 def get_ffn_quant_weight_info(weights: List[CkptWeightInfo], quant_algo: Any,
                               ffn_w_name: str, inter_padding_size: int) -> List[WeightInfo]:

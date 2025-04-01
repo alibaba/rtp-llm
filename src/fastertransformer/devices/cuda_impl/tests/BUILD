@@ -175,7 +175,7 @@ cc_test(
     ],
     copts = copts(),
     deps = test_deps,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
