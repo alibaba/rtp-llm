@@ -54,8 +54,12 @@ struct DeviceInitParams {
     bool enable_sp = false;
     size_t overlap_math_sm_count = 0;
     size_t overlap_comm_type = 0;
-    size_t max_seq_len = 0;
     size_t m_split = 0;
+
+    // to init deepep
+    int64_t max_seq_len = 0;
+    int64_t hidden_size = 0;
+    int64_t num_experts = 0;
 };
 
 // immutable device properties. Can not change since device is initialized.

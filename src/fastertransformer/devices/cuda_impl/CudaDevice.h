@@ -9,6 +9,7 @@
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/cuda/comm_buffer/comm_buffer.h"
+#include "src/fastertransformer/devices/cuda_impl/DeepEPBuffer.h"
 #include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
@@ -168,6 +169,7 @@ private:
     void initMoeRunner(const DataType compute_type, const DataType weights_type);
     void initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
                        const std::string& tp_group_name, NcclParam& nccl_param);
+    bool initDeepEPBuffer();
     void checkUseGroupGemm();
     NcclParam getNcclParam(ParallelMode mode);
     template<typename QuantType>
@@ -232,6 +234,15 @@ public:
 
     torch::Tensor QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params);
     torch::Tensor DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams& params);
+
+    FfnLayerOutput gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output = nullptr);
+    bool initDeepepBuffer();
+    MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
+    FfnLayerOutput deepEpCombine(const MoeCombineParams& params);
+    FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
+    FfnLayerOutput deepEpLLCombine(const MoeCombineParams& params);
+    FfnLayerOutput deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
@@ -319,6 +330,8 @@ private:
     std::unique_ptr<CommBuffer> ffn_ag_scale_comm_buffer_ = nullptr;
     std::unique_ptr<CommBuffer> ffn_rs_comm_buffer_ = nullptr;
 
+    std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
+
 protected:
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;
@@ -329,6 +342,10 @@ protected:
     bool support_trt_fp8_fmha       = false;
     bool use_fp8_fmha_              = false;
     bool use_flashinfer_sample_kernel      = false;
+
+    bool use_deepep_moe = true; // TODO
+    bool use_deepep_low_latency = true; // TODO
+    uint32_t ll_num_max_token_per_rank = 0;
 };
 
 } // namespace fastertransformer

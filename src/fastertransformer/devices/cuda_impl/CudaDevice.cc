@@ -24,7 +24,7 @@ using namespace rtp_llm;
 
 namespace fastertransformer {
 
-CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
+CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
     stream_ = at::cuda::getCurrentCUDAStream().stream();
@@ -48,8 +48,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         if (params.dp_size > 1) {
             master_ip = "127.0.0.1";
         }
-        initNcclParam(params.tp_rank, params.tp_size, master_ip,
-                      params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
+        initNcclParam(
+            params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {
@@ -60,12 +60,20 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         }
     }
     if (params.dp_size > 1 && params.tp_rank == 0) {
-        initNcclParam(params.dp_rank, params.dp_size, params.master_ip,
-                      params.dp_master_port, "RTP_LLM_DP_GROUP_", dp_nccl_param_);
+        initNcclParam(params.dp_rank,
+                      params.dp_size,
+                      params.master_ip,
+                      params.dp_master_port,
+                      "RTP_LLM_DP_GROUP_",
+                      dp_nccl_param_);
     }
     if (params.ep_size > 1) {
-        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank, params.dp_size * params.tp_size, params.master_ip,
-                      params.dp_tp_master_port, "RTP_LLM_DP_TP_GROUP_", dp_tp_nccl_param_);
+        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
+                      params.dp_size * params.tp_size,
+                      params.master_ip,
+                      params.dp_tp_master_port,
+                      "RTP_LLM_DP_TP_GROUP_",
+                      dp_tp_nccl_param_);
     }
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
@@ -84,12 +92,12 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     checkUseFlashinferSampleKernel();
 
     // Initialize custom all reduce communicator
-    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
+    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before
+    // allocator init
     if (tp_nccl_param_.world_size_ > 1) {
-        auto& nccl_param = tp_nccl_param_;
-        FT_LOG_INFO("Initialize tp custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
-        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
-        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        auto&               nccl_param = tp_nccl_param_;
+        std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
+        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     // cudaHostMalloc needs page table on GPU memory, retain this part first.
@@ -114,21 +122,23 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         size_t free_bytes, total_bytes;
         check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
-        tracker_params.real_allocator = allocator_ptr;
-        tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0
-            ? params.device_reserve_memory_bytes
-            : free_bytes + params.device_reserve_memory_bytes;
-        tracker_params.align_size = 16;
+        tracker_params.real_allocator     = allocator_ptr;
+        tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
+                                                params.device_reserve_memory_bytes :
+                                                free_bytes + params.device_reserve_memory_bytes;
+        tracker_params.align_size         = 16;
         FT_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
-                    device_id_, free_bytes, tracker_params.target_track_bytes);
+                    device_id_,
+                    free_bytes,
+                    tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
-        syncAndCheck(); // sync check tracker malloc cuda mem
+        syncAndCheck();  // sync check tracker malloc cuda mem
     } else {
         allocator_.reset(allocator_ptr);
     }
 
     // hijack torch cuda allocator
-    origin_torch_cuda_allocator_ = at::cuda::CUDACachingAllocator::allocator;
+    origin_torch_cuda_allocator_  = at::cuda::CUDACachingAllocator::allocator;
     managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
     at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
 
@@ -175,17 +185,27 @@ void CudaDevice::init() {
     DeviceBase::init();
 
     FT_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer(
-        {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+
+    if (use_deepep_moe) {
+        if (!initDeepEPBuffer()) {
+            FT_CHECK_WITH_INFO(false, "init deepep buffer failed");
+        } else {
+            FT_LOG_INFO("init deepep buffer success");
+        }
+    }
 }
 
-void CudaDevice::initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
-                               const string& group_name, NcclParam& nccl_param) {
-    nccl_param.rank_ = rank;
+void CudaDevice::initNcclParam(size_t             rank,
+                               size_t             world_size,
+                               const std::string& ip,
+                               size_t             port,
+                               const string&      group_name,
+                               NcclParam&         nccl_param) {
+    nccl_param.rank_       = rank;
     nccl_param.world_size_ = world_size;
-    auto tcpStore = createTcpStore(
-            ip, port, world_size, rank);
-    const auto nccl_id = &(nccl_param.nccl_uid_);
+    auto       tcpStore    = createTcpStore(ip, port, world_size, rank);
+    const auto nccl_id     = &(nccl_param.nccl_uid_);
 
     if (rank == 0) {
         FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
@@ -210,15 +230,19 @@ void CudaDevice::syncAndCheck() {
 
 void CudaDevice::syncCommunication(bool timeout) {
     if (tp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
+        FT_LOG_DEBUG(
+            "Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(tp_nccl_param_, stream_, timeout);
     }
     if (dp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
+        FT_LOG_DEBUG(
+            "Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_nccl_param_, stream_, timeout);
     }
     if (dp_tp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.", dp_tp_nccl_param_.rank_, dp_tp_nccl_param_.world_size_);
+        FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
+                     dp_tp_nccl_param_.rank_,
+                     dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
     if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
@@ -257,9 +281,9 @@ void CudaDevice::overlappedComputeBarrier() {
 DeviceProperties CudaDevice::getDeviceProperties() {
     static DeviceProperties* prop = nullptr;
     if (prop == nullptr) {
-        prop = new DeviceProperties();
-        prop->type = DeviceType::Cuda;
-        prop->id = device_id_;
+        prop          = new DeviceProperties();
+        prop->type    = DeviceType::Cuda;
+        prop->id      = device_id_;
         prop->tp_rank = init_params_.tp_rank;
         prop->tp_size = init_params_.tp_size;
         prop->dp_rank = init_params_.dp_rank;
@@ -278,9 +302,9 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
     bool found_cufmha_runner = false;
-    use_fp8_fmha_ = useFp8Fmha(params);
-    DataType fmha_datatype = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.dtype;
-    for (auto& runner: cufmha_runner_pool_) {
+    use_fp8_fmha_            = useFp8Fmha(params);
+    DataType fmha_datatype   = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.dtype;
+    for (auto& runner : cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
                                    params.configs.mask_type,
                                    params.configs.head_num,
@@ -288,7 +312,7 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                                    params.configs.size_per_head,
                                    params.configs.q_scaling / params.configs.softmax_extra_scale,
                                    params.has_alibi_slopes)) {
-            cufmha_runner_ = runner;
+            cufmha_runner_      = runner;
             found_cufmha_runner = true;
             return;
         }
@@ -302,7 +326,7 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                        params.configs.head_num,
                        params.configs.kv_head_num,
                        params.configs.size_per_head,
-                       params.configs.q_scaling / params.configs.softmax_extra_scale, // div scale for DeepSeek V2
+                       params.configs.q_scaling / params.configs.softmax_extra_scale,  // div scale for DeepSeek V2
                        params.has_alibi_slopes,
                        use_trtv1_fmha,
                        use_trtv2_fmha,
@@ -318,16 +342,17 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     fmha_type_ = FMHAType::NONE;
     if (params.dtype == DataType::TYPE_FP32) {
-        fmha_type_ = FMHAType::NONE;
+        fmha_type_       = FMHAType::NONE;
         output.need_mask = true;
     } else if (params.context_batch_size) {
         selectCuFMHARunner(params);
-        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
+        bool paged_kv_fmha =
+            params.diff_qkv_len && params.has_kv_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
             } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
-                    && params.configs.tokens_per_block % 256 == 0) {
+                       && params.configs.tokens_per_block % 256 == 0) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
@@ -345,19 +370,13 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     }
 
     output.flash_infer_attn_params = FlashInferAttnParams::prepareFlashInferAttnParams(
-            this,
-            params.configs,
-            params.sequence_lengths,
-            params.input_lengths,
-            params.kv_cache_block_id,
-            params.dtype);
+        this, params.configs, params.sequence_lengths, params.input_lengths, params.kv_cache_block_id, params.dtype);
 
     return output;
 }
 
 bool CudaDevice::useGroupGemm() const {
     return use_group_gemm;
-
 }
 
 void CudaDevice::bufMemset(Buffer& buf, int val) {
@@ -418,7 +437,7 @@ void CudaDevice::checkUseTrtV2FMHA() {
         FT_LOG_WARNING("TRT FMHA is disabled for by env");
         return;
     }
-    if(CompileConfig::cudart_version < 12000) {
+    if (CompileConfig::cudart_version < 12000) {
         FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
         return;
     }
@@ -440,7 +459,7 @@ void CudaDevice::checkUseTrtV2FMHA() {
 void CudaDevice::checkSupportTrtFp8FMHA() {
     int sm = get_sm();
     if (sm < 90 || !use_trtv2_fmha) {
-      FT_LOG_WARNING("sm is [%d], use_trtv2_fmha:[%d] not support fp8 fmha", sm, use_trtv2_fmha);
+        FT_LOG_WARNING("sm is [%d], use_trtv2_fmha:[%d] not support fp8 fmha", sm, use_trtv2_fmha);
         return;
     }
     FT_LOG_INFO("support fp8 fmha");
@@ -466,11 +485,9 @@ void CudaDevice::checkUseFlashinferSampleKernel() {
     use_flashinfer_sample_kernel = true;
 }
 
-
 void CudaDevice::checkUseMultiBlockMode() {
     if constexpr (CompileConfig::cudart_version < 11070) {
-        FT_LOG_WARNING("MMHA multi_block_mode for cudart_version %d is disabled",
-                        CompileConfig::cudart_version);
+        FT_LOG_WARNING("MMHA multi_block_mode for cudart_version %d is disabled", CompileConfig::cudart_version);
         use_multi_block_mode = false;
         return;
     }
@@ -498,15 +515,14 @@ void CudaDevice::checkUseGroupGemm() {
 
 MemoryStatus CudaDevice::getDeviceMemoryStatus() {
     MemoryStatus status;
-    size_t total_bytes;
-    auto error = cudaMemGetInfo(&status.free_bytes, &total_bytes);
+    size_t       total_bytes;
+    auto         error = cudaMemGetInfo(&status.free_bytes, &total_bytes);
     FT_CHECK(error == cudaSuccess);
     status.used_bytes = total_bytes - status.free_bytes;
     return status;
 }
 
-nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype)
- {
+nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype) {
     switch (dtype) {
         case fastertransformer::DataType::TYPE_FP16 : return nvinfer1::DataType::kHALF;
         case fastertransformer::DataType::TYPE_BF16 : return nvinfer1::DataType::kBF16;
@@ -522,7 +538,7 @@ DeviceEventPtr CudaDevice::createEvent() {
     return std::make_unique<CudaEvent>(stream_);
 }
 
-CudaEvent::CudaEvent(cudaStream_t stream) : stream_(stream) {
+CudaEvent::CudaEvent(cudaStream_t stream): stream_(stream) {
     check_cuda_error(cudaEventCreate(&event_));
     check_cuda_error(cudaEventRecord(event_, stream));
 }
@@ -556,7 +572,7 @@ void CudaDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
     if (attn_rs_comm_buffer_) {
         return;
     }
-    
+
     FT_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
             params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden, params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale, params.enable_ffn_tp);
 
@@ -587,7 +603,7 @@ void CudaDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
         std::vector<size_t> ffn_ag_buffer_shape = {m, params.ffn_ag_hidden};
         ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
-    
+
         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
         if (params.enable_per_token_scale) {
             std::vector<size_t> ffn_ag_scale_shape = {m, 1};

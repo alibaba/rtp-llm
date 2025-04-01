@@ -7,6 +7,24 @@ flashinfer_deps()
 flashmla_deps()
 
 cc_library(
+    name = "deep_ep_buffer",
+    hdrs = [
+        "DeepEPDefs.h",
+        "DeepEPBuffer.h",
+    ],
+    srcs = [
+        "DeepEPBuffer.cc",
+    ],
+    deps = [
+        "//src/fastertransformer/devices:devices_base",
+        "//src/fastertransformer/devices:device_utils",
+        "//src/fastertransformer/core:torch_cuda_allocator",
+        "//:th_utils",
+        "//3rdparty/deep_ep:deep_ep",
+    ],
+)
+
+cc_library(
     name = "gpu_base",
     hdrs = glob([
         "CudaDevice.h",
@@ -23,6 +41,8 @@ cc_library(
         "CudaNvtxOp.cc",
         "CudaLoraLinearWithActOp.cc",
         "CudaLoraLinear.cc"
+        "CudaDeepEPLLFfnLayer.cc",
+        "CudaDeepEPFfnLayer.cc",
     ]),
     deps = [
         "//src/fastertransformer/devices:devices_base",
@@ -43,6 +63,7 @@ cc_library(
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
         ":flashmla",
+        ":deep_ep_buffer",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

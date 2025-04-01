@@ -73,26 +73,25 @@ void CudaDevice::noBlockCopy(const CopyParams& params) {
 }
 
 TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
-    const auto& input = params.input;
-    const auto data_type = input.type();
-    const auto shape = input.shape();
-    cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    const auto&  input     = params.input;
+    const auto   data_type = input.type();
+    const auto   shape     = input.shape();
+    cudaStream_t stream    = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
     RUNTIME_ASSERT_OP_ARG(shape.size() == 2 || shape.size() == 3,
-        "You can only transpose a 2D buffer, but got [%s]", input.debugString().c_str());
+                          "You can only transpose a 2D buffer, but got [%s]",
+                          input.debugString().c_str());
     if (shape.size() == 2) {
         auto output = allocateBuffer({data_type, {shape[1], shape[0]}});
         if (output->sizeBytes()) {
-            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
-                                                output->data(), input.data(), shape[0], shape[1], stream
-                                                );
+            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
+                data_type, invokeTransposeAxis01, output->data(), input.data(), shape[0], shape[1], stream);
         }
         return output;
     } else {
         auto output = allocateBuffer({data_type, {shape[1], shape[0], shape[2]}});
         if (output->sizeBytes()) {
-            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
-                                                output->data(), input.data(), shape[0], shape[1], shape[2], stream
-                                                );
+            DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
+                data_type, invokeTransposeAxis012, output->data(), input.data(), shape[0], shape[1], shape[2], stream);
         }
         return output;
     }
@@ -103,10 +102,10 @@ inline DstT castTo(SrcT value) {
     return static_cast<DstT>(value);
 }
 
-#define SPECIALIZE_CAST_TO(DstT, SrcT)             \
-    template<>                                     \
-    inline DstT castTo<DstT, SrcT>(SrcT value) {   \
-        return static_cast<DstT>((float)value);    \
+#define SPECIALIZE_CAST_TO(DstT, SrcT)                                                                                 \
+    template<>                                                                                                         \
+    inline DstT castTo<DstT, SrcT>(SrcT value) {                                                                       \
+        return static_cast<DstT>((float)value);                                                                        \
     }
 
 SPECIALIZE_CAST_TO(int64_t, __half);
@@ -132,7 +131,7 @@ SPECIALIZE_CAST_TO(__nv_bfloat16, uint32_t)
 template<typename DstT, typename SrcT>
 void convertType(const void* dst, void* src, size_t size) {
     const auto src_ptr = (const SrcT*)(src);
-    auto dst_ptr = (DstT*)(dst);
+    auto       dst_ptr = (DstT*)(dst);
 
     for (size_t i = 0; i < size; ++i) {
         dst_ptr[i] = castTo<DstT>(src_ptr[i]);
@@ -145,13 +144,12 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
         return input;
     }
 
-    auto alloc_type = getMemAllocationType(input->where());
-    auto host_input = (alloc_type == AllocationType::HOST) ? input : clone({*input, AllocationType::HOST});
+    auto alloc_type  = getMemAllocationType(input->where());
+    auto host_input  = (alloc_type == AllocationType::HOST) ? input : clone({*input, AllocationType::HOST});
     auto host_output = allocateBuffer({params.type, input->shape(), AllocationType::HOST});
     syncAndCheck();
-    DISPATCH_CUDA_FUNCTION_TWO_TYPES(host_output->type(), input->type(), convertType,
-        host_output->data(), host_input->data(), host_input->size()
-    );
+    DISPATCH_CUDA_FUNCTION_TWO_TYPES(
+        host_output->type(), input->type(), convertType, host_output->data(), host_input->data(), host_input->size());
 
     auto output = (alloc_type == AllocationType::HOST) ? host_output : clone({*host_output, alloc_type});
     return {output};
@@ -200,13 +198,11 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
         m = A.shape()[0];
         n = B.size() / m;
     } else {
-        RUNTIME_ASSERT_OP_ARG(false,
-            "multiply can not be applied to A[%s] and B[%s]",
-            A.debugString().c_str(), B.debugString().c_str());
+        RUNTIME_ASSERT_OP_ARG(
+            false, "multiply can not be applied to A[%s] and B[%s]", A.debugString().c_str(), B.debugString().c_str());
     }
 
-    RUNTIME_ASSERT_OP_ARG(A.type() == B.type(),
-                          "A and B must have same type, but got %d vs %d", A.type(), B.type());
+    RUNTIME_ASSERT_OP_ARG(A.type() == B.type(), "A and B must have same type, but got %d vs %d", A.type(), B.type());
     const auto data_type = A.type();
 
     BufferPtr output;
@@ -223,16 +219,7 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
         output = allocateBuffer({data_type, B.shape()});
     }
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-        data_type,
-        invokeScaledDot,
-        output->data(),
-        B.data(),
-        A.data(),
-        m,
-        n,
-        stream_
-    );
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeScaledDot, output->data(), B.data(), A.data(), m, n, stream_);
 
     printBufferData(*output, "multiply_output");
 
@@ -278,20 +265,32 @@ SplitOutput CudaDevice::split(const SplitParams& params) {
 
 inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
-        case DataType::TYPE_BOOL: return ncclInt8;
-        case DataType::TYPE_INT8: return ncclInt8;
-        case DataType::TYPE_QINT8: return ncclInt8;
-        case DataType::TYPE_INT32: return ncclInt32;
-        case DataType::TYPE_INT64: return ncclInt64;
-        case DataType::TYPE_BYTES: return ncclChar;
-        case DataType::TYPE_UINT8: return ncclUint8;
-        case DataType::TYPE_UINT32: return ncclUint32;
-        case DataType::TYPE_UINT64: return ncclUint64;
-        case DataType::TYPE_FP16: return ncclFloat16;
-        case DataType::TYPE_FP32: return ncclFloat32;
-        case DataType::TYPE_FP64: return ncclFloat64;
-        case DataType::TYPE_BF16: return ncclBfloat16;
-        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        case DataType::TYPE_BOOL:
+            return ncclInt8;
+        case DataType::TYPE_INT8:
+            return ncclInt8;
+        case DataType::TYPE_INT32:
+            return ncclInt32;
+        case DataType::TYPE_INT64:
+            return ncclInt64;
+        case DataType::TYPE_BYTES:
+            return ncclChar;
+        case DataType::TYPE_UINT8:
+            return ncclUint8;
+        case DataType::TYPE_UINT32:
+            return ncclUint32;
+        case DataType::TYPE_UINT64:
+            return ncclUint64;
+        case DataType::TYPE_FP16:
+            return ncclFloat16;
+        case DataType::TYPE_FP32:
+            return ncclFloat32;
+        case DataType::TYPE_FP64:
+            return ncclFloat64;
+        case DataType::TYPE_BF16:
+            return ncclBfloat16;
+        default:
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }
 
@@ -305,6 +304,8 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
             return dp_tp_nccl_param_;
         case ParallelMode::FFN_TP:
             return ffn_tp_nccl_param_;
+        case ParallelMode::EP:
+            return dp_tp_nccl_param_;
         default:
             FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -317,17 +318,14 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
     if (tp_nccl_param_.world_size_ < 2) {
         return;
     }
-    const auto stream = (params.overlapped && init_params_.enable_comm_overlap)
-                      ? communication_stream_
-                      : stream_;
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
 
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.buffers.size(); ++i) {
-        auto& buffer = params.buffers[i];
-        auto root = params.root;
-        auto nccl_data_type = getNcclDataType(buffer->type());
-        NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root,
-                            tp_nccl_param_.nccl_comm_, stream));
+        auto& buffer         = params.buffers[i];
+        auto  root           = params.root;
+        auto  nccl_data_type = getNcclDataType(buffer->type());
+        NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root, tp_nccl_param_.nccl_comm_, stream));
     }
     NCCLCHECK(ncclGroupEnd());
 }
@@ -338,18 +336,18 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         return AllReduceOutput{params.buffer};
     }
 
-    const auto stream = ((params.overlapped || params.mode == ParallelMode::DP_AND_TP)
-                         && init_params_.enable_comm_overlap)
-                      ? communication_stream_
-                      : stream_;
+    const auto stream =
+        ((params.overlapped || params.mode == ParallelMode::DP_AND_TP) && init_params_.enable_comm_overlap) ?
+            communication_stream_ :
+            stream_;
     if (stream == communication_stream_) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
         // We use cuda event to ensure the computation on main stream has been finished.
         overlappedComputeBarrier();
     }
-    auto& buffer = params.buffer;
-    const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
+    auto&      buffer         = params.buffer;
+    const auto nccl_op        = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
     // if custom allreduce fails, fallback to the default ncclAllReduce
@@ -363,11 +361,10 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         return AllReduceOutput{custom_ar_res_buf};
     }
 
-    RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
-                          "Invalid reduce op: %d", int(params.op));
+    RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps, "Invalid reduce op: %d", int(params.op));
 
-    NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
-                            nccl_op, nccl_param.nccl_comm_, stream));
+    NCCLCHECK(ncclAllReduce(
+        buffer->data(), buffer->data(), buffer->size(), nccl_data_type, nccl_op, nccl_param.nccl_comm_, stream));
     return AllReduceOutput{params.buffer};
 }
 

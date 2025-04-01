@@ -45,7 +45,8 @@ enum class ParallelMode {
     TP = 0,
     DP = 1,
     DP_AND_TP = 2,
-    FFN_TP = 3
+    FFN_TP = 3,
+    EP        = 4
     // DATA_PARALLEL = 2,
     // PIPELINE_PARALLEL = 3
 };
@@ -107,12 +108,18 @@ using CloneOutput = BufferPtr;
 struct CloneParams {
     CloneParams(const Buffer& input,
                 const AllocationType alloc_type = AllocationType::DEVICE,
-                const BufferHints& hints = BufferHints())
-    : input(input), alloc_type(alloc_type), hints(hints) {}
+                const BufferHints& hints = BufferHints(),
+                bool overlapped = false)
+    : input(input), alloc_type(alloc_type), hints(hints), overlapped(overlapped) {}
+    CloneParams(const Buffer& input,
+                const AllocationType alloc_type,
+                bool overlapped)
+    : input(input), alloc_type(alloc_type), hints(BufferHints()), overlapped(overlapped) {}
 
     const Buffer& input;
     const AllocationType alloc_type;
     const BufferHints& hints;
+    bool overlapped = false;
 };
 
 struct CopyParams {
@@ -524,8 +531,8 @@ struct MlaDecoderAttentionParams{
 
     BufferPtr                       bmm_indices;
 
-    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common, 
-        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme, const BufferPtr bmm_indices = nullptr): 
+    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common,
+        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme, const BufferPtr bmm_indices = nullptr):
             layer_id(layer_id), q(q), qkv_output(qkv_output), common(common), weights(weights), configs(configs), qscheme(qscheme), bmm_indices(bmm_indices) {}
 };
 
@@ -622,6 +629,9 @@ struct MoeGateSelectOutput {
     BufferPtr expert_scales;
 };
 
+struct DeepEPDispatchOutput;
+struct DeepEPDispatchOutputLowLatency;
+
 struct MoeDispatchOutput {
     BufferPtr                    hidden;
     BufferPtr                    expert_ids;
@@ -633,6 +643,9 @@ struct MoeDispatchOutput {
     const BufferPtr              concated_src_buffers; // to make them outlive async sendrecv
     const BufferPtr              split_dst_buffers;    // to make them outlive async sendrecv
     DeviceHookPtr                comm_barrier_hook;
+
+    std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
+    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
 };
 
 struct MoeDispatchParams {
@@ -661,6 +674,10 @@ struct MoeCombineParams {
     const MoeConfigs&         moe_configs;
     size_t                    origin_token_num;
     bool                      overlapped = false;
+    std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
+    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
+    const BufferPtr expert_ids;
+    const BufferPtr expert_scales;
 };
 
 struct GreedyParams {

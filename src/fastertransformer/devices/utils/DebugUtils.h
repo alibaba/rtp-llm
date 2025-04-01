@@ -2,10 +2,13 @@
 
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace fastertransformer {
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false);
+void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false, bool show_stats_only = false);
+
+void printTorchTensorData(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false, bool show_stats_only = false);
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName);
 

@@ -141,6 +141,13 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
 
+    if (use_deepep_moe) {
+        if (use_deepep_low_latency) {
+            return deepEpLLMoeFfnLayer(params, gate_output);
+        }
+        return deepEpMoeFfnLayer(params, gate_output);
+    }
+
     if (moe_conf.ep_size > 1) {
         MoeDispatchOutput dispatched_output =
             epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
@@ -201,13 +208,13 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
                     quantize({*hidden_states, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
-            hidden_states = 
+            hidden_states =
                 moeFfnFp8(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
         } else {
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
             hidden_states =
-                moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;                
+                moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
         }
     }
     FfnLayerOutput out = epCombine({hidden_states,

@@ -44,7 +44,8 @@ void printBuffer2d(const std::string&  hint,
                         size_t              column_start,
                         size_t              column_end,
                         size_t              max_print_lines,
-                        int log_level) {
+                        int log_level,
+                        bool show_stats_only) {
     size_t dim1 = dims[0];
     size_t dim2 = dims[1];
     FT_LOG(log_level, "Buffer %s: shape [%d %d]", hint.c_str(), dim1, dim2);
@@ -53,19 +54,21 @@ void printBuffer2d(const std::string&  hint,
         std::stringstream ss;
         ss << "Buffer " << hint << " : ";
         ss << "[" << i << "]";
-        auto   print_func = [&](size_t column_start, size_t column_end) {
-            for (int j = column_start; j < column_end && j < dim2; j++) {
-                double value = tensor[i][j].item<double>();
-                ss << " k = " << j << " value = " << value;
-            }
-        };
+        if (!show_stats_only) {
+            auto   print_func = [&](size_t column_start, size_t column_end) {
+                for (int j = column_start; j < column_end && j < dim2; j++) {
+                    double value = tensor[i][j].item<double>();
+                    ss << " k = " << j << " value = " << value;
+                }
+            };
+            print_func(column_start, column_end);
+            ss << " ...... ";
+            print_func(std::max((size_t)0, dim2 - (column_end - column_start)), dim2);
+        }
         const auto [sum1, sum2] = calculateTensorSum(
             [&](size_t j) -> auto { return tensor[i][j]; },
             dim2
         );
-        print_func(column_start, column_end);
-        ss << " ...... ";
-        print_func(std::max((size_t)0, dim2 - (column_end - column_start)), dim2);
         ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
         FT_LOG(log_level, ss.str());
         line_num++;
@@ -81,7 +84,8 @@ void printBuffer3d(const std::string&  hint,
                         size_t              column_start,
                         size_t              column_end,
                         size_t              max_print_lines,
-                        int log_level) {
+                        int log_level,
+                        bool show_stats_only) {
     size_t dim1     = dims[0];
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
@@ -92,19 +96,21 @@ void printBuffer3d(const std::string&  hint,
             std::stringstream ss;
             ss << "Buffer " << hint << " : ";
             ss << "[" << i << ", " << j << "]";
-            auto   print_func = [&](size_t column_start, size_t column_end) {
-                for (int k = column_start; k < column_end && k < dim3; k++) {
-                    double value = tensor[i][j][k].item<double>();
-                    ss << " k = " << k << " value = " << value;
-                }
-            };
+            if (!show_stats_only) {
+                auto   print_func = [&](size_t column_start, size_t column_end) {
+                    for (int k = column_start; k < column_end && k < dim3; k++) {
+                        double value = tensor[i][j][k].item<double>();
+                        ss << " k = " << k << " value = " << value;
+                    }
+                };
+                print_func(column_start, column_end);
+                ss << " ...... ";
+                print_func(std::max((size_t)0, dim3 - (column_end - column_start)), dim3);
+            }
             const auto [sum1, sum2] = calculateTensorSum(
                 [&](size_t k) -> auto { return tensor[i][j][k]; },
                 dim3
             );
-            print_func(column_start, column_end);
-            ss << " ...... ";
-            print_func(std::max((size_t)0, dim3 - (column_end - column_start)), dim3);
             ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
             FT_LOG(log_level, ss.str());
             line_num++;
@@ -253,7 +259,7 @@ void printBuffer6d(const std::string&  hint,
     }
 }
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print) {
+void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print, bool show_stats_only) {
     const auto log_level = force_print ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_TRACE1;
 
     if (!force_print) {
@@ -298,12 +304,17 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     } else if (dims.size() == 4) {
         printBuffer4d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     } else if (dims.size() == 3) {
-        printBuffer3d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
+        printBuffer3d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level, show_stats_only);
     } else if (dims.size() == 2) {
-        printBuffer2d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
+        printBuffer2d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level, show_stats_only);
     } else if (dims.size() == 1) {
         printBuffer1d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
     }
+}
+
+void printTorchTensorData(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device, bool force_print, bool show_stats_only) {
+    auto buffer = torchTensor2Buffer(tensor);
+    printBufferData(*buffer, hint, device, force_print, show_stats_only);
 }
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {
