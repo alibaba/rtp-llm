@@ -163,13 +163,7 @@ cc_binary(
     linkshared = 1,
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
-    ] + select({
-        "@//:using_cuda": [
-            "-L/usr/local/cuda/lib64",
-            "-lnvToolsExt",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     visibility = ["//visibility:public"],
 )
 

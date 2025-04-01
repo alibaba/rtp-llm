@@ -42,8 +42,6 @@ cc_library(
     alwayslink = True,
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
     ],
     visibility = ["//visibility:public"],
 )

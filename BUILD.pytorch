@@ -82,6 +82,18 @@ cc_library(
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
     ]),
+    linkopts = select({
+        "@//:using_cuda": [
+            "-L/usr/local/cuda/lib64",
+            "-L/usr/local/cuda/extras/CUPTI/lib64",
+            "-lcupti",
+            "-lcudart",
+            "-lnccl",
+            "-lnvToolsExt",
+            "-lcudnn",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         "@local_config_python//:python_headers",
     ],
