@@ -73,9 +73,9 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.ffn_tp_master_port = params.ffn_tp_nccl_port_;
     device_params.tokens_per_block  = params.seq_size_per_block_;
     device_params.mla_ops_type      = params.mla_ops_type_;
-    device_params.max_seq_len = params.max_seq_len_;
-    device_params.hidden_size = params.hidden_size_;
-    device_params.num_experts = params.expert_num_;
+    device_params.max_seq_len       = params.max_seq_len_;
+    device_params.hidden_size       = params.hidden_size_;
+    device_params.num_experts       = params.expert_num_;
 
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
@@ -104,6 +104,12 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
 
     FT_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                 device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
+
+    device_params.use_deepep_moe = autil::EnvUtil::getEnv("USE_DEEPEP_MOE", 0L);
+    device_params.use_deepep_low_latency = autil::EnvUtil::getEnv("USE_DEEPEP_LOW_LATENCY", 1L);
+
+    FT_LOG_INFO("use deepep moe: %d, use deepep low latency: %d",
+                device_params.use_deepep_moe, device_params.use_deepep_low_latency);
 
     if (!global_params.device_params.size()) {
         FT_LOG_ERROR("No device is specified to init !");

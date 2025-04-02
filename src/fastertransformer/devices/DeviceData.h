@@ -60,6 +60,9 @@ struct DeviceInitParams {
     int64_t max_seq_len = 0;
     int64_t hidden_size = 0;
     int64_t num_experts = 0;
+
+    bool use_deepep_moe = false;
+    bool use_deepep_low_latency = false;
 };
 
 // immutable device properties. Can not change since device is initialized.

@@ -141,8 +141,8 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
 
-    if (use_deepep_moe) {
-        if (use_deepep_low_latency) {
+    if (init_params_.use_deepep_moe) {
+        if (init_params_.use_deepep_low_latency) {
             return deepEpLLMoeFfnLayer(params, gate_output);
         }
         return deepEpMoeFfnLayer(params, gate_output);

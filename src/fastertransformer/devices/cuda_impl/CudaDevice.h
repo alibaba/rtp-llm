@@ -341,10 +341,8 @@ protected:
     bool use_group_gemm             = false;
     bool support_trt_fp8_fmha       = false;
     bool use_fp8_fmha_              = false;
-    bool use_flashinfer_sample_kernel      = false;
+    bool use_flashinfer_sample_kernel  = false;
 
-    bool use_deepep_moe = true; // TODO
-    bool use_deepep_low_latency = true; // TODO
     uint32_t ll_num_max_token_per_rank = 0;
 };
 
