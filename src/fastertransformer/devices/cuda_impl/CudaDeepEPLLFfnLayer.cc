@@ -39,7 +39,6 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
                                                               false /*return_recv_hook*/
     );
     cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
 
     BufferPtr packed_recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.packed_recv_x, torch::kHalf);
 
@@ -73,7 +72,6 @@ FfnLayerOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
                                                             false,
                                                             false);
     cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
 
     BufferPtr all_output;
     if (params.output != nullptr) {
@@ -95,7 +93,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
     BufferPtr hidden_states = dispatched_output.hidden;  // [num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]
 
     BufferPtr recv_count = torchTensor2Buffer(dispatched_output.deep_ep_ll_output->packed_recv_count);
-    auto recv_count_cpu = clone(CloneParams(*recv_count, AllocationType::HOST, init_params_.enable_comm_overlap));
+    auto recv_count_cpu = clone(CloneParams(*recv_count, AllocationType::HOST, BufferHints(), init_params_.enable_comm_overlap));
 
     auto start_expert_id   = moe_conf.ep_rank * moe_conf.expert_num / moe_conf.ep_size;
 
@@ -133,8 +131,8 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
             }
         }
 
-        auto expert_ids_gpu_buffer = clone(CloneParams(*expert_ids_cpu_buffer, AllocationType::DEVICE, init_params_.enable_comm_overlap));
-        auto expert_scales_gpu_buffer = clone(CloneParams(*expert_scales_cpu_buffer, AllocationType::DEVICE, init_params_.enable_comm_overlap));
+        auto expert_ids_gpu_buffer = clone(CloneParams(*expert_ids_cpu_buffer, AllocationType::DEVICE, BufferHints(), init_params_.enable_comm_overlap));
+        auto expert_scales_gpu_buffer = clone(CloneParams(*expert_scales_cpu_buffer, AllocationType::DEVICE, BufferHints(), init_params_.enable_comm_overlap));
 
         expert_contexts.emplace_back(DeepEPLowLatencyExpertContext(i, token_num, expert_all_token_hidden_states, expert_token_hidden_states, expert_ids_gpu_buffer, expert_scales_gpu_buffer, expert_ids_cpu_buffer, expert_scales_cpu_buffer));
     }
@@ -151,7 +149,6 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
         cudaDeviceSynchronize();
     }
     cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
 
     // copy expert output buffer to output buffer
     auto out_hidden_states = allocateBufferLike(*hidden_states, AllocationType::DEVICE);
@@ -166,7 +163,6 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
         cudaDeviceSynchronize();
     }
     cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
 
     // combine with local token expert_ids and expert_scales
     MoeCombineParams combine_params{out_hidden_states, nullptr, params.output, {}, {}, moe_conf, params.input.shape()[0],  init_params_.enable_comm_overlap, nullptr, dispatched_output.deep_ep_ll_output, dispatched_output.expert_ids, dispatched_output.expert_scales};

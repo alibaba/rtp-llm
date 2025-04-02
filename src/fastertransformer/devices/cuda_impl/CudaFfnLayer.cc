@@ -27,19 +27,18 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     size_t     token_num  = params.expert_ids.shape()[0];
 
     assert(moe_conf.ep_size == tp_size * moe_conf.dp_size);
-    size_t    tp_token_size    = (token_num + tp_size - 1) / tp_size;
-    size_t    slice_begin      = std::min(tp_token_size * moe_conf.tp_rank, token_num);
-    size_t    slice_size       = std::min(token_num - slice_begin, tp_token_size);
-    BufferPtr hidden           = params.input.slice(slice_begin, slice_size);
-    auto      expert_ids       = params.expert_ids.slice(slice_begin, slice_size);
-    auto      expert_scales    = params.expert_scales.slice(slice_begin, slice_size);
-    token_num                  = hidden->shape()[0];
-    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});  // [tp_token_size, topk]
+    size_t    tp_token_size = (token_num + tp_size - 1) / tp_size;
+    size_t    slice_begin = std::min(tp_token_size * moe_conf.tp_rank, token_num);
+    size_t    slice_size = std::min(token_num - slice_begin, tp_token_size);
+    BufferPtr hidden        = params.input.slice(slice_begin, slice_size);
+    auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);
+    auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);
+    token_num = hidden->shape()[0];
+    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
     BufferPtr token_nums_per_rank =
         allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
     bufMemset(*token_nums_per_rank, 0);
-    int32_t* token_nums_per_rank_ptr = token_nums_per_rank->data<int32_t>();
-
+    int32_t*                          token_nums_per_rank_ptr = token_nums_per_rank->data<int32_t>();
     std::vector<std::vector<int32_t>> token_idx_per_rank;
     token_idx_per_rank.resize(ep_size);
     for (int i = 0; i < ep_size; ++i) {
@@ -58,8 +57,8 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
         }
     }
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
-    auto      token_nums_per_rank_gpu     = clone({*token_nums_per_rank});
-    auto      all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
+    auto token_nums_per_rank_gpu     = clone({*token_nums_per_rank});
+    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
     size_t    total_size = std::accumulate(token_nums_per_rank_ptr, token_nums_per_rank_ptr + ep_size, 0);
     BufferPtr all_token_indices_cpu =
         allocateBuffer({DataType::TYPE_INT32, {total_size}, AllocationType::HOST}, {"token_nums_per_rank"});
@@ -71,8 +70,9 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
                token_idx_per_rank[i].size() * sizeof(int32_t));
         offset += token_idx_per_rank[i].size();
     }
-    BufferPtr all_token_indices = clone({*all_token_indices_cpu});
 
+    printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
+    BufferPtr all_token_indices = clone({*all_token_indices_cpu});
     // sync allToAll all_token_nums_per_rank_gpu
     cudaStreamSynchronize(stream_);
     syncCommunication(false);
@@ -139,8 +139,9 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
     if (params.overlapped) {
         overlap_hold_buffers_.clear();
     }
-    auto all_output =
-        allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped}).outputs[0];
+    auto all2all_ret = allToAll({
+        {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
+    auto all_output = all2all_ret.outputs[0];
     return gatherCombineOutput(all_output, params);
 }
 
@@ -153,39 +154,45 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
     }
     torch::Tensor indices_tensor;
     cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
+    if (params.moe_configs.tp_size > 1) {
+        // TODO: can use torch all gather unequal size to avoid copy
+        const size_t tp_token_size =
+            (params.origin_token_num + params.moe_configs.tp_size - 1) / params.moe_configs.tp_size;
+        size_t dim1_size = all_output->shape()[1];
+        assert(params.origin_token_num >= tp_token_size * params.moe_configs.tp_rank);
+        size_t current_token_num = std::max(0, std::min((int)params.origin_token_num - int(tp_token_size * params.moe_configs.tp_rank), (int)tp_token_size));
 
-    if (params.moe_configs.tp_size <= 1) {
-        vector<size_t> new_shape = all_output->shape();
-        new_shape[0]             = params.origin_token_num;
-        BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
-        if (output->shape()[0] > 0) {
-            cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
-                                             invokeScatterAdd,
-                                             all_output->data(),
-                                             all_output->shape()[0],
-                                             all_output->shape()[1],
-                                             params.indices->data<int32_t>(),
-                                             output->data(),
-                                             stream);
+        if (scatter_output == nullptr) {
+            scatter_output = allocateBuffer(
+                {all_output->type(),
+                 {current_token_num,
+                  dim1_size}});
+            if (params.overlapped) {
+                overlap_hold_buffers_.emplace_back(scatter_output);
+            }
+            assert(all_output->shape()[0] == current_token_num);
+            if (scatter_output->shape()[0] > 0) {
+                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
+                                                 invokeScatterAdd,
+                                                 all_output->data(),
+                                                 all_output->shape()[0],
+                                                 all_output->shape()[1],
+                                                 params.indices->data<int32_t>(),
+                                                 scatter_output->data(),
+                                                 stream);
+            }
         }
-        return {output};
-    }
-
-    // TODO: can use torch all gather unequal size to avoid copy
-    const size_t tp_token_size =
-        (params.origin_token_num + params.moe_configs.tp_size - 1) / params.moe_configs.tp_size;
-    size_t dim1_size         = all_output->shape()[1];
-    size_t current_token_num = std::max(
-        0,
-        std::min((int)params.origin_token_num - int(tp_token_size * params.moe_configs.tp_rank), (int)tp_token_size));
-
-    if (scatter_output == nullptr) {
-        scatter_output = allocateBuffer({all_output->type(), {current_token_num, dim1_size}});
-        if (params.overlapped) {
-            overlap_hold_buffers_.emplace_back(scatter_output);
+        BufferPtr padding_output;
+        if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size && params.output) {
+            padding_output = params.output;
+        } else {
+            padding_output =
+                allocateBuffer({all_output->type(), {tp_token_size * params.moe_configs.tp_size, dim1_size}});
+            if (params.overlapped) {
+                overlap_hold_buffers_.emplace_back(padding_output);
+            }
         }
-        assert(all_output->shape()[0] == current_token_num);
         if (scatter_output->shape()[0] > 0) {
             copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
                     *scatter_output,
@@ -211,7 +218,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
                                              all_output->shape()[0],
                                              all_output->shape()[1],
                                              params.indices->data<int32_t>(),
-                                             scatter_output->data(),
+                                             output->data(),
                                              stream);
         }
         return {output, createCommHook()};
@@ -232,8 +239,8 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
     const auto expert_for_source_row =
         allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expert_for_src"});
-    const auto softmax_out = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
-    const auto source_rows = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
+    const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
+    const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
 
     auto       normalization_mode = moe_conf.has_moe_norm ?
                                         tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :

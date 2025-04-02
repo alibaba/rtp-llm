@@ -111,10 +111,6 @@ struct CloneParams {
                 const BufferHints& hints = BufferHints(),
                 bool overlapped = false)
     : input(input), alloc_type(alloc_type), hints(hints), overlapped(overlapped) {}
-    CloneParams(const Buffer& input,
-                const AllocationType alloc_type,
-                bool overlapped)
-    : input(input), alloc_type(alloc_type), hints(BufferHints()), overlapped(overlapped) {}
 
     const Buffer& input;
     const AllocationType alloc_type;
