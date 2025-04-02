@@ -209,6 +209,7 @@ cc_test(
         "//src/fastertransformer/devices/cuda_impl:gpu_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
+    tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
 
@@ -238,5 +239,6 @@ cc_test(
         "//src/fastertransformer/devices/cuda_impl:gpu_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
+    tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )

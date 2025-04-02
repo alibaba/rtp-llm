@@ -35,7 +35,7 @@ cc_library(
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/kernels:kernels",
         "//:th_utils",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",        
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         "//:gpt_init_params",
     ],
     copts = cuda_copts(),
@@ -147,6 +147,7 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
     ],
+    tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
 
@@ -163,6 +164,7 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
     ],
+    tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
 
