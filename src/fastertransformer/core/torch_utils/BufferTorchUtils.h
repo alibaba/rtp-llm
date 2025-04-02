@@ -137,6 +137,18 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
                                  std::move(torchTensor2Buffer(zeros))));
 }
 
+inline BufferPtr torchTensor2BufferWithDstType(const torch::Tensor& tensor, c10::ScalarType dst_type) {
+    auto typed_tensor = tensor.toType(dst_type);
+
+    const auto& data = typed_tensor.data_ptr();
+    const auto& shape = torchShapeToBufferShape(typed_tensor.sizes());
+    const auto& dtype = torchDTypeToDataType(typed_tensor.dtype());
+    const auto& memory_type = torchDeviceToMemoryType(typed_tensor.device());
+    return std::make_shared<Buffer>(memory_type, dtype, shape, data, [typed_tensor](Buffer* data) {
+        // do nothing, just for typed_tensor will not release before buffer release
+    });
+}
+
 inline torch::Tensor Buffer2torchTensor(const Buffer& buf, bool copyData = true) {
     if (buf.isQBuffer()) {
         throw std::runtime_error("not support qbuffer!");

@@ -111,8 +111,8 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
                                                     false /*async_finish*/,
                                                     false /*allocate_on_comm_stream*/);
 
-    BufferPtr recv_x_buffer        = torchTensor2Buffer(dispatch_output.recv_x.toType(torch::kHalf));
-    BufferPtr recv_topk_idx_buffer = torchTensor2Buffer(dispatch_output.recv_topk_idx.value().toType(torch::kInt32));
+    BufferPtr recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_x, torch::kHalf);
+    BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
     BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
     cudaDeviceSynchronize();
 
@@ -149,7 +149,7 @@ FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     // wait combine kernel done, no need, will sync wait on next stream op
     cudaDeviceSynchronize();
 
-    all_output = torchTensor2Buffer(combine_output.recv_x.toType(torch::kHalf));
+    all_output = torchTensor2BufferWithDstType(combine_output.recv_x, torch::kHalf);
     return gatherCombineOutput(all_output, params);
 }
 
@@ -175,7 +175,6 @@ FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const
                                         params.input.shape()[0],
                                         init_params_.enable_comm_overlap,
                                         dispatched_output.deep_ep_output});
-    printBufferData(*out.hidden_states, "moe_ffn_ep_out");
     return out;
 }
 

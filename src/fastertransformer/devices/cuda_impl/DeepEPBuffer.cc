@@ -17,7 +17,6 @@ bool DeepEPBuffer::init() {
         // init device ids
         int local_device_id     = buffer_->get_local_device_id();
         device_ids[world_rank_] = local_device_id;
-        FT_LOG_INFO("before sync device_ids_cpu[0] %d, device_ids_cpu[1] %d", device_ids[0], device_ids[1]);
 
         BufferPtr device_ids_buffer_cpu = vector2Buffer(device_ids);
         BufferPtr device_ids_buffer_gpu = device_->clone({*device_ids_buffer_cpu, AllocationType::DEVICE});
@@ -25,17 +24,13 @@ bool DeepEPBuffer::init() {
         device_->copy({*device_ids_buffer_cpu, *device_ids_buffer_gpu});
 
         device_ids = buffer2vector<int>(*device_ids_buffer_cpu);
-        FT_LOG_INFO("after sync all_gathered_device_ids_cpu[0]%d, all_gathered_device_ids_cpu[1]%d",
-                    device_ids[0],
-                    device_ids[1]);
-    }
+   }
 
     std::vector<std::string> ipc_handles(world_size_, "");
     {
         // init ipc handles, ipc handles is struct
         std::string local_ipc_handle = buffer_->get_local_ipc_handle();
         assert(local_ipc_handle.size() == CUDA_IPC_HANDLE_SIZE);
-        FT_LOG_INFO("before sync local_ipc_handle is %s", local_ipc_handle.c_str());
 
         // local ipc handle to buffer
         std::vector<int8_t> local_ipc_handle_vec(local_ipc_handle.begin(), local_ipc_handle.end());
@@ -51,14 +46,12 @@ bool DeepEPBuffer::init() {
         device_->allGather({{all_ipc_handle_buffer_gpu}, ParallelMode::EP});
 
         BufferPtr all_ipc_handles_buffer_cpu = device_->clone({*all_ipc_handle_buffer_gpu, AllocationType::HOST});
-        FT_LOG_INFO("after sync all_ipc_handles_buffer_cpu is %s", all_ipc_handles_buffer_cpu->debugString().c_str());
 
         // transfer to string
         for (int i = 0; i < world_size_; i++) {
             auto offset = i * CUDA_IPC_HANDLE_SIZE;
             auto data   = all_ipc_handles_buffer_cpu->dataWithOffset<int8_t>(offset);
             ipc_handles[i].assign((char*)(data), CUDA_IPC_HANDLE_SIZE);
-            FT_LOG_INFO("after sync ipc_handles[%d]: %s", i, ipc_handles[i].c_str());
         }
     }
 
@@ -716,21 +709,12 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
                                                                 bool                 use_fp8,
                                                                 bool                 async_finish,
                                                                 bool                 return_recv_hook) {
-    // TODO: only several hidden shapes are supported 2560 / 5120 / 7168(r1)
+    // only several hidden shapes are supported 2560 / 5120 / 7168(r1)
     FT_CHECK(x.scalar_type() == torch::kBFloat16 && x.size(0) < num_max_dispatch_tokens_per_rank);
 
-    // TODO: only several top-k shapes are supported
+    // only several top-k shapes are supported
     FT_CHECK(topk_idx.scalar_type() == torch::kLong);
 
-    FT_LOG_INFO("start call low latency dispatch, num_max_dispatch_tokens_per_rank %d, num_experts %d", num_max_dispatch_tokens_per_rank, num_experts);
-    //FT_LOG_INFO("dispatch start clean low latency buffer");
-    //buffer_->clean_low_latency_buffer(num_max_dispatch_tokens_per_rank, x.size(1), num_experts);
-    //cudaDeviceSynchronize();         
-
-    //FT_LOG_INFO("dispatch clean low latency buffer done and start check low latency buffer");
-    //FT_CHECK(buffer_->check_low_latency_buffer(num_max_dispatch_tokens_per_rank, x.size(1), num_experts));
-
-   // FT_LOG_INFO("start call low latency dispatch");
     auto [packed_recv_x,
           packed_recv_x_scales,
           packed_recv_count,
@@ -740,9 +724,6 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
           hook] =
         buffer_->low_latency_dispatch(
             x, topk_idx, num_max_dispatch_tokens_per_rank, num_experts, use_fp8, async_finish, return_recv_hook);
-
-    FT_LOG_INFO("after call low latency dispatch");
-    //printTorchTensorData(packed_recv_layout_range, "dispatch result packed_recv_layout_range", nullptr, true, true);
 
     DeepEPDispatchHandleLowLatency handle(
         packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, num_experts);
@@ -801,20 +782,6 @@ DeepEPCombineOutputLowLatency DeepEPBuffer::lowLatencyCombine(const torch::Tenso
     FT_CHECK(x.scalar_type() == c10::kBFloat16);
     FT_CHECK(topk_idx.scalar_type() == c10::kLong);
     FT_CHECK(topk_weights.scalar_type() == c10::kFloat);
-
-    //printTorchTensorData(x, "combine x", nullptr, true, true);
-    FT_LOG_INFO("start call low latency combine, num_max_dispatch_tokens_per_rank %d, num_experts %d", handle.num_max_dispatch_tokens_per_rank, handle.num_experts);
-    //printTorchTensorData(handle.packed_recv_src_info, "combine packed_recv_src_info", nullptr, true, true);
-    //printTorchTensorData(handle.packed_recv_layout_range, "combine packed_recv_layout_range", nullptr, true, true);
-    //printTorchTensorData(topk_idx, "combine topk_idx", nullptr, true, true);
-    //printTorchTensorData(topk_weights, "combine topk_weights", nullptr, true, true);
-
-    //FT_LOG_INFO("combine start clean low latency buffer");
-    //buffer_->clean_low_latency_buffer(handle.num_max_dispatch_tokens_per_rank, x.size(2), handle.num_experts);
-    //cudaDeviceSynchronize();         
-                                                          
-    //FT_LOG_INFO("combine clean low latency buffer done and start check low latency buffer");
-    //FT_CHECK(buffer_->check_low_latency_buffer(handle.num_max_dispatch_tokens_per_rank, x.size(2), handle.num_experts));
 
     auto [combined_x, event, hook] = buffer_->low_latency_combine(x,
                                                                   topk_idx,

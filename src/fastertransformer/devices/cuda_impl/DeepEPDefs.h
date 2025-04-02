@@ -241,9 +241,11 @@ struct DeepEPLowLatencyExpertContext {
     BufferPtr hidden_states;
     BufferPtr expert_ids;
     BufferPtr expert_scales;
+    BufferPtr expert_ids_cpu_buffer;
+    BufferPtr expert_scales_cpu_buffer;
     BufferPtr out_hidden_states;
     DeepEPLowLatencyExpertContext(uint32_t index) : index(index) {}
-    DeepEPLowLatencyExpertContext(uint32_t index, uint64_t token_num, const BufferPtr& all_hidden_states, const BufferPtr& hidden_states, const BufferPtr& expert_ids, const BufferPtr& expert_scales): index(index), token_num(token_num), all_hidden_states(all_hidden_states), hidden_states(hidden_states), expert_ids(expert_ids), expert_scales(expert_scales) {}
+    DeepEPLowLatencyExpertContext(uint32_t index, uint64_t token_num, const BufferPtr& all_hidden_states, const BufferPtr& hidden_states, const BufferPtr& expert_ids, const BufferPtr& expert_scales, const BufferPtr& expert_ids_cpu_buffer, const BufferPtr& expert_scales_cpu_buffer): index(index), token_num(token_num), all_hidden_states(all_hidden_states), hidden_states(hidden_states), expert_ids(expert_ids), expert_scales(expert_scales), expert_ids_cpu_buffer(expert_ids_cpu_buffer), expert_scales_cpu_buffer(expert_scales_cpu_buffer) {}
 };
 
 }  // namespace fastertransformer
