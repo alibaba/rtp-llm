@@ -187,7 +187,7 @@ void CudaDevice::init() {
     FT_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 
-    if (use_deepep_moe) {
+    if (init_params_.use_deepep_moe) {
         if (!initDeepEPBuffer()) {
             FT_CHECK_WITH_INFO(false, "init deepep buffer failed");
         } else {
