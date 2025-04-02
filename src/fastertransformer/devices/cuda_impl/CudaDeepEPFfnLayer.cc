@@ -138,7 +138,6 @@ FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     auto  combine_config  = deepep_buffer_->getCombineConfig();
     auto& dispatch_output = params.deep_ep_output;
 
-    BufferPtr all_output;
     auto      combine_output = deepep_buffer_->combine(input_tensor,
                                                   dispatch_output->handle.value(),
                                                   dispatch_output->recv_topk_weights,
@@ -148,8 +147,14 @@ FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   false /*allocate_on_comm_stream*/);
     // wait combine kernel done, no need, will sync wait on next stream op
     cudaDeviceSynchronize();
-
-    all_output = torchTensor2BufferWithDstType(combine_output.recv_x, torch::kHalf);
+    BufferPtr all_output;   
+    if (params.output != nullptr) {
+        all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.output->type())));
+    } else {
+        all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.input->type())));
+    }
+    
+    printBufferData(*all_output, "all_output", nullptr, true);
     return gatherCombineOutput(all_output, params);
 }
 
