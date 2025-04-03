@@ -63,6 +63,11 @@ N_K_GROUP_TYPE= [
 ("7168", "9216", "1", "DeepGemmType::Normal"),
 ("8192", "512" ,"1", "DeepGemmType::Normal"),
 ("9216", "7168", "1", "DeepGemmType::Normal"),
+# tp 8 
+("3072", "1536", "1", "DeepGemmType::Normal"),
+("2048", "512", "1", "DeepGemmType::Normal"),
+("2304", "7168", "1", "DeepGemmType::Normal"),
+("7168", "2304", "1", "DeepGemmType::Normal"),
 
 ("512", "128", "128", "DeepGemmType::GroupedContiguous"),
 ("128", "512", "128", "DeepGemmType::GroupedContiguous"),
