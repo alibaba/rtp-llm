@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-const int64_t MAX_GRPC_TIMEOUT_MS = 180 * 1000;
+const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
 
 class GenerateContext {
 public:

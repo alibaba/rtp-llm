@@ -27,7 +27,7 @@ from maga_transformer.utils.concurrency_controller import ConcurrencyException, 
 
 request_counter = AtomicCounter()
 
-MAX_GRPC_TIMEOUT_SECONDS = 60 * 5
+MAX_GRPC_TIMEOUT_SECONDS = 3600
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
