@@ -537,7 +537,7 @@ DeepEPDispatchOutput DeepEPBuffer::internodeDispatch(const torch::Tensor&       
                                                         std::nullopt /*recv_gbl_rank_prefix_sum*/,
                                                         expert_alignment,
                                                         config,
-                                                        previous_event->event(),
+                                                        event,
                                                         async_finish,
                                                         allocate_on_comm_stream);
 
