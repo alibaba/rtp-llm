@@ -62,6 +62,7 @@ struct DeviceInitParams {
     int64_t num_experts = 0;
 
     bool use_deepep_moe = false;
+    bool use_deepep_internode = false;
     bool use_deepep_low_latency = false;
 };
 

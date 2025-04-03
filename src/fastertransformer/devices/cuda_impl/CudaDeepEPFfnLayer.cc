@@ -19,11 +19,17 @@ bool CudaDevice::initDeepEPBuffer() {
 
     // TODO: check if get right
     ll_num_max_token_per_rank = ((init_params_.max_seq_len + init_params_.tp_size - 1) / init_params_.tp_size) + 1;
-    int64_t num_rdma_bytes =
-        init_params_.use_deepep_low_latency ?
-            DeepEPBuffer::getLowLatencyRdmaSizeHint(
-                ll_num_max_token_per_rank, init_params_.hidden_size, world_size, init_params_.num_experts) :
-            0;
+    int64_t num_rdma_bytes = 0;
+    if(init_params_.use_deepep_low_latency) { // low-latency mode
+        num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
+            ll_num_max_token_per_rank, init_params_.hidden_size, world_size, init_params_.num_experts);
+    }
+    else if (init_params_.use_deepep_internode) { // normal-kernel internode 
+        num_rdma_bytes = int(1e9);
+    }
+    else{
+        num_rdma_bytes = 0; // normal-kernel intranode 
+    }
     deepep_buffer_.reset(new DeepEPBuffer(this,
                                           world_rank,
                                           world_size,

@@ -106,6 +106,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
                 device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
 
     device_params.use_deepep_moe = autil::EnvUtil::getEnv("USE_DEEPEP_MOE", 0L);
+    device_params.use_deepep_internode = autil::EnvUtil::getEnv("USE_DEEPEP_INTERNODE", 0L);
     device_params.use_deepep_low_latency = autil::EnvUtil::getEnv("USE_DEEPEP_LOW_LATENCY", 1L);
 
     FT_LOG_INFO("use deepep moe: %d, use deepep low latency: %d",

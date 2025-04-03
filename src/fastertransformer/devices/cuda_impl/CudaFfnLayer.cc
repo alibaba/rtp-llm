@@ -159,7 +159,6 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
         const size_t tp_token_size =
             (params.origin_token_num + params.moe_configs.tp_size - 1) / params.moe_configs.tp_size;
         size_t dim1_size = all_output->shape()[1];
-        //assert(params.origin_token_num >= tp_token_size * params.moe_configs.tp_rank);
         size_t current_token_num = std::max(0, std::min((int)params.origin_token_num - int(tp_token_size * params.moe_configs.tp_rank), (int)tp_token_size));
 
         if (scatter_output == nullptr) {
