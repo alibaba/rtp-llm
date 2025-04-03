@@ -194,17 +194,6 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
         nullptr);
 }
 
-void transpose_qk_inplace(torch::Tensor& q, torch::Tensor& k) {    
-    auto token_num = q.size(0);
-    auto head_num_q = q.size(1);
-    auto rope_size = q.size(2);
-    auto q_transpose = q.reshape({token_num, head_num_q, rope_size / 2, 2}).transpose(2,3).reshape({token_num, head_num_q, rope_size});
-    FT_LOG_DEBUG("transpose_qk_inplace: token_num:%lu, rope_size:%lu\n", token_num, rope_size);
-    auto k_transpose = k.reshape({token_num, rope_size / 2, 2}).transpose(1,2).reshape({token_num, rope_size});
-    q.copy_(q_transpose, true);
-    k.copy_(k_transpose, true);
-}
-
 void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
     auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.flash_infer_attn_params.get();
@@ -224,10 +213,6 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
         params.fused_qkv,
         {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.rope_head_dim},
         params.kv_offset + params.configs.kv_lora_rank);
-    {
-        DevicePerfWrapper transpose_wrapper(this, "transpose_qk_inplace");
-        transpose_qk_inplace(q_rope_t, k_rope_t);
-    }
     auto cos_sin_cache_t = Buffer2torchTensor(params.weights.rope_cos_sin_cache, false);
     apply_rope_pos_ids_cos_sin_cache(q_rope_t, k_rope_t.unsqueeze(1), q_rope_t, k_rope_t.unsqueeze(1), cos_sin_cache_t, flashinfer.total_positions_t, false, (int64_t)stream_);
     auto append_ckv_t = Buffer2torchTensorWithStride(params.fused_qkv, {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.kv_lora_rank}, params.kv_offset);

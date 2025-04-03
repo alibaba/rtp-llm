@@ -143,6 +143,19 @@ def dequant_weight_split_v(ts: List[torch.Tensor], block_size: int, head_num: in
     from maga_transformer.models.deepseek_dequant import weight_dequant
     return transpose_slice_v([weight_dequant(ts[0], ts[1], block_size)], 
                              head_num, nope_head_dim, v_head_dim, lora_rank)
+    
+def transpose_kv_rope(ts: List[torch.Tensor], kv_lora_rank: int, rope_size: int):
+    rope_size_half = rope_size // 2
+    kva = ts[0]
+    kva[kv_lora_rank: , :]  = kva[kv_lora_rank: , :].reshape([rope_size_half, 2, -1]).transpose(0, 1).reshape([rope_size, -1])    
+    return kva.reshape(ts[0].shape).contiguous()
+
+def transpose_q_rope(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_size: int):
+    rope_size_half = rope_size // 2
+    q = ts[0]
+    q = q.reshape([head_num, nope_head_dim + rope_size, -1])
+    q[:, nope_head_dim: , :] = q[:, nope_head_dim: , :].reshape([head_num, rope_size_half, 2, -1]).transpose(1, 2).reshape([head_num, rope_size, -1])    
+    return q.reshape(ts[0].shape).contiguous()
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
@@ -179,17 +192,17 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         
         if self.q_use_lora:
             mla_layer_weights.extend([
-                WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight')],
+                WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', functools.partial(transpose_q_rope, head_num=self._head_num, nope_head_dim=self.nope_head_dim, rope_size=self.rope_head_dim))],
                         transpose),
                 WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight')],
                         identity)
             ])
             q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight')
             mla_layer_weights.append(
-                WeightInfo(W.mla_fusedqkrope_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight')], concat_0_tranpose)
+                WeightInfo(W.mla_fusedqkrope_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', functools.partial(transpose_kv_rope, kv_lora_rank=self.kv_lora_rank, rope_size=self.rope_head_dim))], concat_0_tranpose)
             )
         else:
-            q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight')
+            q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', functools.partial(transpose_q_rope, head_num=self._head_num, nope_head_dim=self.nope_head_dim, rope_size=self.rope_head_dim))
             mla_layer_weights.append(
                 WeightInfo(W.mla_fusedqkrope_no_lora_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight')], concat_0_tranpose)
             )
@@ -246,7 +259,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         if not self.q_use_lora:
             raise Exception("fp8 only support q_use_lora")
         mla_layer_weights.extend([
-            WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', identity)],
+            WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', functools.partial(transpose_q_rope, head_num=self._head_num, nope_head_dim=self.nope_head_dim, rope_size=self.rope_head_dim))],
                     identity),
             WeightInfo(W.mla_q_b_s, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight_scale_inv', identity)],
                     identity),
@@ -254,7 +267,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                     identity),
             WeightInfo(W.mla_fusedqkrope_w, [
                 CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity), 
-                CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)], concat_0),
+                CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', functools.partial(transpose_kv_rope, kv_lora_rank=self.kv_lora_rank, rope_size=self.rope_head_dim))], concat_0),
             WeightInfo(W.mla_fusedqkrope_s, [
                 CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight_scale_inv', identity), 
                 CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight_scale_inv', identity)], concat_0)
