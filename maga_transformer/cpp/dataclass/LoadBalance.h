@@ -4,6 +4,9 @@
 #include <mutex>
 #include <queue>
 #include <vector>
+#include <algorithm>
+#include <random>
+#include <chrono>
 #include "autil/EnvUtil.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
 
@@ -99,10 +102,21 @@ struct BizHosts {
     std::shared_ptr<std::atomic_uint32_t>    index{0};
     std::vector<std::shared_ptr<const Host>> hosts;
     BizHosts() {}
-    BizHosts(const std::string&                       biz_,
+    BizHosts(const std::string&                          biz_,
                 std::shared_ptr<std::atomic_uint32_t>    index_,
                 std::vector<std::shared_ptr<const Host>> hosts_):
         biz(biz_), index(index_), hosts(hosts_) {}
+
+    void shuffle() {
+        unsigned seed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+        std::mt19937 g(seed);
+        std::shuffle(hosts.begin(), hosts.end(), g);
+
+        std::uniform_int_distribution<uint32_t> dist(0, hosts.size() - 1);
+        uint32_t random_number = dist(g);
+        index->store(random_number);
+    }
 };
 
 void registerLoadBalanceInfo(const pybind11::module& m);

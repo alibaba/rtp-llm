@@ -49,6 +49,9 @@ void BaseLoadBalancer::discovery() {
         }
     }
     {
+        for (auto& [biz, biz_hosts] : new_biz_hosts) {
+            biz_hosts->shuffle();
+        }
         std::unique_lock<std::shared_mutex> lock(biz_hosts_mutex_);
         biz_hosts_.swap(new_biz_hosts);
     }
