@@ -19,9 +19,8 @@ from maga_transformer.utils.model_weight import (
     transpose,
     stack_,
     w_half1,
-    w_half1_t,
+    concat_0,
     w_half2,
-    w_half2_t,
     zeros,
     pad,
     transpose_pad,
@@ -132,6 +131,18 @@ def mla_pad_scale(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rop
     t = t.reshape(-1, head_num * (nope_head_dim + rope_head_dim) // group_size)
     return  t.contiguous()
 
+def concat_0_tranpose(ts: List[torch.Tensor]):
+    return torch.concat(ts, dim=0).transpose(0, 1).contiguous()
+
+def dequant_weight_split_k(ts: List[torch.Tensor], block_size: int, head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
+    from maga_transformer.models.deepseek_dequant import weight_dequant
+    return transpose_slice_k([weight_dequant(ts[0], ts[1], block_size)], 
+                             head_num, nope_head_dim, v_head_dim, lora_rank)
+
+def dequant_weight_split_v(ts: List[torch.Tensor], block_size: int, head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
+    from maga_transformer.models.deepseek_dequant import weight_dequant
+    return transpose_slice_v([weight_dequant(ts[0], ts[1], block_size)], 
+                             head_num, nope_head_dim, v_head_dim, lora_rank)
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
@@ -158,10 +169,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                        identity),
         ]
         mla_layer_weights = [
-            WeightInfo(W.mla_kv_a_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)],
-                       functools.partial(w_half1_t, inter_size=self.kv_lora_rank)),
-            WeightInfo(W.mla_k_rope_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)],
-                       functools.partial(w_half2_t, inter_size=self.kv_lora_rank)),
             WeightInfo(W.mla_k_nope_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
                        functools.partial(kv_split1, kv_lora_rank=self.kv_lora_rank, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim)),
             WeightInfo(W.mla_v_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
@@ -169,6 +176,23 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             WeightInfo(W.mla_kv_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_layernorm.weight', identity)],
                        identity),
         ]
+        
+        if self.q_use_lora:
+            mla_layer_weights.extend([
+                WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight')],
+                        transpose),
+                WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight')],
+                        identity)
+            ])
+            q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight')
+            mla_layer_weights.append(
+                WeightInfo(W.mla_fusedqkrope_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight')], concat_0_tranpose)
+            )
+        else:
+            q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight')
+            mla_layer_weights.append(
+                WeightInfo(W.mla_fusedqkrope_no_lora_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight')], concat_0_tranpose)
+            )
 
         if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
             mla_layer_weights.append(
@@ -177,23 +201,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             mla_layer_weights.append(
                 WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
                            functools.partial(transpose_slice_v, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
-
-        if self.q_use_lora:
-            mla_layer_weights.extend([
-                WeightInfo(W.mla_q_a_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity)],
-                        transpose),
-                WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', identity)],
-                        transpose),
-                WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight', identity)],
-                        identity)
-                ]
-            )
-        else:
-            mla_layer_weights.extend([
-                WeightInfo(W.mla_q_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity)],
-                       transpose),
-                ]
-            )
 
         layer_weights.extend(mla_layer_weights)
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
@@ -213,16 +220,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                        identity),
         ]
         mla_layer_weights = [
-            WeightInfo(W.mla_kv_a_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)],
-                       functools.partial(w_half1, inter_size=self.kv_lora_rank)),
-            WeightInfo(W.mla_kv_a_s, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight_scale_inv', identity)],
-                       functools.partial(w_half1, inter_size=self.kv_lora_rank // group_size)),
-
-            WeightInfo(W.mla_k_rope_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)],
-                       functools.partial(w_half2, inter_size=self.kv_lora_rank)),
-            WeightInfo(W.mla_k_rope_s, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight_scale_inv', identity)],
-                       functools.partial(w_half2, inter_size=self.kv_lora_rank // group_size)),
-
             WeightInfo(W.mla_k_nope_w, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
                        functools.partial(kv_split, kv_lora_rank=self.kv_lora_rank, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, idx=0)),
             WeightInfo(W.mla_k_nope_s, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
@@ -239,43 +236,30 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
         if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
             mla_layer_weights.append(
-                WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
-                           functools.partial(k_split_for_group_gemm, kv_lora_rank=self.kv_lora_rank, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, idx=0)))
-            mla_layer_weights.append(
-                WeightInfo(W.mla_kc_s, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
-                           functools.partial(k_split_for_group_gemm, kv_lora_rank=self.kv_lora_rank // group_size, nope_head_dim=self.nope_head_dim // group_size, v_head_dim=self.v_head_dim // group_size, idx=0)))
+                WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity), CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
+                           functools.partial(dequant_weight_split_k, block_size=128, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
             
             mla_layer_weights.append(
-                WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity)],
-                           functools.partial(v_split_for_group_gemm, kv_lora_rank=self.kv_lora_rank, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, idx=1)))
-            mla_layer_weights.append(
-                WeightInfo(W.mla_vc_s, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
-                           functools.partial(v_split_for_group_gemm, kv_lora_rank=self.kv_lora_rank // group_size, nope_head_dim=self.nope_head_dim // group_size, v_head_dim=self.v_head_dim // group_size, idx=1)))
+                WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity), CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
+                           functools.partial(dequant_weight_split_v, block_size=128, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
 
-        if self.q_use_lora:
-            mla_layer_weights.extend([
-                WeightInfo(W.mla_q_a_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity)],
-                        identity),
-                WeightInfo(W.mla_q_a_s, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight_scale_inv', identity)],
-                        identity),
-
-                WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', identity)],
-                        identity),
-                WeightInfo(W.mla_q_b_s, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight_scale_inv', identity)],
-                        identity),
-
-                WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight', identity)],
-                        identity)
-                ]
-            )
-        else:
-            mla_layer_weights.extend([
-                WeightInfo(W.mla_q_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity)],
-                       transpose),
-                WeightInfo(W.mla_q_s, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight_scale_inv', identity)],
-                       transpose),
-                ]
-            )
+        if not self.q_use_lora:
+            raise Exception("fp8 only support q_use_lora")
+        mla_layer_weights.extend([
+            WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', identity)],
+                    identity),
+            WeightInfo(W.mla_q_b_s, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight_scale_inv', identity)],
+                    identity),
+            WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight', identity)],
+                    identity),
+            WeightInfo(W.mla_fusedqkrope_w, [
+                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity), 
+                CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', identity)], concat_0),
+            WeightInfo(W.mla_fusedqkrope_s, [
+                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight_scale_inv', identity), 
+                CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight_scale_inv', identity)], concat_0)
+            ]
+        )
 
         layer_weights.extend(mla_layer_weights)
         layer_weights.extend(self._get_fp8_ffn_layer_weight_info(layer_id))
@@ -357,6 +341,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_s3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight_scale_inv', identity)],
                            functools.partial(pad, inter_padding_size=inter_padding_size // group_size, dim=0)),
             ]
+
     def _get_weight_info(self):
         layer_weights: List[List[WeightInfo]] = []
         weights = [

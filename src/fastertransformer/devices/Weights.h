@@ -78,8 +78,8 @@ struct AttentionLayerWeights {
     std::shared_ptr<const DenseWeights>     linear_bias_slopes_weight;
 
     // mla weights
-    std::shared_ptr<const DenseWeights>     q_weight; // some models only use q_w
-    std::shared_ptr<const DenseWeights>     q_a_weight;
+    std::shared_ptr<const DenseWeights>     fusedqkrope_weight;
+    std::shared_ptr<const DenseWeights>     fusedqkrope_no_lora_weight;
     std::shared_ptr<const DenseWeights>     q_b_weight;
     std::shared_ptr<const DenseWeights>     kv_a_weight;
     std::shared_ptr<const DenseWeights>     k_nope_weight;

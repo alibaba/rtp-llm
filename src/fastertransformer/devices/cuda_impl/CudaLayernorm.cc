@@ -11,6 +11,68 @@ using namespace std;
 
 namespace fastertransformer {
 
+LayernormOutput CudaDevice::layernormWithStride(const LayernormWithStrideParams& params) {
+    FT_CHECK_WITH_INFO(params.qscheme == QScheme::NoQuantize, "qscheme must be NoQuantize in layernormWithStride");
+    const auto data_type = params.input->type();
+    const auto m = params.input->shape()[0];
+    const auto in_stride = params.input->shape()[1];
+    const auto norm_weight = params.norm_weight;
+    const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
+    const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    const auto eps = params.eps;
+
+    int out_stride;
+    int out_offset;
+    BufferPtr norm_output;
+
+    // if not in_place, we hope that the output is contiguous
+    if (params.in_place) {
+        norm_output = params.input;
+        out_stride = in_stride;
+        out_offset = params.offset;
+    } else {
+        norm_output = allocateBuffer({data_type, {m, params.norm_group_size}, AllocationType::DEVICE}, {"norm_with_stride_output"});
+        out_stride = params.norm_group_size;
+        out_offset = 0;
+    }
+
+    if (params.norm_type == NormType::layernorm) {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
+                                        invokeLayerNormWithStride,
+                                        norm_output->dataWithOffset(out_offset),
+                                        out_stride,
+                                        params.input->dataWithOffset(params.offset),
+                                        in_stride,
+                                        gamma,
+                                        beta,
+                                        eps,
+                                        m,
+                                        params.norm_group_size,
+                                        norm_weight->get().gamma.get()->shape()[0],
+                                        stream_);
+        sync_check_cuda_error();
+        return LayernormOutput({norm_output, nullptr});
+    } else if (params.norm_type == NormType::rmsnorm) {
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
+                                        invokeRmsNormWithStride,
+                                        norm_output->dataWithOffset(out_offset),
+                                        out_stride,
+                                        params.input->dataWithOffset(params.offset),
+                                        in_stride,
+                                        gamma,
+                                        beta,
+                                        eps,
+                                        m,
+                                        params.norm_group_size,
+                                        norm_weight->get().gamma.get()->shape()[0],
+                                        stream_);
+        sync_check_cuda_error();
+        return LayernormOutput({norm_output, nullptr});
+    } else {
+        throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
+    }
+}
+
 LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     BufferPtr input = params.input;
     BufferPtr norm_output = input;

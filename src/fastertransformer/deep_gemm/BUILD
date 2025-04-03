@@ -55,6 +55,7 @@ N_K_GROUP_TYPE= [
 ("7168", "16384", "1", "DeepGemmType::Normal"),
 ("7168", "18432", "1", "DeepGemmType::Normal"),
 ("12288", "1536", "1", "DeepGemmType::Normal"),
+("2112", "7168", "1", "DeepGemmType::Normal"),
 
 ("1024", "7168", "1", "DeepGemmType::Normal"),
 ("7168", "1024", "1", "DeepGemmType::Normal"),

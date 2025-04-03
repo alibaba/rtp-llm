@@ -264,6 +264,7 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(7168, 16384, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(7168, 18432, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(12288, 1536, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(2112, 7168, 1, DeepGemmType::Normal)
 
     DISPATCH_DEEP_GEMM(1024, 7168,1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(7168, 1024,1, DeepGemmType::Normal)
@@ -312,7 +313,7 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(128, 512,64, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(4096, 7168,128, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(512, 128,64, DeepGemmType::GroupedContiguous)
-    FT_LOG_ERROR("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
+    FT_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
 }
 #endif
 

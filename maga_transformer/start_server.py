@@ -33,6 +33,10 @@ def check_server_health(server_port):
         return False
 
 def start_backend_server_impl(global_controller):
+    # only for debug
+    if os.environ.get('DEBUG_LOAD_SERVER', None) == '1':
+        start_backend_server(global_controller)
+        os._exit(-1)
     backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, ), name="backend_server")
     backend_process.start()
     

@@ -7,9 +7,7 @@ namespace fastertransformer {
 BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     const auto& input      = params.input;
     const auto& qkv_weight = params.weights.qkv_weight;
-
-    // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
-    const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
+    
 
 #if defined(__aarch64__)
     // Arm attention op only support fp32 data type
@@ -34,26 +32,24 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     printBufferData(*qkv, "qkv");
 
     if (params.weights.q_norm_weight) {
-        auto after_q_norm = layernorm(LayernormParams(qkv, 
+        auto after_q_norm = layernormWithStride(LayernormWithStrideParams({qkv, 
                                                       *params.weights.q_norm_weight, 
                                                       params.ln_params.eps, 
                                                       params.ln_params.norm_type, 
                                                       0, 
-                                                      params.configs.size_per_head * params.configs.head_num, 
-                                                      qkv_merged_size));
+                                                      params.configs.size_per_head * params.configs.head_num}));
 
         qkv = std::move(after_q_norm.output);
         printBufferData(*qkv, "qkv_after_q_norm");
     }
 
     if (params.weights.k_norm_weight) {
-        auto after_k_norm = layernorm(LayernormParams(qkv,
+        auto after_k_norm = layernormWithStride(LayernormWithStrideParams({qkv,
                                                       *params.weights.k_norm_weight,
                                                       params.ln_params.eps,
                                                       params.ln_params.norm_type,
                                                       params.configs.size_per_head * params.configs.head_num,
-                                                      params.configs.size_per_head * params.configs.kv_head_num,
-                                                      qkv_merged_size));
+                                                      params.configs.size_per_head * params.configs.kv_head_num}));
 
         qkv = std::move(after_k_norm.output);
         printBufferData(*qkv, "qkv_after_k_norm");

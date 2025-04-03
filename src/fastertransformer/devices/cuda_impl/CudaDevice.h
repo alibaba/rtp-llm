@@ -194,7 +194,9 @@ public:
     ConvertOutput convert(const ConvertParams& params) override;
     SelectOutput select(const SelectParams& params) override;
     SplitOutput split(const SplitParams& params) override;
+    SliceOutput slice(const SliceParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
+    LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     MultiplyOutput multiply(const MultiplyParams& params) override;
@@ -234,8 +236,8 @@ public:
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
     FfnLayerOutput epCombine(const MoeCombineParams& params) override;
 
-    torch::Tensor QInputBatchMatmulWrapper(const MlaDecoderAttentionParams& params);
-    torch::Tensor DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams& params);
+  void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaDecoderAttentionParams& params);
+  void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaDecoderAttentionParams& params);
 
     FfnLayerOutput gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output = nullptr);
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);

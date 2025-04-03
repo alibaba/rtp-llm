@@ -54,52 +54,41 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                 kv_cache.v_scale_buffer->debugString().c_str());
         }
     }
+    BufferPtr fused_qkv = nullptr;    
     BufferPtr q = nullptr;
+    int64_t kv_offset = 0;
     DevicePerfWrapper pre_mla_wrapper(this, "pre_mla_layer");
-    if (params.weights.q_a_weight != nullptr) {
+    if (params.weights.fusedqkrope_weight != nullptr) {
         // auto q_output_size = params.configs.nope_head_dim;
-        BufferPtr q_a                = gemm(GemmParams(input, *(params.weights.q_a_weight->kernel)));
-        layernorm(LayernormParams(q_a,
-                                  q_a,
-                                  mayGetRef(params.weights.q_a_norm_weight),
-                                  std::nullopt,
-                                  std::nullopt,
-                                  std::nullopt,
-                                  1.0f,
-                                  params.ln_params.eps,
-                                  true,
-                                  false,
-                                  params.ln_params.norm_type));
-        q = gemm(GemmParams(*q_a, *(params.weights.q_b_weight->kernel)));
+        fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_weight->kernel)));        
+        kv_offset = params.configs.q_lora_rank;
+        auto norm_output         = layernormWithStride(LayernormWithStrideParams(
+            {fused_qkv,
+                     mayGetRef(params.weights.q_a_norm_weight),
+                     params.ln_params.eps,
+                     params.ln_params.norm_type,
+                     0,
+                     params.configs.q_lora_rank,
+                     QScheme::NoQuantize,
+                     false}));
+        q                        = gemm(GemmParams(*norm_output.output, *(params.weights.q_b_weight->kernel)));
     } else {
-        q = gemm(GemmParams(input, *(params.weights.q_weight->kernel)));
+        fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_no_lora_weight->kernel)));
+        kv_offset = params.configs.head_num * params.configs.size_per_head;
+        q = slice(SliceParams({*fused_qkv, -1, 0, (int64_t)(params.configs.head_num * params.configs.size_per_head)}));
     }
-    printBufferData(input, "kv_a_before_layernorm_input");
-    if (params.weights.kv_a_weight->kernel->isQBuffer()) {
-        printBufferData((reinterpret_cast<const QBuffer&>(*params.weights.kv_a_weight->kernel)).scales(), "params.weights.kv_a_weight_scales");
-    }
-    FT_LOG_DEBUG("params.weights.kv_a_weight->kernel:%s", params.weights.kv_a_weight->kernel->debugString().c_str());
-    auto kv_a   = gemm(GemmParams(input, *(params.weights.kv_a_weight->kernel)));
-    printBufferData(*kv_a, "kv_a_before_layernorm");
-    layernorm(LayernormParams(kv_a,
-                            kv_a,
-                            mayGetRef(params.weights.kv_a_norm_weight),
-                            std::nullopt,
-                            std::nullopt,
-                            std::nullopt,
-                            1.0f,
-                            params.ln_params.eps,
-                            true,
-                            false,
-                            params.ln_params.norm_type));
+    layernormWithStride(
+        LayernormWithStrideParams({fused_qkv,
+                                   mayGetRef(params.weights.kv_a_norm_weight),
+                                   params.ln_params.eps,
+                                   params.ln_params.norm_type,
+                                   (size_t)kv_offset,
+                                   params.configs.kv_lora_rank,                                   
+                                   QScheme::NoQuantize,
+                                   true}));
 
-    auto k_rope = gemm(GemmParams(input, *(params.weights.k_rope_weight->kernel)));
-    printBufferData(*q, "q");
-    printBufferData(*kv_a, "kv_a_after_layernorm");
-    printBufferData(*k_rope, "k_rope");
-    mlaRotaryWriteKVCache({*q, *kv_a, *k_rope, params.common, params.weights, params.configs, params.qscheme});
-    printBufferData(*q, "q_after_rotary");
-    printBufferData(*k_rope, "k_rope_after_rotary");
+    mlaRotaryWriteKVCache({*q,*fused_qkv, kv_offset, params.common, params.weights, params.configs, params.qscheme});
+    printBufferData(*fused_qkv, "fused_qkrope_after_rotary");
     pre_mla_wrapper.stop();
     auto      qscheme       = params.qscheme;
     auto      dtype         = input.type();
@@ -118,40 +107,21 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
         auto generate_q = q->view(0, generate_batch_size);
         auto generate_qkv_output = qkv_output->slice(0, generate_batch_size);
-        if (qscheme == QScheme::Qfp8PerTokenBlock) {
-            size_t m = generate_q.shape()[0];
-            size_t m_pad = (m + 127) / 128 * 128;
-            auto bmm_indices_host = allocateBuffer({DataType::TYPE_INT32, {m_pad * params.configs.head_num}, AllocationType::HOST}, {"bmm_indices_host"});
-            int* index = bmm_indices_host->data<int>();
-            for (int i = 0;i < m_pad * params.configs.head_num; ++i) {
-                index[i] = i / params.configs.head_num;
-            }
-            auto bmm_indices = clone({*bmm_indices_host, AllocationType::DEVICE});
-
-            mlaDecoderSelfAttention({params.layer_id,
-                                    generate_q,
-                                    generate_qkv_output,
-                                    params.common,
-                                    params.weights,
-                                    params.configs,
-                                    params.qscheme,
-                                    bmm_indices});
-        } else {
-            mlaDecoderSelfAttention({params.layer_id,
-                                    generate_q,
-                                    generate_qkv_output,
-                                    params.common,
-                                    params.weights,
-                                    params.configs,
-                                    params.qscheme});
-        }
+        mlaDecoderSelfAttention({params.layer_id,
+                                 generate_q,
+                                 generate_qkv_output,
+                                 params.common,
+                                 params.weights,
+                                 params.configs,
+                                 params.qscheme});
     }
     if (context_batch_size) {
         // slice to get BufferPtr
         auto context_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
+        auto split_result = split({*fused_qkv, {(size_t)kv_offset, (size_t)params.configs.kv_lora_rank, (size_t)params.configs.rope_head_dim}, 1});
         auto context_q = q->view(generate_batch_size, context_token_num);
-        auto context_kv_a   = kv_a->view(generate_batch_size, context_token_num);
-        auto context_k_rope = k_rope->view(generate_batch_size, context_token_num);
+        auto context_kv_a   = split_result.outputs[1];
+        auto context_k_rope = split_result.outputs[2];
         if (layer_kv_cache) {
             auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
             params.common.kv_cache->kv_cache_block_id =
@@ -159,8 +129,8 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         }
         mlaContextAttention({params.layer_id,
                              context_q,
-                             context_kv_a,
-                             context_k_rope,
+                             *context_kv_a,
+                             *context_k_rope,
                              context_qkv_output,
                              params.common,
                              params.weights,

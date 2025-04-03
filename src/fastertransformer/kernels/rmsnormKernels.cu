@@ -162,13 +162,15 @@ __global__ void generalRmsNorm(T* output, T* normed_output, const T* input, cons
 
 
 template<typename T, bool IS_BIAS>
-__global__ void rmsNormWithStride(T* __restrict data,
+__global__ void rmsNormWithStride(T* __restrict output,
+                                  const int out_stride,
+                                  const T* __restrict input,
+                                  const int in_stride,
                                   const T* __restrict gamma,
                                   const T* __restrict bias,
                                   const float eps,
                                   const int n,
-                                  const int norm_size,
-                                  const int stride) {
+                                  const int norm_size) {
     constexpr auto num_elems_T = num_elems<T>::value;
     using float_packed_t = typename packed_as<float, num_elems_T>::type;
     constexpr int vec_size = num_elems<T>::value;
@@ -177,7 +179,8 @@ __global__ void rmsNormWithStride(T* __restrict data,
 
     const int sample_idx = blockIdx.x / (n / norm_size);
     const int group_idx = blockIdx.x % (n / norm_size);
-    T* group_start = data + sample_idx * (stride / vec_size) + group_idx * (norm_size / vec_size);
+    const T* group_start = input + sample_idx * (in_stride / vec_size) + group_idx * (norm_size / vec_size);
+    T* dest_start =  output + sample_idx * (out_stride / vec_size) + group_idx * (norm_size / vec_size);
 
     __shared__ float smem_scale;
 
@@ -203,7 +206,7 @@ __global__ void rmsNormWithStride(T* __restrict data,
 
         const float_packed_t val_f = cuda_cast<float_packed_t>(packed_val);
         const T val = cuda_cast<T>(compute_rmsnorm<float_packed_t, T, IS_BIAS>(val_f, smem_scale, gamma, bias, elem_idx));
-        group_start[elem_idx] = cuda_cast<T>(val);
+        dest_start[elem_idx] = cuda_cast<T>(val);
     }
 }
 
@@ -346,20 +349,20 @@ void invokeGeneralRmsNorm(T* out, const T* input, const T* gamma, const T* beta,
 }
 
 template<typename T>
-void invokeRmsNormWithStride(T* __restrict data,
+void invokeRmsNormWithStride(T* __restrict output,
+                             const int out_stride,
+                             const T* __restrict input,
+                             const int in_stride,
                              const T* __restrict gamma,
                              const T* __restrict beta,
                              const float  layernorm_eps,
                              const int    m,
                              const int    n,
                              const int    norm_size,
-                             const int    stride,
-                             const int    offset,
                              cudaStream_t stream)
 {
     constexpr size_t vec_size = 2;
     constexpr size_t warp_size = 32;
-    data = data + offset;
 
     // 参数校验
     if (n % norm_size != 0) {
@@ -377,11 +380,25 @@ void invokeRmsNormWithStride(T* __restrict data,
     using Tp = typename packed_as<T, vec_size>::type;
     bool is_bias = beta != nullptr;
     if (is_bias) {
-        rmsNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma), reinterpret_cast<const Tp*>(beta),
-                        layernorm_eps, n, norm_size, stride);
+        rmsNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output),
+                                                                out_stride,
+                                                                reinterpret_cast<const Tp*>(input),
+                                                                in_stride,
+                                                                reinterpret_cast<const Tp*>(gamma),
+                                                                reinterpret_cast<const Tp*>(beta),
+                                                                layernorm_eps,
+                                                                n,
+                                                                norm_size);
     } else {
-        rmsNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma), reinterpret_cast<const Tp*>(beta),
-                layernorm_eps, n, norm_size, stride);
+        rmsNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output),
+                                                                 out_stride,
+                                                                 reinterpret_cast<const Tp*>(input),
+                                                                 in_stride,
+                                                                 reinterpret_cast<const Tp*>(gamma),
+                                                                 reinterpret_cast<const Tp*>(beta),
+                                                                 layernorm_eps,
+                                                                 n,
+                                                                 norm_size);                                                                 
     }
 }
 
@@ -460,15 +477,16 @@ INSTANTIATE_ADD_BIAS_RESL_RMSNORM(__nv_bfloat16, __nv_fp8_e4m3);
 #endif // ENABLE_FP8
 
 #define INSTANTIATE_STRIDED_RMSNORM(T)                                                                               \
-    template void invokeRmsNormWithStride(T* __restrict data,                                                        \
+    template void invokeRmsNormWithStride(T* __restrict output,                                                      \
+                                          const int out_stride,                                                      \
+                                          const T* __restrict input,                                                 \
+                                          const int in_stride,                                                       \
                                           const T* __restrict gamma,                                                 \
                                           const T* __restrict beta,                                                  \
                                           const float  layernorm_eps,                                                \
                                           const int    m,                                                            \
                                           const int    n,                                                            \
                                           const int    norm_size,                                                    \
-                                          const int    stride,                                                       \
-                                          const int    offset,                                                       \
                                           cudaStream_t stream);
 INSTANTIATE_STRIDED_RMSNORM(float);
 INSTANTIATE_STRIDED_RMSNORM(half);

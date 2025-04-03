@@ -140,6 +140,10 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tens
 
 def ffn_sp_neg1(t: torch.Tensor, tp: int, tp_rank: int,  ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[-1] // ffn_tp_size, dim=-1)[ffn_tp_rank]
+def sp_neg1_part_by_head(t: torch.Tensor, tp: int, tp_rank: int, head_num:int, size_per_head: int, **kwargs: Any) -> torch.Tensor:
+    t_0 = torch.split(t[:, :head_num * size_per_head], head_num * size_per_head // tp, dim=-1)[tp_rank]
+    t_1 =  t[:, head_num * size_per_head:]
+    return torch.concat([t_0, t_1], dim=-1)
 
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
@@ -396,11 +400,9 @@ class W:
     post_ln_2_beta = 'post_layernorm_weights_2.beta'
 
     # mla
-    mla_q_w = "self_attention_weights.mla.query_weight.kernel"
-    mla_q_a_w = "self_attention_weights.mla.query_a_weight.kernel"
+    mla_fusedqkrope_w = "self_attention_weights.mla.fusedqkrope.kernel"
+    mla_fusedqkrope_no_lora_w = "self_attention_weights.mla.fusedqkrope_no_lora.kernel"
     mla_q_b_w = "self_attention_weights.mla.query_b_weight.kernel"
-    mla_kv_a_w = "self_attention_weights.mla.key_value_a_weight.kernel"
-    mla_k_rope_w = "self_attention_weights.mla.key_rope_weight.kernel"
     mla_k_nope_w = "self_attention_weights.mla.key_nope_weight.kernel"
     mla_v_w = "self_attention_weights.mla.value_weight.kernel"
     mla_q_a_ln_gamma = "self_attention_weights.mla.query_a_layernorm_weight.gamma"
@@ -408,12 +410,11 @@ class W:
     mla_kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma"
     mla_kv_a_ln_beta = "self_attention_weights.mla.key_value_a_layernorm_weight.beta"
 
-    mla_q_s = "self_attention_weights.mla.query_weight.weight_only_quant_scale"
-    mla_q_a_s = "self_attention_weights.mla.query_a_weight.weight_only_quant_scale"
+    mla_fusedqkrope_s = "self_attention_weights.mla.fusedqkrope.weight_only_quant_scale"
+    mla_fusedqkrope_no_lora_s = "self_attention_weights.mla.fusedqkrope_no_lora.weight_only_quant_scale"
     mla_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale"
-    mla_kv_a_s = "self_attention_weights.mla.key_value_a_weight.weight_only_quant_scale"
-    mla_k_rope_s = "self_attention_weights.mla.key_rope_weight.weight_only_quant_scale"
     mla_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale"
+
     mla_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale"
 
     # mla + absorb
@@ -566,28 +567,20 @@ class W:
         ffn_w1,
         ffn_w2,
         ffn_w3,
-        mla_kc,
-        mla_kc_s,
         mla_k_nope_s,
         mla_k_nope_w,
-        mla_k_rope_s,
-        mla_k_rope_w,
-        mla_kv_a_s,
-        mla_kv_a_w,
-        mla_q_a_s,
-        mla_q_a_w,
         mla_q_b_s,
         mla_q_b_w,
-        mla_q_s,
-        mla_q_w,
-        mla_vc,
-        mla_vc_s,
         mla_v_s,
         mla_v_w,
         moe_s1,
         moe_s2,
         moe_w1,
         moe_w2,
+        mla_fusedqkrope_w,
+        mla_fusedqkrope_no_lora_w,
+        mla_fusedqkrope_s,
+        mla_fusedqkrope_no_lora_s,
     ])
 
     groupwise_quant_params = set([
@@ -607,19 +600,6 @@ class W:
         moe_s2,
     ])
 
-    mla_quant_weights = [
-        mla_kv_a_w,
-        mla_k_rope_w,
-        mla_k_nope_w,
-        mla_v_w,
-        # mla_kv_a_ln_gamma,
-        mla_q_a_w,
-        mla_q_b_w,
-        # mla_q_a_ln_gamma,
-        mla_kc,
-        mla_vc,
-        mla_q_w
-    ]
 
     sq_quant_weights = [
         attn_qkv_w,
@@ -662,15 +642,11 @@ class W:
     int8_attn_weights = [
         [attn_qkv_w, attn_qkv_s],
         [attn_o_w, attn_o_s],
-        [mla_q_w, mla_q_s],
-        [mla_q_a_w, mla_q_a_s],
+        [mla_fusedqkrope_w, mla_fusedqkrope_s],
+        [mla_fusedqkrope_no_lora_w, mla_fusedqkrope_no_lora_s],
         [mla_q_b_w, mla_q_b_s],
-        [mla_kv_a_w, mla_kv_a_s],
-        [mla_k_rope_w, mla_k_rope_s],
         [mla_k_nope_w, mla_k_nope_s],
         [mla_v_w, mla_v_s],
-        [mla_kc, mla_kc_s],
-        [mla_vc, mla_vc_s],
     ]
 
     int8_attn_vision_weights = [
@@ -758,11 +734,11 @@ class W:
         attn_o_shift: sp_0,
 
         # mla
-        mla_q_w: sp_neg1,
-        mla_q_a_w: sp_id,
         mla_q_b_w: sp_neg1,
-        mla_kv_a_w: sp_id,
-        mla_k_rope_w: sp_id,
+        mla_fusedqkrope_w: sp_id,
+        mla_fusedqkrope_s: sp_id,
+        mla_fusedqkrope_no_lora_w: sp_neg1_part_by_head,
+        mla_fusedqkrope_no_lora_s: sp_neg1_part_by_head,
         mla_k_nope_w: sp_neg1,
         mla_v_w: sp_neg1,
         mla_v_s: sp_neg1,
@@ -770,20 +746,13 @@ class W:
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
         mla_kv_a_ln_beta: sp_id,
-        mla_q_s: sp_neg1,
-        mla_q_a_s: sp_id,
         mla_q_b_s: sp_neg1,
-        mla_kv_a_s: sp_id,
-        mla_k_rope_s: sp_id,
+        mla_fusedqkrope_s: sp_id,
         mla_k_nope_s: sp_neg1,
         mla_kc: sp_0,
         mla_vc: sp_0,
         mla_kc_s: sp_0,
         mla_vc_s: sp_0,
-
-        # mla cache
-        mla_kc: sp_0,
-        mla_vc: sp_0,
 
         cross_attn_pre_ln_gamma: sp_id,
         cross_attn_pre_ln_beta: sp_id,
@@ -929,8 +898,6 @@ class W:
             W.mla_v_s: sp_0,
             W.mla_q_b_w: sp_0,
             W.mla_q_b_s: sp_0,
-            W.mla_q_w: sp_0,
-            W.mla_q_s: sp_0
         }
         tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
         tp_strategy.update(gemm_block_fp8_weight_tp_strategy)

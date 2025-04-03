@@ -154,9 +154,6 @@ def get_layer_group_quant_weight_info(
                            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                            identity)
             ])
-        elif weight_info.name in W.mla_quant_weights:
-            quant_weights.extend(get_mla_quant_weight_info(
-                weight_info.weights))
         elif weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]:
             quant_weights.extend(
                 get_ffn_quant_weight_info(weight_info.weights, quant_algo,

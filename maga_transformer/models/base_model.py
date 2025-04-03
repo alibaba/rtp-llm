@@ -383,20 +383,7 @@ class BaseModel(object):
 
         if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
-
-        if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
-            for layer_weight in self.weight.weights:
-                if W.mla_kc in layer_weight and W.mla_vc in layer_weight:
-                    continue
-                mla_k_nope_weight  = layer_weight[W.mla_k_nope_w]
-                mla_v_weight = layer_weight[W.mla_v_w]
-                kc_weight = mla_k_nope_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).permute(1, 2, 0).contiguous()
-                vc_weight = mla_v_weight.view(self.config.gpt_init_params.kv_lora_rank, self.config.gpt_init_params.head_num // g_parallel_info.tp_size, -1).transpose(0, 1).contiguous()
-                if W.mla_kc not in layer_weight:
-                    layer_weight[W.mla_kc] = kc_weight
-                if W.mla_vc not in layer_weight:
-                    layer_weight[W.mla_vc] = vc_weight
-
+            
         if self.config.vit_separation != 1:
             if self.task_type == TaskType.LANGUAGE_MODEL:
                 lm_head_w = self.weight.steal_global_weight(W.lm_head)

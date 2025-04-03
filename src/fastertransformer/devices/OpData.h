@@ -118,6 +118,16 @@ struct CloneParams {
     bool overlapped = false;
 };
 
+struct SliceParams {
+    const Buffer& input;
+    int64_t dim;
+    int64_t start;
+    int64_t end;    
+    int64_t step = 1;
+};
+
+using SliceOutput = BufferPtr;
+
 struct CopyParams {
     const Buffer& dst;
     const Buffer& src;
@@ -187,6 +197,18 @@ struct AddBiasOutput {
     BufferPtr output;
 };
 
+struct LayernormWithStrideParams {
+    BufferPtr input;
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight;
+    double eps;
+    NormType norm_type;
+    size_t offset;
+    // do normalize for each group in norm_group
+    size_t norm_group_size;    
+    QScheme qscheme = QScheme::NoQuantize;
+    bool in_place = true;
+};
+
 struct LayernormParams {
     LayernormParams(BufferPtr input,
                     BufferPtr before_norm_output,
@@ -214,37 +236,8 @@ struct LayernormParams {
                     return_normed_output(return_normed_output),
                     is_inplace(is_inplace),
                     qscheme(qscheme),
-                    offset(0),
-                    hidden_size(0),
-                    stride(0),
                     attn_swap_comm_buffer(attn_swap_comm_buffer),
                     ffn_swap_comm_buffer(ffn_swap_comm_buffer) {};
-
-    // for qk norm
-    LayernormParams(BufferPtr input,
-                    const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight,
-                    double eps,
-                    NormType norm_type,
-                    size_t offset,
-                    size_t hidden_size,
-                    size_t stride
-                ):
-                    input(std::move(input)),
-                    before_norm_output(nullptr),
-                    norm_weight(norm_weight),
-                    residual1(std::nullopt),
-                    residual2(std::nullopt),
-                    bias(std::nullopt),
-                    norm_type(norm_type),
-                    alpha(0.0),
-                    eps(eps),
-                    return_normed_output(false),
-                    is_inplace(true),
-                    qscheme(QScheme::NoQuantize),
-                    offset(offset),
-                    hidden_size(hidden_size),
-                    stride(stride) {};
-
 
     BufferPtr input;
     BufferPtr before_norm_output;
@@ -263,10 +256,7 @@ struct LayernormParams {
     const bool return_normed_output;
     const bool is_inplace;
     const QScheme qscheme;
-
-    const int offset;
-    const int hidden_size;
-    const int stride;
+    
     bool attn_swap_comm_buffer = false;
     bool ffn_swap_comm_buffer = false;
 };
@@ -492,8 +482,8 @@ struct AttentionModuleParams {
 
 struct MlaRotaryWriteKVCacheParams {
     const Buffer&                   q;
-    const Buffer&                   ckv;
-    const Buffer&                   k_rope;
+    const Buffer&                   fused_qkv;
+    const int64_t                   kv_offset;
 
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
@@ -524,12 +514,9 @@ struct MlaDecoderAttentionParams{
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
-
-    BufferPtr                       bmm_indices;
-
-    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common,
-        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme, const BufferPtr bmm_indices = nullptr):
-            layer_id(layer_id), q(q), qkv_output(qkv_output), common(common), weights(weights), configs(configs), qscheme(qscheme), bmm_indices(bmm_indices) {}
+    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common, 
+        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme): 
+            layer_id(layer_id), q(q), qkv_output(qkv_output), common(common), weights(weights), configs(configs), qscheme(qscheme) {}
 };
 
 struct WriteCacheParams {

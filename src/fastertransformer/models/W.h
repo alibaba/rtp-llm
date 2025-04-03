@@ -44,11 +44,10 @@ static const std::string k_ln_gamma      = "self_attention_weights.k_layernorm.g
 static const std::string k_ln_beta       = "self_attention_weights.k_layernorm.beta";
 
 // mla
-static const std::string attn_q      = "self_attention_weights.mla.query_weight.kernel";
-static const std::string attn_q_a    = "self_attention_weights.mla.query_a_weight.kernel";
+static const std::string mla_fusedqkrope      = "self_attention_weights.mla.fusedqkrope.kernel";
+// for lite
+static const std::string mla_fusedqkrope_no_lora = "self_attention_weights.mla.fusedqkrope_no_lora.kernel";
 static const std::string attn_q_b    = "self_attention_weights.mla.query_b_weight.kernel";
-static const std::string attn_kv_a   = "self_attention_weights.mla.key_value_a_weight.kernel";
-static const std::string attn_k_rope = "self_attention_weights.mla.key_rope_weight.kernel";
 static const std::string attn_k_nope = "self_attention_weights.mla.key_nope_weight.kernel";
 static const std::string attn_v      = "self_attention_weights.mla.value_weight.kernel";
 static const std::string q_a_ln_gamma  = "self_attention_weights.mla.query_a_layernorm_weight.gamma";
@@ -64,11 +63,9 @@ static const std::string mla_vc_s = "self_attention_weights.mla.vc.weight_only_q
 // rotary embedding cos sin cache
 static const std::string rope_cos_sin_cache = "rotary_embedding.cos_sin_cache";
 
-static const std::string attn_q_s = "self_attention_weights.mla.query_weight.weight_only_quant_scale";
-static const std::string attn_q_a_s = "self_attention_weights.mla.query_a_weight.weight_only_quant_scale";
+static const std::string mla_fusedqkrope_s      = "self_attention_weights.mla.fusedqkrope.weight_only_quant_scale";
+static const std::string mla_fusedqkrope_no_lora_s = "self_attention_weights.mla.fusedqkrope_no_lora.weight_only_quant_scale";
 static const std::string attn_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale";
-static const std::string attn_kv_a_s = "self_attention_weights.mla.key_value_a_weight.weight_only_quant_scale";
-static const std::string attn_k_rope_s = "self_attention_weights.mla.key_rope_weight.weight_only_quant_scale";
 static const std::string attn_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale";
 static const std::string attn_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale";
 

@@ -39,6 +39,14 @@ LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+LayernormOutput DeviceOps::layernormWithStride(const LayernormWithStrideParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+SliceOutput DeviceOps::slice(const SliceParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AddBiasOutput DeviceOps::addbias(const AddBiasParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

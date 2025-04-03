@@ -226,6 +226,19 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
     return output;
 }
 
+SliceOutput CudaDevice::slice(const SliceParams& params) {
+    const auto& input = params.input;
+    const auto& starts = params.start;
+    const auto& step = params.step;
+    auto input_t = Buffer2torchTensor(params.input, false);
+    auto sliceTensor = input_t.slice(params.dim, starts, params.end, step);
+    auto buffer_shape = torchShapeToBufferShape(sliceTensor.sizes());
+    auto out = allocateBuffer({input.type(), buffer_shape});
+    auto out_t = Buffer2torchTensor(out, false);
+    out_t.copy_(sliceTensor, false);
+    return out;
+}
+
 SplitOutput CudaDevice::split(const SplitParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.input.dim() == 2 && params.dim < params.input.dim()
                               && std::accumulate(params.split_sizes.begin(), params.split_sizes.end(), 0)

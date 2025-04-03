@@ -106,13 +106,16 @@ __global__ void qkLayerNorm(T* __restrict qkv,
 }
 
 template<typename T, bool IS_BIAS>
-__global__ void layerNormWithStride(T* __restrict data,
-                                   const T* __restrict gamma,
-                                   const T* __restrict beta,
-                                   const float layernorm_eps,
-                                   const int n,          // 总特征维度
-                                   const int norm_size,  // 归一化窗口大小
-                                   const int stride) 
+__global__ void layerNormWithStride(T* __restrict output,
+                                    const int out_stride,
+                                    const T* __restrict input,
+                                    const int in_stride,
+                                    const T* __restrict gamma,
+                                    const T* __restrict beta,
+                                    const float layernorm_eps,
+                                    const int n,          // 总特征维度
+                                    const int norm_size,  // 归一化窗口大小
+                                    const int stride) 
 {
     constexpr auto num_elems_T = num_elems<T>::value;    // 向量化元素数
     constexpr size_t warp_size = 32;
@@ -127,8 +130,9 @@ __global__ void layerNormWithStride(T* __restrict data,
     __shared__ float s_variance;
 
     // 计算当前窗口的起始位置
-    T* sample_start = data + sample_idx * (stride / num_elems_T);
-    T* head_start = sample_start + head_idx * (norm_size / num_elems_T);
+    const T* sample_start = input + sample_idx * (in_stride / num_elems_T);
+    T* output_start = output + sample_idx * (out_stride / num_elems_T);
+    const T* head_start = sample_start + head_idx * (norm_size / num_elems_T);
 
     // Stage 1: 计算均值
     float local_sum = 0.0f;
@@ -173,7 +177,7 @@ __global__ void layerNormWithStride(T* __restrict data,
         } else {
             val_f = (val_f - s_mean) * s_variance * gamma_val;
         }
-        head_start[elem_idx] = cuda_cast<T>(val_f);
+        output_start[elem_idx] = cuda_cast<T>(val_f);
     }
 }
 
@@ -203,19 +207,19 @@ void invokeQkLayerNorm(T* __restrict qkv,
 }
 
 template<typename T>
-void invokeLayerNormWithStride(T* __restrict data,
+void invokeLayerNormWithStride(T* __restrict output,
+                               const int out_stride,
+                               const T* __restrict input,
+                               const int in_stride,
                                const T* __restrict gamma,
                                const T* __restrict beta,
                                const float  layernorm_eps,
                                const int    m,
                                const int    n,
                                const int    norm_size,
-                               const int    stride,
-                               const int    offset,
                                cudaStream_t stream) {
     constexpr size_t vec_size = 2;
     constexpr size_t warp_size = 32;
-    data = data + offset;
 
     // 参数校验
     if (n % norm_size != 0) {
@@ -233,14 +237,15 @@ void invokeLayerNormWithStride(T* __restrict data,
     using Tp = typename packed_as<T, vec_size>::type;
     bool is_bias = beta != nullptr;
     if (is_bias) {
-       layerNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma),
-       			        reinterpret_cast<const Tp*>(beta),
-							layernorm_eps, n, norm_size, stride);
-   }
-   else {
-       layerNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma),
-       			        reinterpret_cast<const Tp*>(beta),
-							layernorm_eps, n, norm_size, stride);
+       layerNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output), out_stride, reinterpret_cast<const Tp*>(input), in_stride,
+       			        reinterpret_cast<const Tp*>(gamma),
+							reinterpret_cast<const Tp*>(beta),
+							layernorm_eps, m, n, norm_size);
+   } else {
+       layerNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output), out_stride, reinterpret_cast<const Tp*>(input), in_stride,
+       			        reinterpret_cast<const Tp*>(gamma),
+							nullptr,
+							layernorm_eps, m, n, norm_size);
    }
 }
 
@@ -261,15 +266,16 @@ INSTANTIATE_QK_LAYERNORM(__nv_bfloat16);
 #undef INSTANTIATE_QK_LAYERNORM
 
 #define INSTANTIATE_STRIDED_LAYERNORM(T)                                                                               \
-    template void invokeLayerNormWithStride(T* __restrict data,                                                        \
+    template void invokeLayerNormWithStride(T* __restrict output,                                                      \
+                                            const int out_stride,                                                      \
+                                            const T* __restrict input,                                                 \
+                                            const int in_stride,                                                       \
                                             const T* __restrict gamma,                                                 \
                                             const T* __restrict beta,                                                  \
                                             const float  layernorm_eps,                                                \
                                             const int    m,                                                            \
                                             const int    n,                                                            \
                                             const int    norm_size,                                                    \
-                                            const int    stride,                                                       \
-                                            const int    offset,                                                       \
                                             cudaStream_t stream);
 INSTANTIATE_STRIDED_LAYERNORM(float);
 INSTANTIATE_STRIDED_LAYERNORM(half);

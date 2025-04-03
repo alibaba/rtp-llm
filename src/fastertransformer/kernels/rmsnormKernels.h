@@ -42,16 +42,16 @@ void invokeAddBiasResidualRmsNorm(T* output, T* normed_output, const T* input, c
     const float* scale = nullptr, float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr);
 
 template<typename T>
-void invokeRmsNormWithStride(T* __restrict data,
+void invokeRmsNormWithStride(T* __restrict output,
+                             const int out_stride,
+                             const T* __restrict input,
+                             const int in_stride,
                              const T* __restrict gamma,
                              const T* __restrict beta,
                              const float  layernorm_eps,
                              const int    tokens,
                              const int    hidden_size,
                              const int    norm_size,
-                             const int    stride,
-                             const int    offset,
                              cudaStream_t stream);
-
 
 } // namespace fastertransformer

@@ -19,10 +19,12 @@ public:
     virtual SelectOutput select(const SelectParams& params);
     virtual ConcatOutput concat(const ConcatParams& params);
     virtual SplitOutput split(const SplitParams& params);
+    virtual SliceOutput slice(const SliceParams& params);
     virtual void         bufMemset(Buffer& buf, int val);
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);
+    virtual LayernormOutput layernormWithStride(const LayernormWithStrideParams& params);
     virtual AddBiasOutput addbias(const AddBiasParams& params);
     virtual BufferPtr gemm(const GemmParams& params);
     virtual GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
