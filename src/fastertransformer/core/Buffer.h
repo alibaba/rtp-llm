@@ -106,9 +106,9 @@ public:
     void updateShape(const std::vector<size_t>& shape);
     void updateTypeAndShape(DataType type, const std::vector<size_t>& shape);
     Buffer reshape(const std::vector<size_t>& shape) const;
-    Buffer view(size_t offset, size_t size) const; // only from 0-d
+    Buffer view(size_t offset, size_t size, bool count = true) const; // only from 0-d
     // only from 0-d
-    std::shared_ptr<Buffer> slice(size_t offset, size_t size) const;
+    std::shared_ptr<Buffer> slice(size_t offset, size_t size, bool count = true) const;
     Buffer operator[](size_t offset) const;
     std::shared_ptr<Buffer> index(size_t id) const;
 
@@ -161,6 +161,10 @@ public:
         return "BufferData Detail(" + oss.str() + ")";
     }
 
+    void updateParent(std::shared_ptr<Buffer> parent) {
+        parent_ = parent;
+    }
+
     std::string debugStringMeta() const;
 
 private:
@@ -173,6 +177,8 @@ protected:
     void*               data_;
     DeleterFuncType     deleter_ = nullptr;
     mutable size_t      view_count_ = 0;
+
+    std::shared_ptr<Buffer> parent_ = nullptr;
 
 friend class QBuffer;
 

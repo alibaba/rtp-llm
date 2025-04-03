@@ -124,9 +124,10 @@ Buffer Buffer::reshape(const std::vector<size_t>& shape) const {
 // NOTE: new Buffer from view() has the same data pointer as the original buffer,
 //       and also shorter life time than the original buffer.
 //       user has the responsibility to keep the original buffer alive.
-Buffer Buffer::view(size_t offset, size_t size) const {
+Buffer Buffer::view(size_t offset, size_t size, bool count) const {
+    auto deleter = count? getSubBufferDeleter(): nullptr;
     if (offset == 0 && size == shape_[0]) {
-        return Buffer(where_, type_, shape_, data_, getSubBufferDeleter());
+        return Buffer(where_, type_, shape_, data_, deleter);
     } else {
         FT_CHECK_WITH_INFO(offset + size <= this->shape_[0],
                            "view offset %d + size %d out of range with buffer[%s]",
@@ -134,13 +135,14 @@ Buffer Buffer::view(size_t offset, size_t size) const {
         auto new_shape = shape_;
         new_shape[0] = size;
         const auto offset_size = this->size() / shape_[0] * offset;
-        return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), getSubBufferDeleter());
+        return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), deleter);
     }
 }
 
-std::shared_ptr<Buffer> Buffer::slice(size_t offset, size_t size) const {
+std::shared_ptr<Buffer> Buffer::slice(size_t offset, size_t size, bool count) const {
     const auto temp = view(offset, size);
-    return make_shared<Buffer>(temp.where_, temp.type_, temp.shape_, temp.data_, getSubBufferDeleter());
+    auto deleter = count? getSubBufferDeleter(): nullptr;
+    return make_shared<Buffer>(temp.where_, temp.type_, temp.shape_, temp.data_, deleter);
 }
 
 Buffer Buffer::operator[](size_t offset) const {

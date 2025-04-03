@@ -334,29 +334,15 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
     FT_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
     FT_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
             // padding to 128 # hack block size
-    bool need_pad = params.A.shape()[0] % 128 != 0;
     BufferPtr      quanted_input;
     BufferPtr      gemm_output;
-    if (need_pad) {
-        vector<size_t> pad_shape = params.A.shape();
-        pad_shape[0] = (pad_shape[0] / 128 + 1) * 128;
-        auto padded_input = allocateBuffer({params.A.type(), pad_shape, AllocationType::DEVICE}, {"pad_gemm_input"});
-	cudaMemcpyAsync(padded_input->data(), params.A.data(), params.A.sizeBytes(), cudaMemcpyDeviceToDevice, stream_);
-        quanted_input = quantize(QuantizeParams(*padded_input, DataType::TYPE_QFP8_E4M3, padded_input->dim()-1, QScheme::Qfp8PerTokenBlock));
-	FT_LOG_DEBUG("padding input for deep_gemm");
-	printBufferData(*quanted_input, "quanted_input for deep_gemm");
-        vector<size_t> output_shape = output->shape();
-        output_shape[0] = (output_shape[0] / 128 + 1) * 128;
-        gemm_output = allocateBuffer({output->type(), output_shape, AllocationType::DEVICE}, {"pad_gemm_output"});
-    } else {
-        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock));
-        gemm_output = output;
-    }
+
+    quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock));
+    gemm_output = output;
  
     DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
-    if (need_pad) {
-        this->copy({*output, gemm_output->view(0, output->shape()[0])});
-    }
+    output = gemm_output->slice(0, params.A.shape()[0], false);
+    output->updateParent(gemm_output);
 }
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C

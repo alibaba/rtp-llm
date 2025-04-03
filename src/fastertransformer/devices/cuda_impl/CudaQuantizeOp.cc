@@ -44,8 +44,15 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
 
     BufferPtr scales = nullptr;
     DataType out_data_type = (params.qscheme == QScheme::Qfp8PerTensor || params.qscheme == QScheme::Qfp8PerTokenBlock) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+
+    vector<size_t> input_shape = params.input.shape();
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        // padding to 128
+        input_shape[0] = (input_shape[0] + 127) / 128 * 128;
+    }
+
     auto kernel = allocateBuffer({out_data_type,
-                                 params.input.shape(),
+                                 input_shape,
                                  getMemAllocationType(params.input.where())},
                                  {"kernel"});
 
@@ -157,13 +164,14 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
             default:
                 FT_CHECK_WITH_INFO(false, "unsupport data type");
         }
+#ifdef ENABLE_BF16
     } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        FT_CHECK_WITH_INFO(params.input.shape()[1] % 128 == 0, "last dim must be divisible by 128");
+        FT_CHECK_WITH_INFO(input_shape[1] % 128 == 0, "last dim must be divisible by 128");
         scales = allocateBuffer({DataType::TYPE_FP32,
-                                {params.input.shape()[0], (unsigned int)(params.input.shape()[1] / 128)},
+                                {input_shape[0], (unsigned int)(input_shape[1] / 128)},
                                 getMemAllocationType(params.input.where())},
                                 {"scales"});
-        if (params.input.shape()[0] == 0) {
+        if (input_shape[0] == 0) {
             return BufferPtr(new QBuffer(std::move(kernel),
                                          std::move(scales),
                                          std::move(BufferPtr(new Buffer(params.input.where(),
@@ -172,6 +180,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                                                         nullptr)))));
         }
         tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), params.input.size(), stream_);
+#endif
 #endif
     } else {
         FT_CHECK_WITH_INFO(false, "params qscheme type unknown: %d", int(params.qscheme));
