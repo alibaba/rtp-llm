@@ -905,6 +905,7 @@ struct QuantizeParams {
 
     // for groupwise quantize
     int64_t    groupSize;
+    int64_t    paddingSize = 0;
 
     QuantizeParams(const Buffer&          input,
                    DataType               qtype,
@@ -935,11 +936,12 @@ struct QuantizeParams {
         axis(axis),
         qscheme(QScheme::Qint8PerToken),
         groupSize(groupSize) {}
-    QuantizeParams(const Buffer& input, DataType qtype, size_t axis, QScheme qscheme):
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis, QScheme qscheme, int64_t paddingSize = 0):
         input(input),
         qtype(qtype),
         axis(axis),
-        qscheme(qscheme){}
+        qscheme(qscheme),
+        paddingSize(paddingSize) {}
 };
 
 }  // namespace fastertransformer

@@ -18,7 +18,8 @@ public:
         auto output = device_->quantize({*torchTensor2Buffer(input),
                                          DataType::TYPE_FP8_E4M3,
                                          1,
-                                         QScheme::Qfp8PerTokenBlock});
+                                         QScheme::Qfp8PerTokenBlock,
+                                         128});
 
         auto kernel = Buffer2torchTensor(reinterpret_cast<const QBuffer&>(*output).kernel(), false);
         auto scales = Buffer2torchTensor(reinterpret_cast<const QBuffer&>(*output).scales(), false);

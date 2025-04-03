@@ -46,9 +46,9 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
     DataType out_data_type = (params.qscheme == QScheme::Qfp8PerTensor || params.qscheme == QScheme::Qfp8PerTokenBlock) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
 
     vector<size_t> input_shape = params.input.shape();
-    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock && params.paddingSize) {
         // padding to 128
-        input_shape[0] = (input_shape[0] + 127) / 128 * 128;
+        input_shape[0] = (input_shape[0] + params.paddingSize - 1) / params.paddingSize * params.paddingSize;
     }
 
     auto kernel = allocateBuffer({out_data_type,
