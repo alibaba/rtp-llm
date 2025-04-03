@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include <memory>
 
 namespace fastertransformer {
 
@@ -28,6 +29,7 @@ public:
     QBuffer& operator=(const QBuffer& buffer)   = delete;
     QBuffer& operator=(QBuffer&& buffer)        = delete;
 
+    std::shared_ptr<QBuffer>          qslice(size_t offset, size_t size) const;
     Buffer          scales()                const;
     Buffer          zeros()                 const;
     Buffer          kernel()                const;

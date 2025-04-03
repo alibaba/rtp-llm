@@ -61,6 +61,8 @@ public:
     virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);
     virtual MoeDispatchOutput epDispatch(const MoeDispatchParams& params);
     virtual FfnLayerOutput epCombine(const MoeCombineParams& params);
+    virtual ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params);
+    virtual AllGatherLoraLinearOutput allGatherloraLinear(const AllGatherLoraLinearParams& params);
 
     // for sampler
     virtual GreedyOutput sampleGreedy(const GreedyParams& params);
@@ -71,6 +73,7 @@ public:
     virtual AllReduceOutput allReduce(const AllReduceParams& params);
     virtual void allGather(const AllGatherParams& params);
     virtual AllToAllOutput allToAll(const AllToAllParams& params);
+    virtual void reduceScatter(const ReduceScatterParams& params);
     virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
 
     // for quantization
@@ -90,6 +93,8 @@ public:
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
     static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
+
+    virtual void prepareCommBuffer(const PrepareCommBufferParams& params);
 };
 
 }  // namespace fastertransformer

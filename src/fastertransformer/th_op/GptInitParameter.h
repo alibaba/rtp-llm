@@ -188,6 +188,7 @@ public:
     int64_t     tp_nccl_port_   = 0;
     int64_t     dp_nccl_port_   = 0;
     int64_t     dp_tp_nccl_port_= 0;
+    int64_t     ffn_tp_nccl_port_ = 0;
     int64_t     http_port_      = 0;
     int64_t     model_rpc_port_ = 0;
     int64_t     tp_size_        = 1;
@@ -196,6 +197,9 @@ public:
     int64_t     ep_rank_        = 0;
     int64_t     dp_size_        = 1;
     int64_t     dp_rank_        = 0;
+    int64_t     ffn_tp_size_    = 1;
+    int64_t     ffn_tp_rank_    = 0;
+    bool        enable_sp_      = false;
 
 
     // pd speration

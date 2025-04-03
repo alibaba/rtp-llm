@@ -66,8 +66,17 @@ struct NcclParam {
     NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
     NcclParam(NcclParam const& param):
         rank_(param.rank_), world_size_(param.world_size_), nccl_uid_(param.nccl_uid_), nccl_comm_(param.nccl_comm_){};
-    std::string toString() {
+    std::string toString() const {
         return rtp_llm::fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
+    }
+    bool operator==(const NcclParam& other) const {
+        return rank_ == other.rank_ &&
+               world_size_ == other.world_size_ &&
+               nccl_comm_ == other.nccl_comm_;
+    }
+
+    bool operator!=(const NcclParam& other) const {
+        return !(*this == other);
     }
 };
 

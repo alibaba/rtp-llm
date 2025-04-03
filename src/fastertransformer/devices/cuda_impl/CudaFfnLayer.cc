@@ -190,7 +190,7 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
                     *scatter_output,
                     params.overlapped});
         }
-        allGather({{padding_output}, ParallelMode::TP, params.overlapped});
+        allGather({{padding_output}, ParallelMode::TP, {}, true, params.overlapped});
         if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size) {
             return {padding_output, createCommHook()};
         } else {

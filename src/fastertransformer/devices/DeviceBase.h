@@ -38,6 +38,7 @@ public:
     virtual void syncCommunication(bool timeout = true);
     virtual void overlappedCommBarrier();
     virtual DeviceHookPtr createCommHook();
+    virtual void overlappedComputeBarrier();
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
@@ -62,6 +63,8 @@ public:
     LossOutput loss(const LossParams& params) override;
     MaskOutput attentionMask(const MaskParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) override;
+    AllGatherLoraLinearOutput allGatherloraLinear(const AllGatherLoraLinearParams& params) override;
     BufferPtr mhaQKVGemm(const AttentionLayerParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     MultimodalEmbeddingOutput multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
@@ -69,6 +72,7 @@ public:
     //mla
     AttentionLayerOutput mlaAttentionLayer(const AttentionLayerParams& params) override;
 
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 protected:
     BufferStatus queryBufferStatus();
     AllocationType getMemAllocationType(const MemoryType type);

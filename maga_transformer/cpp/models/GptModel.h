@@ -40,7 +40,7 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
+    mutable ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
     ft::BufferPtr lm_output_indexes; // [context_batch_size]
@@ -136,6 +136,9 @@ struct GptLayerInputs {
     ft::AttentionCommonInputs attention_common_inputs;
     const ft::DataType dtype;
     std::vector<LayerMicroBatchInputs> micro_batch_inputs;
+    bool enable_sp = false;
+    size_t token_num = 0;
+    size_t pad_token_num = 0;
 };
 
 struct AttentionBlockOutputs {
@@ -211,7 +214,9 @@ private:
         const ft::BufferPtr hidden,
         const bool has_context_request,
         const bool need_all_logits,
-        const ft::BufferPtr lm_output_indexes);
+        const ft::BufferPtr lm_output_indexes,
+        bool enable_sp,
+        size_t token_num);
 
 private:
     ft::DeviceBase* device_;

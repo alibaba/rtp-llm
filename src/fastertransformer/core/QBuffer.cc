@@ -1,4 +1,5 @@
 #include "src/fastertransformer/core/QBuffer.h"
+#include "Buffer.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include <memory>
 
@@ -94,6 +95,22 @@ BufferPtr QBuffer::kernelPtr() const {
                                     shape(),
                                     data(),
                                     nullptr);
+}
+
+std::shared_ptr<QBuffer> QBuffer::qslice(size_t offset, size_t size) const {
+    BufferPtr new_kernel = slice(offset, size);
+    BufferPtr new_scales = scales_ ? scales_->slice(offset, size) : nullptr;
+    BufferPtr new_zeros = nullptr;
+    if (zeros_ && zeros_->shape()[0] > (offset + size)) {
+        new_zeros = zeros_->slice(offset, size);
+    } else {
+        new_zeros = BufferPtr(
+                    new Buffer(MemoryType::MEMORY_GPU,
+                    DataType::TYPE_INVALID,
+                    {0},
+                    nullptr));
+    }
+    return std::make_shared<QBuffer>(std::move(new_kernel), std::move(new_scales), std::move(new_zeros));
 }
 
 void* QBuffer::scalesData() const {

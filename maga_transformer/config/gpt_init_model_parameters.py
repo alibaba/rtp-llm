@@ -150,6 +150,7 @@ class GptInitModelParameters:
         self.tp_nccl_port = g_master_info.tp_nccl_port
         self.dp_nccl_port = g_master_info.dp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
+        self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
@@ -316,6 +317,9 @@ class GptInitModelParameters:
         self.ep_rank = parallel_info.ep_rank
         self.dp_size = parallel_info.dp_size
         self.dp_rank = parallel_info.dp_rank
+        self.ffn_tp_rank = parallel_info.ffn_tp_rank
+        self.ffn_tp_size = parallel_info.ffn_tp_size
+        self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
 
         self.ckpt_path = ckpt_path

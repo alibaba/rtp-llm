@@ -8,6 +8,7 @@
 #include "src/fastertransformer/cuda/cuggemm/cuggemm.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/cuda/comm_buffer/comm_buffer.h"
 #include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
@@ -151,6 +152,7 @@ public:
     void syncCommunication(bool timeout = true) override;
     void overlappedCommBarrier() override;
     DeviceHookPtr createCommHook() override;
+    void overlappedComputeBarrier() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     DeviceEventPtr createEvent() override;
     bool useGroupGemm() const;
@@ -195,6 +197,8 @@ public:
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) override;
+    AllGatherLoraLinearOutput allGatherloraLinear(const AllGatherLoraLinearParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
@@ -206,6 +210,7 @@ public:
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
     AllToAllOutput allToAll(const AllToAllParams& params) override;
+    void reduceScatter(const ReduceScatterParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr mlaQKVGemm(const AttentionLayerParams& params) override;
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
@@ -228,6 +233,7 @@ public:
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
@@ -295,6 +301,7 @@ private:
     NcclParam tp_nccl_param_;
     NcclParam dp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
+    NcclParam ffn_tp_nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
 
@@ -302,6 +309,13 @@ private:
 
     // BufferPtr will be error when multi stream, tmp hold
     std::vector<BufferPtr> overlap_hold_buffers_;
+    std::unique_ptr<CommBuffer> attn_ag_comm_buffer_ = nullptr;
+    std::unique_ptr<CommBuffer> attn_ag_scale_comm_buffer_ = nullptr;
+    std::unique_ptr<CommBuffer> attn_rs_comm_buffer_ = nullptr;
+    std::unique_ptr<CommBuffer> ffn_ag_comm_buffer_ = nullptr;
+    std::unique_ptr<CommBuffer> ffn_ag_scale_comm_buffer_ = nullptr;
+    std::unique_ptr<CommBuffer> ffn_rs_comm_buffer_ = nullptr;
+
 protected:
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;

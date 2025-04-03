@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <stddef.h>
 #include <string>
 #include "src/fastertransformer/core/Types.h"
@@ -26,6 +27,8 @@ struct DeviceInitParams {
     size_t ep_size         = 1;
     size_t dp_rank         = 0;
     size_t dp_size         = 1;
+    size_t ffn_tp_rank     = 0;
+    size_t ffn_tp_size     = 1;
 
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
@@ -34,6 +37,7 @@ struct DeviceInitParams {
     int64_t     tp_master_port    = 0;
     int64_t     dp_master_port    = 0;
     int64_t     dp_tp_master_port = 0;
+    int64_t     ffn_tp_master_port = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.
@@ -46,6 +50,12 @@ struct DeviceInitParams {
 
     bool enable_comm_overlap = true;
     bool enable_layer_micro_batch  = false;
+
+    bool enable_sp = false;
+    size_t overlap_math_sm_count = 0;
+    size_t overlap_comm_type = 0;
+    size_t max_seq_len = 0;
+    size_t m_split = 0;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -59,6 +69,13 @@ struct DeviceProperties {
 
     size_t dp_rank = 0;
     size_t dp_size = 1;
+    size_t ffn_tp_rank = 0;
+    size_t ffn_tp_size = 1;
+
+    bool enable_sp = false;
+    size_t overlap_math_sm_count = 0;
+    size_t overlap_comm_type = 0;
+    size_t m_split = 0;
 
     /* -- device implementation detail -- */
     // These two options are prepared for intel cpu device.

@@ -129,11 +129,17 @@ def shift_one(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
 
+def ffn_sp_0(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int,**kwargs: Any) -> torch.Tensor:
+    return torch.split(t, t.shape[0] // ffn_tp_size, dim=0)[ffn_tp_rank]
+
 def sp_1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
+
+def ffn_sp_neg1(t: torch.Tensor, tp: int, tp_rank: int,  ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int, **kwargs: Any) -> torch.Tensor:
+    return torch.split(t, t.shape[-1] // ffn_tp_size, dim=-1)[ffn_tp_rank]
 
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
@@ -786,23 +792,23 @@ class W:
         cross_attn_o_w: sp_0,
         cross_attn_o_b: sp_id,
 
-        ffn_w1: sp_neg1,
-        vision_ffn_w1: sp_neg1,
-        ffn_z1: sp_neg1,
-        ffn_s1: sp_neg1,
-        ffn_b1: sp_neg1,
-        ffn_w3: sp_neg1,
-        vision_ffn_w3: sp_neg1,
-        ffn_z3: sp_neg1,
-        ffn_s3: sp_neg1,
-        ffn_b3: sp_neg1,
-        ffn_w2: sp_0,
-        vision_ffn_w2: sp_0,
-        ffn_z2: sp_0,
-        ffn_s2: sp_0,
+        ffn_w1: ffn_sp_neg1,
+        vision_ffn_w1: ffn_sp_neg1,
+        ffn_z1: ffn_sp_neg1,
+        ffn_s1: ffn_sp_neg1,
+        ffn_b1: ffn_sp_neg1,
+        ffn_w3: ffn_sp_neg1,
+        vision_ffn_w3: ffn_sp_neg1,
+        ffn_z3: ffn_sp_neg1,
+        ffn_s3: ffn_sp_neg1,
+        ffn_b3: ffn_sp_neg1,
+        ffn_w2: ffn_sp_0,
+        vision_ffn_w2: ffn_sp_0,
+        ffn_z2: ffn_sp_0,
+        ffn_s2: ffn_sp_0,
         ffn_b2: sp_id,
-        ffn_act_s: sp_0,
-        ffn_smoother: sp_0,
+        ffn_act_s: ffn_sp_0,
+        ffn_smoother: ffn_sp_0,
 
         moe_w1: sp_moe_w1,
         moe_z1: sp_moe_w1,
@@ -892,11 +898,11 @@ class W:
             W.attn_o_s: sp_id,
             W.attn_o_smoother: sp_0,
             W.attn_o_shift: sp_0,
-            W.ffn_w1: sp_0,
-            W.ffn_s1: sp_0,
-            W.ffn_w3: sp_0,
-            W.ffn_s3: sp_0,
-            W.ffn_w2: sp_neg1,
+            W.ffn_w1: ffn_sp_0,
+            W.ffn_s1: ffn_sp_0,
+            W.ffn_w3: ffn_sp_0,
+            W.ffn_s3: ffn_sp_0,
+            W.ffn_w2: ffn_sp_neg1,
             W.ffn_s2: sp_id,
         }
         tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
@@ -1094,6 +1100,8 @@ class ModelDeployWeightInfo:
         self.ep_rank = config.ep_rank
         self.dp_size = config.dp_size
         self.dp_rank = config.dp_rank
+        self.ffn_tp_rank = config.ffn_tp_rank
+        self.ffn_tp_size = config.ffn_tp_size
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num

@@ -29,19 +29,59 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     } else {
         BufferPtr up_output;
         if (isGatedActivation(params.configs.activation_type)) {
-            auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-            up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
+            BufferPtr ffn_input_ptr = params.input.slice(0, params.input.shape()[0]);
+            FT_LOG_DEBUG("enable_sp %d ffn_tp_size %d", params.enable_sp, init_params_.ffn_tp_size);
+            if (params.enable_sp && init_params_.ffn_tp_size > 1) {
+                printBufferData(*ffn_input_ptr, "ffn_ag_input");
+                BufferPtr ag_recv_buffer = nullptr;
+                size_t pad_token_num = ffn_input_ptr->shape()[0] * init_params_.ffn_tp_size;
+                if (params.qscheme == NoQuantize) {
+                    ag_recv_buffer = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                } else if (params.qscheme == Qint8PerToken){
+                    BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                    BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
+                                                    {pad_token_num},
+                                                    AllocationType::DEVICE},
+                                                    {"ag_recv_buffer_scale"});
+                    ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                                    std::move(scales),
+                                                    std::move(BufferPtr(
+                                                        new Buffer(MemoryType::MEMORY_GPU,
+                                                        DataType::TYPE_INVALID,
+                                                        {0},
+                                                        nullptr)))));
+                } else {
+                    throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
+                }
+                GemmParams up_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.up_weight->kernel));
+                AllGatherLoraLinearOutput all_gather_output = allGatherloraLinear({LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input), ffn_input_ptr, ag_recv_buffer, params.qscheme, params.output->type(), ParallelMode::FFN_TP});
+                // syncAndCheck();
+                ffn_input_ptr = all_gather_output.all_gather_recv_buffer;
+                up_output = all_gather_output.output;
+                printBufferData(*ffn_input_ptr, "ffn_ag_inter_output");
+                printBufferData(*up_output, "ffn_ag_final_output");
+            } else {
+                GemmParams up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+                up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
+            }
             printBufferData(*up_output, "ffn_up");
-            auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
-            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input));
-            printBufferData(*gate_output.output, "ffn_gate");
+            BufferPtr gate_output = nullptr;
+            if (params.enable_sp && init_params_.ffn_tp_size > 1) {
+                GemmParams gate_gemm_params = GemmParams(*ffn_input_ptr, *(params.weights.gate_weight->kernel));
+                gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
+            } else {
+                GemmParams gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
+                gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input)).output;
+            }
+            printBufferData(*gate_output, "ffn_gate");
             activation({params.configs.activation_type,
                         up_output,
                         mayGetRef(params.weights.up_weight->bias),
-                        *(gate_output.output),
+                        *gate_output,
                         std::nullopt,
                         mayGetRef(params.weights.act_scale)});
         } else {
+            FT_CHECK_WITH_INFO(!params.enable_sp, "enable_sp is not supported for non-gated activation");
             auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
             auto lora_linear_params = LoraLinearParams(up_gemm_params,  params.lora_input.up_lora_input);
             auto activation_params  = ActivationParams(params.configs.activation_type,
@@ -74,8 +114,20 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
 
         printBufferData(*up_output, "ffn_act");
-        auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
-        output = loraLinear(LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input)).output;
+        if (params.enable_sp && init_params_.ffn_tp_size > 1) {
+            BufferPtr gemm_output = allocateBuffer({params.output->type(), {up_output->shape()[0], params.weights.down_weight->kernel->shape()[1]}},
+                                 {"ffn_rs_input"});
+            GemmParams down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, gemm_output);
+            ReduceScatterLoraLinearOutput reduce_scatter_output = loraLinearReduceScatter({LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input), params.output, params.qscheme, params.output->type(), ParallelMode::FFN_TP});
+            // syncAndCheck();
+            gemm_output = reduce_scatter_output.reduce_scatter_recv_buffer;
+            output = reduce_scatter_output.output;
+            printBufferData(*gemm_output, "ffn_rs_inter_output");
+            printBufferData(*output, "ffn_rs_final_output");
+        } else {
+            auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
+            output = loraLinear(LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input)).output;
+        }
     }
 
     printBufferData(*output, "ffn_out");

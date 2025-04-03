@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 6
+MASTER_INFO_PORT_NUM = 12
 MIN_WORKER_INFO_PORT_NUM = 7
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -28,7 +28,7 @@ class ParallelInfo(object):
     # EP从TP里分
     def __init__(
             self, tp_size: int, ep_size: int,
-            pp_size: int, dp_size: int,
+            pp_size: int, dp_size: int, ffn_sp_size: int,
             world_size: int, world_rank: int,
             local_world_size: int
     ):
@@ -36,10 +36,12 @@ class ParallelInfo(object):
         self.ep_size = ep_size
         self.pp_size = pp_size
         self.dp_size = dp_size
+        self.ffn_sp_size = ffn_sp_size
+        self.ffn_tp_size = self.tp_size // self.ffn_sp_size
         self.world_size = world_size
         self.world_rank = world_rank
         self.local_world_size = local_world_size
-        logging.info(f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size}]")
+        logging.info(f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]")
         assert ep_size <= world_size and world_size % ep_size == 0
         assert self.world_size == self.tp_size * self.dp_size * self.pp_size
         if torch.cuda.is_available():
@@ -60,6 +62,10 @@ class ParallelInfo(object):
     def ep_rank(self) -> int:
         return self.world_rank % self.ep_size
 
+    @property
+    def ffn_tp_rank(self) -> int:
+        return self.tp_rank % self.ffn_tp_size
+    
     @property
     def local_rank(self) -> int:
         return self.world_rank % self.local_world_size
@@ -85,14 +91,15 @@ class ParallelInfo(object):
                 ep_size=int(params.get('EP_SIZE', params.get('WORLD_SIZE', '1'))),
                 pp_size=int(params.get('PP_SIZE', '1')),
                 dp_size=int(params.get('DP_SIZE', 1)),
+                ffn_sp_size = int(params.get('FFN_SP_SIZE', '1')),
                 world_size=world_size,
                 world_rank=int(params.get('WORLD_RANK', '0')),
                 local_world_size=local_world_size)
         if (torch.cuda.is_available() and (info.local_world_size > torch.cuda.device_count())):
             raise Exception(f'local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}')
         if (info.tp_size * info.pp_size * info.dp_size != info.world_size or
-            info.world_rank >= info.world_size):
-            raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
+            info.world_rank >= info.world_size or (info.tp_size % info.ffn_sp_size != 0)):
+            raise Exception(f'tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} ffn_sp_size: {info.ffn_sp_size} invalid world config')
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
             raise Exception(f"not support info.world_size:[{info.world_size}] mod info.local_world_size:[{info.local_world_size}] != 0")
@@ -130,7 +137,7 @@ class ParallelInfo(object):
         self.local_world_size=new_info.local_world_size
 
     def __str__(self):
-        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank}]"
+        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} ]"
 
 g_parallel_info = ParallelInfo.from_env()
 
@@ -250,6 +257,7 @@ class MasterInfo:
     sp_gpt_nccl_port: int
     dp_nccl_port: int
     dp_tp_nccl_port: int
+    ffn_tp_nccl_port: int
 
 g_master_info = MasterInfo(
     ip='',
@@ -258,17 +266,21 @@ g_master_info = MasterInfo(
     nccl_op_port=0,
     sp_gpt_nccl_port=0,
     dp_nccl_port=0,
-    dp_tp_nccl_port=0)
+    dp_tp_nccl_port=0,
+    ffn_tp_nccl_port=0)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
-    g_master_info.dp_nccl_port = base_port - 5
-    g_master_info.dp_tp_nccl_port = base_port - 6
+    g_master_info.dp_nccl_port = base_port - 10
+    g_master_info.dp_tp_nccl_port = base_port - 11
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4
+    g_master_info.ffn_tp_nccl_port = base_port - 5
+    if g_parallel_info.ffn_sp_size != g_parallel_info.tp_size:
+        base_port -= g_parallel_info.ffn_sp_size
 
 def total_need_port_num() -> int:
     return MASTER_INFO_PORT_NUM * g_parallel_info.dp_size + WORKER_INFO_PORT_NUM * g_parallel_info.tp_size

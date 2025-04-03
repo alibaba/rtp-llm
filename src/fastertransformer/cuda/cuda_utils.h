@@ -168,6 +168,8 @@ bool is_sm90();
 float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream);
 int getDevice();
 int getDeviceCount();
+int currentDeviceId();
+void priorityRange(int *low_priority, int *high_priority, int device_id = -1);
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm);
 bool shared_mem_sufficient(int smem_size);
 std::string getDriverVersion();
@@ -175,6 +177,7 @@ int getCudaVersion();
 bool checkAllNVLinks(std::vector<size_t> device_ids);
 bool checkOnSameNumaNodes(std::vector<size_t> device_ids);
 int getVisibleDeviceNum();
+bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank);
 
 
 template<typename T>

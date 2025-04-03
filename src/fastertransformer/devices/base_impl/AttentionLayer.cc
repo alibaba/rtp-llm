@@ -17,7 +17,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto generate_batch_size = sequence_lengths.shape()[0];
     const auto context_batch_size = input_lengths.shape()[0] - generate_batch_size;
     const auto context_token_num = params.common.context_token_num;
-    const auto h_token_num = context_token_num + generate_batch_size;
+    const auto pad_token_num = params.enable_sp ? params.pad_token_num : (context_token_num + generate_batch_size);
 
     RUNTIME_ASSERT_OP_ARG(!params.residual, "default attention layer impl does not support residual!");
 
@@ -63,30 +63,61 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // typically local_head_num * size_per_head
     const auto qkv_hidden_size = output_weight->kernel->shape()[0];
 
-    // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
-    // other devices need to be careful about this.
-    // maybe add a device property here.
-    auto qkv = params.configs.use_mla ? mlaQKVGemm(params): mhaQKVGemm(params);
+    BufferPtr qkv = nullptr;
+    if (params.enable_sp && params.layer_id > 0) {
+        BufferPtr ag_recv_buffer = nullptr;
+        BufferPtr attn_input_ptr = params.input.slice(0, params.input.shape()[0]); 
+        printBufferData(*attn_input_ptr, "attn_ag_input");
+
+        if (params.qscheme == NoQuantize) {
+            ag_recv_buffer = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+        } else if (params.qscheme == Qint8PerToken){
+            BufferPtr kernel = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer_kernel"});
+            BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
+                                            {pad_token_num},
+                                            AllocationType::DEVICE},
+                                            {"ag_recv_buffer_scale"});
+            ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                            std::move(scales),
+                                            std::move(BufferPtr(
+                                                new Buffer(MemoryType::MEMORY_GPU,
+                                                DataType::TYPE_INVALID,
+                                                {0},
+                                                nullptr)))));
+        } else {
+            throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
+        }
+        GemmParams qkv_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.qkv_weight->kernel));
+        AllGatherLoraLinearOutput all_gather_output = allGatherloraLinear({LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input), attn_input_ptr, ag_recv_buffer, params.qscheme, params.output->type()});
+        // syncAndCheck();
+        ag_recv_buffer = all_gather_output.all_gather_recv_buffer;
+        qkv = all_gather_output.output;
+        printBufferData(*ag_recv_buffer, "attn_ag_inter_output");
+        printBufferData(*qkv, "attn_ag_final_output");
+    } else {
+        // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
+        // other devices need to be careful about this.
+        // maybe add a device property here.
+        qkv = params.configs.use_mla ? mlaQKVGemm(params): mhaQKVGemm(params);
+    }
+    printBufferData(*qkv, "qkv");
 
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
     auto qscheme = params.qscheme;
     auto dtype = (input.isQBuffer() && qscheme != QScheme::Qfp8PerTensor ? qkv->type() : input.type());
-    auto output = params.output ? params.output
-                : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
-                                 {"attn_layer_out"});
     BufferPtr qkv_output = nullptr;
     if (qscheme == QScheme::Qfp8PerTensor) {
       auto scales = params.weights.static_quant_weight->kernel;
-      qkv_output = BufferPtr(new QBuffer(allocateBuffer({DataType::TYPE_FP8_E4M3, {h_token_num, qkv_hidden_size}}, {"qkv_output"}),
+      qkv_output = BufferPtr(new QBuffer(allocateBuffer({DataType::TYPE_FP8_E4M3, {pad_token_num, qkv_hidden_size}}, {"qkv_output"}),
 			    BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
 			    BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
     } else {
 #if defined(__aarch64__)
     // Arm attention op only support fp32 data type
-    qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+    qkv_output = allocateBuffer({DataType::TYPE_FP32, {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
 #else
-    qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+    qkv_output = allocateBuffer({dtype, {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
 #endif
     }
 
@@ -112,6 +143,19 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     }
     printBufferData(*qkv_output, "qkv_output");
 
+    BufferPtr gemm_output = nullptr;
+    BufferPtr attn_output = nullptr;
+    if (params.enable_sp) {
+        gemm_output = allocateBuffer({dtype, {pad_token_num, output_weight->kernel->shape()[1]}},
+                                 {"attn_layer_out"});
+        attn_output = params.output;
+    } else {
+        gemm_output = params.output ? params.output
+                : allocateBuffer({dtype, {pad_token_num, output_weight->kernel->shape()[1]}},
+                                 {"attn_layer_out"});
+        attn_output = gemm_output;
+    }
+     
     if(params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTensor) {
         OptionalConstBufferRef smoother_weight =
             params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
@@ -141,21 +185,28 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             static_scale_weight,
             static_scale_reciprocal_weight);
 
-        BufferPtr quantized_attention_output = quantize(quant_params);
+        qkv_output = quantize(quant_params);
 
-
-        auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
-        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
-    } else {
+    }
 #if defined(__aarch64__)
 	// Arm attention op only support fp32 data type, convert to original dtype
-        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output, dtype);
+        GemmParams output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, gemm_output, dtype);
 #else
-        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output);
+        GemmParams output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, gemm_output);
 #endif
-        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
+
+    if (params.enable_sp) {
+        printBufferData(*qkv_output, "attn_rs_input");
+        ReduceScatterLoraLinearOutput reduce_scatter_output = loraLinearReduceScatter({LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input), params.output, params.qscheme, params.output->type()});
+        // syncAndCheck();
+        gemm_output = reduce_scatter_output.reduce_scatter_recv_buffer;
+        attn_output = reduce_scatter_output.output;
+        printBufferData(*gemm_output, "attn_rs_inter_output");
+        printBufferData(*attn_output, "attn_rs_final_output");
+    } else {
+        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input));
     }
-    return {std::move(output)};
+    return {std::move(attn_output)};
 }
 
 }; // namespace fastertransformer

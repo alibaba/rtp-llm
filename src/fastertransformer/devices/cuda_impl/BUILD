@@ -22,6 +22,7 @@ cc_library(
         "CudaGroupGemmOp.cc",
         "CudaNvtxOp.cc",
         "CudaLoraLinearWithActOp.cc",
+        "CudaLoraLinear.cc"
     ]),
     deps = [
         "//src/fastertransformer/devices:devices_base",

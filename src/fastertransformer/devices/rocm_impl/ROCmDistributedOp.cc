@@ -90,8 +90,8 @@ void ROCmDevice::allGather(const AllGatherParams& params) {
     }
 
     NCCLCHECK(ncclGroupStart());
-    for (auto i = 0; i < params.buffers.size(); ++i) {
-        auto& buffer = params.buffers[i];
+    for (auto i = 0; i < params.recv_buffers.size(); ++i) {
+        auto& buffer = params.recv_buffers[i];
         const auto nccl_data_type = getNcclDataType(buffer->type());
         const auto data_num = buffer->size() / nccl_param_.world_size_;
         RUNTIME_ASSERT_OP_ARG(data_num * nccl_param_.world_size_ == buffer->size(),

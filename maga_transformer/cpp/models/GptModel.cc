@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
 #include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
+#include <algorithm>
 #include <memory>
 
 
@@ -183,11 +184,11 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         context_batch_size,
         max_context_seq_len);
 
-    RUNTIME_ASSERT_OP_ARG(
-        (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
-        "combo_tokens is not consistent with input lengths, "
-        "there are %d tokens in context plus %ld tokens in decoder batch, but got %ld input tokens.",
-        cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
+    // RUNTIME_ASSERT_OP_ARG(
+    //     (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
+    //     "combo_tokens is not consistent with input lengths, "
+    //     "there are %d tokens in context plus %ld tokens in decoder batch, but got %ld input tokens.",
+    //     cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
 
     attention_inputs.cu_seqlens = device_->clone(
         {*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
@@ -336,6 +337,23 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
 
 GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "forwardPreLayers");
+    bool enable_sp = device_->getDeviceProperties().enable_sp;
+    size_t token_num = inputs.combo_tokens->shape()[0];
+    size_t pad_token_num = token_num;
+    size_t pad_mod_num = device_props_.tp_size * max((size_t)1, device_props_.m_split);
+    if (token_num <= pad_mod_num) {
+        enable_sp = false;
+    }
+    if (enable_sp && token_num % pad_mod_num != 0) {
+        pad_token_num = token_num + (pad_mod_num - token_num % pad_mod_num);
+        BufferPtr combo_tokens = inputs.combo_tokens;
+        BufferPtr pad_combo_tokens = device_->allocateBuffer({combo_tokens->type(), {pad_token_num}, AllocationType::HOST},{"pad_combo_tokens"});
+        device_->bufMemset(*pad_combo_tokens, 0);
+        device_->copy({pad_combo_tokens->view(0, token_num), *combo_tokens});
+        inputs.combo_tokens = pad_combo_tokens;
+        printBufferData(*combo_tokens, {"combo_tokens"});
+        printBufferData(*pad_combo_tokens, {"pad_combo_tokens"});
+    }
     const auto combo_tokens = device_->clone(
         {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
 
@@ -396,15 +414,30 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     printBufferData(*hidden, "input_hidden");
 
+    if (device_props_.overlap_comm_type == 2) {
+        const auto& layer0 = weights_.layers[0];
+        FT_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken, "ring p2p overlap only supports bf16/fp16 or w8a8");
+        const size_t max_batch_seq_len = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1) * device_->initParams().max_seq_len;
+        const size_t attn_rs_hidden = layer0.self_attention_weights.output_weight->kernel->shape()[1];
+        const size_t ffn_rs_hidden = layer0.ffn_weights.down_weight->kernel->shape()[1];
+        const size_t attn_ag_hidden = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];
+        const size_t ffn_ag_hidden = layer0.ffn_weights.gate_weight->kernel->shape()[0];
+        DataType rs_output_type = dtype;
+        DataType ag_input_type = description_.act_qscheme == QScheme::NoQuantize ? dtype : DataType::TYPE_QINT8;
+        bool enable_per_token_scale = description_.act_qscheme == QScheme::Qint8PerToken;
+        bool enable_ffn_tp = enable_sp && device_props_.ffn_tp_size > 1;
+        device_->prepareCommBuffer({max_batch_seq_len, attn_rs_hidden, ffn_rs_hidden, attn_ag_hidden, ffn_ag_hidden, rs_output_type, ag_input_type, enable_per_token_scale, enable_ffn_tp});
+    }
+
     auto micro_batch_plan = planMicroBatches(inputs);
     if (micro_batch_plan.enable) {
         auto micro_batch_inputs = prepareMicroBatchInputs(
             inputs, hidden, pre_decoder_residual, dtype,  micro_batch_plan);
-        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), dtype, micro_batch_inputs};
+        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
     } else {
         // prepare resources for all layers
         auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, combo_position_ids);
-        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype};
+        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype, {}, enable_sp, token_num, pad_token_num};
     }
 }
 
@@ -537,25 +570,30 @@ GptLayerOutputs GptModel::forwardGptLayer(
     const auto& layer = weights_.layers[layer_id];
 
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
-    auto ffn_output_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"ffn_out_buf"});
-    // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
-    // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
-    // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
-    ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
+    bool enable_sp = inputs.enable_sp;
+    size_t rank_pad_token_num = enable_sp ? inputs.pad_token_num / device_props_.tp_size : hidden->shape()[0];
+    auto ffn_output_buf = device_->allocateBuffer({inputs.dtype, {rank_pad_token_num, hidden->shape()[1]}}, {"ffn_out_buf"});
+    if (!enable_sp) {
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
+        // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
+        ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
+    }
     auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
                                             layer.ffn_weights,
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                                             description_.act_qscheme,
-                                            std::move(ffn_output_buf)});
+                                            std::move(ffn_output_buf),
+                                            enable_sp});
     if (lora_model_input) {
         ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
     }
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     hidden = ffn_output.hidden_states;
-    if (device_props_.tp_size > 1 && !layer.ffn_weights.moe_gating_weight) {
+    if (device_props_.ffn_tp_size > 1 && !layer.ffn_weights.moe_gating_weight && !enable_sp) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
         auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=%ld", (long)hidden->sizeBytes());
-        hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
+        hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum, false, ParallelMode::FFN_TP}).buffer;
     }
     if (residual_scale_) {
         hidden = device_->multiply({*residual_scale_, *hidden});
@@ -593,18 +631,24 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
 
     attention_common_inputs.layer_id = layer_id;
     const auto& layer = weights_.layers[layer_id];
+    bool enable_sp = inputs.enable_sp;
 
     // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
-    auto attn_out_buf = device_->allocateBuffer({inputs.dtype, hidden->shape()}, {"attn_out_buf"});
-    // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
-    // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
-    // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
-    attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
+    size_t rank_pad_token_num = enable_sp ? inputs.pad_token_num / device_props_.tp_size : hidden->shape()[0];
+    BufferPtr attn_out_buf = device_->allocateBuffer({inputs.dtype, {rank_pad_token_num, hidden->shape()[1]}}, {"attn_out_buf"});
+    if (!enable_sp) {
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
+        // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
+        attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
+    }
     auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
     printBufferData(*residual, "in residual");
     BufferPtr residual2 = nullptr;
+    BufferPtr cloned_hidden = nullptr;
     if (layer.pre_layernorm) {
-        residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+        cloned_hidden = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+        residual = cloned_hidden;
         auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
                                                                         nullptr,
                                                                         *layer.pre_layernorm,
@@ -613,10 +657,38 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         std::nullopt,
                                                                         0.f,
                                                                         description_.layernorm_eps,
-                                                                        true,
+                                                                        false,
                                                                         false,
                                                                         description_.norm_type,
-                                                                        description_.act_qscheme));
+                                                                        description_.act_qscheme,
+                                                                        layer_id > 0 ? true: false,
+                                                                        false));
+           
+        int m_split = device_props_.m_split;
+        size_t overlap_comm_type = device_props_.overlap_comm_type;
+        if (enable_sp && layer_id == 0) {
+            if (overlap_comm_type == 1 && m_split > 0) {
+                vector<int> selected_indices;
+                selected_indices.reserve(rank_pad_token_num);
+                size_t m = inputs.pad_token_num;
+                size_t m_chunk = m / m_split;
+                if (m > 128) {
+                    m_chunk = (m / m_split + 127) & ~127;
+                }
+                size_t tp_rank = device_props_.tp_rank;
+                size_t round = m_chunk / device_props_.tp_size;
+
+                size_t offset = tp_rank * round;
+                for (size_t i = 0; i < rank_pad_token_num; i++) {
+                    selected_indices.push_back( (i / round) * m_chunk + i % round + offset);
+                }
+                // printBufferData(*vector2Buffer(selected_indices), "selected_indices");
+                residual = device_->select({*residual, *device_->clone({*vector2Buffer(selected_indices)})});
+            } else {
+                residual = residual->slice(rank_pad_token_num * device_props_.tp_rank, rank_pad_token_num);
+            }
+        }
+        
         hidden = std::move(pre_layernorm_output.output);
     }
 
@@ -642,6 +714,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
             device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             {description_.layernorm_eps, description_.norm_type},
             description_.act_qscheme,
+            enable_sp,
+            inputs.pad_token_num
     });
     if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
@@ -650,7 +724,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     }
 
     auto attn_hidden = std::move(attn_output.hidden_states);
-    if (device_props_.tp_size > 1) {
+    if (device_props_.tp_size > 1 && !enable_sp) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
         auto wrapper = DevicePerfWrapper(device_, "allReduce, sizeBytes=%ld", (long)attn_hidden->sizeBytes());
         attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
@@ -663,7 +737,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     if (layer.post_layernorm) {
         // attn_hidden = attn_hidden + residual
         // hidden = layernorm(attn_hidden)
-        printBufferData(*residual, "post layernorm residual");
+        printBufferData(*residual, "before post layernorm residual");
         auto post_layernorm_params = LayernormParams(attn_hidden,
                                                         attn_hidden,
                                                         ft::mayGetRef(layer.post_layernorm),
@@ -675,13 +749,15 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                         false,
                                                         description_.post_layernorm,
                                                         description_.norm_type,
-                                                        description_.act_qscheme);
+                                                        description_.act_qscheme,
+                                                        false,
+                                                        true);
 
         auto post_layernorm_output = device_->layernorm(post_layernorm_params);
         hidden = std::move(post_layernorm_output.output);
         attn_hidden = std::move(post_layernorm_output.before_norm_output);
         residual = attn_hidden;
-        printBufferData(*residual, "post_layernorm_residual");
+        printBufferData(*residual, "after post layernorm residual");
     } else {
         residual2 = attn_hidden;
     }
@@ -761,12 +837,48 @@ GptLayerOutputs GptModel::forwardMoeFfn(const GptLayerOutputs& inputs, const int
 }
 
 GptModelOutputs GptModel::forwardPostLayers(
-    const ft::BufferPtr input,
+    ft::BufferPtr input,
     const bool has_context_request,
     const bool need_all_logits,
-    const ft::BufferPtr lm_output_indexes)
+    const ft::BufferPtr lm_output_indexes,
+    bool enable_sp,
+    size_t token_num)
 {
     DevicePerfWrapper wrapper(device_, "forwardPostLayers");
+    BufferPtr all_gather_output = nullptr;
+    if (enable_sp && device_props_.tp_size > 1) {
+        all_gather_output = device_->allocateBuffer({input->type(), {input->shape()[0] * device_props_.tp_size, input->shape()[1]}}, {"all_gather_output"});
+        size_t m = all_gather_output->shape()[0];
+        int m_split = device_props_.m_split;
+        size_t overlap_comm_type = device_props_.overlap_comm_type;
+        if (overlap_comm_type == 1 && m_split > 0) {
+            size_t token_idx = 0;
+            size_t ag_token_idx = 0;
+            size_t m_chunk = m / m_split;
+            if (m > 128) {
+                m_chunk = (m / m_split + 127) & ~127;
+            }
+            while (token_idx < m) {
+                const auto micro_batch_tokens = std::min(m - token_idx, m_chunk);
+                const auto ag_micro_batch_tokens = micro_batch_tokens / device_props_.tp_size;
+                auto micro_batch_recv_buffer = all_gather_output->slice(token_idx, micro_batch_tokens);
+                auto micro_ag_send_buffer = input->slice(ag_token_idx, ag_micro_batch_tokens);
+                device_->allGather({{micro_batch_recv_buffer}, ParallelMode::TP, {micro_ag_send_buffer}, false});
+                token_idx += micro_batch_tokens;
+                ag_token_idx += ag_micro_batch_tokens;
+            }
+        } else {
+            device_->allGather({{all_gather_output}, ParallelMode::TP, {input}, false});
+        }
+
+        size_t pad_mod_num = device_props_.tp_size * max((size_t)1, device_props_.m_split);
+        if (token_num % pad_mod_num != 0) {
+            input = device_->clone({all_gather_output->view(0, token_num), AllocationType::DEVICE});
+        } else {
+            input = all_gather_output;            
+        }
+    }
+
     auto hidden = input;
     if (weights_.final_layernorm) {
         auto final_layernorm = device_->layernorm(LayernormParams(hidden,
@@ -834,7 +946,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         layer_outputs.hidden,
         inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
         inputs.need_all_logits,
-        inputs.lm_output_indexes);
+        inputs.lm_output_indexes,
+        layer_inputs.enable_sp,
+        layer_inputs.token_num);
+
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     return outputs;

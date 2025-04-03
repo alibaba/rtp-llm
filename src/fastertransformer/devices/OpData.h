@@ -15,11 +15,14 @@
 #include "src/fastertransformer/utils/EnumUtils.h"
 #include "maga_transformer/cpp/utils/StackTrace.h"
 
+#include <cstddef>
 #include <optional>
 #include <functional>
 #include <sstream>
 #include <memory>
 #include <torch/extension.h>
+#include <torch/python.h>
+#include <type_traits>
 
 namespace rtp_llm {
 class GptModelInputs;
@@ -41,7 +44,8 @@ enum class OpErrorType {
 enum class ParallelMode {
     TP = 0,
     DP = 1,
-    DP_AND_TP = 2
+    DP_AND_TP = 2,
+    FFN_TP = 3
     // DATA_PARALLEL = 2,
     // PIPELINE_PARALLEL = 3
 };
@@ -192,7 +196,9 @@ struct LayernormParams {
                     bool is_inplace = true,
                     bool return_normed_output = false,
                     NormType norm_type = NormType::layernorm,
-                    QScheme qscheme = QScheme::NoQuantize) :
+                    QScheme qscheme = QScheme::NoQuantize,
+                    bool attn_swap_comm_buffer = false,
+                    bool ffn_swap_comm_buffer = false) :
                     input(std::move(input)),
                     before_norm_output(std::move(before_norm_output)),
                     norm_weight(norm_weight),
@@ -207,7 +213,9 @@ struct LayernormParams {
                     qscheme(qscheme),
                     offset(0),
                     hidden_size(0),
-                    stride(0) {};
+                    stride(0),
+                    attn_swap_comm_buffer(attn_swap_comm_buffer),
+                    ffn_swap_comm_buffer(ffn_swap_comm_buffer) {};
 
     // for qk norm
     LayernormParams(BufferPtr input,
@@ -256,6 +264,8 @@ struct LayernormParams {
     const int offset;
     const int hidden_size;
     const int stride;
+    bool attn_swap_comm_buffer = false;
+    bool ffn_swap_comm_buffer = false;
 };
 
 enum GemmType : size_t {
@@ -289,7 +299,9 @@ struct GemmParams {
                TransposeOperation transB = TransposeOperation::NONE,
                const ActivationType activationType = ActivationType::Identity,
                const float alpha = 1.0f,
-               const float beta  = 0.0f):
+               const float beta  = 0.0f,
+               int math_sm_count = 0,
+               void* stream = nullptr):
                A(A),
                B(B),
                C(C),
@@ -299,7 +311,9 @@ struct GemmParams {
                transB(transB),
                activationType(activationType),
                alpha(alpha),
-               beta(beta) {}
+               beta(beta),
+               math_sm_count(math_sm_count),
+               stream(stream) {}
 
 
     const Buffer& A;
@@ -315,6 +329,8 @@ struct GemmParams {
 
     const float alpha = 1.0f;
     const float beta  = 0.0f;
+    mutable int math_sm_count = 0;
+    void* stream = nullptr;
 
     void check() const;
     GemmType dispatch() const;
@@ -544,6 +560,8 @@ struct AttentionLayerParams {
     const OptionalConstBufferRef    residual; // for intel xft
     const LayerNormConfig           ln_params;
     const QScheme                   qscheme;
+    bool                            enable_sp;
+    size_t                          pad_token_num;
 };
 
 struct MoeConfigs {
@@ -581,9 +599,10 @@ struct FfnLayerParams {
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
-                   BufferPtr                    output = nullptr):
+                   BufferPtr                    output = nullptr,
+                   bool                         enable_sp = false):
         input(input), configs(configs), weights(weights), residual(residual),
-        qscheme(qscheme), output(std::move(output)){}
+        qscheme(qscheme), output(std::move(output)), enable_sp(enable_sp) {}
 
     const Buffer& input;
     const FfnConfigs&            configs;
@@ -595,6 +614,7 @@ struct FfnLayerParams {
     BufferPtr                    output;
 
     lora::FfnLayerLoraInput      lora_input;
+    bool enable_sp;
 };
 
 struct MoeGateSelectOutput {
@@ -718,7 +738,17 @@ struct AllReduceOutput {
 };
 
 struct AllGatherParams {
-    const std::vector<BufferPtr>& buffers;
+    const std::vector<BufferPtr>& recv_buffers;
+    ParallelMode mode = ParallelMode::TP;
+    std::vector<BufferPtr> send_buffers;
+    bool inplace = true;
+    bool overlapped = false;
+};
+
+struct ReduceScatterParams {
+    const BufferPtr send_buffer;
+    const BufferPtr recv_buffer;
+    const ReduceOp op;
     ParallelMode mode = ParallelMode::TP;
     bool overlapped = false;
 };
@@ -811,6 +841,17 @@ struct LoraLinearOutput {
     BufferPtr output;
 };
 
+struct AllGatherLoraLinearOutput {
+    BufferPtr output;
+    BufferPtr all_gather_recv_buffer;
+};
+
+struct ReduceScatterLoraLinearOutput {
+    BufferPtr output;
+    BufferPtr reduce_scatter_recv_buffer;
+};
+
+
 struct LoraLinearParams {
 
     LoraLinearParams(GemmParams& gemm_params,
@@ -820,6 +861,38 @@ struct LoraLinearParams {
 
     GemmParams& gemm_params;
     lora::LoraOpInputPtr lora_input;
+};
+
+struct LoraLinearReduceScatterParams {
+    const LoraLinearParams& lora_linear_params;
+    const BufferPtr& rs_recv_buffer;
+    QScheme qscheme;
+    DataType output_type;
+    ParallelMode mode = ParallelMode::TP;
+    LoraLinearReduceScatterParams(const LoraLinearParams& lora_linear_params, const BufferPtr& rs_recv_buffer, QScheme qscheme, DataType output_type, ParallelMode mode = ParallelMode::TP): lora_linear_params(lora_linear_params), rs_recv_buffer(rs_recv_buffer), qscheme(qscheme), output_type(output_type), mode(mode) {}
+};
+
+struct AllGatherLoraLinearParams {
+    const LoraLinearParams& lora_linear_params;
+    const BufferPtr& ag_send_buffer;
+    BufferPtr ag_recv_buffer;
+    QScheme qscheme;
+    DataType output_type;
+    ParallelMode mode = ParallelMode::TP;
+    AllGatherLoraLinearParams(const LoraLinearParams& lora_linear_params, const BufferPtr& ag_send_buffer, BufferPtr ag_recv_buffer, QScheme qscheme, DataType output_type, ParallelMode mode = ParallelMode::TP): lora_linear_params(lora_linear_params), ag_send_buffer(ag_send_buffer), ag_recv_buffer(ag_recv_buffer), qscheme(qscheme), output_type(output_type), mode(mode){}
+};
+
+struct PrepareCommBufferParams {
+    const size_t max_batch_seq_len;
+    const size_t attn_rs_hidden;
+    const size_t ffn_rs_hidden;
+    const size_t attn_ag_hidden;
+    const size_t ffn_ag_hidden;
+    DataType rs_output_type;
+    DataType ag_input_type;
+    bool enable_per_token_scale = false;
+    bool enable_ffn_tp = false;
+    PrepareCommBufferParams(size_t max_batch_seq_len, size_t attn_rs_hidden, size_t ffn_rs_hidden, size_t attn_ag_hidden, size_t ffn_ag_hidden, DataType rs_output_type, DataType ag_input_type, bool enable_per_token_scale = false, bool enable_ffn_tp = false): max_batch_seq_len(max_batch_seq_len), attn_rs_hidden(attn_rs_hidden), ffn_rs_hidden(ffn_rs_hidden), attn_ag_hidden(attn_ag_hidden), ffn_ag_hidden(ffn_ag_hidden), rs_output_type(rs_output_type), ag_input_type(ag_input_type), enable_per_token_scale(enable_per_token_scale), enable_ffn_tp(enable_ffn_tp) {}
 };
 
 struct LoraLinearWithActivationParams {

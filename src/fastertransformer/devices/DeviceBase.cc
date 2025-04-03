@@ -114,6 +114,10 @@ DeviceHookPtr DeviceBase::createCommHook() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceBase::overlappedComputeBarrier() {
+    syncCommunication();
+}
+
 DeviceEventPtr DeviceBase::createEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -377,5 +381,7 @@ AllReduceOutput DeviceBase::allReduce(const AllReduceParams& params) {
     };
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
+
+void DeviceBase::prepareCommBuffer(const PrepareCommBufferParams& params) {}
 
 } // namespace fastertransformer

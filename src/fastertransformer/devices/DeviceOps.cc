@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/DeviceOps.h"
+#include "OpData.h"
 
 namespace fastertransformer {
 
@@ -166,6 +167,14 @@ FfnLayerOutput DeviceOps::epCombine(const MoeCombineParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+AllGatherLoraLinearOutput DeviceOps::allGatherloraLinear(const AllGatherLoraLinearParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+ReduceScatterLoraLinearOutput DeviceOps::loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 GreedyOutput DeviceOps::sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -187,6 +196,10 @@ void DeviceOps::allGather(const AllGatherParams& params) {
 }
 
 AllToAllOutput DeviceOps::allToAll(const AllToAllParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::reduceScatter(const ReduceScatterParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -229,5 +242,9 @@ torch::Tensor DeviceOps::preprocessWeightScale(torch::Tensor weight, torch::Tens
 void DeviceOps::perfRangePush(const std::string& name) const {}
 
 void DeviceOps::perfRangePop() const {}
+
+void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
 
 } // namespace fastertransformer

@@ -15,7 +15,9 @@
  */
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/utils/StackTrace.h"
 
+#include <mutex>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -65,6 +67,7 @@ void check(T result, const char* const file, int const line) {
     if (result) {
         std::string error_str = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
                      + std::to_string(line);
+        printStackTrace();
         FT_LOG_ERROR(error_str);
         fflush(stdout);
         fflush(stderr);
@@ -149,6 +152,37 @@ int getDeviceCount() {
     return count;
 }
 
+int currentDeviceId() {
+    // Query device from CUDA runtime
+    int device_id;
+    check_cuda_error(cudaGetDevice(&device_id));
+    return device_id;
+}
+
+void priorityRange(int *low_priority, int *high_priority, int device_id) {
+    static std::vector<std::pair<int, int>> cache(getDeviceCount());
+    static std::vector<std::once_flag> flags(getDeviceCount());
+    if (device_id < 0) {
+        device_id = currentDeviceId();
+    }
+    FT_CHECK_WITH_INFO(0 <= device_id && device_id < getDeviceCount(), "invalid CUDA device ID");
+    auto init = [&]() {
+        int ori_dev = currentDeviceId();
+        if (device_id != ori_dev) {
+            check_cuda_error(cudaSetDevice(device_id));
+        }
+        int min_pri, max_pri;
+        check_cuda_error(cudaDeviceGetStreamPriorityRange(&min_pri, &max_pri));
+        if (device_id != ori_dev) {
+            check_cuda_error(cudaSetDevice(ori_dev));
+        }
+        cache[device_id] = std::make_pair(min_pri, max_pri);
+    };
+    std::call_once(flags[device_id], init);
+    *low_priority = cache[device_id].first;
+    *high_priority = cache[device_id].second;
+}
+
 std::string getDriverVersion() {
     nvmlReturn_t result;
     nvmlDevice_t device;
@@ -185,6 +219,22 @@ int getCudaVersion() {
     int cuda_driver_version;
     check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
     return cuda_driver_version;
+}
+
+bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank) {
+    // check P2P access
+    for (size_t i = 0; i < tp_ranks.size(); i++) {
+        size_t peer_rank = tp_ranks[i];
+        if (peer_rank == rank) {
+            continue;
+        }
+        int peer_access_available = 0;
+        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
+        if (peer_access_available == 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool checkAllNVLinks(std::vector<size_t> device_ids) {

@@ -34,21 +34,58 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
 
     if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock)) {
         FT_LOG_DEBUG("allocate norm_output");
-        norm_output = allocateBufferLike(*params.input);
+        if (params.attn_swap_comm_buffer && attn_ag_comm_buffer_) {
+            norm_output = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, 
+                                    params.input->type(),
+                                    {input->shape()},
+                                    (char*)attn_ag_comm_buffer_->_ubuf + init_params_.tp_rank * params.input->sizeBytes()));
+        } else if (params.ffn_swap_comm_buffer && ffn_ag_comm_buffer_) {
+            norm_output = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                    params.input->type(),
+                                    {input->shape()},
+                                    (char*)ffn_ag_comm_buffer_->_ubuf + init_params_.ffn_tp_rank * params.input->sizeBytes()));
+        } else {
+            norm_output = allocateBufferLike(*params.input);
+        }
     } else if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock) {
         auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
-        auto kernel = allocateBuffer({quant_data_type,
-                                            {input->shape()},
-                                            AllocationType::DEVICE},
-                                            {"kernel"});
-        BufferPtr scales;
+        BufferPtr kernel = nullptr;
+        if (params.attn_swap_comm_buffer && attn_ag_comm_buffer_) {
+            kernel = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                          quant_data_type,
+                                          {input->shape()},
+                                          (char*)attn_ag_comm_buffer_->_ubuf + init_params_.tp_rank * params.input->size() * getTypeSize(quant_data_type)));
+        } else if (params.ffn_swap_comm_buffer && ffn_ag_comm_buffer_) {
+            kernel = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                          quant_data_type,
+                                          {input->shape()},
+                                          (char*)ffn_ag_comm_buffer_->_ubuf + init_params_.ffn_tp_rank * params.input->size() * getTypeSize(quant_data_type)));
+        } else {
+            kernel = allocateBuffer({quant_data_type,
+                                        {input->shape()},
+                                        AllocationType::DEVICE},
+                                        {"kernel"});
+        }
+        BufferPtr scales = nullptr;
         // when QScheme::Qint8PerToken the scale is created by layernorm kernel
         if (params.qscheme == QScheme::Qint8PerToken) {
-	  FT_LOG_DEBUG("Qint8PerToken");
-            scales = allocateBuffer({DataType::TYPE_FP32,
-                                            {input->shape()[0]},
-                                            AllocationType::DEVICE},
-                                            {"scales"});
+	        FT_LOG_DEBUG("Qint8PerToken");
+            if (params.attn_swap_comm_buffer && attn_ag_scale_comm_buffer_) {
+                scales = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                              DataType::TYPE_FP32,
+                                              {input->shape()[0]},
+                                              (char*)attn_ag_scale_comm_buffer_->_ubuf + init_params_.tp_rank * input->shape()[0] * getTypeSize(DataType::TYPE_FP32)));
+            } else if (params.ffn_swap_comm_buffer && ffn_ag_scale_comm_buffer_) {
+                scales = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                              DataType::TYPE_FP32,
+                                              {input->shape()[0]},
+                                              (char*)ffn_ag_scale_comm_buffer_->_ubuf + init_params_.ffn_tp_rank * input->shape()[0] * getTypeSize(DataType::TYPE_FP32)));
+            } else {
+                scales = allocateBuffer({DataType::TYPE_FP32,
+                                                {input->shape()[0]},
+                                                AllocationType::DEVICE},
+                                                {"scales"});
+            }
         // when QScheme::Qint8PerTensor, the scale is from ckpt
         } else if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qfp8PerTensor){
 	  FT_LOG_DEBUG("QScheme::Qint8PerTensor");
@@ -111,7 +148,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             return LayernormOutput({norm_output, nullptr});
         }
     }
-    FT_LOG_DEBUG("params.norm_type:%d", params.norm_type);
+    FT_LOG_DEBUG("params.norm_type: %d", params.norm_type);
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         // TODO(lidongjin)
         // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.
@@ -146,7 +183,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     }
 
     auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor || params.qscheme == QScheme::Qfp8PerTokenBlock) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
-    FT_LOG_DEBUG("quant_data_type: %d, params.norm_type is layernorm\n", quant_data_type);
+    FT_LOG_DEBUG("quant_data_type: %d, params.norm_type is %d\n", quant_data_type, params.norm_type);
     if (params.norm_type == NormType::layernorm) {
         if (params.residual1.has_value() || params.bias.has_value()) {
             DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralAddBiasResidualLayerNorm,

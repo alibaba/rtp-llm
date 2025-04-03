@@ -46,7 +46,7 @@ ncclDataType_t getNcclDataType() {
     } else if (std::is_same<T, bool>::value) {
         nccl_data_type = ncclInt8;
     } else {
-        printf("[ERROR] NCCL only support float, half, bfloat16, int, int64, char, and bool. \n");
+        FT_LOG_ERROR("[ERROR] NCCL only support float, half, bfloat16, int, int64, char, and bool. \n");
         exit(-1);
     }
     return nccl_data_type;

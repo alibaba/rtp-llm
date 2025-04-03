@@ -70,6 +70,8 @@ class ModelWeightsLoader:
         self._ep_rank = weights_info.ep_rank
         self._dp_size = weights_info.dp_size
         self._dp_rank = weights_info.dp_rank
+        self._ffn_tp_rank = weights_info.ffn_tp_rank
+        self._ffn_tp_size = weights_info.ffn_tp_size
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
         self._weight_log: WeightLog = WeightLog()
@@ -650,6 +652,8 @@ class ModelWeightsLoader:
                        ep_rank=self._ep_rank,
                        dp=self._dp_size,
                        dp_rank=self._dp_rank,
+                       ffn_tp_rank = self._ffn_tp_rank,
+                       ffn_tp_size = self._ffn_tp_size,
                        hidden_size=self._weights_info._hidden_size,
                        head_num=self._weights_info._head_num,
                        head_num_kv=self._weights_info._head_num_kv,

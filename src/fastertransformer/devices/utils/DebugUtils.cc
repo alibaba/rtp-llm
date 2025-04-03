@@ -262,7 +262,10 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
         }
 
         if (buffer.isQBuffer()) {
-            FT_LOG_INFO("skip QBuffer [%s]: %s", hint.c_str(), buffer.debugString().c_str());
+            const QBuffer* q_buffer = &(reinterpret_cast<const QBuffer&>(buffer));
+            printBufferData(q_buffer->kernel(), hint + "_kernel");
+            printBufferData(q_buffer->scales(), hint + "_scales");
+            printBufferData(q_buffer->zeros(), hint + "_zeros");
             return;
         }
     }

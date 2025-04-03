@@ -181,7 +181,7 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
                                   arguments.m,
                                   arguments.n,
                                   arguments.k,
-                                  stream_);
+                                  params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
 }
 
 void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params,
@@ -215,7 +215,7 @@ void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params,
                                                       arguments.m,
                                                       arguments.n,
                                                       arguments.k,
-                                                      stream_);
+                                                      params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
     } else {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
@@ -233,7 +233,7 @@ void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params,
                                             arguments.m,
                                             arguments.n,
                                             arguments.k,
-                                            stream_);
+                                            params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
     }
 }
 
@@ -275,8 +275,9 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
                                  arguments.ldc,
                                  computeType,
                                  arguments.alpha,
-                                 arguments.beta);
-
+                                 arguments.beta,
+                                 params.math_sm_count,
+                                 params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
         sync_check_cuda_error();
     } else
 #endif
@@ -296,7 +297,9 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
                                  D,
                                  arguments.ldc,
                                  arguments.alpha,
-                                 arguments.beta);
+                                 arguments.beta,
+                                 params.math_sm_count,
+                                 params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
     } else if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_3DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});

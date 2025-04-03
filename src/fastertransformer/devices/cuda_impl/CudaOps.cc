@@ -280,6 +280,7 @@ inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
         case DataType::TYPE_BOOL: return ncclInt8;
         case DataType::TYPE_INT8: return ncclInt8;
+        case DataType::TYPE_QINT8: return ncclInt8;
         case DataType::TYPE_INT32: return ncclInt32;
         case DataType::TYPE_INT64: return ncclInt64;
         case DataType::TYPE_BYTES: return ncclChar;
@@ -302,6 +303,8 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
             return dp_nccl_param_;
         case ParallelMode::DP_AND_TP:
             return dp_tp_nccl_param_;
+        case ParallelMode::FFN_TP:
+            return ffn_tp_nccl_param_;
         default:
             FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -330,7 +333,7 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
 }
 
 AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
-    const auto nccl_param = getNcclParam(params.mode);
+    NcclParam nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return AllReduceOutput{params.buffer};
     }
@@ -343,11 +346,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
         // We use cuda event to ensure the computation on main stream has been finished.
-        cudaEvent_t event;
-        check_cuda_error(cudaEventCreate(&event));
-        check_cuda_error(cudaEventRecord(event, stream_));
-        check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
-        check_cuda_error(cudaEventDestroy(event));
+        overlappedComputeBarrier();
     }
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
@@ -355,7 +354,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 
     // if custom allreduce fails, fallback to the default ncclAllReduce
     // dp tmp not support custom_allreduce_comm
-    if (params.mode == ParallelMode::TP && custom_allreduce_comm_ && nccl_op == ncclSum
+    if ((params.mode == ParallelMode::TP || (params.mode == ParallelMode::FFN_TP && tp_nccl_param_ == ffn_tp_nccl_param_)) && custom_allreduce_comm_ && nccl_op == ncclSum
         && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_)) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
@@ -373,7 +372,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 }
 
 PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams& params) {
-    auto& nccl_param = tp_nccl_param_;
+    NcclParam nccl_param = getNcclParam(params.mode);;
     if (nccl_param.world_size_ < 2) {
         return PrepareAllReduceOutput{params.buffer};
     }
@@ -554,23 +553,56 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
 
 void CudaDevice::allGather(const AllGatherParams& params) {
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
-    auto nccl_param = getNcclParam(params.mode);
+    NcclParam nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return;
     }
     NCCLCHECK(ncclGroupStart());
-    for (auto i = 0; i < params.buffers.size(); ++i) {
-        auto& buffer = params.buffers[i];
-        const auto nccl_data_type = getNcclDataType(buffer->type());
-        const auto data_num = buffer->size() / nccl_param.world_size_;
-        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == buffer->size(),
-                              "Buffer size %ld must be divisible by world size %d",
-                              buffer->size(), nccl_param.world_size_);
-        const auto data_size = data_num * buffer->typeSize();
-        NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param.rank_ * data_size, buffer->data(),
-                                data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+    for (auto i = 0; i < params.recv_buffers.size(); ++i) {
+        auto& recv_buffer = params.recv_buffers[i];
+        const auto nccl_data_type = getNcclDataType(recv_buffer->type());
+        const auto data_num = recv_buffer->size() / nccl_param.world_size_;
+        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == recv_buffer->size(),
+                            "Buffer size %ld must be divisible by world size %d",
+                            recv_buffer->size(), nccl_param.world_size_);
+        if (params.inplace) {
+            const auto data_size = data_num * recv_buffer->typeSize();
+            NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size, recv_buffer->data(),
+                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+        } else {
+            auto& send_buffer = params.send_buffers[i];
+            NCCLCHECK(ncclAllGather(send_buffer->data(), recv_buffer->data(),
+                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+        }
     }
     NCCLCHECK(ncclGroupEnd());
+}
+
+void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
+    FT_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::FFN_TP, "reduce scatter only support mode TP or FFN TP");
+    auto nccl_param = getNcclParam(params.mode);
+    if (nccl_param.world_size_ < 2) {
+        return;
+    }
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap)
+                      ? communication_stream_
+                      : stream_;
+    if (stream == communication_stream_) {
+        // NOTE: before starting communication, we need to make sure that the previous computation
+        // has been finished. Otherwise, the communication may overlap with the computation.
+        // We use cuda event to ensure the computation on main stream has been finished.
+        overlappedComputeBarrier();
+    }
+    const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
+
+    auto& send_buffer = params.send_buffer;
+    const auto nccl_data_type = getNcclDataType(send_buffer->type());
+    const auto data_num = send_buffer->size() / nccl_param.world_size_;
+    RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == send_buffer->size(),
+                            "Buffer size %ld must be divisible by world size %d",
+                            send_buffer->size(), nccl_param.world_size_);
+    NCCLCHECK(ncclReduceScatter(send_buffer->data(), params.recv_buffer->data(),
+                            data_num, nccl_data_type, nccl_op, nccl_param.nccl_comm_, stream));
 }
 
 } // namespace fastertransformer

@@ -51,6 +51,14 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         initNcclParam(params.tp_rank, params.tp_size, master_ip,
                       params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
+    if (params.ffn_tp_size > 1) {
+        if (params.ffn_tp_size != params.tp_size) {
+            initNcclParam(params.ffn_tp_rank, params.ffn_tp_size, params.master_ip,
+                        params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size, "RTP_LLM_FFN_TP_GROUP_", ffn_tp_nccl_param_);
+        } else {
+            ffn_tp_nccl_param_ = tp_nccl_param_;
+        }
+    }
     if (params.dp_size > 1 && params.tp_rank == 0) {
         initNcclParam(params.dp_rank, params.dp_size, params.master_ip,
                       params.dp_master_port, "RTP_LLM_DP_GROUP_", dp_nccl_param_);
@@ -148,6 +156,9 @@ CudaDevice::~CudaDevice() {
     check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+    if (ffn_tp_nccl_param_ != tp_nccl_param_ && ffn_tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(ffn_tp_nccl_param_.nccl_comm_);
+    }
     if (tp_nccl_param_.nccl_comm_) {
         ncclCommDestroy(tp_nccl_param_.nccl_comm_);
     }
@@ -210,12 +221,16 @@ void CudaDevice::syncCommunication(bool timeout) {
         FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.", dp_tp_nccl_param_.rank_, dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
+    if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
+        FT_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
+    }
 }
 
 void CudaDevice::overlappedCommBarrier() {
     // NOTE: when all the overlapped communication and computation done,
     // we need to ensure the communication has been finished before starting the next computation.
-    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ > 1) {
+    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
         cudaEvent_t event;
         check_cuda_error(cudaEventCreate(&event));
         check_cuda_error(cudaEventRecord(event, communication_stream_));
@@ -226,6 +241,17 @@ void CudaDevice::overlappedCommBarrier() {
 
 DeviceHookPtr CudaDevice::createCommHook() {
     return std::make_unique<CudaCommHook>(stream_, communication_stream_);
+}
+void CudaDevice::overlappedComputeBarrier() {
+    // NOTE: when all the overlapped communication and computation done,
+    // we need to ensure the communication has been finished before starting the next computation.
+    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
+        cudaEvent_t event;
+        check_cuda_error(cudaEventCreate(&event));
+        check_cuda_error(cudaEventRecord(event, stream_));
+        check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
+        check_cuda_error(cudaEventDestroy(event));
+    }
 }
 
 DeviceProperties CudaDevice::getDeviceProperties() {
@@ -240,6 +266,12 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->dp_size = init_params_.dp_size;
         prop->enable_comm_overlap = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
+        prop->enable_sp = init_params_.enable_sp;
+        prop->overlap_math_sm_count = init_params_.overlap_math_sm_count;
+        prop->overlap_comm_type = init_params_.overlap_comm_type;
+        prop->ffn_tp_size = init_params_.ffn_tp_size;
+        prop->ffn_tp_rank = init_params_.ffn_tp_rank;
+        prop->m_split = init_params_.m_split;
     }
     return *prop;
 }
@@ -518,6 +550,50 @@ CudaCommHook::~CudaCommHook() {
 
 void CudaCommHook::hook_sync() const {
     check_cuda_error(cudaStreamWaitEvent(main_stream_, hook_event_, 0));
+}
+
+void CudaDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
+    if (attn_rs_comm_buffer_) {
+        return;
+    }
+    
+    FT_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
+            params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden, params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale, params.enable_ffn_tp);
+
+    size_t m = params.max_batch_seq_len * 1.1;
+    std::vector<size_t> tp_ranks = fcNcclGatherRanks(tp_nccl_param_, stream_);
+
+    FT_LOG_INFO("[PrepareCommBuffer] prepare attn_rs_comm_buffer_");
+    std::vector<size_t> attn_rs_buffer_shape = {m, params.attn_rs_hidden};
+    attn_rs_comm_buffer_ = initCommBuffer(attn_rs_buffer_shape, params.rs_output_type, tp_nccl_param_, tp_ranks, false, stream_);
+
+    FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_comm_buffer_");
+    std::vector<size_t> attn_ag_buffer_shape = {m, params.attn_ag_hidden};
+    attn_ag_comm_buffer_ = initCommBuffer(attn_ag_buffer_shape, params.ag_input_type, tp_nccl_param_, tp_ranks, true, stream_);
+
+    if (params.enable_per_token_scale) {
+        FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_scale_comm_buffer_");
+        std::vector<size_t> attn_ag_scale_shape = {m, 1};
+        attn_ag_scale_comm_buffer_ = initCommBuffer(attn_ag_scale_shape, DataType::TYPE_FP32, tp_nccl_param_, tp_ranks, true, stream_);
+    }
+
+    if (params.enable_ffn_tp) {
+        std::vector<size_t> ffn_tp_ranks = fcNcclGatherRanks(ffn_tp_nccl_param_, stream_);
+
+        FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_rs_comm_buffer_");
+        std::vector<size_t> ffn_rs_buffer_shape = {m, params.ffn_rs_hidden};
+        ffn_rs_comm_buffer_ = initCommBuffer(ffn_rs_buffer_shape, params.rs_output_type, ffn_tp_nccl_param_, ffn_tp_ranks, false, stream_);
+
+        FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
+        std::vector<size_t> ffn_ag_buffer_shape = {m, params.ffn_ag_hidden};
+        ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+    
+        FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
+        if (params.enable_per_token_scale) {
+            std::vector<size_t> ffn_ag_scale_shape = {m, 1};
+            ffn_ag_scale_comm_buffer_ = initCommBuffer(ffn_ag_scale_shape, DataType::TYPE_FP32, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+        }
+    }
 }
 
 }; // namespace fastertransformer

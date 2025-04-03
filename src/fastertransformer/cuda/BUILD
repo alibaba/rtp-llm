@@ -103,6 +103,29 @@ cc_library(
 )
 
 cc_library(
+    name = "comm_buffer",
+    srcs = [
+        "comm_buffer/comm_buffer.cc",
+    ],
+    hdrs = [
+        "comm_buffer/comm_buffer.h"
+    ],
+    deps = [
+        ":nccl_util",
+        ":custom_ar",
+        ":cuda_utils",
+        ":memory_utils",
+        "//src/fastertransformer/core:types",
+        "//src/fastertransformer/kernels:kernels_cu",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "nccl_util",
     srcs = [
         "nccl/nccl_utils_torch.cc",
@@ -259,6 +282,7 @@ cc_library(
         ":cuda_utils",
         ":cuda_fmha_utils",
         ":custom_ar",
+        ":comm_buffer",
         ":memory_utils",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils",

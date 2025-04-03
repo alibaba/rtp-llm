@@ -45,6 +45,9 @@ cublasMMWrapper::~cublasMMWrapper() {
     mutex_ = nullptr;
     if (allocator_ != nullptr) {
         allocator_->free((void**)(&cublas_workspace_));
+        for (size_t i = 0; i < additional_cublas_workspaces_.size(); i++) {
+            allocator_->free((void**)(&additional_cublas_workspaces_[i]));
+        }
         allocator_ = nullptr;
     }
 }
@@ -74,8 +77,10 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            void*             C,
                            const int         ldc,
                            float             f_alpha,
-                           float             f_beta) {
-    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta);                            
+                           float             f_beta,
+                           int               math_sm_count,
+                           cudaStream_t      stream) {
+    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta, math_sm_count, stream);                            
 }
 
 void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
@@ -97,7 +102,9 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
                                 int ldc,
                                 bool is_fp16_computeType,
                                 cublasLtMatmulAlgo_info info,
-                                bool findAlgo) {
+                                bool findAlgo,
+                                int               math_sm_count,
+                                cudaStream_t      stream) {
     struct ResourceManager {
         cublasLtMatrixLayout_t Adesc;
         cublasLtMatrixLayout_t Bdesc;
@@ -153,6 +160,10 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
     check_cuda_error(cublasLtMatmulDescCreate(&resource.operationDesc, computeType));
 #endif
 
+    if (math_sm_count > 0) {
+        check_cuda_error(cublasLtMatmulDescSetAttribute(resource.operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &math_sm_count, sizeof(math_sm_count)));
+    }
+
     check_cuda_error(cublasLtMatmulDescSetAttribute(resource.operationDesc,
             CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t)));
     check_cuda_error(cublasLtMatmulDescSetAttribute(resource.operationDesc,
@@ -161,6 +172,17 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
     cublasLtMatmulAlgo_t algo;
     void*                workSpace     = cublas_workspace_;
     uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+    if (stream != stream_) {
+        if (cublas_workspces_map_.count(stream) == 0) {
+            void* additional_cublas_workspace = nullptr;
+            additional_cublas_workspace = allocator_->reMalloc(additional_cublas_workspace, CUBLAS_WORKSPACE_SIZE);
+            additional_cublas_workspaces_.push_back(additional_cublas_workspace);
+            cublas_workspces_map_[stream] = additional_cublas_workspaces_.size() - 1;
+        }
+        workSpace = additional_cublas_workspaces_[cublas_workspces_map_[stream]];
+        workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+        FT_LOG_DEBUG("stream %d, idx %d", stream, cublas_workspces_map_[stream]);
+    }
     if (findAlgo) {
         if (info.workspaceSize > workspaceSize) {
             findAlgo = 0;
@@ -234,7 +256,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
                     (findAlgo == 1 ? (&algo) : NULL),
                     workSpace,
                     workspaceSize,
-                    stream_));
+                    stream));
 
     sync_check_cuda_error();
 }
@@ -255,16 +277,18 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            const int         ldc,
                            cudaDataType_t    computeType,
                            float             f_alpha,
-                           float             f_beta) {
+                           float             f_beta,
+                           int               math_sm_count,
+                           cudaStream_t      stream) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     std::lock_guard<std::mutex> lock(*mutex_);
 
     half h_alpha = (half)(f_alpha);
     half h_beta  = (half)(f_beta);
-
     // TODO: default cublas libs
-    bool  is_fp16_computeType = computeType == CUDA_R_16F ? true : false;
-    bool using_cublasLt      = (Atype == CUDA_R_16F || Atype == CUDA_R_8F_E4M3) ? true : false;
+    bool is_fp16_computeType = computeType == CUDA_R_16F ? true : false;
+    bool using_cublasLt      = (Atype == CUDA_R_16F || Atype == CUDA_R_8F_E4M3 || Atype == CUDA_R_16BF) ? true : false;
+
     int  batch_count         = 1;
     // fp32 use cublas as default
     // fp16 use cublasLt as default
@@ -284,6 +308,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     } else {
         FT_LOG_DEBUG("Fallback to default cublas algorithm");
     }
+    FT_LOG_DEBUG("using cublasLt: %d", using_cublasLt);
 
     try {
         if (using_cublasLt) {
@@ -306,7 +331,9 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                         ldc,
                         is_fp16_computeType,
                         info,
-                        findAlgo);
+                        findAlgo,
+                        math_sm_count,
+                        stream);
         } else {
             int cublasAlgo = info.algoId;
             check_cuda_error(cublasGemmEx(cublas_handle_,

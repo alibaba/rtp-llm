@@ -43,6 +43,8 @@ protected:
 
     IAllocator* allocator_        = nullptr;
     void*       cublas_workspace_ = nullptr;
+    std::vector<void*> additional_cublas_workspaces_;
+    std::unordered_map<void*, int32_t> cublas_workspces_map_;
 
     friend class cublasINT8MMWrapper;
 
@@ -78,7 +80,9 @@ protected:
                     int ldc,
                     bool is_fp16_computeType,
                     cublasLtMatmulAlgo_info info,
-                    bool findAlgo);
+                    bool findAlgo,
+                    int               math_sm_count,
+                    cudaStream_t       stream);
 
 public:
     cublasMMWrapper(cublasHandle_t   cublas_handle_,
@@ -148,7 +152,9 @@ public:
               const int         ldc,
               cudaDataType_t    computeType,
               float             f_alpha,
-              float             f_beta);
+              float             f_beta,
+              int               math_sm_count,
+              cudaStream_t      stream);
 
     void Gemm(cublasOperation_t transa,
               cublasOperation_t transb,
@@ -162,7 +168,9 @@ public:
               void*             C,
               const int         ldc,
               const float       f_alpha = 1.0f,
-              const float       f_beta = 0.0f);
+              const float       f_beta = 0.0f,
+              int               math_sm_count=0,
+              cudaStream_t      stream = 0);
 
     void Int8Gemm(const int     m,
                   const int     n,
