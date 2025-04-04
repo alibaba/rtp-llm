@@ -29,15 +29,16 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     } else {
         BufferPtr up_output;
         if (isGatedActivation(params.configs.activation_type)) {
-            BufferPtr ffn_input_ptr = params.input.slice(0, params.input.shape()[0]);
+            BufferPtr ffn_input_ptr = nullptr;
             FT_LOG_DEBUG("enable_sp %d ffn_tp_size %d", params.enable_sp, init_params_.ffn_tp_size);
             if (params.enable_sp && init_params_.ffn_tp_size > 1) {
-                printBufferData(*ffn_input_ptr, "ffn_ag_input");
                 BufferPtr ag_recv_buffer = nullptr;
-                size_t pad_token_num = ffn_input_ptr->shape()[0] * init_params_.ffn_tp_size;
+                size_t pad_token_num = params.input.shape()[0] * init_params_.ffn_tp_size;
                 if (params.qscheme == NoQuantize) {
+                    ffn_input_ptr = params.input.slice(0, params.input.shape()[0]);
                     ag_recv_buffer = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
                 } else if (params.qscheme == Qint8PerToken){
+                    ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslice(0, params.input.shape()[0]);
                     BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
                     BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
                                                     {pad_token_num},
@@ -53,6 +54,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 } else {
                     throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
                 }
+                printBufferData(*ffn_input_ptr, "ffn_ag_input");
                 GemmParams up_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.up_weight->kernel));
                 AllGatherLoraLinearOutput all_gather_output = allGatherloraLinear({LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input), ffn_input_ptr, ag_recv_buffer, params.qscheme, params.output->type(), ParallelMode::FFN_TP});
                 // syncAndCheck();

@@ -66,12 +66,14 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     BufferPtr qkv = nullptr;
     if (params.enable_sp && params.layer_id > 0) {
         BufferPtr ag_recv_buffer = nullptr;
-        BufferPtr attn_input_ptr = params.input.slice(0, params.input.shape()[0]); 
+        BufferPtr attn_input_ptr = nullptr;
         printBufferData(*attn_input_ptr, "attn_ag_input");
 
         if (params.qscheme == NoQuantize) {
+            attn_input_ptr = params.input.slice(0, params.input.shape()[0]);
             ag_recv_buffer = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
         } else if (params.qscheme == Qint8PerToken){
+            attn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslice(0, params.input.shape()[0]);
             BufferPtr kernel = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer_kernel"});
             BufferPtr scales = allocateBuffer({DataType::TYPE_FP32,
                                             {pad_token_num},
