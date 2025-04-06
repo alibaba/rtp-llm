@@ -60,18 +60,18 @@ torch::Tensor T5LayerNormOp::stride_forward(torch::Tensor input, torch::Tensor g
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
     auto batch_size = input.size(0);
-    auto norm_size = gamma.size(0);
-    torch::Tensor output     = torch::zeros_like(input);
-    fastertransformer::invokeRmsNormWithStride((float*)input.data_ptr(),
-                                                 (float*)gamma.data_ptr(),
-                                                 (float*)nullptr,
-                                                 (float)eps,
-                                                 (int)batch_size,
-                                                 (int)d_model,
-                                                 (int)norm_size,
-                                                 (int)stride,
-                                                 (int)offset,
-                                                 stream);
+    auto norm_size = gamma.size(0);    
+    fastertransformer::invokeRmsNormWithStride((float*)input.data_ptr() + offset,
+                                                (int)stride,
+                                                (float*)input.data_ptr() + offset,
+                                                (int)stride,
+                                                (float*)gamma.data_ptr(),
+                                                (float*)nullptr,
+                                                (float)eps,
+                                                (int)batch_size,
+                                                (int)d_model,
+                                                (int)norm_size,
+                                                stream);
     auto input_slice = input.slice(1, offset, offset + d_model);
     return input_slice;
 }

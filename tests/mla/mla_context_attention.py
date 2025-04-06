@@ -12,7 +12,7 @@ import torch
 
 from dataclasses import dataclass
 from flash_attn import flash_attn_varlen_func
-from test_util import MlaOpsType
+from test_util import MlaOpsType, compare_tensor_diff_with_ratio
 import random
 
 os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
@@ -130,6 +130,7 @@ class TestRope(unittest.TestCase):
             nope_rope_size = config.nope_rope_size
             v_head_size = config.v_head_size
             kv_lora = config.kv_lora
+            q_lora = config.q_lora_rank
 
             dtype = torch.bfloat16
             device = torch.device("cuda")
@@ -139,20 +140,24 @@ class TestRope(unittest.TestCase):
             token_nums = int(torch.sum(seq_len).item()) # type: ignore
 
             q = torch.randn(token_nums, head_num * nope_rope_size, dtype=dtype, device=device)
-            kv_a = torch.randn(token_nums, kv_lora, dtype=dtype, device=device)
-            k_rope = torch.randn(token_nums, rope_head_size, dtype=dtype, device=device)
+            fused_qkv = torch.randn(token_nums, q_lora + kv_lora + rope_head_size, dtype=dtype, device=device)            
+            kv_a = fused_qkv[:, q_lora: q_lora + kv_lora].contiguous()
+            k_rope = fused_qkv[:, q_lora + kv_lora: ].contiguous()
+            cos_sin_cache = torch.concat([torch.ones([16384, 32]), torch.zeros([16384,32])], dim=-1).to(torch.device("cuda")).to(torch.float32)            
 
             k_nope_weight = torch.randn(kv_lora, head_num * nope_head_size, dtype=dtype, device=device)
             v_weight = torch.randn(kv_lora, head_num * v_head_size, dtype=dtype, device=device)
 
             # [1, token_num, head_num, nope_size]
             attn_output_expect = torch_attention(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len, config)
+            attn_output_expect = attn_output_expect[:, :, :, :v_head_size].contiguous()
             print(attn_output_expect.shape)
             
-            attn_output = self.mla_context_attn_op.forward(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len)
-            attn_output = attn_output.reshape(1, token_nums, head_num, nope_rope_size)
-            torch.testing.assert_close(attn_output_expect, attn_output_expect, atol=1e-2, rtol=2e-3)
+            attn_output = self.mla_context_attn_op.forward(q, fused_qkv, q_lora, k_nope_weight, v_weight, cos_sin_cache, seq_len)
+            attn_output = attn_output.reshape(1, token_nums, head_num, v_head_size)
+            compare_tensor_diff_with_ratio(attn_output, attn_output_expect, 1e-2, 2e-3)
             torch.cuda.synchronize()
 
 if __name__ == '__main__':
+    logging.info("cwd: %s", os.getcwd())
     unittest.main()

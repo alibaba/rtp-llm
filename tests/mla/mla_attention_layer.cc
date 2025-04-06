@@ -71,26 +71,33 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         BufferPtr input_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
-        auto      flash_infer_attn_params = FlashInferAttnParams::prepareFlashInferAttnParams(device_,
-                                                                                       attn_configs,
-                                                                                       sequence_lengths_host,
-                                                                                       sequence_lengths_host,
-                                                                                       kvcache_block_id_host,
-                                                                                       DataType::TYPE_BF16);
+        auto      decode_flash_infer_attn_params =
+            FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
+                                                                    attn_configs,
+                                                                    sequence_lengths_host,
+                                                                    sequence_lengths_host,
+                                                                    kvcache_block_id_host,
+                                                                    DataType::TYPE_BF16);
+        auto context_flash_infer_attn_params =
+            FlashInferAttnParams::prepareContextFlashInferAttnParams(device_,
+                                                                     attn_configs,
+                                                                     sequence_lengths_host,
+                                                                     sequence_lengths_host,
+                                                                     kvcache_block_id_host,
+                                                                     DataType::TYPE_BF16);
+
         size_t token_num     = hidden.size(0);
         auto   hidden_b      = torchTensor2Buffer(hidden);
         auto   kc_weight_b   = torchTensor2Buffer(weights[0]);
         auto   vc_t_weight_b = torchTensor2Buffer(weights[1]);
         auto   q_a_norm_weight_gamma = torchTensor2Buffer(weights[2]);
         auto   q_a_norm_weight_beta = torchTensor2Buffer(weights[3]);
-        auto   q_a_weight_b  = torchTensor2Buffer(weights[4]);
+        auto   mla_fusedqkrope_w = torchTensor2Buffer(weights[4]);
         auto   q_b_weight_b  = torchTensor2Buffer(weights[5]);
-        auto   kv_a_weight_b = torchTensor2Buffer(weights[6]);
-        auto   k_rope_weight_b = torchTensor2Buffer(weights[7]);
-        auto   kv_a_norm_weight_gamma = torchTensor2Buffer(weights[8]);
-        auto   kv_a_norm_weight_beta = torchTensor2Buffer(weights[9]);
-        auto   output_weight_b = torchTensor2Buffer(weights[10]);  
-        auto   cos_sin_cache_b = torchTensor2Buffer(weights[11]);
+        auto   kv_a_norm_weight_gamma = torchTensor2Buffer(weights[6]);
+        auto   kv_a_norm_weight_beta = torchTensor2Buffer(weights[7]);
+        auto   output_weight_b = torchTensor2Buffer(weights[8]);  
+        auto   cos_sin_cache_b = torchTensor2Buffer(weights[9]);
         auto hidden_buffer = torchTensor2Buffer(hidden);
         auto qkv_output = device_->allocateBuffer(
             {hidden_buffer->type(), {token_num, attn_configs.head_num, attn_configs.nope_head_dim + attn_configs.rope_head_dim}}, {"output"});
@@ -103,10 +110,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         attn_layer_weight.vc_weight           = vc_dense_weight;
         attn_layer_weight.q_a_norm_weight     = std::make_shared<LayerNormWeights>(q_a_norm_weight_gamma, q_a_norm_weight_beta);
         attn_layer_weight.kv_a_norm_weight    = std::make_shared<LayerNormWeights>(kv_a_norm_weight_gamma, kv_a_norm_weight_beta);
-        attn_layer_weight.q_a_weight          = std::make_shared<DenseWeights>(q_a_weight_b);
+        attn_layer_weight.fusedqkrope_weight   = std::make_shared<DenseWeights>(mla_fusedqkrope_w);
         attn_layer_weight.q_b_weight          = std::make_shared<DenseWeights>(q_b_weight_b);
-        attn_layer_weight.kv_a_weight         = std::make_shared<DenseWeights>(kv_a_weight_b);
-        attn_layer_weight.k_rope_weight       = std::make_shared<DenseWeights>(k_rope_weight_b);
         attn_layer_weight.output_weight       = std::make_shared<DenseWeights>(output_weight_b);
         attn_layer_weight.rope_cos_sin_cache  = cos_sin_cache_b;
         auto attn_common_inputs               = AttentionCommonInputs();
@@ -115,7 +120,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         attn_common_inputs.kv_cache =
             std::make_optional<KvCacheInfo>({1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer, 
             nullptr, nullptr});
-        attn_common_inputs.flash_infer_attn_params = flash_infer_attn_params;
+        attn_common_inputs.prefill_flash_infer_attn_params = context_flash_infer_attn_params;
+        attn_common_inputs.decode_flash_infer_attn_params = decode_flash_infer_attn_params;
         attn_common_inputs.input_lengths = input_lengths_host;
         attn_common_inputs.sequence_lengths = sequence_lengths_host;
         LayerNormConfig layernorm_config = LayerNormConfig();

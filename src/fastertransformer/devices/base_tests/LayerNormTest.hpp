@@ -214,8 +214,7 @@ protected:
             
         // 拼接三个张量（最终维度为 [batch_size, 3n]）
         auto input_tensor = torch::cat({hidden_states_1, hidden_states_2, hidden_states_3}, /*dim=*/1);
-
-        uint16_t stride = n * 3;
+        
         // auto input_tensor = (torch::arange(m * n, m * n * 2) / (n * n)).reshape({m, n}).to(torch_dtype);
         
         auto gamma_tensor = (torch::ones({norm_size}) / 2).to(torch_dtype);
@@ -247,24 +246,14 @@ protected:
             gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32)).reshape({m, -1});
 
         {
-            auto testcase1_output_stride0 = device_->layernorm(LayernormParams(input, 
-                                                        weights, 
-                                                        1e-6, 
-                                                        norm_type,
-                                                        0, 
-                                                        n, 
-                                                        stride));
+            auto testcase1_output_stride0 =
+                device_->layernormWithStride(LayernormWithStrideParams({input, weights, 1e-6, norm_type, 0, n}));
             auto actual_output = bufferToTensor(*(testcase1_output_stride0.output)).slice(1, 0, n);
             assertTensorClose(expected_output_1, actual_output);
         }
         {
-            auto testcase1_output = device_->layernorm(LayernormParams(input, 
-                                                        weights, 
-                                                        1e-6, 
-                                                        norm_type,
-                                                        n, 
-                                                        n, 
-                                                        stride));
+            auto testcase1_output =
+                device_->layernormWithStride(LayernormWithStrideParams({input, weights, 1e-6, norm_type, n, n}));
             auto actual_output = bufferToTensor(*(testcase1_output.output)).slice(1, n, n + n);
             assertTensorClose(expected_output_2, actual_output);
         }

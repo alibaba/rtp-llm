@@ -74,17 +74,18 @@ torch::Tensor LayerNormOp::stride_forward(torch::Tensor input, torch::Tensor gam
 
     auto batch_size = input.size(0);
     auto norm_size = gamma.size(0);
-    torch::Tensor output     = torch::zeros_like(input);
-    fastertransformer::invokeLayerNormWithStride((float*)input.data_ptr(),
+    fastertransformer::invokeLayerNormWithStride((float*)input.data_ptr() + offset,
+                                                 (int)stride,
+                                                 (float*)input.data_ptr() + offset,
+                                                 (int)stride,
                                                  (float*)gamma.data_ptr(),
                                                  (float*)bias.data_ptr(),
                                                  (float)eps,
                                                  (int)batch_size,
                                                  (int)d_model,
                                                  (int)norm_size,
-                                                 (int)stride,
-                                                 (int)offset,
                                                  stream);
+    // std::cout << "after layernorm: " << input << std::endl;
     auto input_slice = input.slice(1, offset, offset + d_model);
     return input_slice;
 }

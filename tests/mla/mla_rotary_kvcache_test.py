@@ -1,4 +1,4 @@
-
+import sys; sys.path.append("/hio_disk/baowending.bwd/FasterTransformer/")
 import logging
 import math
 import os
@@ -66,7 +66,7 @@ def trans(x: torch.Tensor):
 class TestRotaryKVcacheTest(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")        
         self.config = DeepSeekConfig()
         # self.mla_ops_type = MlaOpsType.FLASH_MLA
         self.mla_ops_type = MlaOpsType.FLASH_INFER
@@ -124,11 +124,11 @@ class TestRotaryKVcacheTest(unittest.TestCase):
                          self.config.head_num,
                          self.config.nope_head_size + self.config.rope_head_size],
                          dtype=torch.bfloat16, device=torch.device("cuda"))
-        q_rope_clone =  q[:, :, self.config.nope_head_size: ].contiguous().detach().clone()
-        ckv = torch.randn([token_num,
-                         self.config.kv_lora],
-                         dtype=torch.bfloat16, device=torch.device("cuda"))
-        k_rope = torch.randn([token_num, self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
+        q_rope_clone =  q[:, :, self.config.nope_head_size: ].contiguous().detach().clone()        
+        fused_qkv = torch.randn([token_num, self.config.q_lora_rank + self.config.kv_lora + self.config.rope_head_size],
+                                dtype=torch.bfloat16, device=torch.device("cuda"))
+        ckv = fused_qkv[:, self.config.q_lora_rank: self.config.q_lora_rank + self.config.kv_lora]
+        k_rope = fused_qkv[:, self.config.q_lora_rank + self.config.kv_lora:]
         k_rope_clone = k_rope.detach().clone()
         # transpose
         # q[..., self.config.nope_head_size:] = q[..., self.config.nope_head_size:].reshape(token_num, self.config.head_num, self.config.rope_head_size // 2, 2).transpose(2, 3).reshape(token_num, self.config.head_num, self.config.rope_head_size).contiguous()
@@ -142,7 +142,8 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         kv_cache = torch.zeros([total_page_num, page_size, self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
         ckv_cache = kv_cache[:, :, :self.config.kv_lora]
         kpe_cache = kv_cache[:, :, self.config.kv_lora:]
-        self.mla_rotary_kvcache_op.applyRotaryKVCache(q, ckv, k_rope, kv_cache, torch.empty(tuple(), dtype=torch.bfloat16, device=torch.device("cuda")), cos_sin_cache)
+        self.mla_rotary_kvcache_op.applyRotaryKVCache(q, fused_qkv, self.config.q_lora_rank, kv_cache, torch.empty(tuple(), dtype=torch.bfloat16, device=torch.device("cuda")), cos_sin_cache)
+        torch.cuda.synchronize()
 
         # check kvcache not empty
         page_offset = 0
@@ -165,6 +166,7 @@ class TestRotaryKVcacheTest(unittest.TestCase):
             offset += input_len
 
         q_rope = q[:, :, self.config.nope_head_size:]
+        torch.cuda.synchronize()
         # check rotary embedding
         for i, seq_len in enumerate(sequence_length_mins_one):
             q_rope_compare, k_rope_compare = self.do_rotary_ref(q_rope_clone[i].unsqueeze(0), k_rope_clone[i].unsqueeze(0), [seq_len])

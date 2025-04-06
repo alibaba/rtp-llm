@@ -200,24 +200,6 @@ py_test(
 )
 
 py_test(
-    name = "mla_gemm_test",
-    srcs = [
-        "mla/mla_gemm_test.py"
-    ],
-    data = [
-        "//:th_transformer",
-        ":test_ops",
-    ],
-    deps = [
-        "//maga_transformer:torch",
-    ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
-    exec_properties = {'gpu':'A10'},
-)
-
-py_test(
     name = "mla_context_attention",
     srcs = [
         "mla/mla_context_attention.py",

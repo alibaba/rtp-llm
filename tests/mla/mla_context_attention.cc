@@ -19,10 +19,11 @@ public:
                      int64_t hidden_size,
                      double  softmax_extra_scale);
     torch::Tensor forward(torch::Tensor q,
-                          torch::Tensor kv_a,
-                          torch::Tensor k_rope,
+                          torch::Tensor fused_qkv,
+                          int64_t kv_offset,
                           torch::Tensor k_nope_weight,
                           torch::Tensor v_weight,
+                          torch::Tensor cos_sin_cache,
                           torch::Tensor seq_len);
 
 private:
@@ -68,18 +69,19 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
 }
 
 torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
-                                        torch::Tensor kv_a,
-                                        torch::Tensor k_rope,
+                                        torch::Tensor fused_qkv,
+                                        int64_t kv_offset,
                                         torch::Tensor k_nope_weight,
                                         torch::Tensor v_weight,
+                                        torch::Tensor cos_sin_cache,
                                         torch::Tensor seq_len) {
     size_t token_num       = q.size(0);
     auto   q_b             = torchTensor2Buffer(q);
-    auto   kv_a_b          = torchTensor2Buffer(kv_a);
-    auto   k_rope_b        = torchTensor2Buffer(k_rope);
+    auto   fused_qkv_b          = torchTensor2Buffer(fused_qkv);
     auto   k_nope_weight_b = torchTensor2Buffer(k_nope_weight);
     auto   v_weight_b      = torchTensor2Buffer(v_weight);
-    auto   datatype        = kv_a_b->type();
+    auto   cos_sin_cache_b = torchTensor2Buffer(cos_sin_cache);
+    auto   datatype        = fused_qkv_b->type();
 
     size_t               batch_size = seq_len.size(0);
     std::vector<int32_t> cu_seqlens_data(batch_size + 1, 0);
@@ -92,9 +94,9 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         max_seq_len            = std::max(max_seq_len, cur_seq_len);
     }
 
-    BufferPtr sequence_lengths;
+    BufferPtr sequence_lengths = torchTensor2Buffer(torch::empty({0}, torch::dtype(torch::kInt32)));
     BufferPtr kv_cache_block_id;
-    BufferPtr input_lengths;
+    BufferPtr input_lengths = torchTensor2Buffer(seq_len);
 
     auto device_prep_params = DevicePrepParams({
         attn_configs,
@@ -106,9 +108,9 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         0,
     });
 
-    device_->prepareModelRun(device_prep_params);
+    auto prep_output = device_->prepareModelRun(device_prep_params);
     auto output =
-        device_->allocateBuffer({datatype, {token_num, attn_configs.head_num * attn_configs.size_per_head}}, {"output"});
+        device_->allocateBuffer({datatype, {token_num, attn_configs.head_num * attn_configs.v_head_dim}}, {"output"});
 
     auto k_nope_w = std::make_shared<DenseWeights>(k_nope_weight_b);
     auto v_w      = std::make_shared<DenseWeights>(v_weight_b);
@@ -116,15 +118,17 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     auto attn_layer_weight          = AttentionLayerWeights();
     attn_layer_weight.k_nope_weight = k_nope_w;
     attn_layer_weight.v_weight      = v_w;
+    attn_layer_weight.rope_cos_sin_cache = cos_sin_cache_b;
     auto attn_common_inputs         = AttentionCommonInputs();
     attn_common_inputs.cu_seqlens =
         device_->clone({*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
     attn_common_inputs.context_batch_size  = batch_size;
     attn_common_inputs.decoder_batch_size  = 0;
     attn_common_inputs.context_max_seq_len = token_num;
+    attn_common_inputs.prefill_flash_infer_attn_params.swap(prep_output.prefill_flash_infer_attn_params);
 
     auto mla_params = MlaAttentionModuleParams{
-        0, *q_b, *kv_a_b, *k_rope_b, output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};
+        0, *q_b, *fused_qkv_b, kv_offset, output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};
 
     device_->mlaContextAttention(mla_params);
 

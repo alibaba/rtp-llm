@@ -5,12 +5,11 @@ import unittest
 import torch
 from dataclasses import dataclass
 from test_util import compare_tensor_diff_with_ratio
+from rotary_util import create_cos_sin_cache
 from typing import List
 import random
 
 os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
-
-from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 
 logging.basicConfig(
     level="INFO",
@@ -40,23 +39,6 @@ class DeepSeekConfig:
     mscale = yarn_get_mscale(40, 1.0)
     softmax_scale = 192**-0.5 * mscale * mscale
     
-def create_cos_sin_cache():
-    rotary_emb = DeepseekV3YarnRotaryEmbedding(64,
-                                                32768,
-                                                10000,
-                                                scaling_factor=1.0,
-                                                original_max_position_embeddings=4096,
-                                                beta_fast=32,
-                                                beta_slow=1,
-                                                mscale=1.0,
-                                                mscale_all_dim=1.0)
-    half_rope_dim = 64 // 2
-    cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
-    sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
-    # cos sin cache must be float32
-    cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous().to(torch.device("cuda")).to(torch.float32)
-    return cos_sin_cache
-
 
 class TestMlaAttentionLayer(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
@@ -98,20 +80,17 @@ class TestMlaAttentionLayer(unittest.TestCase):
             torch.randn([self.config.q_lora_rank], dtype=torch.bfloat16, device=torch.device("cuda")),
             # 3. q_a_norm_weight_beta
             torch.randn([self.config.q_lora_rank], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 4. q_a_weight
-            torch.randn([self.config.hidden_size, self.config.q_lora_rank], dtype=torch.bfloat16, device=torch.device("cuda")),
+            # 4 mla_fusedqkrope_w
+            torch.randn([self.config.hidden_size, self.config.q_lora_rank + self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda")),
             # 5. q_b_weight
             torch.randn([self.config.q_lora_rank, self.config.head_num * (self.config.nope_head_size + self.config.rope_head_size)], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 6. kv_a_weight
-            torch.randn([self.config.hidden_size, self.config.kv_lora], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 7. k_rope_weight
-            torch.randn([self.config.hidden_size, self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 8. kv_a_norm_weight_gamma
+            # 6. kv_a_norm_weight_gamma
             torch.randn([self.config.kv_lora], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 9. kv_`a_norm_weight_beta
+            # 7. kv_a_norm_weight_beta
             torch.randn([self.config.kv_lora], dtype=torch.bfloat16, device=torch.device("cuda")),
-            # 10. output_weight
-            torch.randn([self.config.head_num * (self.config.v_head_size + self.config.rope_head_size), self.config.hidden_size], dtype=torch.bfloat16, device=torch.device("cuda")),
+            # 8. output_weight
+            torch.randn([self.config.head_num * self.config.v_head_size, self.config.hidden_size], dtype=torch.bfloat16, device=torch.device("cuda")),
+            # 9. cos_sin_cache
             create_cos_sin_cache()
         ]
         

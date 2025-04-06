@@ -100,14 +100,15 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                     for (size_t i = 0; i < repeat_time; i++) {
                         invokeLayerNormWithStride(
                             (TestType*)input->data(),
+                            hidden_size,
+                            (TestType*)input->data(),
+                            hidden_size,
                             (TestType*)gamma->data(),
                             (TestType*)beta->data(),
                             1e-6,
                             batch_size,
                             n,
-                            norm_size,
-                            hidden_size,
-                            0,
+                            norm_size,                            
                             stream
                         );
                     }
@@ -130,14 +131,15 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                     for (size_t i = 0; i < repeat_time; i++) {
                         invokeRmsNormWithStride(
                             (TestType*)input->data(),
+                            hidden_size,
+                            (TestType*)input->data(),
+                            hidden_size,
                             (TestType*)gamma->data(),
                             (TestType*)beta->data(),
                             1e-6,
                             batch_size,
                             n,
                             norm_size,
-                            hidden_size,
-                            0,
                             stream
                         );
                     }
