@@ -12,6 +12,8 @@ using namespace std;
 
 namespace fastertransformer {
 
+#ifdef ENABLE_DEEP_EP
+
 bool CudaDevice::initDeepEPBuffer() {
     auto   nccl_param = getNcclParam(ParallelMode::EP);
     size_t world_rank = nccl_param.rank_;
@@ -24,11 +26,11 @@ bool CudaDevice::initDeepEPBuffer() {
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, init_params_.num_experts);
     }
-    else if (init_params_.use_deepep_internode) { // normal-kernel internode 
+    else if (init_params_.use_deepep_internode) { // normal-kernel internode
         num_rdma_bytes = int(1e9);
     }
     else{
-        num_rdma_bytes = 0; // normal-kernel intranode 
+        num_rdma_bytes = 0; // normal-kernel intranode
     }
     deepep_buffer_.reset(new DeepEPBuffer(this,
                                           world_rank,
@@ -153,13 +155,13 @@ FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   false /*allocate_on_comm_stream*/);
     // wait combine kernel done, no need, will sync wait on next stream op
     cudaDeviceSynchronize();
-    BufferPtr all_output;   
+    BufferPtr all_output;
     if (params.output != nullptr) {
         all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.output->type())));
     } else {
         all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.input->type())));
     }
-    
+
     printBufferData(*all_output, "all_output", nullptr, true);
     return gatherCombineOutput(all_output, params);
 }
@@ -188,5 +190,25 @@ FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const
                                         dispatched_output.deep_ep_output});
     return out;
 }
+
+#else
+
+bool CudaDevice::initDeepEPBuffer() {
+    return false;
+}
+
+MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+#endif
 
 }  // namespace fastertransformer

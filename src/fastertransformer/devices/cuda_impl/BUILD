@@ -6,6 +6,11 @@ trt_plugins()
 flashinfer_deps()
 flashmla_deps()
 
+config_setting(
+    name = "enable_deep_ep",
+    values = {"copt": "-DENABLE_DEEP_EP=1"},
+)
+
 cc_library(
     name = "deep_ep_buffer",
     hdrs = [
@@ -40,7 +45,7 @@ cc_library(
         "CudaGroupGemmOp.cc",
         "CudaNvtxOp.cc",
         "CudaLoraLinearWithActOp.cc",
-        "CudaLoraLinear.cc"
+        "CudaLoraLinear.cc",
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
     ]),
@@ -63,12 +68,17 @@ cc_library(
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
         ":flashmla",
-        ":deep_ep_buffer",
-    ],
+    ] + select({
+        ":enable_deep_ep": [
+            ":deep_ep_buffer",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     copts = copts(),
     alwayslink = 1,
 )
+
 cc_library(
     name = "gpu_register",
     srcs = glob([
@@ -81,6 +91,7 @@ cc_library(
     copts = copts(),
     alwayslink = 1,
 )
+
 cc_library(
     name = "cuda_impl",
     srcs = glob([

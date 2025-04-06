@@ -10,6 +10,8 @@
 
 namespace fastertransformer {
 
+#ifdef ENABLE_DEEP_EP
+
 MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
     const auto& moe_conf                         = params.moe_configs;
     auto const  tp_size                          = moe_conf.tp_size;
@@ -59,7 +61,7 @@ FfnLayerOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
     auto& expert_ids    = params.expert_ids;
     auto& expert_scales = params.expert_scales;
 
-    torch::Tensor input_tensor = 
+    torch::Tensor input_tensor =
         Buffer2torchTensorWithDstType(*params.input, false, torch::kBFloat16);  // [num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]
     torch::Tensor topk_idx_tensor = Buffer2torchTensorWithDstType(*expert_ids, false, c10::kLong);
     torch::Tensor topk_weights_tensor = Buffer2torchTensorWithDstType(*expert_scales, false, c10::kFloat);
@@ -110,8 +112,8 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
         // hidden states with valid token
         BufferPtr expert_all_token_hidden_states = hidden_states->index(i);
         BufferPtr expert_token_hidden_states = expert_all_token_hidden_states->slice(0, token_num);
-        
-        // mock expert ids and scales only for one expert, may be can change to topk=1, and cudaMemset once 
+
+        // mock expert ids and scales only for one expert, may be can change to topk=1, and cudaMemset once
         BufferPtr expert_ids_cpu_buffer = allocateBuffer({DataType::TYPE_INT32, {(uint64_t)token_num, top_k}, AllocationType::HOST});
         BufferPtr expert_scales_cpu_buffer = allocateBuffer({DataType::TYPE_FP32, {(uint64_t)token_num, top_k}, AllocationType::HOST});
 
@@ -168,4 +170,21 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
     MoeCombineParams combine_params{out_hidden_states, nullptr, params.output, {}, {}, moe_conf, params.input.shape()[0],  init_params_.enable_comm_overlap, nullptr, dispatched_output.deep_ep_ll_output, dispatched_output.expert_ids, dispatched_output.expert_scales};
     return deepEpLLCombine(combine_params);
 }
+
+#else
+
+MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+#endif
+
 }  // namespace fastertransformer

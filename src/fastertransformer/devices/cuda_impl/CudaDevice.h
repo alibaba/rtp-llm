@@ -9,7 +9,9 @@
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/cuda/comm_buffer/comm_buffer.h"
+#ifdef ENABLE_DEEP_EP
 #include "src/fastertransformer/devices/cuda_impl/DeepEPBuffer.h"
+#endif
 #include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
@@ -236,7 +238,6 @@ public:
     torch::Tensor DecoderOutputGemmWrapper(const torch::Tensor& attn_out_t, const MlaDecoderAttentionParams& params);
 
     FfnLayerOutput gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output = nullptr);
-    bool initDeepepBuffer();
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
     FfnLayerOutput deepEpCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
@@ -330,7 +331,9 @@ private:
     std::unique_ptr<CommBuffer> ffn_ag_scale_comm_buffer_ = nullptr;
     std::unique_ptr<CommBuffer> ffn_rs_comm_buffer_ = nullptr;
 
+#ifdef ENABLE_DEEP_EP
     std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
+#endif
 
 protected:
     bool use_trtv1_fmha             = false;
