@@ -433,7 +433,8 @@ struct AttentionCommonInputs {
 
     bool warmup;
 
-    FlashInferAttnParamsPtr flash_infer_attn_params;
+    FlashInferAttnParamsPtr prefill_flash_infer_attn_params;
+    FlashInferAttnParamsPtr decode_flash_infer_attn_params;
 };
 
 struct AttentionConfigs {
@@ -482,8 +483,10 @@ struct AttentionModuleParams {
 
 struct MlaRotaryWriteKVCacheParams {
     const Buffer&                   q;
+    BufferPtr                       fused_dest_q;
     const Buffer&                   fused_qkv;
     const int64_t                   kv_offset;
+    FlashInferAttnParamsPtr         flash_infer_params; // prefill or decode
 
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
@@ -494,29 +497,14 @@ struct MlaRotaryWriteKVCacheParams {
 struct MlaAttentionModuleParams {
     const int32_t                   layer_id;
     const Buffer&                   q;
-    const Buffer&                   kv_a;
-    const Buffer&                   k_rope;
+    const Buffer&                   fused_qkv;
+    const int64_t                   kv_offset;
     BufferPtr                       qkv_output; // shape [token_num, hidden_size]
 
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
-};
-
-// decoder attention read kv_a/k_rope from kvcache
-struct MlaDecoderAttentionParams{
-    const int32_t                   layer_id;
-    const Buffer&                   q;
-    BufferPtr                       qkv_output; // shape [token_num, hidden_size]
-
-    AttentionCommonInputs&          common;
-    const AttentionLayerWeights&    weights;
-    const AttentionConfigs&         configs;
-    const QScheme                   qscheme;
-    MlaDecoderAttentionParams(const int32_t layer_id, const Buffer& q, BufferPtr qkv_output, AttentionCommonInputs& common, 
-        const AttentionLayerWeights& weights, const AttentionConfigs& configs, const QScheme qscheme): 
-            layer_id(layer_id), q(q), qkv_output(qkv_output), common(common), weights(weights), configs(configs), qscheme(qscheme) {}
 };
 
 struct WriteCacheParams {
@@ -835,6 +823,7 @@ struct DevicePrepParams {
 struct DevicePrepOutput {
     bool need_mask = true;
     FlashInferAttnParamsPtr flash_infer_attn_params;
+    FlashInferAttnParamsPtr prefill_flash_infer_attn_params;
 };
 
 struct LoraLinearOutput {

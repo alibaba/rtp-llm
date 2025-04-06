@@ -204,7 +204,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         else:
             q_a_weight = CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', functools.partial(transpose_q_rope, head_num=self._head_num, nope_head_dim=self.nope_head_dim, rope_size=self.rope_head_dim))
             mla_layer_weights.append(
-                WeightInfo(W.mla_fusedqkrope_no_lora_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight')], concat_0_tranpose)
+                WeightInfo(W.mla_fusedqkrope_no_lora_w, [q_a_weight, CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', functools.partial(transpose_kv_rope, kv_lora_rank=self.kv_lora_rank, rope_size=self.rope_head_dim))], concat_0_tranpose)
             )
 
         if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:

@@ -26,7 +26,7 @@ void flashInferAttnParamsDeleter(void* p) {
     delete (FlashInferAttnParams*)p;
 }
 
-void prepareDecodeFlashInferAttnParams(FlashInferAttnParams* params,
+void prepareDecodeFlashInferAttnParamsImpl(FlashInferAttnParams* params,
                                     fastertransformer::DeviceBase *device,
                                     const fastertransformer::AttentionConfigs &attn_configs,
                                     const BufferPtr &sequence_lengths_host,
@@ -69,6 +69,7 @@ void prepareDecodeFlashInferAttnParams(FlashInferAttnParams* params,
     params->page_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {size_t(page_indice_vec.size())}, AllocationType::HOST}, {"page_indice_host"});
     std::copy(page_indice_vec.begin(), page_indice_vec.end(), params->page_indice_host->data<int>());
 
+    params->kv_cache_block_id   = device->clone({*kv_cache_block_id_host, AllocationType::DEVICE});
     params->batch_indice = device->clone({*params->batch_indice_host, AllocationType::DEVICE});
     params->positions = device->clone({*params->positions_host, AllocationType::DEVICE});
     params->paged_kv_last_page_len = device->clone({*params->paged_kv_last_page_len_host, AllocationType::DEVICE});
@@ -76,6 +77,7 @@ void prepareDecodeFlashInferAttnParams(FlashInferAttnParams* params,
     params->page_indptr = device->clone({*params->page_indptr_host, AllocationType::DEVICE});
     params->qo_indptr = device->clone({*params->qo_indptr_host, AllocationType::DEVICE});
     params->page_indice = device->clone({*params->page_indice_host, AllocationType::DEVICE});
+    params->kvlen   = device->clone({*params->kvlen_host, AllocationType::DEVICE});
 
     params->float_workspace_t = Buffer2torchTensor(params->float_workspace, false);
     params->int_workspace_t = Buffer2torchTensor(params->int_workspace, false);
@@ -92,107 +94,103 @@ void prepareDecodeFlashInferAttnParams(FlashInferAttnParams* params,
     params->page_indptr_host_t = Buffer2torchTensor(params->page_indptr_host, false);
     params->page_indice_t = Buffer2torchTensor(params->page_indice, false);
     params->kvlen_host_t = Buffer2torchTensor(params->kvlen_host, false);
+    params->kvlen_t = Buffer2torchTensor(params->kvlen, false);
+    params->kv_cache_block_id_t = Buffer2torchTensor(params->kv_cache_block_id, false);
 }
 
 // for mla, we need to prepare additional params for write kvcache and de rotary embedding
-void prepareMLAFlashInferAttnParams(FlashInferAttnParams*                      params,
+void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*                      params,
                                     fastertransformer::DeviceBase*             device,
                                     const fastertransformer::AttentionConfigs& attn_configs,
                                     const BufferPtr&                           sequence_lengths_host,
                                     const BufferPtr&                           input_lengths_host,
                                     const BufferPtr&                           kv_cache_block_id_host,
-                                    const uint64_t                             total_token_num,
+                                    const uint64_t                             prefill_token_num,
                                     const uint64_t                             context_batch_size,
                                     const uint64_t                             tokens_per_block,
                                     const uint64_t                             max_batch_blocks,
                                     const uint64_t                             batch_size) {
-    params->total_batch_indices_host = device->allocateBuffer(
-        {DataType::TYPE_INT32, {total_token_num}, AllocationType::HOST}, {"total_batch_indices_host"});
-    params->total_positions_host = device->allocateBuffer(
-        {DataType::TYPE_INT32, {total_token_num}, AllocationType::HOST}, {"total_positions_host"});
-    params->total_kv_last_page_len_1_host =
-        device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + batch_size}, AllocationType::HOST},
-                               {"total_kv_last_page_len_1_host"});
-    params->total_page_indptr_host =
-        device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + batch_size + 1}, AllocationType::HOST},
-                               {"total_page_indptr_host"});
-    params->total_page_indptr_host->data<int>()[0] = 0;
-    std::vector<int> total_page_indices_vec;
+    params->batch_indice_host = device->allocateBuffer(
+        {DataType::TYPE_INT32, {prefill_token_num}, AllocationType::HOST}, {"prefill_batch_indices_host"});
+    params->positions_host = device->allocateBuffer(
+        {DataType::TYPE_INT32, {prefill_token_num}, AllocationType::HOST}, {"prefill_positions_host"});
+    params->paged_kv_last_page_len_1_host =
+        device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size}, AllocationType::HOST},
+                               {"prefill_kv_last_page_len_1_host"});
+    params->page_indptr_host =
+        device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST},
+                               {"prefill_page_indptr_host"});
+    params->page_indptr_host->data<int>()[0] = 0;
+    std::vector<int> prefill_page_indices_vec;
 
-    if (batch_size > 0) {
-        std::copy(params->batch_indice_host->data<int>(),
-                  params->batch_indice_host->data<int>() + batch_size,
-                  params->total_batch_indices_host->data<int>());
-        std::copy(params->positions_host->data<int>(),
-                  params->positions_host->data<int>() + batch_size,
-                  params->total_positions_host->data<int>());
-        std::copy(params->paged_kv_last_page_len_1_host->data<int>(),
-                  params->paged_kv_last_page_len_1_host->data<int>() + batch_size,
-                  params->total_kv_last_page_len_1_host->data<int>());
-        std::copy(params->page_indptr_host->data<int>(),
-                  params->page_indptr_host->data<int>() + batch_size + 1,
-                  params->total_page_indptr_host->data<int>());
-        total_page_indices_vec.reserve(params->page_indice_host->size());
-        std::copy(params->page_indice_host->data<int>(),
-                  params->page_indice_host->data<int>() + params->page_indice_host->size(),
-                  std::back_inserter(total_page_indices_vec));
-    }
-
-    int offset = batch_size;
-    for (int i = batch_size; i < int(context_batch_size + batch_size); i++) {
-        auto input_length = input_lengths_host->data<int>()[i];
+    int offset = 0;
+    for (int i = 0; i < context_batch_size; i++) {
+        auto input_length = input_lengths_host->data<int>()[i + batch_size];
         for (int j = 0; j < input_length; j++) {
-            params->total_batch_indices_host->data<int>()[offset] = i;
-            params->total_positions_host->data<int>()[offset]     = j;
+            params->batch_indice_host->data<int>()[offset] = i;
+            params->positions_host->data<int>()[offset]    = j;
             offset += 1;
         }
         if (kv_cache_block_id_host) {
-            int page_nums = (input_lengths_host->data<int>()[i] + tokens_per_block - 1) / tokens_per_block;
+            int page_nums = (input_length + tokens_per_block - 1) / tokens_per_block;
             for (int j = 0; j < page_nums; j++) {
-                auto page_idx = kv_cache_block_id_host->data<int>()[i * max_batch_blocks + j];
-                total_page_indices_vec.push_back(page_idx);
+                auto page_idx = kv_cache_block_id_host->data<int>()[(i + batch_size) * max_batch_blocks + j];
+                prefill_page_indices_vec.push_back(page_idx);
             }
-            params->total_kv_last_page_len_1_host->data<int>()[i] = (input_length - 1) % tokens_per_block + 1;
-            params->total_page_indptr_host->data<int>()[i + 1]    = total_page_indices_vec.size();
+            params->paged_kv_last_page_len_1_host->data<int>()[i] = (input_length - 1) % tokens_per_block + 1;
+            params->page_indptr_host->data<int>()[i + 1]    = prefill_page_indices_vec.size();
         }
     }
     if (kv_cache_block_id_host) {
-        params->total_page_indices_host =
-            device->allocateBuffer({DataType::TYPE_INT32, {size_t(total_page_indices_vec.size())}, AllocationType::HOST}, 
-                                   {"total_page_indices_host"});
+        params->page_indice_host =
+            device->allocateBuffer({DataType::TYPE_INT32, {size_t(prefill_page_indices_vec.size())}, AllocationType::HOST}, 
+                                   {"prefill_page_indices_host"});
         std::copy(
-            total_page_indices_vec.begin(), total_page_indices_vec.end(), params->total_page_indices_host->data<int>());
-        params->total_page_indices       = device->clone({*params->total_page_indices_host, AllocationType::DEVICE});
-        params->total_page_indices_t       = Buffer2torchTensor(params->total_page_indices, false);
-
-        if (device->mla_ops_type == MlaOpsType::FLASH_MLA) {
-            params->kv_cache_block_id   = device->clone({*kv_cache_block_id_host, AllocationType::DEVICE});
-            params->kv_cache_block_id_t = Buffer2torchTensor(params->kv_cache_block_id, false);
-        }
-    }
-    if (device->mla_ops_type == MlaOpsType::FLASH_MLA && batch_size > 0) {
-        params->kvlen_host = device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"kvlen_host"});
-        for (int i = 0; i < int(batch_size); i++) {
-            params->kvlen_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] + 1;
-        }
-        params->kvlen_host_t = Buffer2torchTensor(params->kvlen_host, false);
-
-        params->kvlen   = device->clone({*params->kvlen_host, AllocationType::DEVICE});
-        params->kvlen_t = Buffer2torchTensor(params->kvlen, false);
+            prefill_page_indices_vec.begin(), prefill_page_indices_vec.end(), params->page_indice_host->data<int>());
+        params->page_indice       = device->clone({*params->page_indice_host, AllocationType::DEVICE});
+        params->page_indice_t       = Buffer2torchTensor(params->page_indice, false);
     }
 
-    params->total_batch_indices      = device->clone({*params->total_batch_indices_host, AllocationType::DEVICE});
-    params->total_positions          = device->clone({*params->total_positions_host, AllocationType::DEVICE});
-    params->total_kv_last_page_len_1 = device->clone({*params->total_kv_last_page_len_1_host, AllocationType::DEVICE});
-    params->total_page_indptr        = device->clone({*params->total_page_indptr_host, AllocationType::DEVICE});
+    params->batch_indice      = device->clone({*params->batch_indice_host, AllocationType::DEVICE});
+    params->positions          = device->clone({*params->positions_host, AllocationType::DEVICE});
+    params->paged_kv_last_page_len_1 = device->clone({*params->paged_kv_last_page_len_1_host, AllocationType::DEVICE});
+    params->page_indptr        = device->clone({*params->page_indptr_host, AllocationType::DEVICE});
 
-    params->total_batch_indices_t      = Buffer2torchTensor(params->total_batch_indices, false);
-    params->total_positions_t          = Buffer2torchTensor(params->total_positions, false);
-    params->total_kv_last_page_len_1_t = Buffer2torchTensor(params->total_kv_last_page_len_1, false);
-    params->total_page_indptr_t        = Buffer2torchTensor(params->total_page_indptr, false);
+    params->batch_indice_t      = Buffer2torchTensor(params->batch_indice, false);
+    params->positions_t          = Buffer2torchTensor(params->positions, false);
+    params->paged_kv_last_page_len_1_t = Buffer2torchTensor(params->paged_kv_last_page_len_1, false);
+    params->page_indptr_t        = Buffer2torchTensor(params->page_indptr, false);
 }
 
-FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
+
+FlashInferAttnParamsPtr FlashInferAttnParams::prepareContextFlashInferAttnParams(
+        fastertransformer::DeviceBase *device,
+        const fastertransformer::AttentionConfigs &attn_configs,
+        const BufferPtr &sequence_lengths_host,
+        const BufferPtr &input_lengths_host,
+        const BufferPtr &kv_cache_block_id_host,
+        fastertransformer::DataType dtype)
+{    
+    const size_t batch_size         = sequence_lengths_host->shape()[0];
+    const size_t context_batch_size = input_lengths_host->shape()[0] - batch_size;
+    if (context_batch_size == 0) {
+        return nullptr;
+    }
+
+    const int tokens_per_block = attn_configs.tokens_per_block;
+
+    const int    max_batch_blocks   = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
+    const size_t prefill_token_num    = std::accumulate(input_lengths_host->data<int>() + batch_size,
+                                                     input_lengths_host->data<int>() + context_batch_size + batch_size,
+                                                     0);
+    auto ret = FlashInferAttnParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
+    auto params = (FlashInferAttnParams*)ret.get();
+    prepareContextMLAFlashInferAttnParamsImpl(params, device, attn_configs, sequence_lengths_host, input_lengths_host, kv_cache_block_id_host, prefill_token_num, context_batch_size, tokens_per_block, max_batch_blocks, batch_size);
+    return ret;
+}
+
+
+FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
         fastertransformer::DeviceBase *device,
         const fastertransformer::AttentionConfigs &attn_configs,
         const BufferPtr &sequence_lengths_host,
@@ -201,8 +199,12 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
         fastertransformer::DataType dtype)
 {
     const char* disable_flash_infer_env = getenv("DISABLE_FLASH_INFER");
-
     if (fastertransformer::get_sm() < 80 || (disable_flash_infer_env && strcmp(disable_flash_infer_env, "1") == 0)) {
+        return nullptr;
+    }
+
+    const size_t batch_size         = sequence_lengths_host->shape()[0];
+    if (batch_size == 0) {
         return nullptr;
     }
 
@@ -226,14 +228,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
         return nullptr;
     }
 
-    const size_t batch_size         = sequence_lengths_host->shape()[0];
-    const size_t context_batch_size = input_lengths_host->shape()[0] - batch_size;
     const int    max_batch_blocks   = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
-    const size_t total_token_num    = batch_size
-                                   + std::accumulate(input_lengths_host->data<int>() + batch_size,
-                                                     input_lengths_host->data<int>() + context_batch_size + batch_size,
-                                                     0);
-
     auto ret = FlashInferAttnParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
     auto params = (FlashInferAttnParams*)ret.get();
     if (group_size > 5) {
@@ -243,19 +238,8 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
     }
 
     // prepare flashinfer params for decode
-    if (batch_size > 0) {
-        prepareDecodeFlashInferAttnParams(params, device, attn_configs, sequence_lengths_host, kv_cache_block_id_host, batch_size, tokens_per_block, max_batch_blocks);
-    }
-
-    // prepare flashinfer params for mla rotary and write kvcache
-    if (device->mla_ops_type != MlaOpsType::MHA){
-        prepareMLAFlashInferAttnParams(params, device, attn_configs, sequence_lengths_host, input_lengths_host, kv_cache_block_id_host, total_token_num, context_batch_size, tokens_per_block, max_batch_blocks, batch_size);
-    }
-    // set plan
-    if (batch_size == 0) {
-        return ret;
-    }
-
+    prepareDecodeFlashInferAttnParamsImpl(params, device, attn_configs, sequence_lengths_host, kv_cache_block_id_host, batch_size, tokens_per_block, max_batch_blocks);
+    
     if (!attn_configs.use_mla || device->mla_ops_type == MlaOpsType::MHA) {
         if (params->decode) {
             params->plan = BatchDecodeWithPagedKVCachePlan(
@@ -323,6 +307,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
 
     return ret;
 }
+
 
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
@@ -543,7 +528,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
     }
 
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.flash_infer_attn_params.get();
+    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (flash_infer_attn_params && flash_infer_attn_params->plan.numel() > 0) {
         const auto &flashinfer = *flash_infer_attn_params;
         at::Tensor qkv_input = Buffer2torchTensor(params.input, false);

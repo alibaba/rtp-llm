@@ -15,7 +15,7 @@ namespace fastertransformer {
 
 // q_input_shape [batch_size, head_num, nope_head_dim + rope_head_dim]
 
-void CudaDevice::QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaDecoderAttentionParams& params) {
+void CudaDevice::QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params) {
     auto absorb_q = fused_q_input_t.slice(-1, 0, params.configs.kv_lora_rank);
     DevicePerfWrapper wrapper(this, "QInputBatchMatmulWrapper");
     // shape: [head_num, nope_head_dim, kv_lora_rank]
@@ -28,21 +28,33 @@ void CudaDevice::QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const 
     torch::bmm_out(absorb_q.transpose_(0, 1), q_nope_t.transpose(0, 1), w_kc_t);
 }
 
-void CudaDevice::DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaDecoderAttentionParams& params) {
+void CudaDevice::DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params) {
+    DevicePerfWrapper wrapper(this, "DecoderOutputGemmWrapper");
     auto w_vc_t = Buffer2torchTensor(params.weights.vc_weight->kernel, false);
     torch::bmm_out(qkv_output_t.transpose_(0, 1), mla_out_t.transpose(0, 1), w_vc_t);
 }
 
-void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
+void CudaDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) {
     DevicePerfWrapper wrapper(this, "mlaDecoder_layer_%d", params.layer_id);
 
     auto fused_q_input = allocateBuffer({params.q.type(), {params.q.shape()[0], params.configs.head_num, params.configs.kv_lora_rank + params.configs.rope_head_dim}, AllocationType::DEVICE});
+
+    mlaRotaryWriteKVCache({params.q,
+                           fused_q_input,
+                           params.fused_qkv,
+                           params.kv_offset,
+                           params.common.decode_flash_infer_attn_params,
+                           params.common,
+                           params.weights,
+                           params.configs,
+                           params.qscheme});
+
     auto fused_q_input_t = Buffer2torchTensor(fused_q_input, false);
     QInputBatchMatmulWrapper(fused_q_input_t, params);
     printBufferData(*fused_q_input, "fused_q_input");
 
     auto ckv = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.flash_infer_attn_params.get();
+    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (!flash_infer_attn_params) {
         throw std::runtime_error("flash_infer_attn_params must be setting when using mla");
     }
@@ -54,10 +66,9 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params
     // maybe some shape check ?
 
     auto q_reshape = params.q.reshape({params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
-    auto q_rope = Buffer2torchTensorWithStride(q_reshape, {(int64_t)params.q.shape()[0], (int64_t)params.configs.head_num, (int64_t)params.configs.rope_head_dim}, params.configs.nope_head_dim);
+    auto q_rope = fused_q_input_t.slice(-1, params.configs.kv_lora_rank, params.configs.kv_lora_rank + params.configs.rope_head_dim);
 
-    if (mla_ops_type == MlaOpsType::FLASH_MLA) {
-        fused_q_input_t.slice(-1, params.configs.kv_lora_rank, params.configs.kv_lora_rank + params.configs.rope_head_dim).copy_(q_rope, true);
+    if (mla_ops_type == MlaOpsType::FLASH_MLA) {        
 	fused_q_input_t = fused_q_input_t.reshape({
 	    (int64_t)params.q.shape()[0], 1, (int64_t)params.configs.head_num, (int64_t)(params.configs.kv_lora_rank + params.configs.rope_head_dim)
 	  });
@@ -143,24 +154,39 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params
 AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModuleParams& params) {
     DevicePerfWrapper wrapper(this, "mlaContext_layer_%d", params.layer_id);
     auto& q = params.q;
-    auto& k_rope = params.k_rope;
-    auto& kv_a   = params.kv_a;
+    auto& fused_qkv = params.fused_qkv;
 
-    auto const token_num     = kv_a.shape()[0];
+    auto const token_num     = q.shape()[0];
     auto const head_num      = params.configs.head_num;
     auto const nope_head_dim = params.configs.nope_head_dim;
     auto const rope_head_dim = params.configs.rope_head_dim;
     auto const v_head_dim    = params.configs.v_head_dim;
     auto const nope_rope_dim = nope_head_dim + rope_head_dim;
     auto const size_per_head = params.configs.size_per_head;
+    mlaRotaryWriteKVCache({q,
+                           nullptr,
+                           fused_qkv,
+                           params.kv_offset,
+                           params.common.prefill_flash_infer_attn_params,
+                           params.common,
+                           params.weights,
+                           params.configs,
+                           params.qscheme});
     writeCacheStore(params);
 
-    auto datatype = kv_a.type();
+    auto split_result = split({fused_qkv, {(size_t)params.kv_offset, (size_t)params.configs.kv_lora_rank, (size_t)params.configs.rope_head_dim}, 1});
+    auto kv_a = split_result.outputs[1];
+    auto k_rope   = split_result.outputs[2];
+    printBufferData(q, "q_after_rope");
+    printBufferData(*kv_a, "kv_a");
+    printBufferData(*k_rope, "k_rope");
+
+    auto datatype = fused_qkv.type();
     auto qkv =
         allocateBuffer({datatype, {token_num, head_num * nope_rope_dim * 3}, AllocationType::DEVICE}, {"mla_qkv"});
 
-    auto k_nope = gemm(GemmParams(kv_a, *(params.weights.k_nope_weight->kernel)));
-    auto v      = gemm(GemmParams(kv_a, *(params.weights.v_weight->kernel)));
+    auto k_nope = gemm(GemmParams(*kv_a, *(params.weights.k_nope_weight->kernel)));
+    auto v      = gemm(GemmParams(*kv_a, *(params.weights.v_weight->kernel)));
 
     printBufferData(*k_nope, "k_nope");
     printBufferData(*v, "v");
@@ -169,7 +195,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
                                      invokeMlaQKVMerge,
                                      q.data(),
                                      k_nope->data(),
-                                     k_rope.data(),
+                                     k_rope->data(),
                                      v->data(),
                                      qkv->data(),
                                      token_num,
@@ -198,9 +224,9 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
 
 void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.flash_infer_attn_params.get();
+    auto flash_infer_attn_params = (FlashInferAttnParams*)params.flash_infer_params.get();
     if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mla");
+        throw std::runtime_error("flash_infer_attn_params must be setting when using mlaRotaryWriteKVCachela");
     }
     const auto &flashinfer = *flash_infer_attn_params;
     // apply rotary embedding to qk
@@ -210,14 +236,23 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
     auto q_rope_t = Buffer2torchTensorWithStride(
         q_reshaped,
         {(int64_t)q_reshaped.shape()[0], (int64_t)params.configs.head_num, (int64_t)params.configs.rope_head_dim}, params.configs.nope_head_dim);
-
+    torch::Tensor dest_q;
+    if (params.fused_dest_q) {
+        dest_q = Buffer2torchTensorWithStride(*params.fused_dest_q,
+                                              {(int64_t)params.fused_dest_q->shape()[0],
+                                               (int64_t)params.configs.head_num,
+                                               (int64_t)params.configs.rope_head_dim}, params.configs.kv_lora_rank);
+    } else {
+        dest_q = q_rope_t;
+    }
     auto k_rope_t = Buffer2torchTensorWithStride(
         params.fused_qkv,
         {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.rope_head_dim},
         params.kv_offset + params.configs.kv_lora_rank);
     auto cos_sin_cache_t = Buffer2torchTensor(params.weights.rope_cos_sin_cache, false);
-    apply_rope_pos_ids_cos_sin_cache(q_rope_t, k_rope_t.unsqueeze(1), q_rope_t, k_rope_t.unsqueeze(1), cos_sin_cache_t, flashinfer.total_positions_t, false, (int64_t)stream_);
-    auto append_ckv_t = Buffer2torchTensorWithStride(params.fused_qkv, {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.kv_lora_rank}, params.kv_offset);
+    apply_rope_pos_ids_cos_sin_cache(q_rope_t, k_rope_t.unsqueeze(1), dest_q, k_rope_t.unsqueeze(1), cos_sin_cache_t, flashinfer.positions_t, false, (int64_t)stream_);
+    auto append_ckv_t
+     = Buffer2torchTensorWithStride(params.fused_qkv, {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.kv_lora_rank}, params.kv_offset);
 
     if (params.common.kv_cache.has_value()) {
         const auto &k_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
@@ -239,13 +274,13 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
             params.configs.kv_lora_rank);
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
-                                  flashinfer.total_batch_indices_t,
-                                  flashinfer.total_positions_t,
+                                  flashinfer.batch_indice_t,
+                                  flashinfer.positions_t,
                                   k_cache,
                                   v_cache,
-                                  flashinfer.total_page_indices_t,
-                                  flashinfer.total_page_indptr_t,
-                                  flashinfer.total_kv_last_page_len_1_t,
+                                  flashinfer.page_indice_t,
+                                  flashinfer.page_indptr_t,
+                                  flashinfer.paged_kv_last_page_len_1_t,
                                   (int64_t)stream_);
     }
 }

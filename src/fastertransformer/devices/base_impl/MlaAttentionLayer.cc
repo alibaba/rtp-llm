@@ -54,13 +54,13 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                 kv_cache.v_scale_buffer->debugString().c_str());
         }
     }
-    BufferPtr fused_qkv = nullptr;    
+    BufferPtr fused_qkv = nullptr;
     BufferPtr q = nullptr;
     int64_t kv_offset = 0;
     DevicePerfWrapper pre_mla_wrapper(this, "pre_mla_layer");
     if (params.weights.fusedqkrope_weight != nullptr) {
         // auto q_output_size = params.configs.nope_head_dim;
-        fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_weight->kernel)));        
+        fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_weight->kernel)));
         kv_offset = params.configs.q_lora_rank;
         auto norm_output         = layernormWithStride(LayernormWithStrideParams(
             {fused_qkv,
@@ -83,12 +83,9 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                    params.ln_params.eps,
                                    params.ln_params.norm_type,
                                    (size_t)kv_offset,
-                                   params.configs.kv_lora_rank,                                   
+                                   params.configs.kv_lora_rank,
                                    QScheme::NoQuantize,
                                    true}));
-
-    mlaRotaryWriteKVCache({*q,*fused_qkv, kv_offset, params.common, params.weights, params.configs, params.qscheme});
-    printBufferData(*fused_qkv, "fused_qkrope_after_rotary");
     pre_mla_wrapper.stop();
     auto      qscheme       = params.qscheme;
     auto      dtype         = input.type();
@@ -106,9 +103,12 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     if (generate_batch_size) {
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
         auto generate_q = q->view(0, generate_batch_size);
+        auto generate_fused_qkv = fused_qkv->view(0, generate_batch_size);
         auto generate_qkv_output = qkv_output->slice(0, generate_batch_size);
         mlaDecoderSelfAttention({params.layer_id,
                                  generate_q,
+                                 generate_fused_qkv,
+                                 kv_offset,
                                  generate_qkv_output,
                                  params.common,
                                  params.weights,
@@ -118,10 +118,8 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     if (context_batch_size) {
         // slice to get BufferPtr
         auto context_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
-        auto split_result = split({*fused_qkv, {(size_t)kv_offset, (size_t)params.configs.kv_lora_rank, (size_t)params.configs.rope_head_dim}, 1});
+        auto context_fused_qkv = fused_qkv->slice(generate_batch_size, context_token_num);
         auto context_q = q->view(generate_batch_size, context_token_num);
-        auto context_kv_a   = split_result.outputs[1];
-        auto context_k_rope = split_result.outputs[2];
         if (layer_kv_cache) {
             auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
             params.common.kv_cache->kv_cache_block_id =
@@ -129,8 +127,8 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
         }
         mlaContextAttention({params.layer_id,
                              context_q,
-                             *context_kv_a,
-                             *context_k_rope,
+                             *context_fused_qkv,
+                             kv_offset,
                              context_qkv_output,
                              params.common,
                              params.weights,

@@ -68,26 +68,6 @@ struct FlashInferAttnParams {
     torch::Tensor page_indptr_host_t;
     torch::Tensor kvlen_host_t;
     torch::Tensor page_indice_t;
-
-    // including both decode and prefill, for mla
-    BufferPtr total_batch_indices_host;
-    BufferPtr total_positions_host;
-    BufferPtr total_page_indices_host;
-    BufferPtr total_page_indptr_host;
-    BufferPtr total_kv_last_page_len_1_host;
-
-    BufferPtr total_batch_indices;
-    BufferPtr total_positions;
-    BufferPtr total_page_indices;
-    BufferPtr total_page_indptr;
-    BufferPtr total_kv_last_page_len_1;
-
-    torch::Tensor total_batch_indices_t;
-    torch::Tensor total_positions_t;
-    torch::Tensor total_page_indices_t;
-    torch::Tensor total_page_indptr_t;
-    torch::Tensor total_kv_last_page_len_1_t;
-
     // for flashmla only
     BufferPtr kv_cache_block_id;
     BufferPtr kvlen;
@@ -100,7 +80,7 @@ struct FlashInferAttnParams {
     bool decode = true;
     torch::Tensor plan;
 
-    static FlashInferAttnParamsPtr prepareFlashInferAttnParams(
+    static FlashInferAttnParamsPtr prepareDecodeFlashInferAttnParams(
             fastertransformer::DeviceBase *device,
             const fastertransformer::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,
@@ -108,6 +88,13 @@ struct FlashInferAttnParams {
             const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
 
+    static FlashInferAttnParamsPtr prepareContextFlashInferAttnParams(
+            fastertransformer::DeviceBase *device,
+            const fastertransformer::AttentionConfigs &attn_configs,
+            const BufferPtr &sequence_lengths_host,
+            const BufferPtr &input_lengths_host,
+            const BufferPtr &kv_cache_block_id_host,
+            DataType dtype);
 };
 
 nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype);
@@ -231,13 +218,13 @@ public:
                                int normalization_mode);
     void prepareMoEGate(const FfnLayerParams& params,
                         BufferPtr             gate);
-    void mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) override;
+    void mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
     FfnLayerOutput epCombine(const MoeCombineParams& params) override;
 
-  void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaDecoderAttentionParams& params);
-  void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaDecoderAttentionParams& params);
+    void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
+    void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
 
     FfnLayerOutput gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output = nullptr);
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);

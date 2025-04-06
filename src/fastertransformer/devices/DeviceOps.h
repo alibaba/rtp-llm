@@ -45,7 +45,7 @@ public:
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     virtual AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
     virtual AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params);
-    virtual AttentionModuleOutput mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params);
+    virtual AttentionModuleOutput mlaDecoderSelfAttention(const MlaAttentionModuleParams& params);
     virtual void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
 
     // Top level model ops
