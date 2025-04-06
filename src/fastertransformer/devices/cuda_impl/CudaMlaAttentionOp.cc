@@ -29,9 +29,8 @@ void CudaDevice::QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const 
 }
 
 void CudaDevice::DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaDecoderAttentionParams& params) {
-    auto attn_out_t = qkv_output_t.slice(-1, 0, params.configs.v_head_dim);
     auto w_vc_t = Buffer2torchTensor(params.weights.vc_weight->kernel, false);
-    torch::bmm_out(attn_out_t.transpose_(0, 1), mla_out_t.transpose(0, 1), w_vc_t);
+    torch::bmm_out(qkv_output_t.transpose_(0, 1), mla_out_t.transpose(0, 1), w_vc_t);
 }
 
 void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) {
@@ -137,7 +136,7 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params
         );
     }
     printBufferData(*torchTensor2Buffer(attn_out_t), "mla_attn_out_t");
-    auto qkv_output_t = Buffer2torchTensor(params.qkv_output->reshape({params.qkv_output->shape()[0], params.configs.head_num, params.configs.size_per_head}), false);
+    auto qkv_output_t = Buffer2torchTensor(params.qkv_output->reshape({params.qkv_output->shape()[0], params.configs.head_num, params.configs.v_head_dim}), false);
     DecoderOutputGemmWrapper(qkv_output_t, attn_out_t, params);
 }
 
@@ -153,7 +152,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
     auto const rope_head_dim = params.configs.rope_head_dim;
     auto const v_head_dim    = params.configs.v_head_dim;
     auto const nope_rope_dim = nope_head_dim + rope_head_dim;
-
+    auto const size_per_head = params.configs.size_per_head;
     writeCacheStore(params);
 
     auto datatype = kv_a.type();
@@ -181,9 +180,9 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
                                      stream_);
 
     printBufferData(*qkv, "mla_qkv");
-
+    auto padded_qkv_output_t = allocateBuffer({datatype, {token_num, head_num * size_per_head}, AllocationType::DEVICE}, {"padded_qkv_output"});
     AttentionModuleParams attn_params = AttentionModuleParams(
-        {params.layer_id, *qkv, *params.qkv_output, params.common, params.weights, params.configs, params.qscheme});
+        {params.layer_id, *qkv, *padded_qkv_output_t, params.common, params.weights, params.configs, params.qscheme});
     // only paged fmha use kv_block_array, mld not use paged fmha
     prefillAttention(
         attn_params,
@@ -191,7 +190,10 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
         nullptr,
         nullptr,
         nullptr,
-        nullptr);
+        nullptr);    
+    auto qkv_output_reshaped = padded_qkv_output_t->reshape({token_num, params.configs.head_num, size_per_head});
+    auto sliced_buffer = slice({qkv_output_reshaped, -1, 0, (int64_t)v_head_dim});
+    copy({*params.qkv_output, *sliced_buffer});
 }
 
 void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {

@@ -102,7 +102,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     } else {
         attention_out = allocateBuffer({dtype, {h_token_num, params.configs.hidden_size}}, {"attn_output"});
     }
-    auto qkv_output = allocateBuffer({dtype, {h_token_num, params.configs.head_num * params.configs.size_per_head}}, {"qkv_output"});
+    auto qkv_output = allocateBuffer({dtype, {h_token_num, params.configs.head_num * params.configs.v_head_dim}}, {"qkv_output"});
     if (generate_batch_size) {
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
         auto generate_q = q->view(0, generate_batch_size);
@@ -137,15 +137,9 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                              params.configs,
                              params.qscheme});
     }
-    printBufferData(*qkv_output, "attent_projt_input");
-    auto seq_len = qkv_output->shape()[0];  
-    auto qkv_output_reshape = qkv_output->reshape({seq_len, params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
-    auto stride_qkv_output = Buffer2torchTensorWithStride(
-        qkv_output_reshape,
-        {(int64_t)seq_len, (int64_t)params.configs.head_num, (int64_t)params.configs.nope_head_dim}).reshape({(int64_t)seq_len, (int64_t)(params.configs.head_num*params.configs.nope_head_dim)}).contiguous();
-    auto strid_qkv_buffer = torchTensor2Buffer(stride_qkv_output);
-    auto output_gemm_params = GemmParams(*strid_qkv_buffer, *(params.weights.output_weight->kernel), nullopt, attention_out);
-    loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
+    printBufferData(*qkv_output, "attent_proj_input");
+    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel), nullopt, attention_out);
+    loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input));
     printBufferData(*attention_out, "attention_out");
     return {std::move(attention_out)};
 }
