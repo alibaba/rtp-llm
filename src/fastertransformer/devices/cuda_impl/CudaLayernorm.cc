@@ -176,40 +176,6 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         }
     }
 
-    if (params.stride != 0) {
-        FT_CHECK_WITH_INFO(params.bias == std::nullopt && params.residual1 == std::nullopt && params.residual2 == std::nullopt && params.is_inplace == true, "check error with stride");
-        if (params.norm_type == NormType::layernorm) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                            invokeLayerNormWithStride,
-                                            input->data(),
-                                            gamma,
-                                            beta,
-                                            eps,
-                                            m,
-                                            params.hidden_size,
-                                            norm_weight->get().gamma.get()->shape()[0],
-                                            params.stride,
-                                            params.offset,
-                                            stream_);
-            sync_check_cuda_error();
-            return LayernormOutput({norm_output, nullptr});
-        } else if (params.norm_type == NormType::rmsnorm) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                            invokeRmsNormWithStride,
-                                            input->data(),
-                                            gamma,
-                                            beta,
-                                            eps,
-                                            m,
-                                            params.hidden_size,
-                                            norm_weight->get().gamma.get()->shape()[0],
-                                            params.stride,
-                                            params.offset,
-                                            stream_);
-            sync_check_cuda_error();
-            return LayernormOutput({norm_output, nullptr});
-        }
-    }
     FT_LOG_DEBUG("params.norm_type: %d", params.norm_type);
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         // TODO(lidongjin)

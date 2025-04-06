@@ -114,8 +114,7 @@ __global__ void layerNormWithStride(T* __restrict output,
                                     const T* __restrict beta,
                                     const float layernorm_eps,
                                     const int n,          // 总特征维度
-                                    const int norm_size,  // 归一化窗口大小
-                                    const int stride) 
+                                    const int norm_size) 
 {
     constexpr auto num_elems_T = num_elems<T>::value;    // 向量化元素数
     constexpr size_t warp_size = 32;
@@ -133,6 +132,7 @@ __global__ void layerNormWithStride(T* __restrict output,
     const T* sample_start = input + sample_idx * (in_stride / num_elems_T);
     T* output_start = output + sample_idx * (out_stride / num_elems_T);
     const T* head_start = sample_start + head_idx * (norm_size / num_elems_T);
+    T* out_head_start = output_start + head_idx * (norm_size / num_elems_T);
 
     // Stage 1: 计算均值
     float local_sum = 0.0f;
@@ -177,7 +177,7 @@ __global__ void layerNormWithStride(T* __restrict output,
         } else {
             val_f = (val_f - s_mean) * s_variance * gamma_val;
         }
-        output_start[elem_idx] = cuda_cast<T>(val_f);
+        out_head_start[elem_idx] = cuda_cast<T>(val_f);
     }
 }
 
@@ -240,12 +240,12 @@ void invokeLayerNormWithStride(T* __restrict output,
        layerNormWithStride<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output), out_stride, reinterpret_cast<const Tp*>(input), in_stride,
        			        reinterpret_cast<const Tp*>(gamma),
 							reinterpret_cast<const Tp*>(beta),
-							layernorm_eps, m, n, norm_size);
+							layernorm_eps, n, norm_size);
    } else {
        layerNormWithStride<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(output), out_stride, reinterpret_cast<const Tp*>(input), in_stride,
        			        reinterpret_cast<const Tp*>(gamma),
 							nullptr,
-							layernorm_eps, m, n, norm_size);
+							layernorm_eps, n, norm_size);
    }
 }
 
