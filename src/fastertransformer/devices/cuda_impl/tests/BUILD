@@ -161,21 +161,22 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    linkopts = [
-        "-lpython3.10",
-        "-ltorch",
-        "-lc10",
-        "-ltorch_cpu",
-        "-ltorch_cuda",
-        "-ltorch_python",
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
-        "-L/usr/local/cuda/extras/CUPTI/lib64",
-        "-lcupti",
-    ],
     copts = copts(),
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "cuda_fp8_moe_op_test",
+    srcs = [
+        "CudaFp8MoeOpTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps,
+    tags = ['H20'],
+    exec_properties = {'gpu':'H20'}
 )
 
 cc_test(

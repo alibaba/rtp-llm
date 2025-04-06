@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <float.h>
 #include <math.h>
 #include <numeric>
@@ -11,6 +12,7 @@
 #include "src/fastertransformer/utils/activation_types.h"
 
 namespace fastertransformer {
+constexpr float FP8_E4M3_MAX = 448.0f;
 
 template<typename T>
 void expandInputRowsKernelLauncherContiguous(T const*       unpermuted_input,
@@ -28,9 +30,17 @@ void expandInputRowsKernelLauncherContiguous(T const*       unpermuted_input,
                                              int const      k,
                                              cudaStream_t   stream);
 
-template <class T, class GemmOutputType, class ScaleBiasType>
-void doActivationContiguous(T* output, GemmOutputType const* gemm_result, float const* fp8_quant, ScaleBiasType const* bias,
-                            bool bias_is_broadcast, int const* src_row_to_dst, int num_rows, int64_t inter_size,
-                            ActivationType activation_type, int const* permuted_experts, cudaStream_t stream);
+template<class GemmOutputType, class ScaleBiasType>
+void doActivationContiguous(__nv_fp8_e4m3*        output_fp8,
+                            float*                fp8_scale,
+                            GemmOutputType const* gemm_result,
+                            ScaleBiasType const*  bias,
+                            bool                  bias_is_broadcast,
+                            int const*            src_row_to_dst,
+                            int                   num_rows,
+                            int64_t               inter_size,
+                            ActivationType        activation_type,
+                            int const*            permuted_experts,
+                            cudaStream_t          stream);
 
 }  // namespace fastertransformer

@@ -18,6 +18,9 @@
 #pragma GCC diagnostic pop
 
 #include "src/fastertransformer/cuda/trt_utils.h"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
+
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -79,8 +82,8 @@ __global__ void expandInputRowsContiguousKernel(T const*      unpermuted_input,
         src_row_to_dst[expanded_source_row] = static_cast<int>(expanded_dest_row);
     }
 
-    auto const* source_row_ptr = reinterpret_cast<DataElem const*>(unpermuted_input + source_row * cols);
-    auto*       dest_row_ptr   = reinterpret_cast<DataElem*>(permuted_output + expanded_dest_row * cols);
+    auto const* source_row_ptr = reinterpret_cast<DataElem const*>(unpermuted_input + (int64_t)source_row * cols);
+    auto*       dest_row_ptr   = reinterpret_cast<DataElem*>(permuted_output + (int64_t)expanded_dest_row * cols);
 
     int64_t const start_offset     = threadIdx.x;
     int64_t const stride           = EXPAND_THREADS_PER_BLOCK;
@@ -92,8 +95,8 @@ __global__ void expandInputRowsContiguousKernel(T const*      unpermuted_input,
 
     using ScaleDataElem                    = cutlass::Array<float, 4>;
     int const scale_cols = cols / 128;
-    auto const* source_fp8_scales_row_ptr = reinterpret_cast<ScaleDataElem const*>(fp8_scales + source_row * scale_cols);
-    auto*       dest_fp8_scales_row_ptr   = reinterpret_cast<ScaleDataElem*>(permuted_output_fp8_scales + expanded_dest_row * scale_cols);
+    auto const* source_fp8_scales_row_ptr = reinterpret_cast<ScaleDataElem const*>(fp8_scales + (int64_t)source_row * scale_cols);
+    auto*       dest_fp8_scales_row_ptr   = reinterpret_cast<ScaleDataElem*>(permuted_output_fp8_scales + (int64_t)expanded_dest_row * scale_cols);
 
     int const scale_num_elems_in_col = scale_cols / 4;
 
@@ -123,7 +126,7 @@ void expandInputRowsKernelLauncherContiguous(T const*      unpermuted_input,
                                              cudaStream_t  stream) {
     int64_t const blocks  = dest_num_rows;
     int64_t const threads = EXPAND_THREADS_PER_BLOCK;
-    assert(cols % 512 == 0);
+    FT_CHECK(cols % 512 == 0);
     expandInputRowsContiguousKernel<T><<<blocks, threads, 0, stream>>>(unpermuted_input,
                                                                        fp8_scales,
                                                                        permuted_output,
@@ -175,15 +178,21 @@ const int FINALIZE_THREADS_PER_BLOCK = 256;
 // ============================== Gated Activation =================================
 constexpr static int ACTIVATION_THREADS_PER_BLOCK = 256;
 
-template <class T, class GemmOutputType, class ScaleBiasType, template <class> class ActFn>
-__global__ void doActivationContiguousKernel(T* output, GemmOutputType const* gemm_result, float const* fp8_quant,
-    ScaleBiasType const* bias_ptr, bool bias_is_broadcast, int const* src_row_to_dst,
-                                             int64_t inter_size, bool gated, int const* permuted_experts)
+template <class GemmOutputType, class ScaleBiasType, template <class> class ActFn>
+__global__ void doActivationContiguousKernel(__nv_fp8_e4m3* output_fp8,
+                                             float *output_fp8_scale,
+                                             GemmOutputType const* gemm_result,
+                                             ScaleBiasType const* bias_ptr,
+                                             bool bias_is_broadcast,
+                                             int const* src_row_to_dst,
+                                             int64_t inter_size,
+                                             bool gated,
+                                             int const* permuted_experts)
 {
     int64_t const tid = threadIdx.x;
     int64_t const expanded_source_row = blockIdx.x;
     int const expert = permuted_experts[expanded_source_row];
-    int const token = src_row_to_dst[expanded_source_row];
+    int64_t const token = src_row_to_dst[expanded_source_row];
     if (token < 0)
     {
         return;
@@ -193,16 +202,14 @@ __global__ void doActivationContiguousKernel(T* output, GemmOutputType const* ge
     size_t gated_off = gated ? inter_size : 0;
 
     gemm_result = gemm_result + token * inter_size * gated_size_mul;
-    output = output + token * inter_size; // Aliases gemm_result for non-gated, non-fp8 cases
-
+    output_fp8 = output_fp8 + token * inter_size; // Aliases gemm_result for non-gated, non-fp8 cases
+    output_fp8_scale = output_fp8_scale + token * inter_size / 128;
     // int64_t expert = source_k_rank;
     // if (bias_ptr)
     // {
     //     // TODO this is almost certainly faster as a linear scan
     //     expert = findTotalEltsLessThanTarget(expert_first_token_offset, num_experts, (int64_t) token + 1) - 1;
     // }
-
-    float const quant_scale = fp8_quant ? *fp8_quant : 1.f;
 
     if (bias_ptr)
     {
@@ -212,15 +219,16 @@ __global__ void doActivationContiguousKernel(T* output, GemmOutputType const* ge
     }
 
     // Load 128-bits per thread, according to the smallest data type we read/write
-    constexpr int64_t ACTIVATION_ELEM_PER_THREAD
-        = 128 / std::min(cutlass::sizeof_bits<T>::value, cutlass::sizeof_bits<GemmOutputType>::value);
+    // constexpr int64_t ACTIVATION_ELEM_PER_THREAD
+    //     = 128 / std::min(cutlass::sizeof_bits<T>::value, cutlass::sizeof_bits<GemmOutputType>::value);
+    constexpr int64_t ACTIVATION_ELEM_PER_THREAD = 4;
 
     using BiasElem = cutlass::Array<ScaleBiasType, ACTIVATION_ELEM_PER_THREAD>;
     using GemmResultElem = cutlass::Array<GemmOutputType, ACTIVATION_ELEM_PER_THREAD>;
-    using OutputElem = cutlass::Array<T, ACTIVATION_ELEM_PER_THREAD>;
+    using OutputElem = cutlass::Array<__nv_fp8_e4m3, ACTIVATION_ELEM_PER_THREAD>;
     using ComputeElem = cutlass::Array<float, ACTIVATION_ELEM_PER_THREAD>;
     auto gemm_result_vec = reinterpret_cast<GemmResultElem const*>(gemm_result);
-    auto output_vec = reinterpret_cast<OutputElem*>(output);
+    auto output_vec = reinterpret_cast<OutputElem*>(output_fp8);
     auto bias_ptr_vec = reinterpret_cast<BiasElem const*>(bias_ptr);
     int64_t const start_offset = tid;
     int64_t const stride = ACTIVATION_THREADS_PER_BLOCK;
@@ -249,33 +257,64 @@ __global__ void doActivationContiguousKernel(T* output, GemmOutputType const* ge
             }
             gate_act = gate_act * gate_mul;
         }
-
-        output_vec[elem_index] = arrayConvert<ComputeElem, OutputElem>(gate_act * quant_scale);
+        // plus<Array<T, N>> op;
+        cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;
+        float scale = max_abs_op((float)1e-4, gate_act);
+        scale = warpReduceMax<float>(scale);
+        scale = scale / FP8_E4M3_MAX;
+        gate_act = gate_act * (1 / scale);
+        output_vec[elem_index] = arrayConvert<ComputeElem, OutputElem>(gate_act);
+        if (tid % 32 == 0) {
+            output_fp8_scale[elem_index / 32] = scale;
+        }
     }
 }
 
-template <class T, class GemmOutputType, class ScaleBiasType>
-void doActivationContiguous(T* output, GemmOutputType const* gemm_result, float const* fp8_quant, ScaleBiasType const* bias,
-                            bool bias_is_broadcast, int const* src_row_to_dst, int num_rows, int64_t inter_size,
-                            ActivationType activation_type, int const* permuted_experts, cudaStream_t stream)
-{
-    int64_t const blocks = num_rows;
+template<class GemmOutputType, class ScaleBiasType>
+void doActivationContiguous(__nv_fp8_e4m3*        output_fp8,
+                            float*                fp8_scale,
+                            GemmOutputType const* gemm_result,
+                            ScaleBiasType const*  bias,
+                            bool                  bias_is_broadcast,
+                            int const*            src_row_to_dst,
+                            int                   num_rows,
+                            int64_t               inter_size,
+                            ActivationType        activation_type,
+                            int const*            permuted_experts,
+                            cudaStream_t          stream) {
+    int64_t const blocks  = num_rows;
     int64_t const threads = ACTIVATION_THREADS_PER_BLOCK;
+    FT_CHECK(inter_size % 128 == 0);
 
     auto fn_list = std::array{
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,    // Gelu
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::ReLu>,    // Relu
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,    // Silu
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,    // Swiglu
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,    // Geglu
-        &doActivationContiguousKernel<T, GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::Identity> // Identity
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,  // Gelu
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::ReLu>,  // Relu
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,  // Silu
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,  // Swiglu
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,  // Geglu
+        &doActivationContiguousKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::Identity>  // Identity
     };
     auto fn = fn_list[static_cast<int>(activation_type)];
-    fn<<<blocks, threads, 0, stream>>>(output, gemm_result, fp8_quant, bias, bias_is_broadcast,
-                                       src_row_to_dst, inter_size, isGatedActivation(activation_type), permuted_experts);
+    fn<<<blocks, threads, 0, stream>>>(output_fp8,
+                                       fp8_scale,
+                                       gemm_result,
+                                       bias,
+                                       bias_is_broadcast,
+                                       src_row_to_dst,
+                                       inter_size,
+                                       isGatedActivation(activation_type),
+                                       permuted_experts);
 }
 
-template void doActivationContiguous<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16>(__nv_bfloat16* output, __nv_bfloat16 const* gemm_result, float const* fp8_quant, __nv_bfloat16 const* bias,
-                                                                                  bool bias_is_broadcast, int const* src_row_to_dst, int num_rows, int64_t inter_size,
-                                                                                  ActivationType activation_type, int const* permuted_experts, cudaStream_t stream);
+template void doActivationContiguous<__nv_bfloat16, __nv_bfloat16>(__nv_fp8_e4m3*       output_fp8,
+                                                                   float*               fp8_scale,
+                                                                   __nv_bfloat16 const* gemm_result,
+                                                                   __nv_bfloat16 const* bias,
+                                                                   bool                 bias_is_broadcast,
+                                                                   int const*           src_row_to_dst,
+                                                                   int                  num_rows,
+                                                                   int64_t              inter_size,
+                                                                   ActivationType       activation_type,
+                                                                   int const*           permuted_experts,
+                                                                   cudaStream_t         stream);
 }  // namespace fastertransformer

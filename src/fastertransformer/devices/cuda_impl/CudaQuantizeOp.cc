@@ -2,8 +2,6 @@
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
-
-
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 using namespace std;
 
@@ -173,39 +171,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                                                         {0},
                                                                         nullptr)))));
         }
-        torch::Tensor x = Buffer2torchTensor(params.input, false);
-        const int64_t m = params.input.shape()[0], n = params.input.shape()[1];
-        auto x_view = x.view({m, -1, 128});
-
-        auto x_abs = x_view.abs();
-        auto x_amax = x_abs.to(torch::kFloat32)
-                        .amax(/*dim=*/2)
-                        .view({m, -1})
-                        .clamp_min(1e-4);
-        auto scale = 448.0 / x_amax.unsqueeze(2);
-        auto x_scaled = x_view * scale;
-        auto x_fp8 = x_scaled.view({m, n}).to(torch::kFloat8_e4m3fn).contiguous();
-        auto inverse_scale = (x_amax / 448.0).view({m, -1}).contiguous();
-        auto inverse_scale_buf = torchTensor2Buffer(inverse_scale);
-
-        copy({*scales, *inverse_scale_buf});
-        auto kernel_buf = torchTensor2Buffer(x_fp8);
-        copy({*kernel, *kernel_buf});
-        // size_t scale_size, group_size = 128;
-        // scale_size = (params.input.shape()[1] + 127) / 128;
-        // scales = allocateBuffer({DataType::TYPE_FP32,
-        //                         {params.input.shape()[0], scale_size},
-        //                         getMemAllocationType(params.input.where())},
-        //                         {"scales"});
-        // DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(), invokePerTokenQuantization,
-        //                                  kernel->data<int8_t>(),
-        //                                  params.input.data(),
-        //                                  params.input.shape()[0],
-        //                                  params.input.shape()[1],
-        //                                  scales->data<float>(),
-        //                                  params.smoother.has_value() ? params.smoother.value().get().data<float>() : nullptr,
-        //                                  params.shift.has_value() ? params.shift.value().get().data<float>() : nullptr,
-        //                                  stream_);
+        tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), params.input.size(), stream_);
 #endif
     } else {
         FT_CHECK_WITH_INFO(false, "params qscheme type unknown: %d", int(params.qscheme));

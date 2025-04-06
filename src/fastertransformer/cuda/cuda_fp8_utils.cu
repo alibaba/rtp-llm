@@ -435,5 +435,47 @@ DEFINE_INVOKE_QUANTIZE_MATRIX(__nv_bfloat16, float, __nv_fp8_e4m3);
 #endif
 
 #endif // ENABLE_FP8
+
+#ifdef ENABLE_FP8
+template<typename T_S>
+__global__ void computeFP8Quantize128Kernel(__nv_fp8_e4m3*       fp8_output,
+                                            T_S*                 quant_ptr,
+                                            const __nv_bfloat16* weights,
+                                            const int64_t        size) {
+    constexpr float min_scaling_factor = 1.0f / (FP8_E4M3_MAX * 512.f);
+    const int64_t       global_idx     = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_idx * 4 >= size) {
+        return;
+    }
+    using Pack4BF16 = packed_type<__nv_bfloat16, 4>::type;
+
+    Pack4BF16 w4    = *((Pack4BF16*)weights + global_idx);
+    float     scale = cuda_cast<float>(
+        cuda_max<__nv_bfloat16>(cuda_max<__nv_bfloat16>(cuda_abs(w4.x)), cuda_max<__nv_bfloat16>(cuda_abs(w4.y))));
+    scale = warpReduceMax<float>(scale);
+    scale = cuda_max((float)1e-4, scale) / FP8_E4M3_MAX;
+    __nv_fp8_4_e4m3 output;
+    output.array[0]                              = __nv_fp8_e4m3(float(w4.x.x) / scale);
+    output.array[1]                              = __nv_fp8_e4m3(float(w4.x.y) / scale);
+    output.array[2]                              = __nv_fp8_e4m3(float(w4.y.x) / scale);
+    output.array[3]                              = __nv_fp8_e4m3(float(w4.y.y) / scale);
+    *((__nv_fp8_4_e4m3*)fp8_output + global_idx) = output;
+    if (threadIdx.x % 32 == 0) {
+        quant_ptr[global_idx / 32] = scale;
+    }
+}
+
+void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
+                                 float*               quant_ptr,
+                                 const __nv_bfloat16* weights,
+                                 const int64_t        numel,
+                                 cudaStream_t         stream) {
+    const int num_per_grid = CTA_SIZE / 32;
+    dim3      grid((numel / 128 + num_per_grid - 1) / num_per_grid);
+    dim3      block(CTA_SIZE);
+    computeFP8Quantize128Kernel<<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, numel);
+}
+
+#endif // ENABLE_FP8
 } // namespace common
 } // namespace tensorrt_llm

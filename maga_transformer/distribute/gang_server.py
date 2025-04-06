@@ -172,11 +172,11 @@ class GangServer:
         sleep_time = int(os.environ.get('GANG_SLEEP_TIME', '10'))
         def wrapper():
             while True:
+                time.sleep(sleep_time)
                 try:
                     self._health_check_impl()
                 except:
-                    os._exit(-1)
-                time.sleep(sleep_time)
+                    os._exit(-1)              
         t = Thread(target=wrapper)
         t.daemon = True
         t.start()

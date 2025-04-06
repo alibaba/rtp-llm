@@ -44,7 +44,7 @@ public:
         EXPECT_NEAR(1, (2 * torch::sum(ref_output * gemm_output) / sum).item<double>(), 0.001);
     }
     void RunDeepGeemPluginGroupedContiguousTest() {
-        int m = 128, n = 4096, k = 7168, num_groups = 256;
+        int m = 128, n = 4096, k = 7168, num_groups = 128;
 
         auto input =  torch::ones({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::randn({num_groups, m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);

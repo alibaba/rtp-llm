@@ -41,7 +41,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     std::vector<std::vector<int32_t>> token_idx_per_rank;
     token_idx_per_rank.resize(ep_size);
     for (int i = 0; i < ep_size; ++i) {
-        token_idx_per_rank.reserve(token_num);
+        token_idx_per_rank[i].reserve(token_num);
     }
     int const num_experts_per_node = expert_num / ep_size;
     for (int i = 0; i < token_num; ++i) {
@@ -73,6 +73,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
     BufferPtr all_token_indices = clone({*all_token_indices_cpu});
     // sync allToAll all_token_nums_per_rank_gpu
+    cudaStreamSynchronize(stream_);
     syncCommunication(false);
     auto                all_token_nums_per_rank = clone({*all_token_nums_per_rank_gpu, AllocationType::HOST});
     std::vector<size_t> input_split_sizes;
@@ -85,8 +86,9 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     }
     vector<BufferPtr> selected_buffers;
     BufferPtr select_hidden = select({*hidden, *all_token_indices});
+    BufferPtr hidden_fp8;
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        BufferPtr hidden_fp8 =
+        hidden_fp8 =
             quantize({*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
         selected_buffers.emplace_back(std::dynamic_pointer_cast<QBuffer>(hidden_fp8)->kernelPtr());
         selected_buffers.emplace_back(std::dynamic_pointer_cast<QBuffer>(hidden_fp8)->scalesPtr());
@@ -99,7 +101,6 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
     const auto& global_buffers = all2all_output.outputs;
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        printBufferData(*global_buffers[1], "global_buffers[1]", this, true);
         BufferPtr hidden_fp8(new QBuffer(std::move(global_buffers[0]),
                                          std::move(global_buffers[1]),
                                          std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
@@ -140,6 +141,7 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
     auto all2all_ret = allToAll({
         {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
     auto all_output = all2all_ret.outputs[0];
+    FT_CHECK_WITH_INFO(all_output->shape()[0] == params.indices->shape()[0], "combine output batch size should same as indices shape");
     if (params.overlapped) {
         overlap_hold_buffers_.emplace_back(all_output);
         overlap_hold_buffers_.emplace_back(params.input);
@@ -202,7 +204,7 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
         vector<size_t> new_shape = all_output->shape();
         new_shape[0]             = params.origin_token_num;
         BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
-        if (output->shape()[0] > 0) {
+        if (output->shape()[0] > 0 && params.origin_token_num > 0) {
             cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
                                              invokeScatterAdd,

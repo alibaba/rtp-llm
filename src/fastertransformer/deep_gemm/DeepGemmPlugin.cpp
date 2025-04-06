@@ -12,14 +12,10 @@
 #include "src/fastertransformer/core/QBuffer.h"
 #include "src/fastertransformer/deep_gemm/DeepGemmPlugin.h"
 
-#if CUDA_VERSION >= 12060
-#define DEEP_GEMM_PLUGIN
-#endif
-
 using namespace std;
 
 namespace fastertransformer {
-#ifdef DEEP_GEMM_PLUGIN
+#ifdef ENABLE_FP8
 template<uint32_t N, uint32_t K, uint32_t GROUP_NUM, DeepGemmType GEMM_TYPE>
 void dispatchBlockNK(__nv_bfloat16*         output,
                      __nv_fp8_e4m3*         lhs,
@@ -321,7 +317,7 @@ void runDeepGemm(__nv_bfloat16*         output,
 #endif
 
 void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &output, cudaStream_t stream) {
-#ifdef DEEP_GEMM_PLUGIN
+#ifdef ENABLE_FP8
     // lhs.fp8 e4m3, [m, k]; scales -> fp32, [m, k / 128]
     // rhs.fp8 e4m3, [n, k]; scales -> fp32, [n / 128, k / 128]
     // output.bf16, [m, n]
@@ -363,7 +359,7 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
 }
 
 void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &rhs, Buffer &output, const Buffer &m_indices, cudaStream_t stream) {
-#ifdef DEEP_GEMM_PLUGIN
+#ifdef ENABLE_FP8
     // lhs.fp8 e4m3, [m_sum, k]; scales -> fp32, [m_sum, k / 128]
     // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
     // output.bf16, [m_sum, n]
@@ -401,7 +397,7 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
 }
 
 void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, Buffer &output, const Buffer &masked_m, int expected_m, cudaStream_t stream) {
-#ifdef DEEP_GEMM_PLUGIN
+#ifdef ENABLE_FP8
     // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, m_max, k / 128]
     // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
     // output.bf16, [m, n]

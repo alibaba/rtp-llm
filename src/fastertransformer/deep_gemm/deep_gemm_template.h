@@ -7,13 +7,13 @@
 #include <cuda_fp8.h>
 #include <cuda_bf16.h>
 
-#if CUDA_VERSION >= 12060
+#ifdef ENABLE_FP8
 #include "src/fastertransformer/deep_gemm/include/fp8_gemm.cuh"
 #endif
 
 namespace fastertransformer {
 
-#if CUDA_VERSION >= 12060
+#ifdef ENABLE_FP8
 #define DISPATCH_NUM_STAGES_AND_TMA(NUM_STAGES, NUM_TMA_MULTICAST) \
     if (num_stages == NUM_STAGES && num_tma_multicast == NUM_TMA_MULTICAST) { \
         using gemm_runner = deep_gemm::Gemm<N, K, BM, BN, BK, GROUP_NUM, NUM_STAGES, NUM_TMA_MULTICAST, GEMM_TYPE>; \
@@ -86,7 +86,7 @@ void dispatchBlockNK(__nv_bfloat16*         output,
                      uint32_t               num_sms,
                      uint32_t               smem_size) 
 {
-#if CUDA_VERSION >= 12060
+#ifdef ENABLE_FP8
     DISPATCH_BLOCK_MK(64, 128)
     DISPATCH_BLOCK_MK(128, 128)
     FT_FAIL("DISPATCH_DEEP_GEMM(BLOCK_M=%u, BLOCK_N=%u, BLOCK_K=%u) no template found", bm, bn, bk);

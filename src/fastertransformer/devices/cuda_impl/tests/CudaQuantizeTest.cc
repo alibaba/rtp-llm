@@ -14,7 +14,7 @@ class CudaQuantizeTest : public DeviceTestBase {
 public:
     void RunCudaQuantizeFp8() {
         int m = 128, n = 256;
-        auto input = torch::randn({m, n}).to(torch::kFloat32).to(torch::kCUDA);
+        auto input = torch::randn({m, n}).to(torch::kBFloat16).to(torch::kCUDA);
         auto output = device_->quantize({*torchTensor2Buffer(input),
                                          DataType::TYPE_FP8_E4M3,
                                          1,
