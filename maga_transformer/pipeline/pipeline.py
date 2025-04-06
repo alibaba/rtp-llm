@@ -43,7 +43,7 @@ class Pipeline(object):
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(model_config)
 
     def stop(self):
-        pass
+        self.model_cls.stop()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None

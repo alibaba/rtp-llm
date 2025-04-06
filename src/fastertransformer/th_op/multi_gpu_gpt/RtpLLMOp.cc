@@ -33,7 +33,7 @@ void RtpLLMOp::init(py::object model,
     rtp_llm::EngineInitParams params = initModel(model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
     pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer, this, 
+    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer, this,
         std::move(params), std::move(mm_process_engine), std::move(propose_params), std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
@@ -117,7 +117,7 @@ void RtpLLMOp::initRPCServer(
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto use_cache_store = maga_init_params.gpt_init_parameter.use_cache_store_;
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
-    {        
+    {
         pybind11::gil_scoped_acquire acquire;
         if (use_cache_store) {
             model_rpc_service_.reset(new rtp_llm::RemoteRpcServiceImpl());
@@ -188,12 +188,15 @@ void RtpLLMOp::stop() {
             }
             FT_LOG_INFO("Server shutdowning");
             grpc_server_->Shutdown();
+            grpc_server_.reset();
         }
         model_rpc_service_.reset();
         if (http_server_) {
             http_server_->stop();
+            http_server_.reset();
         }
         is_server_shutdown_ = true;
+        rtp_llm::stopKmonitorFactory();
     }
 }
 

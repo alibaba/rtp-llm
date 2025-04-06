@@ -59,6 +59,9 @@ class FrontendWorker():
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")
 
+    def stop(self):
+        self.pipeline.stop()
+
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(prompt, return_offsets_mapping=True, return_attention_mask=False)
 

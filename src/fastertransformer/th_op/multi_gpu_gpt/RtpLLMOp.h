@@ -49,8 +49,8 @@ private:
                        py::object                                             token_processor);
 
 private:
-    std::shared_ptr<rtp_llm::HttpApiServer>       http_server_;
     std::unique_ptr<rtp_llm::RpcServiceImpl>      model_rpc_service_;
+    std::shared_ptr<rtp_llm::HttpApiServer>       http_server_;
     std::unique_ptr<grpc::Server>                 grpc_server_;
     std::thread                                   grpc_server_thread_;
     std::atomic<bool>                             is_server_ready_{false};

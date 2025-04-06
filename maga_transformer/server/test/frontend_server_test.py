@@ -34,7 +34,6 @@ class FakeRawRequest(object):
 class FrontendServerTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        os.environ
         self.frontend_server = FrontendServer()
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 

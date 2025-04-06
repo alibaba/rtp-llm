@@ -65,7 +65,8 @@ class FrontendServer(object):
                     self._frontend_worker.backend_rpc_server_visitor)
 
     def stop(self):
-        pass
+        if self._frontend_worker is not None:
+            self._frontend_worker.stop()
 
     def ready(self):
         return True

@@ -45,14 +45,18 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
 void RtpEmbeddingOp::stop() {
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
+        embedding_rpc_service_.reset();
     }
     if (http_server_) {
         http_server_->stop();
+        http_server_.reset();
     }
     if (!is_server_shutdown_ && embedding_engine_) {
         (void)embedding_engine_->stop();
+        embedding_engine_.reset();
         is_server_shutdown_ = true;
     }
+    rtp_llm::stopKmonitorFactory();
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,

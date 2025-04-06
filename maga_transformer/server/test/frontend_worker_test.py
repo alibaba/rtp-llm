@@ -20,14 +20,16 @@ class FakeFrontendWorker(FrontendWorker):
         self.pipeline = pipeline
 
 class FrontendWorkerTest(TestCase):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def setUp(self):
         os.environ['KV_CACHE_MEM_MB'] = '100'
         os.environ['RESERVER_RUNTIME_MEM_MB'] = '1'
         os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = str(64 * 1024 * 1024)
         self.tokenizer_path = os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source")
         self.ckpt_path = os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source")
         self.frontend_worker = self.create_frontend_worker()
+
+    def tearDown(self):
+        self.frontend_worker.stop()
 
     def create_frontend_worker(self):
         port_list = get_consecutive_free_ports(1)

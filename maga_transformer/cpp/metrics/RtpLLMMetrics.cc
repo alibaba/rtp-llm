@@ -38,7 +38,7 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
     REGISTER_GAUGE_MUTABLE_METRIC(retry_times_metric, "rtp_llm_rpc_retry_times");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_request_metric, "rtp_llm_rpc_loading_cache_request");
-    
+
     REGISTER_GAUGE_MUTABLE_METRIC(get_rpc_connection_rt_us_metric, "rtp_llm_rpc_get_rpc_connection_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(multimodal_process_rt_us_metric, "rtp_llm_rpc_multimodal_process_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_allocate_resource_rt_us_metric, "rtp_llm_rpc_remote_allocate_resource_rt_us");
@@ -113,7 +113,7 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(fallback_times_metric, "rtp_llm_fallback_times");
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_times_metric, "rtp_llm_batch_with_prefill_times");
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_len_metric, "rtp_llm_batch_with_prefill_len");
-    
+
     return true;
 }
 
@@ -284,7 +284,7 @@ bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_left_seq_metric, "rtp_llm_kv_cache_left_seq");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(mr_cost_time_ms_metric, "rtp_llm_mr_cost_time_ms");
-    
+
     return true;
 }
 
@@ -358,12 +358,18 @@ bool initKmonitorFactory() {
         FT_LOG_ERROR("init kmonitor factory failed with");
         return false;
     }
-    FT_LOG_INFO("before KMonitorFactory::Start(), config");
-    kmonitor::KMonitorFactory::Start();
-    FT_LOG_INFO("KMonitorFactory::Start() finished");
+
+    // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
     kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
     FT_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+
+    kmonitor::KMonitorFactory::Start();
+    FT_LOG_INFO("KMonitorFactory::Start() finished");
     return true;
+}
+
+void stopKmonitorFactory() {
+    kmonitor::KMonitorFactory::Shutdown();
 }
 
 kmonitor::MetricsTags getHippoTags() {

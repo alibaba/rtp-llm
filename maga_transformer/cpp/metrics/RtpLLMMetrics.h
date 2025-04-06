@@ -439,6 +439,7 @@ private:
 };
 
 bool initKmonitorFactory();
+void stopKmonitorFactory();
 
 kmonitor::MetricsTags getHippoTags();
 
