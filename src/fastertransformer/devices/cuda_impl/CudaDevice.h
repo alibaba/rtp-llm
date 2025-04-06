@@ -254,7 +254,7 @@ protected:
                            BufferPtr               output);
     void InvokeDeepGemm(const GemmParams&       params,
                         const CudaGemmArguments arguments,
-                        BufferPtr               output);
+                        BufferPtr&              output);
     void selectCuFMHARunner(const DevicePrepParams& params);
 
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,

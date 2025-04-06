@@ -20,6 +20,7 @@ public:
                                          1,
                                          QScheme::Qfp8PerTokenBlock,
                                          128});
+        printBufferData(*output, "quant_out");
 
         auto kernel = Buffer2torchTensor(reinterpret_cast<const QBuffer&>(*output).kernel(), false);
         auto scales = Buffer2torchTensor(reinterpret_cast<const QBuffer&>(*output).scales(), false);

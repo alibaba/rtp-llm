@@ -266,14 +266,16 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
         if (!rtp_llm::Logger::getEngineLogger().isTraceMode()) {
             return;
         }
+    }
 
-        if (buffer.isQBuffer()) {
-            const QBuffer* q_buffer = &(reinterpret_cast<const QBuffer&>(buffer));
-            printBufferData(q_buffer->kernel(), hint + "_kernel");
-            printBufferData(q_buffer->scales(), hint + "_scales");
+    if (buffer.isQBuffer()) {
+        const QBuffer* q_buffer = &(reinterpret_cast<const QBuffer&>(buffer));
+        printBufferData(q_buffer->kernel(), hint + "_kernel");
+        printBufferData(q_buffer->scales(), hint + "_scales");
+        if (q_buffer->zeros().type()) {
             printBufferData(q_buffer->zeros(), hint + "_zeros");
-            return;
         }
+        return;
     }
 
     if (!device) {

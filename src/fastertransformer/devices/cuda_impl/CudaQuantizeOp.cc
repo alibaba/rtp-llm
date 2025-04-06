@@ -60,7 +60,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
         FT_CHECK_WITH_INFO(params.input.where() == MemoryType::MEMORY_CPU, "cpu quantize");
         size_t axis = params.input.dim() - 1;
         scales = allocateBuffer({DataType::TYPE_FP16,
-                                {params.input.shape()[axis]},
+                                {input_shape[axis]},
                                 getMemAllocationType(params.input.where())},
                                 {"scales"});
         // TODO(lidongjin) The dispatch maro only support multi template type but without data cast,
@@ -70,7 +70,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                     nullptr,
                                     scales->data<half>(),
                                     params.input.data<half>(),
-                                    params.input.shape(),
+                                    input_shape,
                                     trtQuantTypeConvert(params.qtype),
                                     get_sm());
         } else if (params.input.type() == DataType::TYPE_BF16) {
@@ -78,7 +78,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                     nullptr,
                                     scales->data<half>(),
                                     params.input.data<__nv_bfloat16>(),
-                                    params.input.shape(),
+                                    input_shape,
                                     trtQuantTypeConvert(params.qtype),
                                     get_sm());
         } else if (params.input.type() == DataType::TYPE_FP32) {
@@ -86,7 +86,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                     nullptr,
                                     scales->data<half>(),
                                     params.input.data<float>(),
-                                    params.input.shape(),
+                                    input_shape,
                                     trtQuantTypeConvert(params.qtype),
                                     get_sm());
         } else {
@@ -95,14 +95,14 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
         }
     } else if (params.qscheme == QScheme::Qint8PerToken) {
         scales = allocateBuffer({DataType::TYPE_FP32,
-                                {params.input.shape()[0]},
+                                {input_shape[0]},
                                 getMemAllocationType(params.input.where())},
                                 {"scales"});
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(), invokePerTokenQuantization,
                                          kernel->data<int8_t>(),
                                          params.input.data(),
-                                         params.input.shape()[0],
-                                         params.input.shape()[1],
+                                         input_shape[0],
+                                         input_shape[1],
                                          scales->data<float>(),
                                          params.smoother.has_value() ? params.smoother.value().get().data<float>() : nullptr,
                                          params.shift.has_value() ? params.shift.value().get().data<float>() : nullptr,
@@ -137,7 +137,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                             params.static_scale.value().get().data<float>(),
                             params.input.data<float>(),
                             params.input.size(),
-                            params.input.shape()[0],
+                            input_shape[0],
                             trt_common::QuantizeMode::PER_TENSOR,
                             stream_);
                 break;
@@ -146,7 +146,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                             params.static_scale.value().get().data<float>(),
                             params.input.data<half>(),
                             params.input.size(),
-                            params.input.shape()[0],
+                            input_shape[0],
                             trt_common::QuantizeMode::PER_TENSOR,
                             stream_);
                 break;
@@ -156,7 +156,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                         params.static_scale.value().get().data<float>(),
                         params.input.data<__nv_bfloat16>(),
                         params.input.size(),
-                        params.input.shape()[0],
+                        input_shape[0],
                         trt_common::QuantizeMode::PER_TENSOR,
                         stream_);
                 break;

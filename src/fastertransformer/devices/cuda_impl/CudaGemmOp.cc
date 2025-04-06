@@ -329,7 +329,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
 
 void CudaDevice::InvokeDeepGemm(const GemmParams& params,
                                 CudaGemmArguments arguments,
-                                BufferPtr         output) {
+                                BufferPtr&        output) {
     FT_LOG_DEBUG("use deep gemm.");
     FT_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
     FT_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
@@ -361,15 +361,17 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                 arguments.DDtype,
                                 autil::StringUtil::toString(arguments.Dshape).c_str(),
                                 params.D->debugString().c_str());
-    } else {
+    } else if (!(params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3)) {
         output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     }
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
         InvokeSmoothQaunt(params, arguments, output);
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
+        auto dshape = arguments.Dshape;
+        dshape[0] = (dshape[0] + 127) / 128 * 128;
+        output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
         InvokeDeepGemm(params, arguments, output);
-
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
         InvokeWeightOnlyGemm(params, arguments, output);
     } else { 
