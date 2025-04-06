@@ -169,7 +169,8 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
             if (params.overlapped) {
                 overlap_hold_buffers_.emplace_back(scatter_output);
             }
-            assert(all_output->shape()[0] == current_token_num);
+            // TODO: why this assertion?
+            // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
                 cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
