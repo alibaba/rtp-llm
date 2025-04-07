@@ -8,7 +8,7 @@ diff --git a/include/flashinfer/utils.cuh b/include/flashinfer/utils.cuh
 index b36145f..73b548e 100644
 --- include/flashinfer/utils.cuh
 +++ include/flashinfer/utils.cuh
-@@ -132,6 +132,21 @@
+@@ -132,6 +132,24 @@
    } else if (group_size == 4) {                              \
      constexpr size_t GROUP_SIZE = 4;                         \
      __VA_ARGS__                                              \
@@ -26,6 +26,9 @@ index b36145f..73b548e 100644
 +    __VA_ARGS__                                              \
 +  } else if (group_size == 10) {                             \
 +    constexpr size_t GROUP_SIZE = 10;                        \
++    __VA_ARGS__                                              \
++  } else if (group_size == 16) {                             \
++    constexpr size_t GROUP_SIZE = 16;                        \
 +    __VA_ARGS__                                              \
    } else if (group_size == 8) {                              \
      constexpr size_t GROUP_SIZE = 8;                         \

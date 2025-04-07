@@ -221,7 +221,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareFlashInferAttnParams(
         attn_configs.q_scaling != 1.0f ||
         attn_configs.use_logn_attn ||
         (size_per_head != 64 && size_per_head != 128 && size_per_head != 192) ||
-        group_size > 10)
+        (group_size > 10 && group_size != 16))
     {
         return nullptr;
     }
