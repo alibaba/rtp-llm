@@ -26,7 +26,7 @@ from maga_transformer.utils.util import has_overlap, has_overlap_kmp
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 from maga_transformer.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 
-think_mode = int(os.environ.get("THINK_MODE", "0"))
+think_mode = bool(int(os.environ.get("THINK_MODE", 0)))
 think_start_tag = os.environ.get("THINK_START_TAG", "<think>\n").encode('utf-8').decode('unicode_escape')
 think_end_tag = os.environ.get("THINK_END_TAG", "</think>\n\n").encode('utf-8').decode('unicode_escape')
 

@@ -123,14 +123,14 @@ class GenerateConfig(BaseModel):
     def add_thinking_params(self, tokenizer):
         end_think_token_id = int(os.environ.get("THINK_END_TOKEN_ID", "-1"))
         self.end_think_token_ids = [end_think_token_id] if end_think_token_id != -1 else []
-        if bool(os.environ.get("THINK_MODE", "0")) and tokenizer and end_think_token_id == -1:
+        if bool(int(os.environ.get("THINK_MODE", 0))) and tokenizer and end_think_token_id == -1:
             think_end_tag: str = os.environ.get("THINK_END_TAG", "</think>\n\n").encode('utf-8').decode('unicode_escape')
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag, add_special_tokens=False)
             else:
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag)
             self.end_think_token_ids = tokenized_result
-        self.in_think_mode = bool(os.environ.get("THINK_MODE", "0")) and len(self.end_think_token_ids) >= 0
+        self.in_think_mode = bool(int(os.environ.get("THINK_MODE", 0))) and len(self.end_think_token_ids) >= 0
 
     def validate(self):
         try:
