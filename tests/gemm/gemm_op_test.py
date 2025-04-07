@@ -127,7 +127,6 @@ class TestGemmOp(unittest.TestCase):
             custom_output = torch.zeros(m, n, device='cuda', dtype=torch.bfloat16)
             self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
             custom_output = custom_output.to("cpu")
-            torch.set_printoptions(threshold=float('inf'))
             assert_close(
                 custom_output,
                 ref_output_fp8,
@@ -162,8 +161,6 @@ class TestGemmOp(unittest.TestCase):
             custom_output = torch.zeros(m, n, device='cuda', dtype=torch.bfloat16)
             self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
             custom_output = custom_output.to("cpu")
-            # torch.set_printoptions(threshold=float('inf'))
-            print(f"m:{m}, k:{k}, n:{n} 结果不匹配: deep_gemm: {custom_output},\n torch_gemm_fp8:{ref_output_fp8},\n torch_gemm_fp16:{ref_output},")
             assert_close(
                 custom_output,
                 ref_output_fp8,

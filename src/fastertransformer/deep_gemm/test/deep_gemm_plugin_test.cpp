@@ -21,14 +21,14 @@ public:
         auto input_scale = torch::rand({m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
         auto weight = torch::randn({n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto weight_scale = torch::randn({int(n / 128), int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
-        auto input_scale_t = input_scale.repeat({1, 128}).reshape({1, m, 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({m, k}).transpose(0, 1),contiguous();
+        auto input_scale_t = input_scale.repeat({1, 128}).reshape({1, m, 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({m, k});
         auto weight_scale_t = weight_scale.repeat({128, 128}).reshape({(int)128, (int)(n / 128), 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({(int)(n), (int)(k)});
         auto ref_output = torch::matmul(input.to(torch::kFloat32) * input_scale_t, torch::transpose((weight.to(torch::kFloat32) * weight_scale_t), 0, 1));
-        printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref", device_, true);
+        printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref");
 
         BufferPtr input_k, input_s;
         input_k = torchTensor2Buffer(input);
-        input_s = torchTensor2Buffer(input_scale);
+        input_s = torchTensor2Buffer(input_scale.transpose(0,1).contiguous());
         BufferPtr lhs = std::make_shared<QBuffer>(std::move(input_k), std::move(input_s), std::move(BufferPtr(new Buffer(input_k->where(), DataType::TYPE_INVALID, {0}, nullptr))));
 
         BufferPtr weight_k, weight_s;
@@ -39,8 +39,9 @@ public:
 
         DeepGemmPlugin::gemmFp8(*lhs, *rhs, *output, 0);
         auto gemm_output = torch::from_blob(output->data(), {(int64_t)m, (int64_t)n}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
-        printBufferData(*output, "output", device_, true);
+        printBufferData(*output, "output");
         auto sum = torch::sum(ref_output * ref_output + (gemm_output * gemm_output)).to(torch::kFloat32);
+        std::cout << 2 * torch::sum(ref_output * gemm_output) / sum << std::endl;
         EXPECT_NEAR(1, (2 * torch::sum(ref_output * gemm_output) / sum).item<double>(), 0.001);
     }
     void RunDeepGeemPluginGroupedContiguousTest() {
@@ -57,7 +58,7 @@ public:
         std::cout << std::endl;
         auto ref_output = torch::matmul(input.to(torch::kFloat32) * input_scale_t, weight_scale_tt).reshape({num_groups * m, n});
         // auto ref_output = torch::einsum("gmk,gnk->gmn", {input.to(torch::kFloat32) * input_scale_t, (weight.to(torch::kFloat32) * weight_scale_t)}).reshape({num_groups * m, n});
-        printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref", device_, true);
+        printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref");
 
         BufferPtr input_k, input_s;
         input_k = torchTensor2Buffer(input.reshape({num_groups * m, k}));
@@ -78,7 +79,7 @@ public:
         DeepGemmPlugin::groupedGemmFp8Contiguous(*lhs, *rhs, *output, *(torchTensor2Buffer(m_indices)), 0);
         auto gemm_output = torch::from_blob(output->data(), {(int64_t)m * num_groups, (int64_t)n}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
         auto sum = torch::sum(ref_output * ref_output + (gemm_output * gemm_output)).to(torch::kFloat32);
-        printBufferData(*output, "output", device_, true);
+        printBufferData(*output, "output");
         std::cout << 2 * torch::sum(ref_output * gemm_output) / sum << std::endl;
         EXPECT_NEAR(1, (2 * torch::sum(ref_output * gemm_output) / sum).item<double>(), 0.001);
     }
