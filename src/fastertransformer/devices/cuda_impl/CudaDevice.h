@@ -218,10 +218,13 @@ public:
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
 
+    void moeGateSelectWithBias(const FfnLayerParams& params, 
+                               BufferPtr gate,
+                               BufferPtr expert_scales,
+                               BufferPtr expert_for_source_row,
+                               int normalization_mode);
     void prepareMoEGate(const FfnLayerParams& params,
-                        BufferPtr             gate,
-                        torch::Tensor&        gate_with_bias_tensor,
-                        BufferPtr&            gate_with_bias);
+                        BufferPtr             gate);
     void mlaDecoderSelfAttention(const MlaDecoderAttentionParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;

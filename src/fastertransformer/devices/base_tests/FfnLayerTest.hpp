@@ -2,7 +2,9 @@
 #include "src/fastertransformer/devices/torch_impl/FfnLayer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
+#include <functional>
 #include <iostream>
+
 class FfnLayerTest : public DeviceTestBase {
 public:
 
@@ -228,6 +230,213 @@ public:
 
 };
 
+class MoEGateSelectTest: public DeviceTestBase {
+public:
+    using Bencher = std::function<void(const char *, const std::function<void()>&)>;
+
+    struct MoEGateSelectTestInput {
+        at::Tensor                input;
+        at::Tensor                moe_gating_weight;
+        std::optional<at::Tensor> e_score_correction_bias;
+    };
+
+    struct MoEGateSelectTestOutput {
+        at::Tensor expert_ids;
+        at::Tensor expert_scales;
+    };
+
+    MoEGateSelectTestInput prepareMoEGateSelectInput(size_t token_num,
+                                                     size_t hidden_dim,
+                                                     size_t expert_num,
+                                                     bool   has_bias) {
+        auto input             = torch::rand({(int64_t)token_num, (int64_t)hidden_dim}, torch::dtype(torch::kFloat32).device(torch::kCUDA)) * 1000.0 / (float)hidden_dim;
+        auto moe_gating_weight = torch::rand({(int64_t)hidden_dim, (int64_t)expert_num}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+        std::optional<at::Tensor> e_score_correction_bias = std::nullopt;
+        if (has_bias) {
+            e_score_correction_bias = std::make_optional(torch::rand({(int64_t)token_num, (int64_t)expert_num}, torch::dtype(torch::kFloat32).device(torch::kCUDA)));
+        }
+
+        return {input, moe_gating_weight, e_score_correction_bias};
+    }
+
+    MoEGateSelectTestOutput MoEGateSelectRun(const MoEGateSelectTestInput &params, 
+                                             size_t         topk,
+                                             size_t         group_num,
+                                             size_t         group_topk,
+                                             int            scoring_func,
+                                             bool           has_moe_norm, 
+                                             const Bencher *bencher = nullptr,
+                                             const char *   case_name = nullptr) {
+        case_name = case_name != nullptr ? case_name : "unnamed case";
+
+        size_t expert_num = params.moe_gating_weight.size(1);
+
+        auto input_buf = torchTensor2Buffer(params.input);
+
+        MoeConfigs moe_configs{expert_num, topk};
+        moe_configs.has_moe_norm = has_moe_norm;
+        moe_configs.scoring_func = scoring_func;
+        if (params.e_score_correction_bias.has_value()) {
+            moe_configs.n_group    = group_num;
+            moe_configs.topk_group = group_topk;
+        }
+
+        FfnConfigs ffn_configs{
+            ActivationType::Swiglu,
+            std::make_optional(moe_configs),
+        };
+
+        BufferPtr moe_gating_weight_buf = torchTensor2Buffer(params.moe_gating_weight);
+
+        FfnLayerWeights weights;
+        weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(moe_gating_weight_buf));
+        if (params.e_score_correction_bias.has_value()) {
+            weights.e_score_correction_bias = torchTensor2Buffer(params.e_score_correction_bias.value());
+        }
+
+        FfnLayerParams ffn_params(
+            *input_buf,
+            ffn_configs,
+            weights
+        );
+
+        auto result = device_->moeGateSelect(ffn_params);
+
+        if (bencher != nullptr) {
+            (*bencher)(case_name, [&, this] {
+                this->device_->moeGateSelect(ffn_params);
+            });
+        }
+
+        return {
+            Buffer2torchTensor(*result.expert_ids, false).clone(),
+            Buffer2torchTensor(*result.expert_scales, false).clone(),
+        };
+    }
+
+    MoEGateSelectTestOutput MoEGateSelectRefRun(const MoEGateSelectTestInput &params, 
+                                                size_t topk,
+                                                size_t group_num,
+                                                size_t group_topk,
+                                                int    scoring_func,
+                                                bool   has_moe_norm) {
+        size_t token_num  = params.input.size(0);
+        size_t expert_num = params.moe_gating_weight.size(1);
+
+        auto gate = params.input.matmul(params.moe_gating_weight);
+
+        if (scoring_func == 1) {
+            gate.sigmoid_();
+        }
+
+        at::Tensor gate_with_bias;
+        if (params.e_score_correction_bias.has_value()) {
+            const auto &e_score_correction_bias = params.e_score_correction_bias.value();
+            
+            auto scores_for_choice = gate.add(e_score_correction_bias);
+            auto reshaped_scores   = scores_for_choice.view({(int)token_num, (int)group_num, -1});
+            auto topk_result       = reshaped_scores.topk(2, /*dim=*/-1);
+            auto group_scores      = std::get<0>(topk_result).sum(-1);
+            auto group_topk_result = group_scores.topk(
+                /*k=*/group_topk,
+                /*dim=*/-1,
+                /*largest=*/true,
+                /*sorted=*/false);
+            auto group_idx  = std::get<1>(group_topk_result);
+            auto group_mask = torch::zeros_like(group_scores, torch::kCUDA);
+            group_mask.scatter_(
+                /*dim=*/1,
+                /*index=*/group_idx,
+                /*src=*/1.0f);
+            int64_t experts_per_group = expert_num / group_num;
+            auto    score_mask        = group_mask.unsqueeze(-1).expand({(int)token_num, (int)group_num, experts_per_group}).reshape({(int)token_num, -1});
+
+            gate_with_bias = scores_for_choice.masked_fill(torch::logical_not(score_mask.to(torch::kBool)), 0.0);
+        } else {
+            gate = gate.softmax(-1);
+            gate_with_bias = gate;
+        }
+
+        auto selected_result = gate_with_bias.topk(
+            /*k=*/topk,
+            /*dim=*/-1,
+            /*largest=*/true,
+            /*sorted=*/false);
+
+        auto expert_ids = std::get<1>(selected_result);
+        auto expert_scale = gate.gather(-1, expert_ids);
+
+        if (has_moe_norm) {
+            auto expert_scale_sum = (expert_scale.sum(-1) + 1e-20).unsqueeze(-1).expand({(int)token_num, (int)topk});
+            expert_scale.div_(expert_scale_sum);
+        }
+
+        return { expert_ids, expert_scale };
+    }
+
+    MoEGateSelectTestOutput processOutput(const MoEGateSelectTestOutput &output, bool mask_lowest = false) {
+        auto expert_ids = output.expert_ids;
+        auto expert_scales = output.expert_scales;
+
+        // id as secondary sorting key
+        const auto id_order = expert_ids.argsort(false, -1);
+        expert_ids = expert_ids.gather(-1, id_order);
+        expert_scales = expert_scales.gather(-1, id_order);
+
+        // scale as primary sorting key
+        const auto scale_order = expert_scales.argsort(true, -1); // stable sort, preserving id order
+        expert_ids = expert_ids.gather(-1, scale_order);
+        expert_scales = expert_scales.gather(-1, scale_order);
+
+        // mask expert ids of the lowest scale to avoid ambiguity
+        if (mask_lowest) {
+            const auto min_scales = std::get<0>(torch::min(expert_scales, -1, true)).expand(expert_scales.sizes());
+            expert_ids = expert_ids.masked_fill(expert_scales.eq(min_scales), -1);
+        }
+
+        return { expert_ids, expert_scales };
+    }
+
+    void assertEquivalentOutput(const MoEGateSelectTestOutput &out_a, 
+                                const MoEGateSelectTestOutput &out_b) {
+        auto a = processOutput(out_a, true);
+        auto b = processOutput(out_b, true);
+
+        assertTensorClose(a.expert_scales, b.expert_scales, 1e-5, 1e-8);
+        assertTensorClose(a.expert_ids, b.expert_ids, 1e-5, 1e-8);
+    }
+
+    void MoEGateSelTest(size_t         token_num,
+                        size_t         hidden_dim,
+                        size_t         expert_num,
+                        size_t         topk,
+                        bool           has_bias,
+                        size_t         group_num,
+                        size_t         group_topk,
+                        int            scoring_func,
+                        bool           has_moe_norm,
+                        const Bencher *bencher = nullptr) {
+        std::stringstream case_name_ss;
+        case_name_ss << "token_num=" << token_num << ", "
+            "hidden_dim=" << hidden_dim << ", "
+            "expert_num=" << expert_num << ", "
+            "topk=" << topk << ", "
+            "has_bias=" << has_bias << ", "
+            "group_num=" << group_num << ", "
+            "group_topk=" << group_topk << ", "
+            "scoring_func=" << scoring_func << ", "
+            "has_moe_norm=" << has_moe_norm;
+        auto case_name = case_name_ss.str();
+        std::cout << "-------------------- " << case_name << " --------------------\n";
+
+        auto params = prepareMoEGateSelectInput(token_num, hidden_dim, expert_num, has_bias);
+        auto ref_res = MoEGateSelectRefRun(params, topk, group_num, group_topk, scoring_func, has_moe_norm);
+        auto res = MoEGateSelectRun(params, topk, group_num, group_topk, scoring_func, has_moe_norm, bencher, case_name.c_str());
+
+        assertEquivalentOutput(ref_res, res);
+    }
+};
 
 class MoELayerTest: public DeviceTestBase {
 public:

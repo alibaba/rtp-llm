@@ -4,6 +4,7 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/kernels/no_aux_tc_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
@@ -239,26 +240,65 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     auto       normalization_mode = moe_conf.has_moe_norm ?
                                         tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
                                         tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    auto       gate_with_bias     = gate;
-    at::Tensor gate_with_bias_tensor;  // hold the tensor to prevent it from being released
-    prepareMoEGate(params, gate, gate_with_bias_tensor, gate_with_bias);
 
-    moe_plugin_->selectExpertsForTokens(gate->data<float>(),
-                                        gate_with_bias->data<float>(),
-                                        expert_scales->data<float>(),
-                                        nullptr, // sparse_mixer_out
-                                        softmax_out->data<float>(),
-                                        expert_for_source_row->data<int>(),
-                                        source_rows->data<int>(),
-                                        token_num,
-                                        num_expert,
-                                        top_k,
-                                        0,
-                                        num_expert,
-                                        0,
-                                        normalization_mode,
-                                        stream_);
+    prepareMoEGate(params, gate);
+
+    if (params.weights.e_score_correction_bias) {
+        moeGateSelectWithBias(params, gate, expert_scales, expert_for_source_row, (int)normalization_mode);
+    } else {
+        moe_plugin_->selectExpertsForTokens(gate->data<float>(),
+                                            gate->data<float>(),
+                                            expert_scales->data<float>(),
+                                            nullptr, // sparse_mixer_out
+                                            softmax_out->data<float>(),
+                                            expert_for_source_row->data<int>(),
+                                            source_rows->data<int>(),
+                                            token_num,
+                                            num_expert,
+                                            top_k,
+                                            0,
+                                            num_expert,
+                                            0,
+                                            normalization_mode,
+                                            stream_);
+    }
+
     return {expert_for_source_row, expert_scales};
+}
+
+void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params, 
+                                       BufferPtr gate,
+                                       BufferPtr expert_scales,
+                                       BufferPtr expert_for_source_row,
+                                       int normalization_mode) {
+    FT_CHECK_WITH_INFO(normalization_mode == 0 || normalization_mode == 1, 
+                       "Unsupported normalization_mode");
+
+    const auto& moe_conf   = params.configs.moe_configs.value();
+    const auto  token_num  = params.input.shape()[0];
+    const auto  num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
+    const auto  top_k      = moe_conf.top_k;
+
+    at::Tensor gate_tensor = Buffer2torchTensor(gate, false);
+    at::Tensor e_score_correction_bias_tensor = Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
+    at::Tensor gate_with_bias_tensor = gate_tensor.add(e_score_correction_bias_tensor);
+    at::Tensor group_scores = torch::empty({(int64_t)token_num, moe_conf.n_group}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    invokeNoAuxTc<float, int32_t>(gate->data<float>(),
+        reinterpret_cast<float *>(group_scores.mutable_data_ptr()),
+        expert_scales->data<float>(),
+        expert_for_source_row->data<int>(),
+        reinterpret_cast<float *>(gate_with_bias_tensor.data_ptr()),
+        token_num, num_expert, moe_conf.n_group, moe_conf.topk_group, top_k,
+        normalization_mode, 1.0, stream_);
+}
+
+void CudaDevice::prepareMoEGate(const FfnLayerParams& params, BufferPtr gate) {
+    auto const& moe_conf = params.configs.moe_configs.value();
+
+    if (moe_conf.scoring_func == 1) {
+       DISPATCH_CUDA_FUNCTION_DATA_TYPE(DataType::TYPE_FP32, invokeSigmoid, gate->data(), gate->size(), 1.0f, stream_);
+    }
 }
 
 FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
@@ -338,50 +378,6 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                          stream_);
     printBufferData(*output, "moe_ffn_out");
     return FfnLayerOutput({move(output)});
-}
-
-void CudaDevice::prepareMoEGate(const FfnLayerParams& params,
-                                BufferPtr             gate,
-                                torch::Tensor&        gate_with_bias_tensor,
-                                BufferPtr&            gate_with_bias) {
-    auto const& moe_conf   = params.configs.moe_configs.value();
-    const auto& hidden     = params.input;
-    const auto  token_num  = hidden.shape()[0];
-    const auto  num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
-
-    if (moe_conf.scoring_func == 1) {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(DataType::TYPE_FP32, invokeSigmoid, gate->data(), gate->size(), 1.0f, stream_);
-    }
-    if (params.weights.e_score_correction_bias) {
-        const int n_routed_experts = num_expert;
-        const int n_group          = moe_conf.n_group;
-        const int topk_group       = moe_conf.topk_group;
-
-        torch::Tensor gate_tensor = Buffer2torchTensor(gate, false);
-        torch::Tensor e_score_correction_bias_tensor =
-            Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
-        auto scores_for_choice = gate_tensor.add(e_score_correction_bias_tensor);
-        auto reshaped_scores   = scores_for_choice.view({(int)token_num, n_group, -1});
-        auto topk_result       = reshaped_scores.topk(2, /*dim=*/-1);
-        auto group_scores      = std::get<0>(topk_result).sum(-1);
-        auto group_topk_result = group_scores.topk(
-            /*k=*/topk_group,
-            /*dim=*/-1,
-            /*largest=*/true,
-            /*sorted=*/false);
-        auto group_idx  = std::get<1>(group_topk_result);
-        auto group_mask = torch::zeros_like(group_scores);
-        group_mask.scatter_(
-            /*dim=*/1,
-            /*index=*/group_idx,
-            /*src=*/1.0f);
-        int64_t experts_per_group = n_routed_experts / n_group;
-        auto    score_mask =
-            group_mask.unsqueeze(-1).expand({(int)token_num, n_group, experts_per_group}).reshape({(int)token_num, -1});
-        gate_with_bias_tensor = scores_for_choice.masked_fill(torch::logical_not(score_mask.to(torch::kBool)), 0.0);
-        gate_with_bias        = torchTensor2Buffer(gate_with_bias_tensor);
-        printBufferData(*gate_with_bias, "gate_with_bias");
-    }
 }
 
 } // namespace fastertransformer
