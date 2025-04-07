@@ -92,12 +92,13 @@ class WeightConverter:
     def _estimate_convert_parallel_num(self):
         max_pool_size = self._estimate_max_convert_parallel_num()
         return self.world_size if max_pool_size > self.world_size else max_pool_size
-        
+
     def _estimate_max_convert_parallel_num(self):
+        converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", "4"))
         try:
             cuda_count = torch.cuda.device_count()
             assert(cuda_count >= 1)
-            return cuda_count * 8
+            return cuda_count * converter_num_per_gpu
         except Exception as _:
             logging.info("no cuda device convert by cpu")
             free_mb = self.get_free_mem_MB() * 0.8
@@ -117,7 +118,7 @@ class WeightConverter:
                 )
                 paralle_info = ParallelInfo.from_params(env_params)
                 config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
-                
+
                 one_layer_model_size_mb = model_size_mb/config.layer_num
                 if model_size_mb < dump_buffer_size_mb:
                     need_size_mb = model_size_mb
