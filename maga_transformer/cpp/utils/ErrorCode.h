@@ -12,6 +12,14 @@ enum class ErrorCode {
     INVALID_PARAMS = 605,
     EXECUTION_EXCEPTION = 606,
 
+    // multimodal error
+    MM_LONG_PROMPT_ERROR = 901,
+    MM_WRONG_FORMAT_ERROR = 902,
+    MM_PROCESS_ERROR = 903,
+    MM_EMPTY_ENGINE_ERROR = 904,
+    MM_NOT_SUPPORTED_ERROR = 905,
+    MM_DOWNLOAD_FAILED = 906,
+
     // Error codes starting from 8000 can be retried
     CANCELLED = 8100,
     OUT_OF_VOCAB_RANGE = 8101,
@@ -48,13 +56,9 @@ enum class ErrorCode {
     CACHE_STORE_LOAD_UNKNOWN_ERROR = 8308,
     CACHE_STORE_STORE_FAILED = 8309,
 
-    // multimodal error
-    MM_LONG_PROMPT_ERROR = 901,
-    MM_WRONG_FORMAT_ERROR = 902,
-    MM_PROCESS_ERROR = 903,
-    MM_EMPTY_ENGINE_ERROR = 904,
-    MM_NOT_SUPPORTED_ERROR = 905,
-    MM_DOWNLOAD_FAILED = 906,
+    // load balance error
+    GET_PART_NODE_STATUS_FAILED = 8400,
+    GET_ALL_NODE_STATUS_FAILED = 8401, 
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -185,6 +189,10 @@ public:
         return code_;
     }
 
+    void setErrorCode(ErrorCode ec) {
+        code_ = ec;
+    }
+
 private:
     ErrorCode code_ = ErrorCode::NONE_ERROR;
     std::string message_;
@@ -212,6 +220,14 @@ public:
 
     const T& value() const {
         return value_;
+    }
+
+    T& value() {
+        return value_;
+    }
+
+    void setStatus(const ErrorInfo& new_status) {
+        status_ = new_status;
     }
 
 private:

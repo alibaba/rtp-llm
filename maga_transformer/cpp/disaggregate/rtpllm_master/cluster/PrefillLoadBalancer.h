@@ -29,7 +29,7 @@ public:
     std::shared_ptr<const Host> getRandomHost(const std::string& biz) const;
 
 private:
-    void updateWorkerStatusImpl(std::unordered_map<std::string, WorkerStatusResponse>& result) override;
+    void updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) override;
     bool updateWorkerExpectFinishTime(PrefillWorkerInfo& worker);
     std::unordered_map<std::string, PrefillWorkerInfo> worker_map_; 
     std::shared_ptr<TimeEstimatorBase>                 estimator_;

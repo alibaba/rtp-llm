@@ -140,7 +140,8 @@ bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker
     return true;
 }
 
-void PrefillLoadBalancer::updateWorkerStatusImpl(std::unordered_map<std::string, WorkerStatusResponse>& response) {
+void PrefillLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) {
+    HeartbeatSynchronizer::NodeStatus response = std::move(result.value());
     std::unique_lock<std::shared_mutex>                lock(host_load_balance_info_map_mutex_);
     // update exist worker info, remove unhealthy worker
     for (auto it = worker_map_.begin(); it != worker_map_.end();) {

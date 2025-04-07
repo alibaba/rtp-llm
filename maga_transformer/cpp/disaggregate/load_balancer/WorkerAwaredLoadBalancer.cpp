@@ -60,8 +60,7 @@ void WorkerAwaredLoadBalancer::syncWorkerThread() {
 
 void WorkerAwaredLoadBalancer::syncWorkerStatus() {
     std::shared_lock<std::shared_mutex> lock(biz_hosts_mutex_);
-    std::unordered_map<std::string, WorkerStatusResponse> result =
-        heartbeat_synchronizer_->getHeartbeatFromHost(biz_hosts_, sync_worker_status_interval_ms_);
+    auto result = heartbeat_synchronizer_->getHeartbeatFromHost(biz_hosts_, sync_worker_status_interval_ms_);
     updateWorkerStatusImpl(result);
 }
 

@@ -2,6 +2,7 @@
 
 #include <shared_mutex>
 
+#include "maga_transformer/cpp/utils/ErrorCode.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/BaseLoadBalancer.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/HeartbeatSynchronizer.h"
 
@@ -21,7 +22,7 @@ protected:
 private:
     void syncWorkerThread();
     void syncWorkerStatus();
-    virtual void updateWorkerStatusImpl(std::unordered_map<std::string, WorkerStatusResponse>& result) = 0;
+    virtual void updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) = 0;
 
 private:    
     bool                                   sync_worker_status_stop_{true};

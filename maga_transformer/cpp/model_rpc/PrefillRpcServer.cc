@@ -145,7 +145,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
         auto cost_time_us = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->setStop(WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            stream->setStop(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
             return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }

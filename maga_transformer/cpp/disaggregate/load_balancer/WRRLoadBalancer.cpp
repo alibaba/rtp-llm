@@ -72,9 +72,25 @@ double WRRLoadBalancer::calculateThreshold(std::vector<std::shared_ptr<const Hos
     return weight_sum * generateRandomDouble();
 }
 
-void WRRLoadBalancer::updateWorkerStatusImpl(std::unordered_map<std::string, WorkerStatusResponse>& result) {
-    // host_load_balance_info_map_ = std::move(result);
-    std::swap(host_load_balance_info_map_, result);
+void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) {
+    const int wait_success_times = 100;
+    static int part_success_times = 0;
+    if (result.ok()) {
+        part_success_times = 0;
+        HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+        std::swap(host_load_balance_info_map_, temp);
+    } else {
+        if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
+            if (part_success_times == wait_success_times) {
+                part_success_times = 0;
+                HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+                std::swap(host_load_balance_info_map_, temp);
+            } else {
+                part_success_times++;
+            }
+        }
+    }
+    
 }
 
 }  // namespace rtp_llm
