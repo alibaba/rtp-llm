@@ -337,7 +337,6 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
 		rhs.debugString().c_str(),
 		reinterpret_cast<const QBuffer&>(rhs).scales().debugString().c_str(),
 		output.debugString().c_str());
-    auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
     int bm, bn, num_stages, num_tma_multicast, smem_size;
     tie(bm, bn, num_stages, num_tma_multicast, smem_size) = getBestConfig(m, n, k, 1, num_sms);
@@ -345,7 +344,7 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(), 
-                (float*)lhs_scales.data_ptr(),
+                reinterpret_cast<const QBuffer&>(lhs).scales().data<float>(),
                 reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
                 reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
                 nullptr, // grouped_layout

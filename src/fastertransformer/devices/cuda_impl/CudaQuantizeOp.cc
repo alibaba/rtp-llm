@@ -167,8 +167,10 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
 #ifdef ENABLE_BF16
     } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
         FT_CHECK_WITH_INFO(input_shape[1] % 128 == 0, "last dim must be divisible by 128");
+        auto scales_shape = params.paddingSize? vector<size_t>({(unsigned int)(input_shape[1] / 128), input_shape[0]}): 
+                                                vector<size_t>({input_shape[0], (unsigned int)(input_shape[1] / 128)});
         scales = allocateBuffer({DataType::TYPE_FP32,
-                                {input_shape[0], (unsigned int)(input_shape[1] / 128)},
+                                scales_shape,
                                 getMemAllocationType(params.input.where())},
                                 {"scales"});
         if (input_shape[0] == 0) {
@@ -179,7 +181,12 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                                                         {0},
                                                                         nullptr)))));
         }
-        tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), params.input.size(), stream_);
+        if (params.paddingSize) {
+            tensorrt_llm::common::invokeComputeFP8Quantize128ColMajorScale(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), input_shape[0], input_shape[1], params.input.size(), stream_);
+        } else {
+            tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), params.input.size(),stream_);
+        }
+        
 #endif
 #endif
     } else {

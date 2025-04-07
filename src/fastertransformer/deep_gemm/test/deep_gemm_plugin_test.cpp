@@ -21,7 +21,7 @@ public:
         auto input_scale = torch::rand({m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
         auto weight = torch::randn({n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto weight_scale = torch::randn({int(n / 128), int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
-        auto input_scale_t = input_scale.repeat({1, 128}).reshape({1, m, 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({m, k});
+        auto input_scale_t = input_scale.repeat({1, 128}).reshape({1, m, 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({m, k}).transpose(0, 1),contiguous();
         auto weight_scale_t = weight_scale.repeat({128, 128}).reshape({(int)128, (int)(n / 128), 128, (int)(k / 128)}).permute({1, 0, 3, 2}).reshape({(int)(n), (int)(k)});
         auto ref_output = torch::matmul(input.to(torch::kFloat32) * input_scale_t, torch::transpose((weight.to(torch::kFloat32) * weight_scale_t), 0, 1));
         printBufferData(*fastertransformer::torchTensor2Buffer(ref_output), "ref", device_, true);
