@@ -69,7 +69,7 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
 
 void MlaRotaryKVCacheOp::init(torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size, torch::Tensor block_id_map) {
     attn_configs.tokens_per_block = page_size;
-    context_params_ = FlashInferAttnParams::prepareContextFlashInferAttnParams(device_,
+    context_params_ = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                 attn_configs,
                                                                 torchTensor2Buffer(sequence_length),
                                                                 torchTensor2Buffer(input_length),

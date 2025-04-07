@@ -239,7 +239,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         vector<int64_t> cache_keys_vec = ft::buffer2vector<int64_t>(*inputs.cache_keys);
         attention_inputs.cache_keys = transVectorToString(cache_keys_vec);
     }
-    attention_inputs.decode_flash_infer_attn_params.swap(prep_output.flash_infer_attn_params);
+    attention_inputs.decode_flash_infer_attn_params.swap(prep_output.decode_flash_infer_attn_params);
     attention_inputs.prefill_flash_infer_attn_params.swap(prep_output.prefill_flash_infer_attn_params);
     attention_inputs.request_id = inputs.request_id;
     attention_inputs.request_pd_separation = inputs.request_pd_separation;

@@ -163,7 +163,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
 }
 
 
-FlashInferAttnParamsPtr FlashInferAttnParams::prepareContextFlashInferAttnParams(
+FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(
         fastertransformer::DeviceBase *device,
         const fastertransformer::AttentionConfigs &attn_configs,
         const BufferPtr &sequence_lengths_host,

@@ -369,14 +369,14 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
 
-    output.flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
+    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
             this,
             params.configs,
             params.sequence_lengths,
             params.input_lengths,
             params.kv_cache_block_id,
             params.dtype);
-    output.prefill_flash_infer_attn_params = FlashInferAttnParams::prepareContextFlashInferAttnParams(
+    output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
             this,
             params.configs,
             params.sequence_lengths,

@@ -88,7 +88,7 @@ struct FlashInferAttnParams {
             const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
 
-    static FlashInferAttnParamsPtr prepareContextFlashInferAttnParams(
+    static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
             fastertransformer::DeviceBase *device,
             const fastertransformer::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,

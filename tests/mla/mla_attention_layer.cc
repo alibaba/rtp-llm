@@ -79,7 +79,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                                                     kvcache_block_id_host,
                                                                     DataType::TYPE_BF16);
         auto context_flash_infer_attn_params =
-            FlashInferAttnParams::prepareContextFlashInferAttnParams(device_,
+            FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                      attn_configs,
                                                                      sequence_lengths_host,
                                                                      sequence_lengths_host,

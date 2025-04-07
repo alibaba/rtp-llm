@@ -822,7 +822,7 @@ struct DevicePrepParams {
 
 struct DevicePrepOutput {
     bool need_mask = true;
-    FlashInferAttnParamsPtr flash_infer_attn_params;
+    FlashInferAttnParamsPtr decode_flash_infer_attn_params;
     FlashInferAttnParamsPtr prefill_flash_infer_attn_params;
 };
 

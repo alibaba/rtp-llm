@@ -140,7 +140,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                                               int64_t       page_size,
                                                                               torch::Tensor block_id_map) {
     attn_configs.tokens_per_block = page_size;
-    auto params                   = FlashInferAttnParams::prepareContextFlashInferAttnParams(device_,
+    auto params                   = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                     attn_configs,
                                                                     torchTensor2Buffer(sequence_length),
                                                                     torchTensor2Buffer(input_length),
