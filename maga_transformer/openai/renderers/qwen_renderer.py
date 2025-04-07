@@ -338,9 +338,12 @@ class QwenRenderer(CustomChatRenderer):
         # if z >= 0:
         #     response = response[z + len("\nFinal Answer: ") :]
 
-    async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
+    async def _update_single_status(self, status: StreamStatus, 
+                                    output: GenerateOutput, max_new_tokens: int,
+                                    stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
         if status.request.tools:
-            return await self.qwen_tool_renderer._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
+            return await self.qwen_tool_renderer._update_single_status(
+                status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
 
         if not isinstance(status, QwenStreamStatus):
             return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)

@@ -531,7 +531,9 @@ class CustomChatRenderer():
                 raise Exception("output num != num_return_sequences")
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
-                delta_list.append(await self._update_single_status(status, output, generate_config.max_new_tokens, generate_config.stop_words_str, stop_word_slice_list, generate_config.is_streaming))
+                delta_list.append(await self._update_single_status(
+                    status, output, generate_config.max_new_tokens, generate_config.stop_words_str,
+                    stop_word_slice_list, generate_config.is_streaming))
             yield await self._generate_stream_response(delta_list, think_status)
             if self._check_all_finished(status_list):
                 break
