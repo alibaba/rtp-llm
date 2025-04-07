@@ -23,10 +23,14 @@ namespace rtp_llm {
         string new_error_msg = "decode addr is " + prefill_context.decode_addr + ", ";                          \
         new_error_msg += "execute time is " + std::to_string(prefill_context.executeTimeMs()) + "ms, ";         \
         new_error_msg += "request timeout is " + std::to_string(prefill_context.request_timeout_ms) + "ms, ";   \
-        if (prefill_context.getStream()) {                                                                           \
-            auto first_token_rt_ms = prefill_context.getStream()->getTimeInfo().first_token_rt_us / 1000;            \
+        if (prefill_context.getStream()) {                                                                      \
+            auto first_token_rt_ms = prefill_context.getStream()->getTimeInfo().first_token_rt_us / 1000;       \
             if (first_token_rt_ms) {                                                                            \
-                new_error_msg += "stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";     \
+                new_error_msg += "stream first token rt is " + std::to_string(first_token_rt_ms) + "ms, ";      \
+            }                                                                                                   \
+            auto wait_time_ms = prefill_context.getStream()->getTimeInfo().wait_time_us / 1000;                 \
+            if (wait_time_ms) {                                                                                 \
+                new_error_msg += "stream wait time is " + std::to_string(first_token_rt_ms) + "ms, ";           \
             }                                                                                                   \
         }                                                                                                       \
         auto status = prefill_context.closeGrpcStream();                                                        \
@@ -57,8 +61,8 @@ namespace rtp_llm {
                 new_error_msg += "server disconnected with status::ok";                                         \
             }                                                                                                   \
         }                                                                                                       \
-        if (prefill_context.getStream()) {                                                                           \
-            prefill_context.getStream()->setStop(new_error_code, new_error_msg);                                     \
+        if (prefill_context.getStream()) {                                                                      \
+            prefill_context.getStream()->setStop(new_error_code, new_error_msg);                                \
         }                                                                                                       \
         prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                  \
         prefill_context.error_status = serializeErrorMsg(                                                       \
@@ -133,14 +137,16 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int MAX_WAIT_TIME_US = 50 * 1000 * 1000;
+    static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_;
     auto begin_time_us = currentTimeUs();
     while (stream->waiting()) {
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us = current_time_us - begin_time_us;
-        if (cost_time_us > MAX_WAIT_TIME_US) {
-            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "wait to run timeout");
+        if (cost_time_us > max_wait_timeout_us) {
+            string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
+            stream->setStop(WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }
     if (stream->stopped()) {

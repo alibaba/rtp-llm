@@ -39,6 +39,7 @@ class ExceptionType(IntEnum):
     RPC_FINISH_FAILED = 8210
     DECODE_MALLOC_FAILED = 8211
     LOAD_KV_CACHE_FAILED = 8212
+    WAIT_TO_RUN_TIMEOUT = 8213
 
     # load cache error
     LOAD_CACHE_TIMEOUT = 8300

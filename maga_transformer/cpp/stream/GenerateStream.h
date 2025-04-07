@@ -252,6 +252,7 @@ public:
 public:
     struct TimeInfo {
         int64_t begin_time_us;
+        int64_t wait_time_us;
         int64_t first_token_time_us;
         int64_t first_token_rt_us;
     };

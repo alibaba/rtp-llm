@@ -790,7 +790,9 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
 }
 
 GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
-    return {begin_time_us_, complete_token_ids_->firstTokenTimeUs(), complete_token_ids_->firstTokenLatencyUs()};
+    return {begin_time_us_, wait_time_us_,
+            complete_token_ids_->firstTokenTimeUs(),
+            complete_token_ids_->firstTokenLatencyUs()};
 }
 
 bool GenerateStream::queryPdSep() const {

@@ -323,6 +323,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(cache_store_rdma_mode, cache_store_rdma_mode_)         \
     DEF_PROPERTY(prefill_retry_times, prefill_retry_times_)             \
     DEF_PROPERTY(prefill_retry_timeout_ms, prefill_retry_timeout_ms_)   \
+    DEF_PROPERTY(prefill_max_wait_timeout_ms, prefill_max_wait_timeout_ms_)   \
     DEF_PROPERTY(decode_retry_times, decode_retry_times_)               \
     DEF_PROPERTY(decode_retry_timeout_ms, decode_retry_timeout_ms_)     \
     DEF_PROPERTY(decode_polling_kv_cache_step_ms, decode_polling_kv_cache_step_ms_)     \
