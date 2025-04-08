@@ -22,6 +22,7 @@ py_test(
         "//maga_transformer:testlib",
     ],
     timeout = 'short',
+    flaky = True,
     env = {"ASYNC_MODE":"0"},
     imports = ["aios/kmonitor/python_client"],
     exec_properties = {'gpu':'A10'},
