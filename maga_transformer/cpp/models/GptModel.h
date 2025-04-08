@@ -165,12 +165,14 @@ struct EpFfnInputs {
 
 struct EpFfnOutputs {
     ft::BufferPtr hidden;
+    ft::MoeCombineOutput combine_output;
     ft::DeviceHookPtr comm_barrier_hook;
 };
 
 struct LastLayerDeferedParams {
     ft::BufferPtr residual;
     ft::BufferPtr shared_expert_output;
+    std::optional<ft::MoeCombineOutput> combine_output;
     std::shared_ptr<const ft::LayerNormWeights> post_ffn_layernorm_weights;
     ft::DeviceHookPtr comm_barrier_hook;
 };

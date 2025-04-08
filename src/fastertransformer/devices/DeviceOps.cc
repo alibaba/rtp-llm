@@ -179,7 +179,11 @@ MoeDispatchOutput DeviceOps::epDispatch(const MoeDispatchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-FfnLayerOutput DeviceOps::epCombine(const MoeCombineParams& params) {
+MoeCombineOutput DeviceOps::epCombine(const MoeCombineParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput DeviceOps::gatherCombineOutput(const MoeCombineOutput& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

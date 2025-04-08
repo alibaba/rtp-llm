@@ -637,18 +637,24 @@ struct MoeDispatchParams {
 };
 
 struct MoeCombineParams {
-    const BufferPtr           input;
-    const BufferPtr           indices;
-    const BufferPtr           output;
-    const std::vector<size_t>& input_split_sizes;
-    const std::vector<size_t>& output_split_sizes;
-    const MoeConfigs&         moe_configs;
+    BufferPtr           input;
+    BufferPtr           indices;
+    BufferPtr           output;
+    std::vector<size_t> input_split_sizes;
+    std::vector<size_t> output_split_sizes;
+    MoeConfigs          moe_configs;
     size_t                    origin_token_num;
     bool                      overlapped = false;
     std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
     std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
-    const BufferPtr expert_ids;
-    const BufferPtr expert_scales;
+    BufferPtr expert_ids;
+    BufferPtr expert_scales;
+};
+
+struct MoeCombineOutput {
+    BufferPtr all_output;
+    BufferPtr scatter_output;
+    MoeCombineParams params;
 };
 
 struct GreedyParams {

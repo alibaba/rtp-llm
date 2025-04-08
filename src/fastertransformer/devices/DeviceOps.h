@@ -65,7 +65,8 @@ public:
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
     virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);
     virtual MoeDispatchOutput epDispatch(const MoeDispatchParams& params);
-    virtual FfnLayerOutput epCombine(const MoeCombineParams& params);
+    virtual MoeCombineOutput epCombine(const MoeCombineParams& params);
+    virtual FfnLayerOutput gatherCombineOutput(const MoeCombineOutput& params);
     virtual ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params);
     virtual AllGatherLoraLinearOutput allGatherloraLinear(const AllGatherLoraLinearParams& params);
 

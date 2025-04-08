@@ -218,7 +218,7 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
             {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
     hidden_states =
         moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
-    FfnLayerOutput out = epCombine({hidden_states,
+    auto combine_out = epCombine({hidden_states,
                                     dispatched_output.indices,
                                     params.output,
                                     dispatched_output.input_split_sizes,
@@ -226,6 +226,7 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
                                     moe_conf,
                                     params.input.shape()[0],
                                     init_params_.enable_comm_overlap});
+    auto out = gatherCombineOutput(combine_out);
     printBufferData(*out.hidden_states, "moe_ffn_ep_out");
     return out;
 }

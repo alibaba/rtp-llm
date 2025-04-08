@@ -221,17 +221,17 @@ public:
     void mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
-    FfnLayerOutput epCombine(const MoeCombineParams& params) override;
+    MoeCombineOutput epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput gatherCombineOutput(const MoeCombineOutput& params) override;
 
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
     void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
 
-    FfnLayerOutput gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output = nullptr);
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
-    FfnLayerOutput deepEpCombine(const MoeCombineParams& params);
+    MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
-    FfnLayerOutput deepEpLLCombine(const MoeCombineParams& params);
+    MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     FfnLayerOutput deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& gate_outputs);
 

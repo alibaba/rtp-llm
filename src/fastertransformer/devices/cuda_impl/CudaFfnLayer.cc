@@ -33,6 +33,10 @@ void hackMoeExpert(const MoeDispatchParams& params, BufferPtr& experts_ids_host)
 }
 
 MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
+    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
+        return deepEpLLDispatch(params);
+    }
+
     DevicePerfWrapper wrapper(this, "epDispatch");
     const auto& moe_conf = params.moe_configs;
 
@@ -153,7 +157,11 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     }
 }
 
-FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
+MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
+    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
+        return deepEpLLCombine(params);
+    }
+
     DevicePerfWrapper wrapper(this, "epCombine");
     if (params.overlapped) {
         overlap_hold_buffers_.clear();
@@ -161,11 +169,16 @@ FfnLayerOutput CudaDevice::epCombine(const MoeCombineParams& params) {
     auto all2all_ret = allToAll({
         {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
     auto all_output = all2all_ret.outputs[0];
-    return gatherCombineOutput(all_output, params);
+    return MoeCombineOutput({all_output, nullptr, params});
+    // return gatherCombineOutput(all_output, params);
 }
 
-FfnLayerOutput
-CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& params, BufferPtr scatter_output) {
+FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_outputs) {
+    auto& all_output = combine_outputs.all_output;
+    auto scatter_output = combine_outputs.scatter_output;
+    const auto& params = combine_outputs.params;
+
+    // TODO(wangyin.yx): remove these overlap held buffers.
     if (params.overlapped) {
         overlap_hold_buffers_.emplace_back(all_output);
         overlap_hold_buffers_.emplace_back(params.input);
@@ -173,6 +186,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
     }
     torch::Tensor indices_tensor;
     cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
+
     if (params.moe_configs.tp_size > 1) {
         // TODO: can use torch all gather unequal size to avoid copy
         const size_t tp_token_size =

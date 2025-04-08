@@ -504,11 +504,34 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
             const auto& ffn_params = batch_ep_input.moe_ffn_params;
             const auto& dispatched_output = batch_ep_input.dispatch_output;
 
-            auto out = device_->moeFfnAndCombine(ffn_params, dispatched_output);
-            auto output = out.hidden_states;
-            printBufferData(*output, "moe_ffn_ep_out");
+            // equivalent of moeFfnAndCombine
+            // auto out = device_->moeFfnAndCombine(ffn_params, dispatched_output);
 
-            ep_outputs.push_back(EpFfnOutputs({output, move(out.comm_barrier_hook)}));
+            const auto& moe_conf = ffn_params.configs.moe_configs.value();
+            auto hidden_states = dispatched_output.hidden;
+            if (hidden_states->shape()[0]) {
+                auto moe_ffn_params = FfnLayerParams(
+                    {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
+                hidden_states =
+                    device_->moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
+            }
+            auto combine_out = device_->epCombine({hidden_states,
+                                dispatched_output.indices,
+                                ffn_params.output,
+                                dispatched_output.input_split_sizes,
+                                dispatched_output.output_split_sizes,
+                                moe_conf,
+                                ffn_params.input.shape()[0],
+                                device_props_.enable_comm_overlap});
+            auto hook = device_->createCommHook();
+            combine_out.params.overlapped = false;
+            // auto out = device_->gatherCombineOutput(combine_out);
+            // auto output = out.hidden_states;
+            auto output = combine_out.all_output;
+
+            // printBufferData(*output, "moe_ffn_ep_out");
+
+            ep_outputs.push_back(EpFfnOutputs({output, move(combine_out), move(hook)}));
         }
 
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
@@ -522,7 +545,8 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                     FT_LOG_DEBUG("synchronize barrier event for layer %ld, micro batch %ld", i, micro_batch_idx);
                     batch_ep_output.comm_barrier_hook->hook_sync();
                 }
-                auto& output = batch_ep_output.hidden;
+                auto output = batch_ep_output.hidden;
+                output = device_->gatherCombineOutput(batch_ep_output.combine_output).hidden_states;
 
                 printBufferData(*output, "layer_" + to_string(i) + "_ffn_output");
 
@@ -547,6 +571,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                 last_layer_defered_params[micro_batch_idx].residual = batch_ep_input.residual;
                 last_layer_defered_params[micro_batch_idx].shared_expert_output = batch_ep_input.shared_expert_output;
                 last_layer_defered_params[micro_batch_idx].post_ffn_layernorm_weights = layer.post_ffn_layernorm;
+                last_layer_defered_params[micro_batch_idx].combine_output = move(batch_ep_output.combine_output);
                 last_layer_defered_params[micro_batch_idx].comm_barrier_hook = move(batch_ep_output.comm_barrier_hook);
                 layer_input.hidden = move(batch_ep_output.hidden);
             }
@@ -679,7 +704,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         description_.act_qscheme,
                                                                         layer_id > 0 ? true: false,
                                                                         false));
-           
+
 
         if (enable_sp && layer_id == 0) {
             if (overlap_comm_type == 1 && m_split > 0) {
@@ -703,7 +728,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                 residual = residual->slice(rank_pad_token_num * device_props_.tp_rank, rank_pad_token_num);
             }
         }
-        
+
         hidden = std::move(pre_layernorm_output.output);
     }
 
@@ -794,6 +819,10 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     const auto& layer = weights_.layers[layer_id];
+
+    if (last_layer_defered_params.combine_output) {
+        hidden = device_->gatherCombineOutput(last_layer_defered_params.combine_output.value()).hidden_states;
+    }
 
     if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
         printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
@@ -890,7 +919,7 @@ GptModelOutputs GptModel::forwardPostLayers(
         if (token_num % pad_mod_num != 0) {
             input = device_->clone({all_gather_output->view(0, token_num), AllocationType::DEVICE});
         } else {
-            input = all_gather_output;            
+            input = all_gather_output;
         }
     }
 
