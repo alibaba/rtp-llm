@@ -228,6 +228,7 @@ public:
 
     // 0 for no sep, 1 for server, 2 for client
     int64_t     vit_separation_                     = 0;
+    bool        enable_speculative_decoding_        = false;
 
 
     std::string model_name_ = "";

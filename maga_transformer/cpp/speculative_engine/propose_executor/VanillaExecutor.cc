@@ -13,6 +13,9 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
     ProposeOutput propose_output;
 
     for (auto& stream : streams) {
+        if (stream->needFinish() || stream->stoppedWithoutLock()) {
+            continue;
+        }
         size_t stream_id = stream->streamId();
         propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
         propose_output.outputs[stream_id]->propose_step = propose_step_;
@@ -24,7 +27,19 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
+        bool stop_propose = propose_streams.empty();
+        tpSyncStopFinishedStream(stop_propose);
+        if (stop_propose) {
+            FT_LOG_DEBUG("early stop propose");
+            break;
+        }
         RETURN_IF_STATUS_ERROR(normal_executor_.process(propose_streams));
+        propose_streams.erase(std::remove_if(propose_streams.begin(),
+                                             propose_streams.end(),
+                                             [&](auto stream) {
+                                                return std::dynamic_pointer_cast<VanillaStream>(stream)->checkFinish();
+                                             }), propose_streams.end());
+
     }
 
     for (auto& stream: propose_streams) {

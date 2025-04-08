@@ -56,6 +56,17 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const ft::GptInitParamete
         }
     }
 
+    if (params.enable_speculative_decoding_) {
+        const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024; // 2 GiB
+        if (reserve_runtime_mem_bytes < minimal_runtime_required) {
+            reserve_runtime_mem_bytes = minimal_runtime_required;
+            FT_LOG_INFO("speculative decoding  needs at least %ld MiB memory for runtime by default, "
+                        "but only %ld MiB memory reserved. adjust to minimal value.",
+                        minimal_runtime_required / 1024 / 1024,
+                        reserve_runtime_mem_bytes / 1024 / 1024);
+        }
+    }
+
     return reserve_runtime_mem_bytes;
 }
 
@@ -82,10 +93,14 @@ size_t CacheConfigCreator::getKVCacheMemorySize(
             device_reserved_memory_bytes = std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
         }
 
-        FT_LOG_INFO("devices reserved %ld MiB memory, warm up consumed %ld MiB max memory",
-                    device_reserved_memory_bytes / 1024 / 1024,
-                    warm_up_result->max_used_memory / 1024 / 1024);
-        runtime_required_bytes = warm_up_result->max_used_memory;
+        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(params);
+        runtime_required_bytes = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
+
+        FT_LOG_INFO("devices reserved %ld MiB memory, warm up consumed %ld MiB max memory, env runtime memory %ld MiB, final runtime memory %ld MiB",
+            device_reserved_memory_bytes / 1024 / 1024,
+            warm_up_result->max_used_memory / 1024 / 1024,
+            env_runtime_required_bytes / 1024 / 1024,
+            runtime_required_bytes / 1024 / 1024);
     } else {
         runtime_required_bytes = getDefaultRuntimeMemorySize(params);
         FT_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",

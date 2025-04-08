@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
+
 namespace rtp_llm {
 
 class VanillaExecutor: public ProposeExecutor {
@@ -34,6 +35,21 @@ public:
     size_t reserveStep() const override {
         return propose_step_;
     }
+
+
+    void tpSyncStopFinishedStream(bool& need_stop) {
+        if (device_->getDeviceProperties().tp_size <= 1) {
+            return;
+        }
+        auto disable_sp_run = device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST});
+        auto disable_sp_run_ptr = disable_sp_run->data<int32_t>();
+        disable_sp_run_ptr[(size_t)0] = need_stop;
+
+        device_->broadcast({{disable_sp_run}, 0});
+        device_->syncCommunication(false);
+        device_->syncAndCheck();
+        need_stop = disable_sp_run_ptr[(size_t)0];
+    };
 
 private:
     size_t         propose_step_;

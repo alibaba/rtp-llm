@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block) 
+CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block)
     : device_(device)
     , batch_size_(batch_size)
     , max_seq_len_(max_seq_len)
@@ -28,6 +28,9 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     FT_CHECK(device_ != nullptr && generate_input != nullptr);
 
     seq_length_ = generate_input->inputLength();
+    FT_CHECK_WITH_INFO((seq_length_ <= max_seq_len_),
+        "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
+
     common_len_ = seq_length_;
     start_check_seq_length_ = seq_length_;
     init_seq_size_ = seq_length_;
@@ -123,12 +126,12 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
     FT_CHECK(new_tokens->dim() == 2);
-    
+
     for (size_t i = 0; i < batch_size_; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
             auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) { // check tokenid
-                error_token_id = current_token_id; 
+                error_token_id = current_token_id;
                 return false;
             }
         }
@@ -146,6 +149,7 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
 }
 
 void CompleteTokenIds::setSeqLength(int seq_length) {
+    FT_CHECK(seq_length <= max_seq_len_);
     if (seq_length > seq_length_) {
         start_check_seq_length_ = seq_length_ + 1;
     } else {
@@ -168,7 +172,14 @@ void CompleteTokenIds::copyTokensTo(int batch_id, void *dst, int offset, size_t 
 }
 
 void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const ft::Buffer &src) {
-    device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num), src});
+    if (src.dim() == 2 && src.shape()[0] == 1) {
+        device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num),
+                        src[0].view(0, token_num)});
+    } else {
+        device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num),
+                        src.view(0, token_num)});
+    }
+
     setSeqLength(seq_length_ + token_num);
 }
 

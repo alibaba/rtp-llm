@@ -55,6 +55,8 @@ class ModelFactory:
         config.model_name = model_cls.__name__
         if issubclass(model_cls, MultiModalMixin):
             config.is_multimodal = True
+        if model_config.sp_type != "":
+            config.enable_speculative_decoding = True
         
         return model_cls, config
 

@@ -22,7 +22,7 @@ public:
         // WARNING: ScoreStream currently only support batch_size = 1
         FT_CHECK(tileNum() == 1);
         CopyOnWrite(stream);
-        updateProposeTokens(propose_tokens);
+        updateProposeTokens(propose_tokens, propose_step_);
         allocateOutputBuffer();
         setNeedReleaseResource(false);
 
@@ -65,11 +65,11 @@ public:
     }
 
 private:
-    void updateProposeTokens(ft::BufferPtr* propose_tokens) {
+    void updateProposeTokens(ft::BufferPtr* propose_tokens, size_t propose_step) {
         if (!propose_tokens) {
             return;
         }
-        complete_token_ids_->appendTokens(0, (*propose_tokens)->size(), **propose_tokens);
+        complete_token_ids_->appendTokens(0, propose_step, **propose_tokens);
     }
 
     void allocateOutputBuffer() {

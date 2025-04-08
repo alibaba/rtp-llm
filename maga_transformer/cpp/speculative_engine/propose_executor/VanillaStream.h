@@ -36,6 +36,12 @@ public:
         return ErrorInfo::OkStatus();
     };
 
+    bool checkFinish() {
+        SpeculativeExecutorStreamOutputPtr output_buffer = propose_output_->outputs[streamId()];
+        output_buffer->propose_step = current_step_;
+        return needFinish() || stoppedWithoutLock();
+    };
+
     void updateOutput(const StreamUpdateInfo& update_info) override {
         SpeculativeExecutorStreamOutputPtr output_buffer = propose_output_->outputs[streamId()];
         // TODO(xyz): optimize deepclone
@@ -71,7 +77,7 @@ private:
         old_top_k_= generate_config->top_k;
         if (!generate_config->top1()) {
             setReturnAllProbs(true);
-        } 
+        }
         if (generate_config->top_k == 0 && generate_config->top_p > 0.0) {
             generate_config->top_k = 20;
         }
@@ -79,7 +85,7 @@ private:
 
 protected:
     int                                old_top_k_    = -1;
-    ProposeOutput*                     propose_output_;       
+    ProposeOutput*                     propose_output_;
     size_t                             current_step_ = 0;
     size_t                             propose_step_ = 0;
 };

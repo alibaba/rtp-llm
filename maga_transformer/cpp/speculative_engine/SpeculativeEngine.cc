@@ -140,6 +140,7 @@ WarmUpResult SpeculativeEngine::warmUp() {
     fake_input->generate_config                       = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = socre_gpt_params.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(socre_gpt_params.warm_up_with_loss_);
+    fake_input->generate_config->top_k                = 2;  
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 

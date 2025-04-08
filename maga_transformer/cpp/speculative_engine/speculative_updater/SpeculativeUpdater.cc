@@ -35,6 +35,9 @@ absl::Status SpeculativeUpdater::dispatch(const GenerateStreamPtr& stream, const
     if (stream->isChunkStream()) {
         return absl::OkStatus();
     }
+    if (stream->stoppedWithoutLock() || stream->finishedWithoutLock()) {
+        return absl::OkStatus();
+    }
     size_t num_accepted_tokens = stream_output.accepted_token_nums;
     const ft::BufferPtr& accepted_tokens = stream_output.accepted_tokens;
     const ft::BufferPtr& logits = stream_output.logits;
