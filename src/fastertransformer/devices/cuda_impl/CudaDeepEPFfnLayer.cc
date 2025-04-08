@@ -60,8 +60,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);  // [tp_token_size, topk]
 
     // prepare tensors for call deepep dispatch layout
-    torch::Tensor input_tensor =
-        Buffer2torchTensor(hidden, false).toType(torch::kBFloat16);  //[num_tokens, hidden_size]
     torch::Tensor topk_idx_tensor;
     torch::Tensor topk_weights_tensor;
 
@@ -103,9 +101,21 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     }
 
     deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
-
-    auto dispatch_output = deepep_buffer_->dispatch(input_tensor,
-                                                    std::nullopt /*x_scales*/,
+    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16, "moe configs not set");
+    BufferPtr quantized_hidden;
+    torch::Tensor x;
+    std::optional<torch::Tensor> x_scales;
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        quantized_hidden = quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        auto kernel_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
+        auto scales_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
+        x = Buffer2torchTensor(kernel_ptr, false); // [num_tokens, hidden_size]
+        x_scales = Buffer2torchTensor(scales_ptr, false); // [num_tokens, hidden_size / 128]
+    } else {
+        x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
+    }
+    auto dispatch_output = deepep_buffer_->dispatch(x,
+                                                    x_scales /*x_scales*/,
                                                     std::nullopt /*handle*/,
                                                     dispatch_layout_output.num_tokens_per_rank,
                                                     dispatch_layout_output.num_tokens_per_rdma_rank,
@@ -119,12 +129,22 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
                                                     false /*async_finish*/,
                                                     false /*allocate_on_comm_stream*/);
 
-    BufferPtr recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_x, torch::kBFloat16);
     BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
     BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
     cudaDeviceSynchronize();
     const size_t num_experts_per_node = expert_num / moe_conf.ep_size;
     tensorrt_llm::kernels::genSourceRowRevert(recv_topk_idx_buffer->data<int>(), recv_topk_idx_buffer->shape()[0], recv_topk_idx_buffer->shape()[1], num_experts_per_node * moe_conf.ep_rank, stream_);
+    BufferPtr recv_x_buffer;
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        recv_x_buffer.reset(new QBuffer(std::move(torchTensor2Buffer(dispatch_output.recv_x)),
+                                        std::move(torchTensor2Buffer(dispatch_output.recv_x_scales.value())),
+                                        std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                                                       DataType::TYPE_INVALID,
+                                                                       {0},
+                                                                       nullptr)))));
+    } else  {
+        recv_x_buffer = torchTensor2Buffer(dispatch_output.recv_x);
+    }
     MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer, all_token_indices};
     out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
     return out;
@@ -171,11 +191,10 @@ FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const
     const auto& moe_conf = params.configs.moe_configs.value();
 
     MoeDispatchOutput dispatched_output =
-        deepEpDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
-    BufferPtr hidden_states = dispatched_output.hidden;
+        deepEpDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf, false, params.qscheme});
     auto moe_ffn_params = FfnLayerParams(
             {*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme});
-    hidden_states =
+    BufferPtr hidden_states =
         moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
     auto combine_out = deepEpCombine({hidden_states,
                                       dispatched_output.indices,

@@ -146,6 +146,7 @@ struct DeepEPDispatchOutput {
                          const std::optional<DeepEPDispatchHandle>& handle,
                          const std::shared_ptr<EventOverlap>&       event_overlap):
         recv_x(recv_x),
+        recv_x_scales(recv_x_scales),
         recv_topk_idx(recv_topk_idx),
         recv_topk_weights(recv_topk_weights),
         num_recv_tokens_per_expert_list(num_recv_tokens_per_expert_list),

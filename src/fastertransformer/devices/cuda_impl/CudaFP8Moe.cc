@@ -217,6 +217,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 
 FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& dispatch_outputs) {
 #ifdef ENABLE_FP8
+#ifdef ENABLE_DEEP_EP
     using T = __nv_bfloat16;
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto& moe_conf            = params.configs.moe_configs.value();
@@ -228,7 +229,7 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
 
     BufferPtr                                       quantize_hidden;
     BufferPtr                                       quantize_hidden_holder;
-    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output = dispatch_outputs.deep_ep_ll_output;
+    auto                                            deep_ep_ll_output = dispatch_outputs.deep_ep_ll_output;
     torch::Tensor                                   hidden            = deep_ep_ll_output->packed_recv_x;
     vector<size_t>                                  hidden_shape;
     if (deep_ep_ll_output->packed_recv_x_scales.has_value()) {
@@ -312,6 +313,10 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
 
     sync_check_cuda_error();
     return {output};
+#else
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    return {nullptr};
+#endif
 #else
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     return {nullptr};
