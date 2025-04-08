@@ -74,7 +74,7 @@ get_tile_config_from_config(CutlassTileConfig tile_config) {
         case CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64:
             return TileConfig{256, 128, 64, 64, 64, 64};
         default:
-            throw std::runtime_error("[TensorRT-LLm Error][get_grid_shape_for_config] Invalid config");
+	    throw std::runtime_error("[TensorRT-LLm Error][get_grid_shape_for_config] Invalid config: " + std::to_string(int(tile_config)));
     }
 }
 

@@ -330,6 +330,9 @@ public:
     {
         int64_t total_rows = num_rows * k;
         bool use_fused_moe = moe_gemm_runner_.isFusedGatedActivation(isGatedActivation(fc1_activation_type), fc1_output_size, hidden_size);
+	if (!use_fused_moe) {
+  	    fc1_activation_type = ActivationType::Identity;
+	}
         auto gemm1_config = moe_gemm_runner_.getChosenConfig(total_rows, fc1_output_size, hidden_size, num_experts, use_fused_moe,   fc1_activation_type, stream);
         auto gemm2_config = moe_gemm_runner_.getChosenConfig(total_rows, hidden_size, fc1_output_size, num_experts, false, ActivationType::Identity, stream);
         gemm1_config_ = std::move(gemm1_config);

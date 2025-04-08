@@ -9,8 +9,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",
-        "@cutlass//:cutlass",
-        "@cutlass//:cutlass_utils",
+	"//src/fastertransformer/cuda:cuda_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

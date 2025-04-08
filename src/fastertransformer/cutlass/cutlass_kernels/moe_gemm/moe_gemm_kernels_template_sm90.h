@@ -71,7 +71,7 @@ void dispatchMoeGemmSelectBiasSM90(HopperGroupedGemmInput hopper_input, int num_
         "Invalid hopper configuration invoked, fallback to Sm80");
 
     TLLM_CHECK_WITH_INFO(
-        workspace_size || hopper_input.isValid(), "Hopper specialisation is missing additional input information");
+        workspace_size || occupancy || hopper_input.isValid(), "Hopper specialisation is missing additional input information");
 
     //            auto func = hopper_input.ptr_c ?
     //            kernels::cutlass_kernels::genericMoeGemmKernelLauncherHopper<T, WeightType,

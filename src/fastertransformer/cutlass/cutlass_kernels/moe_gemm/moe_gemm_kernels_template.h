@@ -527,8 +527,8 @@ MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::getValidConfig
     std::vector<cutlass_extensions::CutlassGemmConfig> valid_splitk_configs;
     for (int i = 0; i < candidate_configs.size(); i++)
     {
-        if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(
-                total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
+        if (candidate_configs[i].tile_config_sm90 != CutlassTileConfigSM90::ChooseWithHeuristic ||
+	    tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
         {
             valid_splitk_configs.push_back(candidate_configs[i]);
         }
@@ -596,11 +596,18 @@ cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, Outp
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
     auto candidate_configs = getConfigs();
+    if (sm_ == 90 && supportsHopperSpecialisation() && total_rows / num_experts > 32) {
+        CutlassGemmConfig config(
+                CutlassTileConfigSM90::CtaShape128x128x128B, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, ClusterShape::ClusterShape_1x1x1);
+	return config;
+    }
+
     std::vector<cutlass_extensions::CutlassGemmConfig> valid_splitk_configs;
     for (int i = 0; i < candidate_configs.size(); i++)
     {
-        if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(
-                total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
+        if (candidate_configs[i].tile_config_sm90 != CutlassTileConfigSM90::ChooseWithHeuristic ||
+	    tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(total_rows, gemm_n, gemm_k, candidate_configs[i], workspace_bytes, is_weight_only))
+
         {
             valid_splitk_configs.push_back(candidate_configs[i]);
         }
@@ -812,7 +819,7 @@ void MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::dispatchT
             {
                 TLLM_CHECK_WITH_INFO(biases != nullptr || hopper_input.ptr_c == nullptr,
                     "Input biases and hopper input disagree if bias is enabled");
-                TLLM_CHECK_WITH_INFO(hopper_input.isValid(), "Calling SM90 configuration with invalid hopper config");
+                TLLM_CHECK_WITH_INFO(occupancy || hopper_input.isValid(), "Calling SM90 configuration with invalid hopper config");
 
                 // Select the appropriate fusion function
                 auto select_function = [&]()
@@ -887,6 +894,8 @@ size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::calcMax
     if constexpr (kernels::cutlass_kernels::isValidHopperMOESpecialisation<T, WeightType>())
     {
         auto configs = getHopperConfigs(sm_);
+        TLLM_CHECK_WITH_INFO(!configs.empty(), "no valid hopper configs");
+
         size_t max_size = 0;
         bool has_config = false;
         for (auto conf : configs)
@@ -903,7 +912,7 @@ size_t MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::calcMax
         }                                                                                                              \
         catch (const std::runtime_error& e)                                                                            \
         {                                                                                                              \
-            TLLM_LOG_TRACE("Unsupported config skipped when calculating MOE workspace size");                          \
+	    TLLM_LOG_ERROR("Unsupported config skipped when calculating MOE workspace size: %s", e.what());            \
         }                                                                                                              \
     } while (0)
 
