@@ -24,6 +24,29 @@ def get_worker_port_num():
 
 get_worker_port_num()
 
+class FrontendServerInfo(object):
+    def __init__(self, frontend_server_id: int):
+        self.frontend_server_id = frontend_server_id
+
+    @staticmethod
+    def from_env() -> FrontendServerInfo:
+        return FrontendServerInfo.from_params(dict(os.environ))   
+
+    @staticmethod
+    def from_params(params: Dict[str, str]) -> FrontendServerInfo:
+        info = FrontendServerInfo(
+                frontend_server_id=int(params.get('FRONTEND_SERVER_ID', '0')))
+        return info
+
+    def reload(self):
+        new_info = self.from_env()
+        self.frontend_server_id = new_info.frontend_server_id
+
+    def __str__(self):
+        return f"FrontendServerInfo:[ frontend_server_id={self.frontend_server_id} ]"
+
+g_frontend_server_info = FrontendServerInfo.from_env()
+
 class ParallelInfo(object):
     # EP从TP里分
     def __init__(

@@ -13,12 +13,15 @@ sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
 from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.server.frontend_app import FrontendApp
+from maga_transformer.distribute.worker_info import g_frontend_server_info
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, init_controller, set_global_controller
 
 def start_frontend_server(server_id: int, global_controller: ConcurrencyController):
     setproctitle(f"maga_ft_frontend_server_{server_id}")
     app = None
     try:
+        g_frontend_server_info.reload()
+        logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
         set_global_controller(global_controller)
         app = FrontendApp()
         app.start()

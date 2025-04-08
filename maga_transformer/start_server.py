@@ -68,7 +68,9 @@ def start_frontend_server_impl(global_controller, backend_process):
     frontend_processes = []
     
     for i in range(frontend_server_count) :
-        process = multiprocessing.Process(target=start_frontend_server, args=(i, global_controller), name=f"frontend_server_{i}")
+        os.environ['FRONTEND_SERVER_ID'] = str(i)
+        process = multiprocessing.Process(target=start_frontend_server,
+                args=(i, global_controller), name=f"frontend_server_{i}")
         frontend_processes.append(process)
         process.start()
 

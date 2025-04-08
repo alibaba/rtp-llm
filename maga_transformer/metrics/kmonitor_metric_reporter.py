@@ -1,7 +1,7 @@
 import logging
 from enum import Enum
 from typing import Dict, Any, Union
-from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.distribute.worker_info import g_parallel_info, g_frontend_server_info
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
@@ -37,6 +37,7 @@ class MetricReporter(object):
     def report(self, metric: Union[AccMetrics,GaugeMetrics], value: float = 1, tags: Dict[str, Any] = {}):
         if g_parallel_info.dp_size > 1:
             tags['dp_rank'] = str(g_parallel_info.dp_rank)
+        tags['frontend_server_id'] = str(g_frontend_server_info.frontend_server_id)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
             logging.warn(f"no metric named {metric.name}")
