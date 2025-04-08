@@ -794,7 +794,7 @@ DeepEPCombineOutputLowLatency DeepEPBuffer::lowLatencyCombine(const torch::Tenso
                                                                   async_finish,
                                                                   return_recv_hook);
 
-    printTorchTensorData(combined_x, "combine combined_x", nullptr, true, true);
+    printTorchTensorData(combined_x, "combine combined_x");
     std::shared_ptr<EventOverlap> event_overlap;
     if (async_finish) {
         std::vector<std::optional<torch::Tensor>> tensors_to_record{

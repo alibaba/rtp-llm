@@ -103,6 +103,32 @@ N_K_GROUP_TYPE= [
 ("128", "512", "64", "DeepGemmType::GroupedContiguous"),
 ("4096", "7168", "128", "DeepGemmType::GroupedContiguous"),
 ("512", "128", "64", "DeepGemmType::GroupedContiguous"),
+("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
+("4096", "7168", "128", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "128", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "128", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "32", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "32", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "32", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "16", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "16", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "16", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "8", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "8", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "8", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "4", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "4", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "4", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
 ]
 template_header = """
 #include "src/fastertransformer/deep_gemm/deep_gemm_template.h"

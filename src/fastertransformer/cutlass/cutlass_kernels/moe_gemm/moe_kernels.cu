@@ -1134,6 +1134,8 @@ __global__ void genSourceRowKernel(
     if (idx < token_num * top_k) {
         if (expert_rows[idx] >= start_expert && expert_rows[idx] < end_expert) {
             expert_rows[idx] = expert_rows[idx] - start_expert;
+        } else if (expert_rows[idx] < 0) {
+            expert_rows[idx] = num_experts;
         } else {
             expert_rows[idx] = expert_rows[idx] + num_experts;
         }
@@ -1154,6 +1156,30 @@ void genSourceRow(int*         expert_rows,
 
     genSourceRowKernel<<<blocks, threads, 0, stream>>>(
         expert_rows, source_rows, token_num, top_k, num_experts, start_expert, end_expert);
+}
+
+__global__ void genSourceRowKernelRevert(
+    int* expert_rows, int token_num, int top_k, int start_expert) {
+    int const idx       = blockIdx.x * blockDim.x + threadIdx.x;
+    int const token_idx = idx / top_k;
+    int const k_idx     = idx % top_k;
+    if (idx < token_num * top_k) {
+        if (expert_rows[idx] > 0) {
+            expert_rows[idx] = expert_rows[idx] + start_expert;
+        }
+    }
+}
+
+void genSourceRowRevert(int*         expert_rows,
+                        int          token_num,
+                        int          top_k,
+                        int          start_expert,
+                        cudaStream_t stream) {
+    int const threads = 256;
+    int const blocks  = token_num * top_k / 256 + 1;
+
+    genSourceRowKernelRevert<<<blocks, threads, 0, stream>>>(
+        expert_rows, token_num, top_k, start_expert);
 }
 
 void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int* permuted_experts, int* permuted_rows,

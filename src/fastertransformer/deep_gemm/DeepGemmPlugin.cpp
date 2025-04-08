@@ -286,6 +286,13 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedContiguous)
 
+    DISPATCH_DEEP_GEMM(4096, 7168, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedMasked)
+
     // EP 8
     DISPATCH_DEEP_GEMM(4096, 7168, 32, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 32, DeepGemmType::GroupedContiguous)
@@ -310,6 +317,32 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedContiguous)
+
+    // masked
+    // EP 8
+    DISPATCH_DEEP_GEMM(4096, 7168, 32, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 32, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 32, DeepGemmType::GroupedMasked)
+
+    // EP 16
+    DISPATCH_DEEP_GEMM(4096, 7168, 16, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 16, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 16, DeepGemmType::GroupedMasked)
+
+    // EP 32
+    DISPATCH_DEEP_GEMM(4096, 7168, 8, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 8, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 8, DeepGemmType::GroupedMasked)
+
+    // EP 64
+    DISPATCH_DEEP_GEMM(4096, 7168, 4, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 4, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 4, DeepGemmType::GroupedMasked)
+
+    // EP 128
+    DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedMasked)
 
     DISPATCH_DEEP_GEMM(2816, 2048, 64, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(2048, 1408, 64, DeepGemmType::GroupedContiguous)
@@ -411,7 +444,7 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
     size_t m, n, k;
     m = lhs.shape()[1]; k = lhs.shape()[2]; n = rhs.shape()[1];
     int num_groups = rhs.shape()[0];
-    FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%d) % 64 or k(%d) % 128 != 0", n, k);
+    FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
     
     auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
@@ -434,7 +467,7 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
                 num_groups,
                 num_stages,
                 num_tma_multicast,
-                DeepGemmType::Normal,
+                DeepGemmType::GroupedMasked,
                 stream,
                 num_sms,
                 smem_size);

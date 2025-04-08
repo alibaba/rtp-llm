@@ -233,6 +233,7 @@ public:
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
     FfnLayerOutput deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    FfnLayerOutput deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& gate_outputs);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);

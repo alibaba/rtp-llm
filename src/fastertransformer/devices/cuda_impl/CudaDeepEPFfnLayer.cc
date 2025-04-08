@@ -119,11 +119,12 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
                                                     false /*async_finish*/,
                                                     false /*allocate_on_comm_stream*/);
 
-    BufferPtr recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_x, torch::kHalf);
+    BufferPtr recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_x, torch::kBFloat16);
     BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
     BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
     cudaDeviceSynchronize();
-
+    const size_t num_experts_per_node = expert_num / moe_conf.ep_size;
+    tensorrt_llm::kernels::genSourceRowRevert(recv_topk_idx_buffer->data<int>(), recv_topk_idx_buffer->shape()[0], recv_topk_idx_buffer->shape()[1], num_experts_per_node * moe_conf.ep_rank, stream_);
     MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer, all_token_indices};
     out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
     return out;
@@ -162,7 +163,7 @@ FfnLayerOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
         all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.input->type())));
     }
 
-    printBufferData(*all_output, "all_output", nullptr, true);
+    printBufferData(*all_output, "all_output");
     return gatherCombineOutput(all_output, params);
 }
 
@@ -172,12 +173,10 @@ FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const
     MoeDispatchOutput dispatched_output =
         deepEpDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
     BufferPtr hidden_states = dispatched_output.hidden;
-    if (hidden_states->shape()[0]) {
-        auto moe_ffn_params = FfnLayerParams(
+    auto moe_ffn_params = FfnLayerParams(
             {*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme});
-        hidden_states =
-            moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
-    }
+    hidden_states =
+        moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
     FfnLayerOutput out = deepEpCombine({hidden_states,
                                         dispatched_output.indices,
                                         // nullptr,

@@ -230,7 +230,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
         vector<size_t> new_shape = all_output->shape();
         new_shape[0]             = params.origin_token_num;
         BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
-        if (output->shape()[0] > 0 && params.origin_token_num > 0) {
+        if (scatter_output == nullptr && output->shape()[0] > 0 && params.origin_token_num > 0) {
             cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
                                              invokeScatterAdd,
@@ -329,7 +329,9 @@ void CudaDevice::prepareMoEGate(const FfnLayerParams& params, BufferPtr gate) {
 
 FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
-
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        return moeFfnFp8(params, gate_outputs);
+    }
     const auto& moe_conf = params.configs.moe_configs.value();
     const auto& hidden   = params.input;
     const auto& weights  = params.weights;

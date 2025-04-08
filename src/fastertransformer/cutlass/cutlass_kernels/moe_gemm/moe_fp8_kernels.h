@@ -43,4 +43,17 @@ void doActivationContiguous(__nv_fp8_e4m3*        output_fp8,
                             int const*            permuted_experts,
                             cudaStream_t          stream);
 
+template<class GemmOutputType, class ScaleBiasType>
+void doActivationMasked(__nv_fp8_e4m3*        output_fp8,
+                        float*                fp8_scale,
+                        GemmOutputType const* gemm_result,
+                        ScaleBiasType const*  bias,
+                        bool                  bias_is_broadcast,
+                        int                   expert_num,
+                        int                   token_num,
+                        int64_t               inter_size,
+                        ActivationType        activation_type,
+                        int const*            masked_m,
+                        cudaStream_t          stream);
+
 }  // namespace fastertransformer

@@ -270,6 +270,98 @@ __global__ void doActivationContiguousKernel(__nv_fp8_e4m3* output_fp8,
     }
 }
 
+template <class GemmOutputType, class ScaleBiasType, template <class> class ActFn>
+__global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
+                                         float *output_fp8_scale,
+                                         GemmOutputType const* gemm_result,
+                                         ScaleBiasType const* bias_ptr,
+                                         bool bias_is_broadcast,
+                                         int token_num,
+                                         int64_t inter_size,
+                                         bool gated,
+                                         int const* masked_m)
+{
+    int64_t const tid = threadIdx.x;
+    int const token = blockIdx.x;
+    int const token_idx = blockIdx.x % token_num;
+    int const expert = blockIdx.x / token_num;
+    if (token_idx >= masked_m[expert])
+    {
+        return;
+    }
+
+    size_t gated_size_mul = gated ? 2 : 1;
+    size_t gated_off = gated ? inter_size : 0;
+
+    gemm_result = gemm_result + token * inter_size * gated_size_mul;
+    output_fp8 = output_fp8 + token * inter_size; // Aliases gemm_result for non-gated, non-fp8 cases
+    output_fp8_scale = output_fp8_scale + token * inter_size / 128;
+    // int64_t expert = source_k_rank;
+    // if (bias_ptr)
+    // {
+    //     // TODO this is almost certainly faster as a linear scan
+    //     expert = findTotalEltsLessThanTarget(expert_first_token_offset, num_experts, (int64_t) token + 1) - 1;
+    // }
+
+    if (bias_ptr)
+    {
+        size_t bias_offset
+            = (bias_is_broadcast ? expert * inter_size * gated_size_mul : token * inter_size * gated_size_mul);
+        bias_ptr = bias_ptr + bias_offset;
+    }
+
+    // Load 128-bits per thread, according to the smallest data type we read/write
+    // constexpr int64_t ACTIVATION_ELEM_PER_THREAD
+    //     = 128 / std::min(cutlass::sizeof_bits<T>::value, cutlass::sizeof_bits<GemmOutputType>::value);
+    constexpr int64_t ACTIVATION_ELEM_PER_THREAD = 4;
+
+    using BiasElem = cutlass::Array<ScaleBiasType, ACTIVATION_ELEM_PER_THREAD>;
+    using GemmResultElem = cutlass::Array<GemmOutputType, ACTIVATION_ELEM_PER_THREAD>;
+    using OutputElem = cutlass::Array<__nv_fp8_e4m3, ACTIVATION_ELEM_PER_THREAD>;
+    using ComputeElem = cutlass::Array<float, ACTIVATION_ELEM_PER_THREAD>;
+    auto gemm_result_vec = reinterpret_cast<GemmResultElem const*>(gemm_result);
+    auto output_vec = reinterpret_cast<OutputElem*>(output_fp8);
+    auto bias_ptr_vec = reinterpret_cast<BiasElem const*>(bias_ptr);
+    int64_t const start_offset = tid;
+    int64_t const stride = ACTIVATION_THREADS_PER_BLOCK;
+    assert(inter_size % ACTIVATION_ELEM_PER_THREAD == 0);
+    int64_t const num_elems_in_col = inter_size / ACTIVATION_ELEM_PER_THREAD;
+    assert(gated_off % ACTIVATION_ELEM_PER_THREAD == 0);
+    int64_t const gated_off_vec = gated_off / ACTIVATION_ELEM_PER_THREAD;
+
+    ActFn<ComputeElem> fn{};
+    for (int64_t elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride)
+    {
+        auto fc1_value = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
+        if (bias_ptr)
+        {
+            fc1_value = fc1_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
+        }
+
+        auto gate_act = fn(fc1_value);
+
+        if (gated)
+        {
+            auto gate_mul = arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
+            if (bias_ptr_vec)
+            {
+                gate_mul = gate_mul + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
+            }
+            gate_act = gate_act * gate_mul;
+        }
+        // plus<Array<T, N>> op;
+        cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;
+        float scale = max_abs_op((float)1e-4, gate_act);
+        scale = warpReduceMax<float>(scale);
+        scale = scale / FP8_E4M3_MAX;
+        gate_act = gate_act * (1 / scale);
+        output_vec[elem_index] = arrayConvert<ComputeElem, OutputElem>(gate_act);
+        if (tid % 32 == 0) {
+            output_fp8_scale[elem_index / 32] = scale;
+        }
+    }
+}
+
 template<class GemmOutputType, class ScaleBiasType>
 void doActivationContiguous(__nv_fp8_e4m3*        output_fp8,
                             float*                fp8_scale,
@@ -317,4 +409,53 @@ template void doActivationContiguous<__nv_bfloat16, __nv_bfloat16>(__nv_fp8_e4m3
                                                                    ActivationType       activation_type,
                                                                    int const*           permuted_experts,
                                                                    cudaStream_t         stream);
+
+template<class GemmOutputType, class ScaleBiasType>
+void doActivationMasked(__nv_fp8_e4m3*        output_fp8,
+                        float*                fp8_scale,
+                        GemmOutputType const* gemm_result,
+                        ScaleBiasType const*  bias,
+                        bool                  bias_is_broadcast,
+                        int                   expert_num,
+                        int                   token_num,
+                        int64_t               inter_size,
+                        ActivationType        activation_type,
+                        int const*            masked_m,
+                        cudaStream_t          stream) {
+    int64_t const blocks  = expert_num * token_num;
+    int64_t const threads = ACTIVATION_THREADS_PER_BLOCK;
+    FT_CHECK(inter_size % 128 == 0);
+
+    auto fn_list = std::array{
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,  // Gelu
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::ReLu>,  // Relu
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,  // Silu
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::SiLu>,  // Swiglu
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::GELU>,  // Geglu
+        &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::Identity>  // Identity
+    };
+    auto fn = fn_list[static_cast<int>(activation_type)];
+    fn<<<blocks, threads, 0, stream>>>(output_fp8,
+                                       fp8_scale,
+                                       gemm_result,
+                                       bias,
+                                       bias_is_broadcast,
+                                       token_num,
+                                       inter_size,
+                                       isGatedActivation(activation_type),
+                                       masked_m);
+}
+
+template void doActivationMasked<__nv_bfloat16, __nv_bfloat16>(__nv_fp8_e4m3*       output_fp8,
+                                                               float*               fp8_scale,
+                                                               __nv_bfloat16 const* gemm_result,
+                                                               __nv_bfloat16 const* bias,
+                                                               bool                 bias_is_broadcast,
+                                                               int                  expert_num,
+                                                               int                  token_num,
+                                                               int64_t              inter_size,
+                                                               ActivationType       activation_type,
+                                                               int const*           masked_m,
+                                                               cudaStream_t         stream);
+
 }  // namespace fastertransformer
