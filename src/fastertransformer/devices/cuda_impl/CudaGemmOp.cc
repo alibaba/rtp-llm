@@ -370,8 +370,14 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
         auto dshape = arguments.Dshape;
         dshape[0] = (dshape[0] + 127) / 128 * 128;
-        output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
-        InvokeDeepGemm(params, arguments, output);
+        auto padded_output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
+        InvokeDeepGemm(params, arguments, padded_output);
+        if (params.D) {
+            copy({*params.D, *padded_output});
+            output = params.D;
+        } else {
+            output = padded_output;
+        }
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
         InvokeWeightOnlyGemm(params, arguments, output);
     } else { 

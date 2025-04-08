@@ -87,18 +87,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                    QScheme::NoQuantize,
                                    true}));
     pre_mla_wrapper.stop();
-    auto      qscheme       = params.qscheme;
     auto      dtype         = input.type();
-    BufferPtr attention_out = nullptr;
-    if (qscheme == QScheme::Qfp8PerTensor) {
-        auto scales   = params.weights.static_quant_weight->kernel;
-        attention_out = BufferPtr(new QBuffer(
-            allocateBuffer({DataType::TYPE_FP8_E4M3, {h_token_num, params.configs.hidden_size}}, {"attn_output"}),
-            BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
-            BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
-    } else {
-        attention_out = allocateBuffer({dtype, {h_token_num, params.configs.hidden_size}}, {"attn_output"});
-    }
     auto qkv_output = allocateBuffer({dtype, {h_token_num, params.configs.head_num * params.configs.v_head_dim}}, {"qkv_output"});
     if (generate_batch_size) {
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
@@ -136,8 +125,8 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                              params.qscheme});
     }
     printBufferData(*qkv_output, "attent_proj_input");
-    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel), nullopt, attention_out);
-    loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input));
+    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel));
+    auto attention_out = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     printBufferData(*attention_out, "attention_out");
     return {std::move(attention_out)};
 }
