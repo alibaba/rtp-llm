@@ -74,33 +74,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         topk_idx_tensor     = Buffer2torchTensor(expert_ids, false).toType(torch::kInt64);  //[num_tokens, top_k]
         topk_weights_tensor = Buffer2torchTensor(expert_scales, false);                     //[num_tokens, top_k]
     }
-
-    // call dispatch and force sync, maybe sync is not necessary
-    auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
-        topk_idx_tensor, expert_num, nullptr /*previous_event*/, false /*async*/, false /*allocate_on_comm_stream*/);
-    cudaDeviceSynchronize();
-
-    // compute all_token_indices for future compute. stores token_idx to each rank
-    // TODO: maybe use torch::nonzero will faster?
-    BufferPtr all_token_indices;
-    {
-        BufferPtr        is_token_in_rank_buffer = torchTensor2Buffer(dispatch_layout_output.is_token_in_rank);
-        std::vector<int> all_token_indices_vec;
-        assert(is_token_in_rank_buffer->shape().size() == 2);
-        auto token_num = is_token_in_rank_buffer->shape()[0];
-        auto rank_num  = is_token_in_rank_buffer->shape()[1];
-        for (int rank = 0; rank < rank_num; ++rank) {
-            for (int token_id = 0; token_id < token_num; ++token_id) {
-                if (is_token_in_rank_buffer->dataWithOffset<bool>(token_id * rank_num + rank)) {
-                    all_token_indices_vec.push_back(token_id);
-                }
-            }
-        }
-
-        all_token_indices = clone({*vector2Buffer(all_token_indices_vec), AllocationType::DEVICE});
-    }
-
-    deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
     RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16, "moe configs not set");
     BufferPtr quantized_hidden;
     torch::Tensor x;
@@ -114,6 +87,14 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     } else {
         x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
     }
+
+    // call dispatch and force sync, maybe sync is not necessary
+    auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
+        topk_idx_tensor, expert_num, nullptr /*previous_event*/, false /*async*/, false /*allocate_on_comm_stream*/);
+    // cudaDeviceSynchronize();
+
+    deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
+
     auto dispatch_output = deepep_buffer_->dispatch(x,
                                                     x_scales /*x_scales*/,
                                                     std::nullopt /*handle*/,
@@ -131,7 +112,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
 
     BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
     BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
     const size_t num_experts_per_node = expert_num / moe_conf.ep_size;
     tensorrt_llm::kernels::genSourceRowRevert(recv_topk_idx_buffer->data<int>(), recv_topk_idx_buffer->shape()[0], recv_topk_idx_buffer->shape()[1], num_experts_per_node * moe_conf.ep_rank, stream_);
     BufferPtr recv_x_buffer;
@@ -145,7 +126,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     } else  {
         recv_x_buffer = torchTensor2Buffer(dispatch_output.recv_x);
     }
-    MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer, all_token_indices};
+    MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer, nullptr};
     out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
     return out;
 }
@@ -175,16 +156,15 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   false /*async_finish*/,
                                                   false /*allocate_on_comm_stream*/);
     // wait combine kernel done, no need, will sync wait on next stream op
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
     BufferPtr all_output;
     if (params.output != nullptr) {
         all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.output->type())));
     } else {
         all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.input->type())));
     }
-
     printBufferData(*all_output, "all_output");
-    return MoeCombineOutput({all_output, nullptr, params});
+    return MoeCombineOutput({all_output, all_output, params});
 }
 
 FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
