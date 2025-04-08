@@ -152,14 +152,15 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
         MoeDispatchOutput dispatched_output =
             epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
         return moeFfnAndCombine(params, dispatched_output);
-    } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        BufferPtr hidden_fp8 =
-                quantize({params.input, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-        auto moe_ffn_params = FfnLayerParams(
-                {*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
-        return moeFfnFp8(moe_ffn_params, gate_output);
     } else {
-        return moeFfn(params, gate_output);
+        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            BufferPtr hidden_fp8 = quantize({params.input, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+            auto      moe_ffn_params =
+                FfnLayerParams({*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
+            return moeFfnFp8(moe_ffn_params, gate_output);
+        } else {
+            return moeFfn(params, gate_output);
+        }
     }
 }
 
