@@ -94,6 +94,10 @@ struct DeviceProperties {
 
     bool enable_comm_overlap = true;
     bool enable_layer_micro_batch = false;
+
+    bool use_deepep_moe = false;
+    bool use_deepep_internode = false;
+    bool use_deepep_low_latency = false;
 };
 
 struct MemoryStatus {

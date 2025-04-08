@@ -42,7 +42,7 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
     );
     // cudaDeviceSynchronize();
 
-    BufferPtr packed_recv_x_buffer = torchTensor2BufferWithDstType(dispatch_output.packed_recv_x, torch::kHalf);
+    BufferPtr packed_recv_x_buffer = torchTensor2Buffer(dispatch_output.packed_recv_x);
 
     // TODO: deep_ep_output might should be removed from output objects.
     MoeDispatchOutput out{packed_recv_x_buffer, expert_ids, expert_scales};
@@ -69,7 +69,7 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
     }
     FT_CHECK(params.deep_ep_ll_output != nullptr);
 
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
 
     auto& expert_ids    = params.expert_ids;
     auto& expert_scales = params.expert_scales;
@@ -89,8 +89,18 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
     // cudaDeviceSynchronize();
 
     BufferPtr all_output;
-    auto output_type = params.output ? params.output->type() : params.input->type();
+    const auto output_type = params.output ? params.output->type() : params.input->type();
+    const auto combined_type = torchDTypeToDataType(combine_output.combined_x.dtype());
+
+    RUNTIME_ASSERT_OP_ARG(!(params.overlapped && (combined_type != output_type)),
+        "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
+
     all_output = torchTensor2BufferWithDstType(combine_output.combined_x, dataTypeToTorchType(output_type));
+
+    if (params.overlapped) {
+        RUNTIME_ASSERT_OP_ARG(combine_output.hook.has_value(), "recv hook is null when overlapped");
+        RUNTIME_ASSERT_OP_ARG(combined_type == output_type, "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
+    }
 
     return MoeCombineOutput({all_output, all_output, params});
 }
@@ -100,12 +110,12 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
     MoeDispatchOutput dispatched_output =
         deepEpLLDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
 
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
 
     auto moe_ffn_params =
         FfnLayerParams(*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme);
     auto out_hidden_states = deepEpFfnFp8(moe_ffn_params, dispatched_output).hidden_states;
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize();
 
     // combine with local token expert_ids and expert_scales
     MoeCombineParams combine_params{out_hidden_states, nullptr, params.output, {}, {}, moe_conf, params.input.shape()[0],  init_params_.enable_comm_overlap, nullptr, dispatched_output.deep_ep_ll_output, dispatched_output.expert_ids, dispatched_output.expert_scales};

@@ -306,6 +306,9 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->ffn_tp_size = init_params_.ffn_tp_size;
         prop->ffn_tp_rank = init_params_.ffn_tp_rank;
         prop->m_split = init_params_.m_split;
+        prop->use_deepep_moe = init_params_.use_deepep_moe;
+        prop->use_deepep_internode = init_params_.use_deepep_internode;
+        prop->use_deepep_low_latency = init_params_.use_deepep_low_latency;
     }
     return *prop;
 }
