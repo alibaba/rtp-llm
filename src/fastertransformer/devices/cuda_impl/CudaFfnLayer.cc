@@ -241,22 +241,26 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             return {output, createCommHook()};
         }
     } else {
-        vector<size_t> new_shape = all_output->shape();
-        new_shape[0]             = params.origin_token_num;
-        BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
-        if (scatter_output == nullptr && output->shape()[0] > 0 && params.origin_token_num > 0) {
-            cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
-                                             invokeScatterAdd,
-                                             all_output->data(),
-                                             all_output->shape()[0],
-                                             all_output->shape()[1],
-                                             params.indices->data<int32_t>(),
-                                             output->data(),
-                                             this->use_stable_scatter_add,
-                                             stream);
+        if (scatter_output == nullptr) {
+            vector<size_t> new_shape = all_output->shape();
+            new_shape[0]             = params.origin_token_num;
+            BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
+            if (output->shape()[0] > 0 && params.origin_token_num > 0) {
+                cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
+                                                 invokeScatterAdd,
+                                                 all_output->data(),
+                                                 all_output->shape()[0],
+                                                 all_output->shape()[1],
+                                                 params.indices->data<int32_t>(),
+                                                 output->data(),
+                                                 this->use_stable_scatter_add,
+                                                 stream);
+            }
+            return {output, createCommHook()};
+        } else {
+            return {all_output, createCommHook()};
         }
-        return {output, createCommHook()};
     }
 }
 

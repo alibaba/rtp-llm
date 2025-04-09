@@ -1164,7 +1164,7 @@ __global__ void genSourceRowKernelRevert(
     int const token_idx = idx / top_k;
     int const k_idx     = idx % top_k;
     if (idx < token_num * top_k) {
-        if (expert_rows[idx] > 0) {
+        if (expert_rows[idx] >= 0) {
             expert_rows[idx] = expert_rows[idx] + start_expert;
         }
     }
