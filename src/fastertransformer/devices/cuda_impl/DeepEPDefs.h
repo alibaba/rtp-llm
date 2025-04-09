@@ -258,13 +258,16 @@ public:
     : hook_(hook)
     , hold_buffers_(hold_buffers)
     , hold_tensors_(hold_tensors)
+    , synchronized_(false)
     {};
 
     ~DeepEPRecvHook() override {};
 
     void hook_sync() const override {
+        FT_CHECK(!synchronized_);
         if (hook_) {
             hook_();
+            synchronized_ = true;
         }
     }
 
@@ -272,6 +275,7 @@ private:
     std::function<void()> hook_;
     std::vector<BufferPtr> hold_buffers_;
     std::vector<torch::Tensor> hold_tensors_;
+    mutable bool synchronized_;
 };
 
 }  // namespace fastertransformer

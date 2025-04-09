@@ -179,11 +179,11 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
     const auto& params = combine_outputs.params;
 
     // TODO(wangyin.yx): remove these overlap held buffers.
-    if (params.overlapped) {
-        overlap_hold_buffers_.emplace_back(all_output);
-        overlap_hold_buffers_.emplace_back(params.input);
-        overlap_hold_buffers_.emplace_back(params.indices);
-    }
+    // if (params.overlapped) {
+        // overlap_hold_buffers_.emplace_back(all_output);
+        // overlap_hold_buffers_.emplace_back(params.input);
+        // overlap_hold_buffers_.emplace_back(params.indices);
+    // }
     torch::Tensor indices_tensor;
     cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
 
@@ -199,9 +199,9 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
                 {all_output->type(),
                  {current_token_num,
                   dim1_size}});
-            if (params.overlapped) {
-                overlap_hold_buffers_.emplace_back(scatter_output);
-            }
+            // if (params.overlapped) {
+            //     overlap_hold_buffers_.emplace_back(scatter_output);
+            // }
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
@@ -223,9 +223,9 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
         } else {
             padding_output =
                 allocateBuffer({all_output->type(), {tp_token_size * params.moe_configs.tp_size, dim1_size}});
-            if (params.overlapped) {
-                overlap_hold_buffers_.emplace_back(padding_output);
-            }
+            // if (params.overlapped) {
+            //     overlap_hold_buffers_.emplace_back(padding_output);
+            // }
         }
         if (scatter_output->shape()[0] > 0) {
             copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
@@ -310,12 +310,12 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     return {expert_for_source_row, expert_scales};
 }
 
-void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params, 
+void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                        BufferPtr gate,
                                        BufferPtr expert_scales,
                                        BufferPtr expert_for_source_row,
                                        int normalization_mode) {
-    FT_CHECK_WITH_INFO(normalization_mode == 0 || normalization_mode == 1, 
+    FT_CHECK_WITH_INFO(normalization_mode == 0 || normalization_mode == 1,
                        "Unsupported normalization_mode");
 
     const auto& moe_conf   = params.configs.moe_configs.value();

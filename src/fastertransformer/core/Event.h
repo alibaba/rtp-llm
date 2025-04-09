@@ -23,7 +23,7 @@ struct DeviceHook {
     virtual void hook_sync() const = 0;
 };
 
-using DeviceHookPtr = std::unique_ptr<DeviceHook>;
+using DeviceHookPtr = std::shared_ptr<DeviceHook>;
 
 } // namespace fastertransformer
 

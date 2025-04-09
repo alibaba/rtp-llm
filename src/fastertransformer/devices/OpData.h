@@ -122,7 +122,7 @@ struct SliceParams {
     const Buffer& input;
     int64_t dim;
     int64_t start;
-    int64_t end;    
+    int64_t end;
     int64_t step = 1;
 };
 
@@ -204,7 +204,7 @@ struct LayernormWithStrideParams {
     NormType norm_type;
     size_t offset;
     // do normalize for each group in norm_group
-    size_t norm_group_size;    
+    size_t norm_group_size;
     QScheme qscheme = QScheme::NoQuantize;
     bool in_place = true;
 };
@@ -256,7 +256,7 @@ struct LayernormParams {
     const bool return_normed_output;
     const bool is_inplace;
     const QScheme qscheme;
-    
+
     bool attn_swap_comm_buffer = false;
     bool ffn_swap_comm_buffer = false;
 };
@@ -566,9 +566,37 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
+struct DeepEPDispatchOutput;
+struct DeepEPDispatchOutputLowLatency;
+struct MoeGateSelectOutput;
+
+struct MoeCombineParams {
+    BufferPtr           input;
+    BufferPtr           indices;
+    BufferPtr           output;
+    std::vector<size_t> input_split_sizes;
+    std::vector<size_t> output_split_sizes;
+    MoeConfigs          moe_configs;
+    size_t                    origin_token_num;
+    bool                      overlapped = false;
+    std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
+    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
+    std::shared_ptr<MoeGateSelectOutput> select_output;
+    BufferPtr expert_ids;
+    BufferPtr expert_scales;
+};
+
+struct MoeCombineOutput {
+    BufferPtr all_output;
+    BufferPtr scatter_output;
+    MoeCombineParams params;
+    DeviceHookPtr comm_barrier_hook;
+};
+
 struct FfnLayerOutput {
     BufferPtr hidden_states;
     DeviceHookPtr comm_barrier_hook;
+    std::optional<MoeCombineOutput> moe_combine_output;
 };
 
 struct FfnLayerParams {
@@ -599,9 +627,6 @@ struct MoeGateSelectOutput {
     BufferPtr expert_ids;
     BufferPtr expert_scales;
 };
-
-struct DeepEPDispatchOutput;
-struct DeepEPDispatchOutputLowLatency;
 
 struct MoeDispatchOutput {
     BufferPtr                    hidden;
@@ -634,27 +659,6 @@ struct MoeDispatchParams {
     const MoeConfigs& moe_configs;
     bool              overlapped = false;
     const QScheme     qscheme;
-};
-
-struct MoeCombineParams {
-    BufferPtr           input;
-    BufferPtr           indices;
-    BufferPtr           output;
-    std::vector<size_t> input_split_sizes;
-    std::vector<size_t> output_split_sizes;
-    MoeConfigs          moe_configs;
-    size_t                    origin_token_num;
-    bool                      overlapped = false;
-    std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
-    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
-    BufferPtr expert_ids;
-    BufferPtr expert_scales;
-};
-
-struct MoeCombineOutput {
-    BufferPtr all_output;
-    BufferPtr scatter_output;
-    MoeCombineParams params;
 };
 
 struct GreedyParams {

@@ -14,10 +14,18 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     BufferPtr output;
     if (params.weights.moe_gating_weight) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
-        output = moeFfnLayer(params).hidden_states;
+        auto moe_output = moeFfnLayer(params);
+        output = moe_output.hidden_states;
 
         auto shared_expert_output = moeSharedExpert(params).hidden_states;
         overlappedCommBarrier();
+
+        // for deep ep ll, the gather should be defered afater shared expert.
+        if (moe_output.moe_combine_output) {
+            moe_output.comm_barrier_hook->hook_sync();
+            moe_output = gatherCombineOutput(moe_output.moe_combine_output.value());
+            output = moe_output.hidden_states;
+        }
 
         printBufferData(*output, "moe_out_after_barrier");
         if (shared_expert_output) {
