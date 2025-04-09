@@ -216,7 +216,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
     const int tokens_per_block = attn_configs.tokens_per_block;
 
     if (!cuda_device ||
-        (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16) ||
+        (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16 && dtype != DataType::TYPE_FP8_E4M3) ||
         attn_configs.kv_cache_dtype != KvCacheDataType::BASE ||
         (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)  ||
         attn_configs.mask_type != causalMask ||
