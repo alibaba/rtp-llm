@@ -17,7 +17,7 @@ void printBuffer1d(const std::string&  hint,
                         size_t              max_print_lines,
                         int log_level) {
     size_t dim1 = dims[0];
-    FT_LOG(log_level, "Buffer %s: shape [%d]", hint.c_str(), dim1);
+    FT_LOG(log_level, "Buffer %s: shape [%d], type: %s", hint.c_str(), dim1, tensor.options().dtype().name().data());
     std::stringstream ss;
     ss << "Buffer " << hint << " : ";
     auto   print_func = [&](size_t column_start, size_t column_end) {
@@ -48,7 +48,7 @@ void printBuffer2d(const std::string&  hint,
                         bool show_stats_only) {
     size_t dim1 = dims[0];
     size_t dim2 = dims[1];
-    FT_LOG(log_level, "Buffer %s: shape [%d %d]", hint.c_str(), dim1, dim2);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d], type: %s", hint.c_str(), dim1, dim2, tensor.options().dtype().name().data());
     size_t line_num = 0;
     for (int i = 0; i < dim1; i++) {
         std::stringstream ss;
@@ -90,7 +90,7 @@ void printBuffer3d(const std::string&  hint,
     size_t dim2     = dims[1];
     size_t dim3     = dims[2];
     size_t line_num = 0;
-    FT_LOG(log_level, "Buffer %s: shape [%d %d %d]", hint.c_str(), dim1, dim2, dim3);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d], type: %s", hint.c_str(), dim1, dim2, dim3, tensor.options().dtype().name().data());
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             std::stringstream ss;
@@ -133,7 +133,7 @@ void printBuffer4d(const std::string&  hint,
     size_t dim3     = dims[2];
     size_t dim4     = dims[3];
     size_t line_num = 0;
-    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d], type: %s", hint.c_str(), dim1, dim2, dim3, dim4, tensor.options().dtype().name().data());
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {
@@ -177,7 +177,7 @@ void printBuffer5d(const std::string&  hint,
     size_t dim4     = dims[3];
     size_t dim5     = dims[4];
     size_t line_num = 0;
-    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d], type: %s", hint.c_str(), dim1, dim2, dim3, dim4, dim5, tensor.options().dtype().name().data());
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {
@@ -224,7 +224,7 @@ void printBuffer6d(const std::string&  hint,
     size_t dim5     = dims[4];
     size_t dim6     = dims[5];
     size_t line_num = 0;
-    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d %d]", hint.c_str(), dim1, dim2, dim3, dim4, dim5, dim6);
+    FT_LOG(log_level, "Buffer %s: shape [%d %d %d %d %d %d], type: %s", hint.c_str(), dim1, dim2, dim3, dim4, dim5, dim6, tensor.options().dtype().name().data());
     for (int i = 0; i < dim1; i++) {
         for (int j = 0; j < dim2; j++) {
             for (int k = 0; k < dim3; k++) {

@@ -335,6 +335,8 @@ protected:
     bool use_fp8_fmha_              = false;
     bool use_flashinfer_sample_kernel  = false;
 
+    bool use_stable_scatter_add = false;
+
     uint32_t ll_num_max_token_per_rank = 0;
 };
 

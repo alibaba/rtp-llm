@@ -172,7 +172,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
-                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
+                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);                
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),
@@ -180,6 +180,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
                                                  all_output->shape()[1],
                                                  params.indices->data<int32_t>(),
                                                  scatter_output->data(),
+                                                 this->use_stable_scatter_add,
                                                  stream);
             }
         }
@@ -219,6 +220,7 @@ CudaDevice::gatherCombineOutput(BufferPtr& all_output, const MoeCombineParams& p
                                              all_output->shape()[1],
                                              params.indices->data<int32_t>(),
                                              output->data(),
+                                             this->use_stable_scatter_add,
                                              stream);
         }
         return {output, createCommHook()};

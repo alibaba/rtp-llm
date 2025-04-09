@@ -1583,6 +1583,67 @@ void invokeGetCuSeqLens(int* cu_seqlens,
 }
 
 template<typename T, int ELEM_PER_THREAD>
+__global__ void scatter_add_stable_kernel(T const* src, int N, int K, int32_t const* index, T* out) {
+    // 在输出位置上并行,每个线程负责一个输出位置的累加
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    out_idx *= ELEM_PER_THREAD;
+    
+    // 计算当前输出元素对应的维度
+    const int k = out_idx % K;
+    const int out_n = out_idx / K;
+    
+    if(out_n >= N) return;
+    
+    // 对每个输入位置检查,如果它们映射到当前输出位置则累加
+    #pragma unroll
+    for(int i = 0; i < ELEM_PER_THREAD; i++) {
+        if(out_idx + i < (size_t)N * K) {
+            T sum = out[out_idx + i];
+            // 遍历所有输入,找到映射到当前输出位置的元素
+            for(int in_n = 0; in_n < N; in_n++) {
+                if(index[in_n] == out_n) {
+                    sum = sum + src[in_n * K + k + i];
+                }
+            }
+            out[out_idx + i] = sum;
+        }
+    }
+}
+
+template<typename T>
+void invokeScatterAddStable(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream) {
+    const int num_threads = 256;
+    const int elem_per_thread = 4;
+    const dim3 block(num_threads);
+    FT_CHECK(K % (elem_per_thread * 2) == 0);
+    
+    auto h_index = std::shared_ptr<int32_t[]>(new int32_t[N], std::default_delete<int32_t[]>());
+    
+    cudaMemcpy(h_index.get(), index, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    
+    int32_t max_out_n = h_index[0];
+    for(int i = 1; i < N; i++) {
+        max_out_n = max(max_out_n, h_index[i]);
+    }
+    max_out_n++;
+
+    if constexpr (std::is_same<T, float>::value) {
+        const dim3 grid(((size_t)max_out_n * K + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
+        scatter_add_stable_kernel<float, elem_per_thread><<<grid, block, 0, stream>>>(src, N, K, index, out);
+    } else if (K % 2 == 0) {
+#if USING_ROCM
+        using Tp = typename rocm::packed_type_2<T>::type;
+#else
+        using Tp = typename packed_type_2<T>::type;
+#endif
+        const dim3 grid(((size_t)max_out_n * K / 2 + num_threads * elem_per_thread - 1) / (num_threads * elem_per_thread));
+        scatter_add_stable_kernel<Tp, elem_per_thread><<<grid, block, 0, stream>>>((Tp*)src, N, K / 2, index, (Tp*)out);
+    } else {
+        throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
+    }
+}
+
+template<typename T, int ELEM_PER_THREAD>
 __global__ void scatter_add_kernel(T const* src, int N, int K, int32_t const* index, T* out) {
     int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     thread_idx *= ELEM_PER_THREAD;
@@ -1610,7 +1671,12 @@ __global__ void scatter_add_kernel(T const* src, int N, int K, int32_t const* in
 }
 
 template<typename T>
-void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream) {
+void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, bool use_stable_scatter_add, cudaStream_t stream) {
+    FT_CHECK_WITH_INFO(N > 0 && K > 0, "N and K must be greater than 0");
+    if (use_stable_scatter_add) {
+        invokeScatterAddStable(src, N, K, index, out, stream);
+        return;
+    }
     const int  num_threads     = 256;
     const int  elem_per_thread = 4;
     const dim3 block(num_threads);
@@ -1634,7 +1700,7 @@ void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, 
 }
 
 #define INSTANTIATE_INVOKE_SCATTER_ADD(T)                                                                              \
-    template void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, cudaStream_t stream)
+    template void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, bool use_stable_scatter_add, cudaStream_t stream)
 
 INSTANTIATE_INVOKE_SCATTER_ADD(half);
 INSTANTIATE_INVOKE_SCATTER_ADD(float);

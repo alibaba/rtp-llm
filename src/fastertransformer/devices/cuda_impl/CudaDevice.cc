@@ -153,6 +153,12 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     } else {
         mla_ops_type = device_prop_.major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
     }
+
+    auto stable_scatter_add_env = std::getenv("ENABLE_STABLE_SCATTER_ADD");
+    if (stable_scatter_add_env && std::string(stable_scatter_add_env) == "ON") {
+        use_stable_scatter_add = true;
+    }
+    FT_LOG_INFO("use_stable_scatter_add: %d", use_stable_scatter_add);
 }
 
 CudaDevice::~CudaDevice() {
