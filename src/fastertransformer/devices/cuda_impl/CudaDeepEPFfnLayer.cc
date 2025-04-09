@@ -148,7 +148,7 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     auto  combine_config  = deepep_buffer_->getCombineConfig();
     auto& dispatch_output = params.deep_ep_output;
 
-    auto      combine_output = deepep_buffer_->combine(input_tensor,
+    auto combine_output = deepep_buffer_->combine(input_tensor,
                                                   dispatch_output->handle.value(),
                                                   dispatch_output->recv_topk_weights,
                                                   combine_config,
@@ -159,9 +159,9 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     // cudaDeviceSynchronize();
     BufferPtr all_output;
     if (params.output != nullptr) {
-        all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.output->type())));
+        all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(params.output->type()));
     } else {
-        all_output = torchTensor2Buffer(combine_output.recv_x.toType(dataTypeToTorchType(params.input->type())));
+        all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(params.input->type()));
     }
     printBufferData(*all_output, "all_output");
     return MoeCombineOutput({all_output, all_output, params});
