@@ -85,7 +85,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.max_seq_len       = params.max_seq_len_;
     FT_LOG_INFO("set overlap type to be %d", device_params.overlap_comm_type);
     device_params.m_split = autil::EnvUtil::getEnv("M_SPLIT", 0UL);
-
+    device_params.max_generate_batch_size = params.max_generate_batch_size_;
     device_params.max_batch_size =
         std::max((size_t)autil::EnvUtil::getEnv("MAX_BATCH_SIZE", 0L), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 

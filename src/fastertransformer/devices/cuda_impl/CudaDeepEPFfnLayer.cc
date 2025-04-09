@@ -20,7 +20,7 @@ bool CudaDevice::initDeepEPBuffer() {
     size_t world_size = nccl_param.world_size_;
 
     // TODO: check if get right
-    ll_num_max_token_per_rank = ((init_params_.max_seq_len + init_params_.tp_size - 1) / init_params_.tp_size) + 1;
+    ll_num_max_token_per_rank = (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
     int64_t num_rdma_bytes = 0;
     if(init_params_.use_deepep_low_latency) { // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
