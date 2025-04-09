@@ -93,8 +93,10 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
     std::shared_ptr<GenerateStream> score_stream = std::make_shared<NormalGenerateStream>(
         generate_input, score_model_params_.gpt_init_parameter, resource_context_, nullptr);
     std::shared_ptr<GenerateStream> propose_stream = nullptr;
-    if (mode == preRunMode::warm_up) {
+    if (mode == preRunMode::prefill_warm_up) {
         score_stream->setPerfTest(true);
+    } else if (mode == preRunMode::decode_warm_up) {
+        score_stream->setIsContextStream(false);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUSOR_ERROR(score_stream->initKVBlock(0, 0));
     };
@@ -121,12 +123,12 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
             warm_up_result);
         auto scorer_cache_config        = std::get<0>(config);
         auto proposer_cache_config      = std::get<1>(config);
-        resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, metrics_reporter_);
+        resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_);
         resource_context_.propose_cache_manager =
-            make_shared<CacheManager>(proposer_cache_config, device_, metrics_reporter_);
+            make_shared<CacheManager>(proposer_cache_config, device_, false, metrics_reporter_);
     } else {
         const auto& config = CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter, warm_up_result);
-        resource_context_.cache_manager = make_shared<CacheManager>(config, device_, metrics_reporter_);
+        resource_context_.cache_manager = make_shared<CacheManager>(config, device_, false, metrics_reporter_);
     }
     return absl::OkStatus();
 }
@@ -148,7 +150,7 @@ WarmUpResult SpeculativeEngine::warmUp() {
     if (propose_model_params_->gpt_model()) {
         propose_executor_.reset(new VanillaExecutor(propose_model_params_, device_, nullptr, nullptr, true));
     }
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
+    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
     (void)score_executor_.reset(nullptr);

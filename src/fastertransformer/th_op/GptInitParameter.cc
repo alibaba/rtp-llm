@@ -137,6 +137,19 @@ RopeConfig GptInitParameter::getRopeConfig() const {
     return rope_config;
 }
 
+// is not pd-sep
+bool GptInitParameter::isPDFusion() const {
+    return !pd_separation_ && !use_cache_store_;
+}
+// is prefill in p-d sep
+bool GptInitParameter::isPrefillRole() const {
+    return pd_separation_ && use_cache_store_;
+}
+// is decode in p-d sep
+bool GptInitParameter::isDecodeRole() const {
+    return !pd_separation_ && use_cache_store_;
+}
+
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)

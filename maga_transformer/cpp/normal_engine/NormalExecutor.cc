@@ -25,6 +25,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
+    // CacheManager::KVCacheBuffer kv_cache_buffer;
+    // CacheConfig cache_config;
+    // if (warmup) {
+    //     kv_cache_buffer.k_blocks = 
+    // } else {
+    //     kv_cache_buffer = cache_manager->kvCacheBuffer();
+    //     cache_config = cache_manager->cacheConfig();
+    // }
+
     model_.reset(new GptModel({
         device_,
         params.gpt_weights,

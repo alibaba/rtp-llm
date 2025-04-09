@@ -13,6 +13,7 @@
 #include "autil/TimeUtility.h"
 #include <memory>
 #include <thread>
+#include <random>
 
 using namespace std;
 namespace rtp_llm {
@@ -64,16 +65,27 @@ NormalEngine::~NormalEngine() {
 }
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(
-    const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
-    if (mode == preRunMode::warm_up) {
-        stream->setPerfTest(true);
-    } else if (mode == preRunMode::build_system_prompt) {
-        THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
-    };
-    std::list<GenerateStreamPtr> streams{stream};
-    THROW_IF_STATUS_ERROR(executor_->process(streams));
-    return stream;
+        const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
+    try {
+        auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
+        if (mode == preRunMode::prefill_warm_up) {
+            stream->setPerfTest(true);
+        } else if (mode == preRunMode::decode_warm_up) {
+            stream->setIsContextStream(false);
+            stream->fakeInitKVBlock();
+        } else if (mode == preRunMode::build_system_prompt) {
+            THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
+        };
+        std::list<GenerateStreamPtr> streams{stream};
+        THROW_IF_STATUS_ERROR(executor_->process(streams));
+        return stream;
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("pre run failed in pre run mode [%s] : %s", preRunModeToString(mode).c_str(), e.what());
+        throw;
+    } catch (...) {
+        FT_LOG_ERROR("catch unknown exception when in pre run mode : [%s]", preRunModeToString(mode).c_str());
+        throw;
+    }
 }
 
 int64_t NormalEngine::getLastScheduleTime() {
@@ -81,31 +93,69 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
-    try {
-        std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-        fake_input->input_ids = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
-        std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
-        fake_input->generate_config               = make_shared<GenerateConfig>();
-        fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
-        fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
-        fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        device_->setTraceMemory(true);
-        executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
-        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
-        const auto device_status = device_->getDeviceStatus();
-        device_->setTraceMemory(false);
-        (void)executor_.reset(nullptr);
-        return WarmUpResult({
+    if (params_.isPDFusion() || params_.isPrefillRole()) {
+        return prefillWarmUp(params);
+    } else {
+        return decodeWarmUp(params);
+    }
+}
+
+WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+    
+    std::default_random_engine generator;
+    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
+    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
+        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
+    }
+
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
+    fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    device_->setTraceMemory(true);
+    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+    const auto device_status = device_->getDeviceStatus();
+    device_->setTraceMemory(false);
+    (void)executor_.reset(nullptr);
+    return WarmUpResult({
+        device_status.device_memory_status.preserved_bytes,
+        device_status.device_memory_status.max_consumed_bytes});
+}
+
+WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+
+    std::default_random_engine generator;
+    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
+    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
+        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
+    }
+
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    // TODO(xinfei.sxf) max_generate_batch_size?
+    fake_input->generate_config->num_return_sequences = 1;
+    fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    device_->setTraceMemory(true);
+
+    auto cache_config = CacheConfigCreator::createBasicConfig(params_);
+    cache_config.seq_size_per_block = params_.seq_size_per_block_;
+    cache_config.block_nums = 5;
+    auto cache_manager = make_shared<CacheManager>(cache_config, device_, true);
+    executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
+    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    const auto device_status = device_->getDeviceStatus();
+    device_->setTraceMemory(false);
+    (void)executor_.reset(nullptr);
+    return WarmUpResult({
         device_status.device_memory_status.preserved_bytes,
             device_status.device_memory_status.max_consumed_bytes});
-    } catch (const std::exception& e) {
-        FT_LOG_ERROR("warm up failed: %s", e.what());
-        throw;
-    } catch (...) {
-        FT_LOG_ERROR("catch unknown exception when warm up");
-        throw;
-    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
@@ -113,7 +163,13 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer(
                                                 {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
-    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
+    
+    std::default_random_engine generator;
+    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
+    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
+        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
+    }
+
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->generate_config->top_k = 1;
@@ -140,7 +196,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
     FT_LOG_INFO("create cache manager with block nums %d, block size %ld MiB",
                 result.block_nums, result.block_size / 1024 / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, metrics_reporter_);
+    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_);
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -242,7 +298,6 @@ absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status;
-
     if (params_.world_size_ > 1) {
         status = executor_->process(streams);
     } else {

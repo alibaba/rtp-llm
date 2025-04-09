@@ -233,7 +233,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
             decoder_batch_size,
             (bool)k_cache_buffer_,
             attention_inputs.max_prefix_length > 0,
-            (bool)weights_.linear_bias_slopes,
+            (bool)weights_.linear_bias_slopes
         });
     if (inputs.cache_keys) {
         vector<int64_t> cache_keys_vec = ft::buffer2vector<int64_t>(*inputs.cache_keys);

@@ -14,9 +14,23 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 
 enum preRunMode {
-    warm_up = 0,
-    build_system_prompt = 1
+    prefill_warm_up = 0,
+    decode_warm_up = 1,
+    build_system_prompt = 2
 };
+
+inline std::string preRunModeToString(preRunMode mode) {
+    switch (mode) {
+        case prefill_warm_up:
+            return "prefill_warm_up";
+        case decode_warm_up:
+            return "decode_warm_up";
+        case build_system_prompt:
+            return "build_system_prompt";
+        default:
+            return "unknown pre run mode";
+    }
+}
 
 class EngineBase {
 public:

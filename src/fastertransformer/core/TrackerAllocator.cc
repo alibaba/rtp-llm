@@ -23,8 +23,8 @@ TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params)
                            real_reserve_size, real_allocator_->memoryType(), e.what());
         }
         if (reserved_ptr) {
-            FT_LOG_INFO("TrackerAllocator successfully reserved %lu bytes (%lu MiB) of memory [%d]",
-                        real_reserve_size, real_reserve_size / 1024L / 1024L, real_allocator_->memoryType());
+            FT_LOG_INFO("TrackerAllocator successfully reserved %lu bytes (%lu MiB) of memory [%d], reserved base addr [%p]",
+                        real_reserve_size, real_reserve_size / 1024L / 1024L, real_allocator_->memoryType(), reserved_ptr);
             memory_tracker_.reset(new MemoryTracker(reserved_ptr, real_reserve_size, params.align_size));
             break;
         }

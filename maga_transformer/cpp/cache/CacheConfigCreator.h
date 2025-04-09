@@ -11,6 +11,7 @@ namespace rtp_llm {
 
 class CacheConfigCreator {
 public:
+    static CacheConfig createBasicConfig(const ft::GptInitParameter& param);
     static CacheConfig createConfig(
         const ft::GptInitParameter& param,
         const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
@@ -20,7 +21,6 @@ public:
         const std::optional<WarmUpResult>& warm_up_result);
 
 private:
-    static CacheConfig createBasicConfig(const ft::GptInitParameter& param);
     static size_t getDefaultRuntimeMemorySize(const ft::GptInitParameter& param);
     static size_t getKVCacheMemorySize(const ft::GptInitParameter& param,
                                        const std::optional<WarmUpResult>& warm_up_result = std::nullopt);

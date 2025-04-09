@@ -34,6 +34,7 @@ public:
         k_block_size_(cache_config.k_block_stride),
         v_block_size_(cache_config.v_block_stride),
         scale_block_size_(cache_config.kv_scale_block_stride),
+        seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     virtual absl::Status                   dispatch(const StreamGroups& stream_groups,
@@ -63,6 +64,7 @@ protected:
     size_t           k_block_size_;
     size_t           v_block_size_;
     size_t           scale_block_size_;
+    size_t           seq_size_per_block_;
     bool             warm_up_;
     ft::DeviceBase*  device_;
 };

@@ -113,7 +113,4 @@ TEST_F(LoraNormalEngineTest, testSimple) {
     EXPECT_NE(engine.getLoraManager(), nullptr);
 }
 
-
-
-
 }  // namespace rtp_llm

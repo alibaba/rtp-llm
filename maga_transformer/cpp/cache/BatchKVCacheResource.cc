@@ -18,7 +18,15 @@ void BatchKVCacheResource::resize(size_t batch_size) {
     batch_block_id.resize(batch_size);
 }
 
-void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks) {
+void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, bool clear) {
+    FT_CHECK(batch_block_id.size() > batch_id);
+    batch_block_id[batch_id].resize(reserver_blocks);
+    if (clear) {
+        batch_block_id[batch_id].assign(batch_block_id[batch_id].size(), 0);
+    }
+}
+
+void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {
     FT_CHECK(batch_block_id.size() > batch_id && batch_block_id[batch_id].size() >= size_t(reserver_blocks));
     batch_block_id[batch_id].resize(reserver_blocks);
 }

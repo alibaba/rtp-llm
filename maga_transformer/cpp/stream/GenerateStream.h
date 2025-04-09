@@ -53,6 +53,7 @@ public:
 
     // Only used in C++ world.
     int reuseBlockSize() const;
+    void fakeInitKVBlock();
     virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual int tryReleaseKVBlock(int nums);

@@ -130,7 +130,11 @@ absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reser
     return stream_cache_resource_.initKVBlock(token_capacity, reserve_step);
 }
 
-absl::StatusOr<int>GenerateStream::incrKVBlock(int token_capacity, size_t reserve_step) {
+void GenerateStream::fakeInitKVBlock() {
+    stream_cache_resource_.fakeInitKVBlock();
+}
+
+absl::StatusOr<int> GenerateStream::incrKVBlock(int token_capacity, size_t reserve_step) {
     return stream_cache_resource_.incrKVBlock(token_capacity, reserve_step);
 }
 

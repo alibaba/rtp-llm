@@ -24,18 +24,24 @@ namespace rtp_llm {
 
 CacheManager::CacheManager(const CacheConfig&                 config,
                            ft::DeviceBase*                    device,
+                           bool                               warmup,
                            const kmonitor::MetricsReporterPtr metrics_reporter):
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
     device_(device),
     metrics_reporter_(metrics_reporter) {
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
-    allocateAndSync();
-    FT_LOG_INFO("block nums is %d after tp sync", config_.block_nums);
-    initFreeBlock();
-    initKvCache();
-    if (metrics_reporter_) {
-        metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
+
+    if (warmup) {
+        initFakeKVCache();
+    } else {
+        allocateAndSync();
+        FT_LOG_INFO("block nums is %d after tp sync", config_.block_nums);
+        initFreeBlock();
+        initKvCache();
+        if (metrics_reporter_) {
+            metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
+        }
     }
 }
 
@@ -63,6 +69,8 @@ void CacheManager::regUserMr() {
             cost_time_ms, (int8_t*)cache_base_ptr_ + config_.k_total_size, config_.v_total_size,
             (int8_t*)cache_base_ptr_ + config_.total_size);
         
+        // TODO(xinfei.sxf) reg kv cache scale
+
         mr_cost_time_ms_ += cost_time_ms;
 
         kvcache_reg_mr_ = true;
@@ -159,13 +167,48 @@ void CacheManager::allocateAndSync() {
     cache_base_ptr_ = cache_aligned_buffer_->data();
 }
 
+void CacheManager::initFakeKVCache() {
+    auto k_block_size = getKBlockSize();
+    auto v_block_size = getVBlockSize();
+    cache_aligned_buffer_ = device_->allocateBuffer({ft::DataType::TYPE_INT8, {k_block_size + v_block_size}});
+    cache_base_ptr_ = cache_aligned_buffer_->data();
+    initKvCache();
+}
+
+size_t CacheManager::getKBlockSize() const {
+    if (config_.use_mla) {
+        return getTypeSize(config_.dtype) * (size_t)config_.layer_num * (size_t)config_.block_nums
+            * (size_t)config_.seq_size_per_block * (size_t)config_.kv_lora_rank;
+    } else {
+        return getTypeSize(config_.dtype) * (size_t)config_.layer_num *  (size_t)config_.block_nums
+            * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block * (size_t)config_.size_per_head;
+    }
+}
+
+size_t CacheManager::getVBlockSize() const {
+    if (config_.use_mla) {
+        return config_.dtype * (size_t)config_.layer_num * (size_t)config_.block_nums                                                 
+            * (size_t)config_.seq_size_per_block * (size_t)config_.rope_head_dim;
+    } else {
+        return getTypeSize(config_.dtype) * (size_t)config_.layer_num *  (size_t)config_.block_nums
+        * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block * (size_t)config_.size_per_head;
+    }
+}
+
 void CacheManager::initKvCache() {
     if (config_.use_mla) {
         initKvCacheMla();
     } else {
         initKvCacheNormal();
     }
-        if (config_.dtype == ft::DataType::TYPE_INT8) {
+
+    initKVCacheScale();
+
+    regUserMr();
+}
+
+void CacheManager::initKVCacheScale() {
+    if (config_.dtype == ft::DataType::TYPE_INT8) {
         kv_cache_.k_scale =
             std::make_unique<ft::Buffer>(ft::MemoryType::MEMORY_GPU,
                                          ft::DataType::TYPE_FP32,
@@ -183,6 +226,7 @@ void CacheManager::initKvCache() {
                                                          (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2
                                                              + kv_cache_.k_scale->sizeBytes());
     }
+
 #ifdef ENABLE_FP8
     else if (config_.dtype == ft::DataType::TYPE_FP8_E4M3) {
         kv_cache_.k_scale = std::make_unique<ft::Buffer>(
@@ -203,8 +247,6 @@ void CacheManager::initKvCache() {
                 (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
     }
 #endif
-    regUserMr();
-
 }
 
 void CacheManager::initKvCacheMla() {

@@ -98,6 +98,7 @@ public:
 
 public:
     CacheManager(const CacheConfig& config, ft::DeviceBase* device,
+                 bool warmup = false,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
     ~CacheManager();
 
@@ -138,9 +139,13 @@ protected:
     void                                    initFreeBlock();
     ft::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndSync();
+    void                                    initFakeKVCache();
     void                                    initKvCache();
     void                                    initKvCacheNormal();
     void                                    initKvCacheMla();
+    void                                    initKVCacheScale();
+    size_t                                  getKBlockSize() const;
+    size_t                                  getVBlockSize() const;
     MatchInfo                               matchImpl(const AdvancedMallocInfo& malloc_info);
     void                                    deregUserMr();
     std::tuple<bool, std::vector<int>>      mallocIndex(const SimpleMallocInfo& malloc_info);

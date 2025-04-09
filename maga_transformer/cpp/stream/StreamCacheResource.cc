@@ -57,7 +57,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         release_blocks_num = blocks.size() - reserved_blocks;
         vector<int> release_blocks(blocks.begin() + reserved_blocks, blocks.end());
         freeBatchBlocks(batch_id, release_blocks);
-        batch_resource_.resize(batch_id, reserved_blocks);
+        batch_resource_.shrink(batch_id, reserved_blocks);
     }
     stream_->setFallbackPrefixLength(reserved_blocks * seqSizePerBlock());
     if (stream_->enable_fast_gen_) {
@@ -261,6 +261,11 @@ bool StreamCacheResource::hasCacheKeys() const {
 const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     FT_CHECK_WITH_INFO(batch_resource_.cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
     return batch_resource_.cache_keys[batch_id];
+}
+
+void StreamCacheResource::fakeInitKVBlock() {
+    batch_resource_.resize(1);
+    batch_resource_.resize(0, stream_->seqLength(), true);
 }
 
 }  // namespace rtp_llm

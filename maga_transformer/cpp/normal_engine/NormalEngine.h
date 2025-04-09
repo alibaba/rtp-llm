@@ -44,6 +44,8 @@ private:
     void         initScheduler();
     std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens);
     WarmUpResult warmUp(const EngineInitParams& params);
+    WarmUpResult prefillWarmUp(const EngineInitParams& params);
+    WarmUpResult decodeWarmUp(const EngineInitParams& params);
     void         initLoadBalance();
     absl::Status trySaveStepError() const;
     void         loop();

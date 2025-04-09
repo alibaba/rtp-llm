@@ -12,7 +12,8 @@ public:
     int                         batchSize() const;
     int                         blockSize(int batch_id) const;
     void                        resize(size_t batch_size);
-    void                        resize(size_t batch_id, int reserver_blocks);
+    void                        resize(size_t batch_id, int reserver_blocks, bool clear = false);
+    void                        shrink(size_t batch_id, int reserver_blocks);
     void                        pushBack(const KVCacheResource& addr);
     void                        append(size_t batch_id, const KVCacheResource& addr);
     void                        appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager);

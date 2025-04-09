@@ -70,6 +70,7 @@ struct GptModelInputs {
     size_t                                    k_block_size;
     size_t                                    v_block_size;
     size_t                                    scale_block_size;
+    size_t                                    seq_size_per_block;
     bool                                      pd_separation = false;
 
     bool                                      need_all_logits = false;

@@ -254,6 +254,13 @@ public:
     bool isGatedActivation() const;
     RopeConfig getRopeConfig() const;
     bool isKvCacheQuant() const;
+
+    // is not pd-sep
+    bool isPDFusion() const;
+    // is prefill in p-d sep
+    bool isPrefillRole() const;
+    // is decode in p-d sep
+    bool isDecodeRole() const;
 };
 
 }

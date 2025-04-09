@@ -12,7 +12,7 @@ struct KVCacheParam {
     uint         block_nums;
     uint         local_head_num_kv;
     uint         size_per_head;
-    uint         seq_size_per_block;
+    uint         seq_size_per_block = 1;
     ft::DataType dtype;
 };
 
@@ -21,7 +21,7 @@ struct MlaCacheParam {
     uint         block_nums;
     uint         kv_lora_rank;
     uint         rope_head_dim;
-    uint         seq_size_per_block;
+    uint         seq_size_per_block = 1;
     ft::DataType dtype;
 };
 
@@ -30,7 +30,7 @@ struct CacheConfig {
     uint32_t     block_nums             = 0;
     uint32_t     local_head_num_kv      = 0;
     uint32_t     size_per_head          = 0;
-    uint32_t     seq_size_per_block     = 0;
+    uint32_t     seq_size_per_block     = 1;
     ft::DataType dtype                  = ft::TYPE_INVALID;
 
     size_t       block_size             = 0;
