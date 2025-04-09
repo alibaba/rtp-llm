@@ -595,7 +595,7 @@ cutlass_extensions::CutlassGemmConfig MoeGemmRunner<T, WeightType, QuantOp, Outp
     static constexpr int workspace_bytes = 0; // No workspace for MoE GEMMs.
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
-    auto candidate_configs = getConfigs();
+    auto candidate_configs = getAmpereConfigs(sm_);
     if (sm_ == 90 && supportsHopperSpecialisation() && total_rows / num_experts > 32) {
         CutlassGemmConfig config(
                 CutlassTileConfigSM90::CtaShape128x128x128B, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, ClusterShape::ClusterShape_1x1x1);
