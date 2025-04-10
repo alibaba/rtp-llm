@@ -241,20 +241,22 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
             std::move(hidden_fp8_scales),
             std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     } else {
-        BufferPtr hidden       = torchTensor2Buffer(deep_ep_ll_output->packed_recv_x);
-        hidden_shape           = hidden->shape();
-        quantize_hidden_holder = quantize({hidden->reshape({hidden_shape[0] * hidden_shape[1], hidden_shape[2]}),
-                                           DataType::TYPE_QFP8_E4M3,
-                                           1,
-                                           params.qscheme});
-        auto hidden_fp8        = std::dynamic_pointer_cast<QBuffer>(quantize_hidden_holder)->kernelPtr();
-        auto hidden_fp8_scales = std::dynamic_pointer_cast<QBuffer>(quantize_hidden_holder)->scalesPtr();
-        hidden_fp8->updateShape(hidden_shape);
-        hidden_fp8_scales->updateShape({hidden_shape[0], hidden_shape[1], hidden_shape[2] / 128});
-        quantize_hidden.reset(new QBuffer(
-            std::move(hidden_fp8),
-            std::move(hidden_fp8_scales),
-            std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
+        RUNTIME_ASSERT_OP_ARG(false, "not support deepepffn bf16 input now");
+        // BufferPtr hidden       = torchTensor2Buffer(deep_ep_ll_output->packed_recv_x);
+        // hidden_shape           = hidden->shape();
+        // // quantize should be 3 dims, not support now
+        // quantize_hidden_holder = quantize({hidden->reshape({hidden_shape[0] * hidden_shape[1], hidden_shape[2]}),
+        //                                    DataType::TYPE_QFP8_E4M3,
+        //                                    1,
+        //                                    params.qscheme});
+        // auto hidden_fp8        = std::dynamic_pointer_cast<QBuffer>(quantize_hidden_holder)->kernelPtr();
+        // auto hidden_fp8_scales = std::dynamic_pointer_cast<QBuffer>(quantize_hidden_holder)->scalesPtr();
+        // hidden_fp8->updateShape(hidden_shape);
+        // hidden_fp8_scales->updateShape({hidden_shape[0], hidden_shape[1], hidden_shape[2] / 128});
+        // quantize_hidden.reset(new QBuffer(
+        //     std::move(hidden_fp8),
+        //     std::move(hidden_fp8_scales),
+        //     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     }
     const auto token_num   = hidden_shape[1];
     const auto hidden_size = hidden_shape[2];
