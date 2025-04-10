@@ -710,7 +710,7 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
                                                                 bool                 async_finish,
                                                                 bool                 return_recv_hook) {
     // only several hidden shapes are supported 2560 / 5120 / 7168(r1)
-    FT_CHECK(x.scalar_type() == torch::kBFloat16 && x.size(0) < num_max_dispatch_tokens_per_rank);
+    FT_CHECK(x.scalar_type() == torch::kBFloat16 && x.size(0) <= num_max_dispatch_tokens_per_rank);
 
     // only several top-k shapes are supported
     FT_CHECK(topk_idx.scalar_type() == torch::kLong);
