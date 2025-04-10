@@ -242,6 +242,8 @@ protected:
     ft::BufferPtr              v_scale_buffer_;
     ft::BufferPtr              residual_scale_fp32_;
     ft::BufferPtr              residual_scale_;
+
+    ft::DeviceHookPtr          last_comm_hook_;
 };
 
 }  // namespace rtp_llm
