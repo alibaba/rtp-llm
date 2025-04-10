@@ -446,15 +446,14 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
     int num_groups = rhs.shape()[0];
     FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
     
-    auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
 
     int bm, bn, num_stages, num_tma_multicast, smem_size;
     tie(bm, bn, num_stages, num_tma_multicast, smem_size) = getBestConfig(expected_m, n, k, num_groups, num_sms);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(), 
-                (float*)lhs_scales.data_ptr(),
+                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
+                reinterpret_cast<const QBuffer&>(lhs).scales().data<float>(),
                 reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
                 reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
                 masked_m.data<int>(), // grouped_layout
