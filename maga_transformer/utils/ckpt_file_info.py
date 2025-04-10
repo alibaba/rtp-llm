@@ -143,6 +143,20 @@ class CkptFileInfo:
             self.metadata = meta
         else:
             self.metadata = torch.load(file, pickle_module=meta_pickler)
+    
+    def get_tensor_type(self, tensor_name: str) -> torch.dtype:
+        file: str = self.file_name
+        if self.is_safetensor():
+            with safe_open(file, framework="pt") as f:
+                if tensor_name not in f.keys():
+                    raise KeyError(f"Tensor '{tensor_name}' not found in the file")
+                tensor = f.get_tensor(tensor_name)
+                return tensor.dtype
+        else:
+            data = torch.load(file, map_location="meta")
+            if tensor_name not in data:
+                raise KeyError(f"Tensor '{tensor_name}' not found in the file")
+            return data[tensor_name].dtype
 
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
         path: str = self.file_name

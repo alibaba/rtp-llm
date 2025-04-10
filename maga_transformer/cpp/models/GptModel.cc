@@ -417,14 +417,20 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     if (device_props_.overlap_comm_type == 2) {
         const auto& layer0 = weights_.layers[0];
-        FT_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken, "ring p2p overlap only supports bf16/fp16 or w8a8");
+        FT_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken || description_.act_qscheme == Qfp8PerTensor,
+                "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
         const size_t max_batch_seq_len = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1) * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];
         const size_t ffn_ag_hidden = layer0.ffn_weights.gate_weight->kernel->shape()[0];
         DataType rs_output_type = dtype;
-        DataType ag_input_type = description_.act_qscheme == QScheme::NoQuantize ? dtype : DataType::TYPE_QINT8;
+        DataType ag_input_type = dtype ;
+        if (description_.act_qscheme == QScheme::Qint8PerTensor) {
+            ag_input_type = DataType::TYPE_QINT8;
+        } else if (description_.act_qscheme == QScheme::Qfp8PerTensor) {
+            ag_input_type = DataType::TYPE_QFP8_E4M3;
+        }
         bool enable_per_token_scale = description_.act_qscheme == QScheme::Qint8PerToken;
         bool enable_ffn_tp = enable_sp && device_props_.ffn_tp_size > 1;
         device_->prepareCommBuffer({max_batch_seq_len, attn_rs_hidden, ffn_rs_hidden, attn_ag_hidden, ffn_ag_hidden, rs_output_type, ag_input_type, enable_per_token_scale, enable_ffn_tp});
@@ -650,6 +656,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     if (layer.pre_layernorm) {
         cloned_hidden = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
         residual = cloned_hidden;
+        int m_split = device_props_.m_split;
+        size_t overlap_comm_type = device_props_.overlap_comm_type;
         auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
                                                                         nullptr,
                                                                         *layer.pre_layernorm,
@@ -658,15 +666,14 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         std::nullopt,
                                                                         0.f,
                                                                         description_.layernorm_eps,
-                                                                        false,
+                                                                        (enable_sp && overlap_comm_type == 2) ? false : true,
                                                                         false,
                                                                         description_.norm_type,
                                                                         description_.act_qscheme,
                                                                         layer_id > 0 ? true: false,
                                                                         false));
            
-        int m_split = device_props_.m_split;
-        size_t overlap_comm_type = device_props_.overlap_comm_type;
+
         if (enable_sp && layer_id == 0) {
             if (overlap_comm_type == 1 && m_split > 0) {
                 vector<int> selected_indices;

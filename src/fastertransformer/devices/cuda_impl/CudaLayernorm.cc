@@ -150,7 +150,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             }
         // when QScheme::Qint8PerTensor, the scale is from ckpt
         } else if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qfp8PerTensor){
-	  FT_LOG_DEBUG("QScheme::Qint8PerTensor");
+	        FT_LOG_DEBUG("QScheme::Qint8PerTensor");
             FT_CHECK_WITH_INFO(norm_weight && norm_weight->get().static_scale_reciprocal, "static_scale_reciprocal should not be None");
             scales = BufferPtr(new Buffer(
                 norm_weight->get().static_scale_reciprocal->where(),

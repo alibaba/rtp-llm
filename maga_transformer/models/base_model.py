@@ -268,11 +268,18 @@ class BaseModel(object):
             return
         
         config_json = json.load(open(config_path))
-        quant_config = config_json.get("quantization_config", None)
+        quant_config = None
+        quant_method = None
+        if config_json.get("quantization_config", None):
+            quant_config = config_json["quantization_config"]
+            quant_method = quant_config['quant_method'].lower()
+
+        if config_json.get("quantization", None):
+            quant_config = config_json["quantization"]
+            quant_method = quant_config['quant_algo'].lower()
         if quant_config is None:
             return
         
-        quant_method = quant_config['quant_method'].lower()
         group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
         bits = quant_config['bits'] if 'bits' in quant_config else 0
         if quant_method == 'fp8':

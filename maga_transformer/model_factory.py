@@ -55,8 +55,6 @@ class ModelFactory:
         config.model_name = model_cls.__name__
         if issubclass(model_cls, MultiModalMixin):
             config.is_multimodal = True
-        if model_config.sp_type != "":
-            config.enable_speculative_decoding = True
         
         return model_cls, config
 
@@ -113,6 +111,9 @@ class ModelFactory:
         if model_config.model_type == 'fake_model' or model.config.vit_separation == 1:
             return model
         propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(model.config, propose_model_config)
+        if propose_model:
+            logging.info("set enable_speculative_decoding")
+            model.config.enable_speculative_decoding = True
         model = AsyncModel(model, propose_model)
         if propose_model:
             logging.info("create propose model done")

@@ -282,6 +282,12 @@ inline ncclDataType_t getNcclDataType(DataType type) {
             return ncclInt8;
         case DataType::TYPE_INT8:
             return ncclInt8;
+        case DataType::TYPE_QINT8:
+            return ncclInt8;
+        case DataType::TYPE_FP8_E4M3:
+            return ncclInt8;
+        case DataType::TYPE_QFP8_E4M3:
+            return ncclInt8;
         case DataType::TYPE_INT32:
             return ncclInt32;
         case DataType::TYPE_INT64:

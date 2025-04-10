@@ -62,14 +62,47 @@ TRT_ENGINE_LAYER_WEIGHT_MAP = {
     W.post_ln_beta : 'transformer.layers.{i}.post_layernorm.bias',
 
 }
+
+TRT_ENGINE_LAYER_WEIGHT_MAP2 = {
+    W.pre_ln_beta : 'transformer.layers.{i}.input_layernorm.bias',
+    W.pre_ln_gamma : 'transformer.layers.{i}.input_layernorm.weight',
+    W.attn_qkv_w : 'transformer.layers.{i}.attention.qkv.weight',
+    W.attn_qkv_b : 'transformer.layers.{i}.attention.qkv.bias',
+    W.attn_qkv_s : 'transformer.layers.{i}.attention.qkv.weights_scaling_factor',
+
+    W.attn_o_w : 'transformer.layers.{i}.attention.dense.weight',
+    W.attn_o_b : 'transformer.layers.{i}.attention.dense.bias',
+    W.attn_o_s : 'transformer.layers.{i}.attention.dense.weights_scaling_factor',
+
+    W.ffn_w1 : 'transformer.layers.{i}.mlp.fc.weight',
+    W.ffn_b1 : 'transformer.layers.{i}.mlp.fc.bias',
+    W.ffn_s1 : 'transformer.layers.{i}.mlp.fc.weights_scaling_factor',
+
+    W.ffn_w2 : 'transformer.layers.{i}.mlp.proj.weight',
+    W.ffn_b2 : 'transformer.layers.{i}.mlp.proj.bias',
+    W.ffn_s2 : 'transformer.layers.{i}.mlp.proj.weights_scaling_factor',
+
+    W.ffn_w3 : 'transformer.layers.{i}.mlp.gate.weight',
+    W.ffn_b3 : 'transformer.layers.{i}.mlp.gate.bias',
+    W.ffn_s3 : 'transformer.layers.{i}.mlp.gate.weights_scaling_factor',
+
+    W.post_ln_gamma : 'transformer.layers.{i}.post_layernorm.weight',
+    W.post_ln_beta : 'transformer.layers.{i}.post_layernorm.bias',
+
+}
 def get_layer_per_tensor_fp8_scale_weight_info(weights: List[CkptWeightInfo]) -> List[WeightInfo]:
     return _get_per_tensor_fp8_scale_weight_info(weights)
 
-def get_trt_engine_layer_weight_info(weights: List[CkptWeightInfo]):
+def get_trt_engine_layer_weight_info(weights: List[CkptWeightInfo], contain_w1_w3: bool = False):
     layer_weights = []
-    for weight_info in weights:
-        if weight_info.name in TRT_ENGINE_LAYER_WEIGHT_MAP:
-            layer_weights.append(WeightInfo(weight_info.name, [CkptWeightInfo(TRT_ENGINE_LAYER_WEIGHT_MAP[weight_info.name], identity)], identity))
+    if contain_w1_w3:
+        for weight_info in weights:
+            if weight_info.name in TRT_ENGINE_LAYER_WEIGHT_MAP2:
+                layer_weights.append(WeightInfo(weight_info.name, [CkptWeightInfo(TRT_ENGINE_LAYER_WEIGHT_MAP2[weight_info.name], identity)], identity))
+    else:
+        for weight_info in weights:
+            if weight_info.name in TRT_ENGINE_LAYER_WEIGHT_MAP:
+                layer_weights.append(WeightInfo(weight_info.name, [CkptWeightInfo(TRT_ENGINE_LAYER_WEIGHT_MAP[weight_info.name], identity)], identity))
 
     return layer_weights
 

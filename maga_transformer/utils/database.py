@@ -23,6 +23,10 @@ class BaseDatabase:
 
     def get_tensor_order(self, name: str) -> List[int]:
         raise NotImplementedError
+    
+    def get_tensor_type(self, name: str) -> torch.dtype:
+        raise NotImplementedError
+
 
 class CkptDatabase(BaseDatabase):
 
@@ -130,6 +134,9 @@ class CkptDatabase(BaseDatabase):
                 tensors.append(ckpt_file.load_tensor(name, datatype))
 
         return tensors
+    
+    def get_tensor_type(self, name: str) -> torch.dtype:
+        return self.PretrainFileList[0].get_tensor_type(name)
 
     def get_tensor_order(self, name: str) -> List[int]:
         orders = []

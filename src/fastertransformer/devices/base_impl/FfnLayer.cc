@@ -51,6 +51,17 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                                         DataType::TYPE_INVALID,
                                                         {0},
                                                         nullptr)))));
+                } else if (params.qscheme == Qfp8PerTensor){
+                    ffn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslicePerTensor(0, params.input.shape()[0]);
+                    BufferPtr kernel = allocateBuffer({ffn_input_ptr->type(), {pad_token_num, ffn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
+                    BufferPtr scales = reinterpret_cast<const QBuffer&>(params.input).scalesPtr();
+                    ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                                    std::move(scales),
+                                                    std::move(BufferPtr(
+                                                        new Buffer(MemoryType::MEMORY_GPU,
+                                                        DataType::TYPE_INVALID,
+                                                        {0},
+                                                        nullptr)))));
                 } else {
                     throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
                 }

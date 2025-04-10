@@ -879,6 +879,38 @@ class W:
         return tp_strategy
 
     @staticmethod
+    def gemm_fp8_per_tensor_gpt_style_tp_strategy():
+        gemm_a8_weight_tp_strategy: Dict[str, Any] = {
+            W.attn_qkv_w: sp_head_gemm_a8,
+            W.attn_qkv_s: sp_id,
+            W.attn_o_w: sp_neg1,
+            W.attn_o_s: sp_id,
+            W.attn_o_smoother: sp_id,
+            W.attn_o_shift: sp_id,
+            W.ffn_w1: ffn_sp_0,
+            W.ffn_s1: sp_id,
+            W.ffn_w3: ffn_sp_0,
+            W.ffn_s3: sp_id,
+            W.ffn_w2: ffn_sp_neg1,
+            W.ffn_s2: sp_id,
+            W.pre_ln_static_quant: sp_id,
+            W.pre_ln_static_quant_reciprocal: sp_id,
+            W.attention_output_static_quant: sp_id,
+            W.attention_output_static_quant_reciprocal: sp_id,
+            W.post_ln_static_quant: sp_id,
+            W.post_ln_static_quant_reciprocal: sp_id,
+            W.ffn_intermediate_weight2_static_quant: sp_id,
+            W.ffn_intermediate_weight2_static_quant_reciprocal: sp_id,
+            W.ffn_intermediate_weight3_static_quant: sp_id,
+            W.ffn_intermediate_weight3_static_quant_reciprocal: sp_id,
+            W.post_ffn_ln_static_quant: sp_id,
+            W.post_ffn_ln_static_quant_reciprocal: sp_id
+        }
+        tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+        tp_strategy.update(gemm_a8_weight_tp_strategy)
+        return tp_strategy
+
+    @staticmethod
     def gemm_block_fp8_gpt_style_tp_strategy():
         gemm_block_fp8_weight_tp_strategy: Dict[str, Any] = {
             W.attn_o_w: sp_neg1,
@@ -1261,6 +1293,8 @@ class ModelDeployWeightInfo:
             return W.gemm_int8_gpt_style_tp_strategy()
         elif self._quant_algo.isFp8() and self._quant_algo.isGroupwise():
             return W.gemm_block_fp8_gpt_style_tp_strategy()
+        elif self._quant_algo.isFp8():
+            return W.gemm_fp8_per_tensor_gpt_style_tp_strategy()
         else:
             return W.gpt_style_tp_strategy
 

@@ -83,10 +83,11 @@ ReduceScatterLoraLinearOutput DeviceBase::loraLinearReduceScatter(const LoraLine
                 input_a_chunk = gemm_a.slice(token_idx, micro_batch_tokens);
             } else if (params.qscheme == Qint8PerToken){
                 input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslice(token_idx, micro_batch_tokens);
+            } else if (params.qscheme == Qfp8PerTensor) {
+                input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslicePerTensor(token_idx, micro_batch_tokens);
             } else {
                 FT_FAIL("unsupported qscheme");
             }
-
             auto micro_batch_gemm_params = GemmParams(
                 *input_a_chunk,
                 linear_params.gemm_params.B,
@@ -158,6 +159,8 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
                 BufferPtr mirco_batch_recevie_scale = recevie_scale.slice(token_idx, micro_batch_tokens);
                 allGather({{mirco_batch_recevie_scale}, params.mode, {micro_batch_send_scale}, false, true});
                 input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslice(token_idx, micro_batch_tokens);
+            } else if (params.qscheme == Qfp8PerTensor) {
+                input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslicePerTensor(token_idx, micro_batch_tokens);
             } else {
                 FT_FAIL("unsupported qscheme");
             }
@@ -182,7 +185,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
         return AllGatherLoraLinearOutput({std::move(output), std::move(params.ag_recv_buffer)});
     }
     
-    if (params.qscheme == NoQuantize) {
+    if (params.qscheme == NoQuantize || params.qscheme == Qfp8PerTensor) {
         allGather({{gemm_a.slice(0, gemm_a.shape()[0])}, params.mode, {params.ag_send_buffer}, false});
     } else if (params.qscheme == Qint8PerToken){
         allGather({{gemm_a.slice(0, gemm_a.shape()[0])}, params.mode, {params.ag_send_buffer}, false});

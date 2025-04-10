@@ -94,7 +94,7 @@ struct CudaGemmArguments {
         }
         // fp8 gemm
         if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            DDtype = DataType::TYPE_BF16;
+            DDtype = DataType::TYPE_FP16;
         }
 
         dim =  params.A.dim();

@@ -7,6 +7,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/QBuffer.h"
 #include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/StackTrace.h"
 
 #include <array>
 
@@ -75,6 +76,7 @@ inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
     switch (dtype.toScalarType()) {
         FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
     default:
+        printStackTrace();
         FT_LOG_ERROR("Unsupported data type: [%d]%s", dtype.toScalarType(), dtype.name().data());
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)(dtype.toScalarType())));
     }
@@ -95,6 +97,7 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
     case TYPE_BYTES:
         return torch::kByte;
     default:
+        printStackTrace();
         FT_LOG_ERROR("Unsupported data type: [%d]", data_type);
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)data_type));
     }

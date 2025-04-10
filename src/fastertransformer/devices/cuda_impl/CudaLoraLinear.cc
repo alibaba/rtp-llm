@@ -66,6 +66,8 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
                 input_a_chunk = gemm_a.slice(input_a_chunk_id * m_chunk, m_chunk);
             } else if (params.qscheme == Qint8PerToken){
                 input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslice(input_a_chunk_id * m_chunk, m_chunk);
+            } else if (params.qscheme == Qfp8PerTensor){
+                input_a_chunk = reinterpret_cast<const QBuffer&>(gemm_a).qslicePerTensor(input_a_chunk_id * m_chunk, m_chunk);
             } else {
                 FT_FAIL("unsupported qscheme");
             }
@@ -199,6 +201,16 @@ AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLin
                                                 DataType::TYPE_INVALID,
                                                 {0},
                                                 nullptr)))));
+        } else if (params.qscheme == Qfp8PerTensor) {
+            BufferPtr gemm_a_kernel = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, params.ag_send_buffer->type(), {m, k}, cb->_ubuf));
+            BufferPtr gemm_a_sacle = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_FP32, {1}, reinterpret_cast<const QBuffer&>(linear_params.gemm_params.A).scalesData()));
+            gemm_a = BufferPtr(new QBuffer(std::move(gemm_a_kernel),
+                                            std::move(gemm_a_sacle),
+                                            std::move(BufferPtr(
+                                                new Buffer(MemoryType::MEMORY_GPU,
+                                                DataType::TYPE_INVALID,
+                                                {0},
+                                                nullptr)))));
         } else {
             FT_FAIL("unsupported qscheme");
         }
@@ -213,6 +225,8 @@ AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLin
                 input_a_chunk = gemm_a->slice(send_chunk_id * m_chunk, m_chunk);
             } else if (params.qscheme == Qint8PerToken) {
                 input_a_chunk = reinterpret_cast<const QBuffer*>(gemm_a.get())->qslice(send_chunk_id * m_chunk, m_chunk);
+            } else if (params.qscheme == Qfp8PerTensor) {
+                input_a_chunk = reinterpret_cast<const QBuffer*>(gemm_a.get())->qslicePerTensor(send_chunk_id * m_chunk, m_chunk);
             } else {
                 FT_FAIL("unsupported qscheme");
             }

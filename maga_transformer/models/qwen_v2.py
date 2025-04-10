@@ -3,7 +3,7 @@ import functools
 import json
 from typing import List, Any, Dict
 
-from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo,
+from maga_transformer.utils.model_weight import (W, Fp8WeightStyle, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo,
                                                  CkptWeightInfo, identity, zeros, transpose, transpose_pad,
                                                  merge_qkv_b, merge_qkv_hf)
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -12,6 +12,7 @@ from maga_transformer.models.base_model import BaseModel
 from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
+from maga_transformer.utils.per_tensor_fp8_weight_util import get_layer_per_tensor_fp8_scale_weight_info, get_trt_engine_layer_weight_info
 
 def scale_reshape(ts):
     return ts[0].reshape(-1)
@@ -26,6 +27,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
         # compat for qwen_v2_video
         if self._contains(weight_keys, 'language_model.'):
             self.prefix = 'language_model.'
+        if self._quant_algo.isFp8() and self.prefix + 'transformer.layers.0.attention.dense.weight' in meta_dicts[0]:
+            self.fp8_weight_stype = Fp8WeightStyle.TRT_ENGINE
 
     def _get_weight_info(self):
         return self._get_hf_weight_info()
@@ -111,7 +114,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
         return layer_quant_weights
 
     def _get_hf_weight_info(self):
-        if self._quant_algo.isSmoothQuant():
+        if self._quant_algo.isSmoothQuant() or self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
             weights = [
                 WeightInfo(W.embedding, [CkptWeightInfo('transformer.vocab_embedding.weight', identity)], identity),
                 WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
@@ -130,6 +133,12 @@ class QWenV2Weight(ModelDeployWeightInfo):
         for layer in range(self._num_layers):
             if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
                 w = self._get_hf_quant_weight_info(layer)
+                layer_weights.append(w)
+            elif self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
+                hf_w = self._get_hf_layer_weight_info(layer)
+                w = get_trt_engine_layer_weight_info(hf_w, True)
+                scale_w = get_layer_per_tensor_fp8_scale_weight_info(w)
+                w.extend(scale_w)
                 layer_weights.append(w)
             elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
                 inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size

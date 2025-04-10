@@ -86,6 +86,17 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                                 DataType::TYPE_INVALID,
                                                 {0},
                                                 nullptr)))));
+        } else if (params.qscheme == Qfp8PerTensor){
+            attn_input_ptr = reinterpret_cast<const QBuffer&>(params.input).qslicePerTensor(0, params.input.shape()[0]);
+            BufferPtr kernel = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer_kernel"});
+            BufferPtr scales = reinterpret_cast<const QBuffer&>(params.input).scalesPtr();
+            ag_recv_buffer = BufferPtr(new QBuffer(std::move(kernel),
+                                            std::move(scales),
+                                            std::move(BufferPtr(
+                                                new Buffer(MemoryType::MEMORY_GPU,
+                                                DataType::TYPE_INVALID,
+                                                {0},
+                                                nullptr)))));
         } else {
             throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
         }
@@ -148,12 +159,12 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     BufferPtr gemm_output = nullptr;
     BufferPtr attn_output = nullptr;
     if (params.enable_sp) {
-        gemm_output = allocateBuffer({dtype, {pad_token_num, output_weight->kernel->shape()[1]}},
+        gemm_output = allocateBuffer({qkv->type(), {pad_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
         attn_output = params.output;
     } else {
         gemm_output = params.output ? params.output
-                : allocateBuffer({dtype, {pad_token_num, output_weight->kernel->shape()[1]}},
+                : allocateBuffer({qkv->type(), {pad_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
         attn_output = gemm_output;
     }
