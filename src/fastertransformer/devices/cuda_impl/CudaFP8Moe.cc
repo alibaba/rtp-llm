@@ -260,9 +260,8 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
     const auto hidden_size = hidden_shape[2];
     RUNTIME_ASSERT_OP_ARG(hidden_shape.size() == 3 && hidden_shape[0] == num_experts_per_node,
                           "hidden_shape dims should be 3 and dim 0 should be num_experts_per_node");
-    BufferPtr output = nullptr;
-    output           = allocateBuffer({DataType::TYPE_BF16, {num_experts_per_node, token_num, hidden_size}});
     if (token_num == 0) {
+        BufferPtr output = allocateBuffer({DataType::TYPE_BF16, {num_experts_per_node, token_num, hidden_size}});
         return {output};
     }
 
@@ -312,7 +311,7 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
         *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, token_num, stream_);
 
     sync_check_cuda_error();
-    return {output};
+    return {fc2_result};
 #else
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     return {nullptr};
