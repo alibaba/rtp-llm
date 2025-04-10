@@ -38,6 +38,8 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
                 accepted_len = status.value();
             } else {
                 stream->setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE, "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output");
+                sampler_output.outputs.emplace_back(
+                    propose_step, 0, nullptr, nullptr, nullptr, nullptr, false);
                 continue;
             }
         }

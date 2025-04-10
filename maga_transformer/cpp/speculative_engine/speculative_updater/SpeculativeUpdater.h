@@ -24,6 +24,9 @@ public:
     absl::Status update(std::list<GenerateStreamPtr>& streams, const SpeculativeSamplerOutput& sampler_output) {
         size_t stream_index = 0;
         for (GenerateStreamPtr& stream : streams) {
+            if (stream->stoppedWithoutLock() || stream->finishedWithoutLock()) {
+                return absl::OkStatus();
+            }
             RETURN_IF_STATUS_ERROR(propose_compact_kv_cache(stream, sampler_output.outputs[stream_index]));
             RETURN_IF_STATUS_ERROR(score_compact_kv_cache(stream, sampler_output.outputs[stream_index]));
             RETURN_IF_STATUS_ERROR(save_score_last_state(stream, sampler_output.outputs[stream_index]));
