@@ -453,7 +453,7 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
-                reinterpret_cast<const QBuffer&>(lhs).scales().data<float>(),
+                reinterpret_cast<const QBuffer&>(lhs).scalesData<float>(),
                 reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
                 reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
                 masked_m.data<int>(), // grouped_layout

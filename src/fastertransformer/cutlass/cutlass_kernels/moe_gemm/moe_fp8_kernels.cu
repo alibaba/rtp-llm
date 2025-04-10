@@ -295,7 +295,7 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
 
     gemm_result = gemm_result + token * inter_size * gated_size_mul;
     output_fp8 = output_fp8 + token * inter_size; // Aliases gemm_result for non-gated, non-fp8 cases
-    // output_fp8_scale = output_fp8_scale + token * inter_size / 128;
+    output_fp8_scale = output_fp8_scale + expert * token_num * inter_size / 128;
     // int64_t expert = source_k_rank;
     // if (bias_ptr)
     // {
@@ -358,7 +358,7 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
         output_vec[elem_index] = arrayConvert<ComputeElem, OutputElem>(gate_act);
         if (tid % 32 == 0) {
             const int64_t now_idx = elem_index / 32;
-            output_fp8_scale[now_idx * gridDim.x + token] = scale;
+            output_fp8_scale[now_idx * token_num + token_idx] = scale;
         }
     }
 }
