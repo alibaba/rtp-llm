@@ -521,15 +521,24 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                     ).hidden_states;
                 }
             }
-            auto combine_out = device_->epCombine({hidden_states,
-                                dispatched_output.indices,
-                                ffn_params.output,
-                                dispatched_output.input_split_sizes,
-                                dispatched_output.output_split_sizes,
-                                moe_conf,
-                                ffn_params.input.shape()[0],
-                                device_props_.enable_comm_overlap});
-            auto hook = device_->createCommHook();
+            auto combine_out = device_->epCombine({
+                hidden_states,
+                dispatched_output.indices,
+                ffn_params.output,
+                dispatched_output.input_split_sizes,
+                dispatched_output.output_split_sizes,
+                moe_conf,
+                ffn_params.input.shape()[0],
+                device_props_.enable_comm_overlap,
+                nullptr,
+                dispatched_output.deep_ep_ll_output,
+                std::make_shared<MoeGateSelectOutput>(batch_ep_input.gate_output),
+                dispatched_output.expert_ids,
+                dispatched_output.expert_scales,
+            });
+            auto hook = combine_out.comm_barrier_hook
+                      ? combine_out.comm_barrier_hook
+                      : device_->createCommHook();
             combine_out.params.overlapped = false;
             // auto out = device_->gatherCombineOutput(combine_out);
             // auto output = out.hidden_states;
