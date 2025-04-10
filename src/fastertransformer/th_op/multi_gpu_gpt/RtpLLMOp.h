@@ -27,12 +27,13 @@ public:
                          py::object gang_info,
                          py::object tokenizer,
                          py::object render);
-
     void addLora(const std::string& adapter_name, py::object lora_a_weights, py::object lora_b_weights);
     void removeLora(const std::string& adapter_name);
     bool ready();
     rtp_llm::LoadBalanceInfo getLoadBalanceInfo();
     rtp_llm::EngineScheduleInfo getEngineScheduleInfo();
+    //currently only used in BatchDecodeScheduler
+    void updateSchedulerInfo(const std::string& scheduler_info);
 
 private:
     void _init(int64_t model_rpc_port,

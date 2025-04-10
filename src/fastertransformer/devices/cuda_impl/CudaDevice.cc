@@ -43,6 +43,10 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
 
+    if (std::getenv("HACK_MOE_EXPERT") && std::string(std::getenv("HACK_MOE_EXPERT")) == "1") {
+        hack_moe_expert_ = true;
+    }
+
     if (params.tp_size > 1) {
         auto master_ip = params.master_ip;
         if (params.dp_size > 1) {

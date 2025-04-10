@@ -199,6 +199,11 @@ class BackendApp(object):
         def remove_lora_internal(req: Dict[str, str]):
             self.backend_server.remove_lora(req)
 
+        @app.post("/update_scheduler_info")
+        def update_scheduler_info(req: Union[str, Dict[str, Any]]):
+            self.backend_server.update_scheduler_info(req)
+            return {"status": "ok"}
+
         # update for worker RANK == 0
         @app.post("/update")
         @check_is_master()

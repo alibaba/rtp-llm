@@ -217,3 +217,10 @@ class BackendServer(object):
         self._lora_manager.remove_lora(req['adapter_name'])
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
             self._gang_server.request_workers(req, 'remove_lora_internal', True)
+
+    def update_scheduler_info(self, req: Union[str, Dict[str, str]]):
+        if self.model is None:
+            return
+        if isinstance(req, str):
+            req = json.loads(req)
+        self.model.decoder_engine_.update_scheduler_info(json.dumps(req))

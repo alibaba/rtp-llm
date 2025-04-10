@@ -41,6 +41,7 @@ public:
     }
 
 private:
+    void         initScheduler();
     std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens);
     WarmUpResult warmUp(const EngineInitParams& params);
     void         initLoadBalance();
@@ -53,7 +54,6 @@ private:
     autil::ThreadPtr               loop_thread_;
     std::atomic<bool>              running_{false};
     std::unique_ptr<Executor>      executor_;
-    std::unique_ptr<SchedulerBase> scheduler_;
     const ft::GptInitParameter     params_;
     StepRecorder                   step_recorder_;
     kmonitor::MetricsReporterPtr   metrics_reporter_;

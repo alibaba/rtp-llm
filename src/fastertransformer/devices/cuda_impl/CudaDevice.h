@@ -338,6 +338,8 @@ protected:
     bool use_stable_scatter_add = false;
 
     uint32_t ll_num_max_token_per_rank = 0;
+    // for local perf
+    bool hack_moe_expert_ = false;
 };
 
 } // namespace fastertransformer

@@ -232,6 +232,7 @@ cc_library(
         "engine_base/*.cc",
     ]),
     deps = torch_deps() + [
+        ":schedulers",
         ":stream",
         ":dataclass",
         ":models",

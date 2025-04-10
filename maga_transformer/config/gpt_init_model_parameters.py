@@ -366,14 +366,9 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
-        # for test, will delete soon
-        random_block = bool(int(os.environ.get('RANDOM_BLOCK', 0)))
-        logging.info(f'random_block: {random_block}')
-        if random_block:
-            import random
-            random_number = random.random()
-            self.block_nums = int(self.block_nums * random_number)
-            logging.info(f'after random, block_nums: {self.block_nums}')
+        if os.environ.get('TEST_LAYER_NUM'):
+            logging.info(f'replace model layer with TEST_LAYER_NUM: {os.environ.get("TEST_LAYER_NUM")}')
+            self.layer_num = int(os.environ.get('TEST_LAYER_NUM', self.layer_num))
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
         logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))

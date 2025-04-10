@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "maga_transformer/cpp/schedulers/BatchDecodeScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "maga_transformer/cpp/utils/Logger.h"
@@ -40,11 +41,20 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     FT_LOG_INFO("create cache manager done");
     executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     FT_LOG_INFO("create normal executor done");
-    scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
-    FT_LOG_INFO("create fifo scheduler done");
+    initScheduler();
     (void)startLoop();
-    if (device_->getDeviceProperties().tp_rank == 0) {
+    if (device_->getDeviceProperties().tp_rank == 0 && scheduler_->canLoadBalance()) {
         initLoadBalance();
+    }
+}
+
+void NormalEngine::initScheduler() {
+    if (getenv("USE_BATCH_DECODE_SCHEDULER") && std::string(getenv("USE_BATCH_DECODE_SCHEDULER")) == "1") {
+        scheduler_.reset(new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
+        FT_LOG_INFO("create batch decode scheduler done");
+    } else {
+        scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));            
+        FT_LOG_INFO("create fifo scheduler done");
     }
 }
 
@@ -231,7 +241,6 @@ absl::Status NormalEngine::step() {
     }
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-
     absl::Status status;
     try {
         status = executor_->process(streams);

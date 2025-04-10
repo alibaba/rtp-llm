@@ -16,6 +16,22 @@ using namespace std;
 
 namespace fastertransformer {
 
+void hackMoeExpert(const MoeDispatchParams& params, BufferPtr& experts_ids_host) {
+    auto elementNum = experts_ids_host->size();
+    auto const ep_size    = params.moe_configs.ep_size; 
+    auto const expert_num = params.moe_configs.expert_num;
+    auto const top_k      = params.moe_configs.top_k;
+    auto const token_num  = params.expert_ids.shape()[0];
+    auto expert_per_rank = expert_num / ep_size;
+    if (token_num == 0 || top_k == 0) {
+        return;
+    }
+    for (int i = 0; i < elementNum; ++i) {
+        *(experts_ids_host->dataWithOffset<int32_t>(i)) =
+            i % ep_size * expert_per_rank + i / ep_size % expert_per_rank;
+    }
+}
+
 MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     DevicePerfWrapper wrapper(this, "epDispatch");
     const auto& moe_conf = params.moe_configs;
@@ -35,6 +51,9 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);
     token_num = hidden->shape()[0];
     BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
+    if (hack_moe_expert_) {
+        hackMoeExpert(params, experts_ids_host);
+    }
     BufferPtr token_nums_per_rank =
         allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
     bufMemset(*token_nums_per_rank, 0);

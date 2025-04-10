@@ -2,7 +2,6 @@
 
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeOnlineAdaptor.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreExecutor.h"
@@ -56,7 +55,6 @@ private:
     std::unique_ptr<ScoreExecutor>            score_executor_      = nullptr;
     std::unique_ptr<SpeculativeOnlineAdaptor> online_adaptor_      = nullptr;
     std::unique_ptr<SpeculativeSampler>       speculative_sampler_ = nullptr;
-    std::unique_ptr<SchedulerBase>            scheduler_           = nullptr;
     std::unique_ptr<SpeculativeUpdater>       speculative_updater_ = nullptr;
     std::shared_ptr<SystemPrompt>             system_prompt_       = nullptr;
 

@@ -9,11 +9,7 @@
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "maga_transformer/cpp/utils/PyUtils.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h"
 
 using namespace std;
@@ -173,6 +169,10 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
+void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
+    model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
+}
+
 void RtpLLMOp::stop() {
     int64_t STOP_TIMEOUT_MS = 60 * 1000;
     if (!is_server_shutdown_) {
@@ -213,6 +213,7 @@ void registerRtpLLMOp(const py::module& m) {
         .def("remove_lora",           &torch_ext::RtpLLMOp::removeLora)
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
+        .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop)
         .def("ready", &torch_ext::RtpLLMOp::ready);
 }

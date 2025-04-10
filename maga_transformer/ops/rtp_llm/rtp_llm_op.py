@@ -41,3 +41,6 @@ class RtpLLMOp():
 
     def get_engine_schedule_info(self) -> EngineScheduleInfo:
         return self.ft_op.get_engine_schedule_info() # type: ignore
+
+    def update_scheduler_info(self, scheduler_info: str):
+        self.ft_op.update_scheduler_info(scheduler_info) # type: ignore
