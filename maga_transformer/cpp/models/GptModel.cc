@@ -609,6 +609,11 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                 last_layer_defered_params[micro_batch_idx].residual = batch_ep_input.residual;
                 last_layer_defered_params[micro_batch_idx].shared_expert_output = batch_ep_input.shared_expert_output;
                 last_layer_defered_params[micro_batch_idx].post_ffn_layernorm_weights = layer.post_ffn_layernorm;
+                if (last_layer_defered_params[micro_batch_idx].combine_output) {
+                    last_layer_defered_params[micro_batch_idx].combine_output.value().params.expert_ids = nullptr;
+                    last_layer_defered_params[micro_batch_idx].combine_output.value().params.expert_scales = nullptr;
+                    last_layer_defered_params[micro_batch_idx].combine_output = nullopt;
+                }
                 last_layer_defered_params[micro_batch_idx].combine_output = move(batch_ep_output.combine_output);
                 last_layer_defered_params[micro_batch_idx].comm_barrier_hook = move(batch_ep_output.comm_barrier_hook);
                 layer_input.hidden = move(batch_ep_output.hidden);
