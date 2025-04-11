@@ -55,9 +55,25 @@ N_K_GROUP_TYPE= [
 ("7168", "4096", "256", "DeepGemmType::GroupedContiguous"),
 ("7168", "2048", "256", "DeepGemmType::GroupedContiguous"),
 
+("4096", "7168", "128", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "128", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "128", "DeepGemmType::GroupedContiguous"),
+
 ("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
 ("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
 ("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "128", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "128", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "128", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
 ]
 template_header = """
 #include "src/fastertransformer/deep_gemm/deep_gemm_template.h"

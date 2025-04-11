@@ -181,7 +181,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     }
 
     int best_block_m = -1, best_block_n = -1;
-    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 144, 160})) {
+    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128})) {
         bool success = false;
         if (best_block_m == -1 || best_block_n == -1) {
             success = true;
@@ -292,12 +292,26 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(4096, 7168, 256, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedContiguous)
-    
+
+    DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedContiguous)
     // EP 128
     DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedContiguous)
 
+    // masked
+    DISPATCH_DEEP_GEMM(4096, 7168, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedMasked)
+    // EP 128
+    DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedMasked)
     FT_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
 }
 #endif

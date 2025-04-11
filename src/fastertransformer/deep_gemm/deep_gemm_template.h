@@ -80,9 +80,7 @@ void dispatchNumStagesAndTma(__nv_bfloat16*         output,
     DISPATCH_BLOCK_N(BM, 104, BK) \
     DISPATCH_BLOCK_N(BM, 112, BK) \
     DISPATCH_BLOCK_N(BM, 120, BK) \
-    DISPATCH_BLOCK_N(BM, 128, BK) \
-    DISPATCH_BLOCK_N(BM, 144, BK) \
-    DISPATCH_BLOCK_N(BM, 160, BK)
+    DISPATCH_BLOCK_N(BM, 128, BK)
 
 #endif
 
