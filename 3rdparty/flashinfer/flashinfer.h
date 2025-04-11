@@ -99,6 +99,18 @@ void top_k_top_p_sampling_from_probs(at::Tensor probs, at::Tensor uniform_sample
                                      std::optional<at::Tensor> maybe_top_p_arr, double top_p_val,
                                      bool deterministic, int64_t cuda_stream);
 
+void top_p_renorm_probs(at::Tensor                probs,
+                        at::Tensor                renorm_probs,
+                        std::optional<at::Tensor> maybe_top_p_arr,
+                        double                    top_p_val,
+                        int64_t                   cuda_stream);
+
+void top_k_renorm_probs(at::Tensor                probs,
+                        at::Tensor                renorm_probs,
+                        std::optional<at::Tensor> maybe_top_k_arr,
+                        int64_t                   top_k_val,
+                        int64_t                   cuda_stream);
+
 // std::vector<int64_t> BatchPrefillWithKVCacheSM90Plan(
 //     unsigned int head_dim, bool causal, at::Tensor float_workspace_buffer,
 //     at::Tensor int_workspace_buffer, at::Tensor page_locked_int_workspace_buffer,
