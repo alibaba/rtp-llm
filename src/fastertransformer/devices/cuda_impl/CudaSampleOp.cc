@@ -9,6 +9,7 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include <cstddef>
 #include <random>
 #include <memory>
 
@@ -142,7 +143,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
 
     auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     auto probs = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
-    auto success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
+    BufferPtr success = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
     torch::TensorOptions options = torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
     bool deterministic = true;
@@ -170,6 +171,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
                     [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
+        success.reset();
         if (need_output_all_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)stream_);
         }
@@ -209,6 +211,25 @@ GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto transposed_tokens = transpose({*device_tokens});
 
     processLogits(params, device_tokens, transposed_tokens);
+
+    // fast path for topk = 1
+    const auto batch_size = params.logits.shape()[0];
+    auto& top_k = params.top_k;
+    if (std::all_of(top_k.data<uint32_t>(),
+                    top_k.data<uint32_t>() + batch_size,
+                    [&](auto t) { return t == 1; }) && !params.output_all_probs.has_value()) {
+        BufferPtr logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+        Buffer samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+        torch::Tensor samples_t = Buffer2torchTensor(samples, false);
+        torch::Tensor probs_t = Buffer2torchTensor(*logits_ref, false);
+        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        samples_t.copy_(selected_tokens);
+
+        auto output_tokens = transpose({*transposed_tokens});
+        copy({params.token_ids, *output_tokens});
+
+        return GreedyOutput{};
+    } 
     
     if (checkUseFlashinferSampleGreedy(params)) {
         return flashinferSampleGreedy(params, transposed_tokens);
