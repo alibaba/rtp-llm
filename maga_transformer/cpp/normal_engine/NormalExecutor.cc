@@ -85,7 +85,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     StreamGroups stream_groups(streams);
     std::shared_ptr<CudaProfiler> profiler;
     if (stream_groups.genTimeline()) {
-        profiler = std::make_shared<CudaProfiler>("cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "+");
+        profiler = std::make_shared<CudaProfiler>("cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
         profiler->start();
     }
     RtpLLMExecutorMetricsCollector executor_collector;
