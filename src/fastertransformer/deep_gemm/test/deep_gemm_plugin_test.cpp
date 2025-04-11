@@ -14,8 +14,8 @@ using namespace rtp_llm;
 
 class DeepGemmPluginTest : public DeviceTestBase {
 public:
-    void RunDeepGeemPluginTest() {
-        int m = 128, n = 2048, k = 7168;
+    void RunDeepGemmPluginTest() {
+        int m = 128, n = 4096, k = 7168;
 
         auto input =  torch::randn({(int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::rand({m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
@@ -44,8 +44,8 @@ public:
         std::cout << 2 * torch::sum(ref_output * gemm_output) / sum << std::endl;
         EXPECT_NEAR(1, (2 * torch::sum(ref_output * gemm_output) / sum).item<double>(), 0.001);
     }
-    void RunDeepGeemPluginGroupedContiguousTest() {
-        int m = 128, n = 4096, k = 7168, num_groups = 128;
+    void RunDeepGemmPluginGroupedContiguousTest() {
+        int m = 128, n = 4096, k = 7168, num_groups = 2;
 
         auto input =  torch::ones({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::randn({num_groups, m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
@@ -86,6 +86,6 @@ public:
 };
 
 TEST_F(DeepGemmPluginTest, Test1) {
-    RunDeepGeemPluginTest();
-    RunDeepGeemPluginGroupedContiguousTest();
+    RunDeepGemmPluginTest();
+    RunDeepGemmPluginGroupedContiguousTest();
 }

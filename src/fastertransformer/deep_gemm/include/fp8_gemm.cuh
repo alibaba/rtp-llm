@@ -27,11 +27,22 @@ __device__ __host__ constexpr int get_num_threads_per_sm(int block_m) {
     return (block_m == 64 ? 1 : 2) * kNumMathThreadsPerGroup + kNumTMAThreads;
 }
 
+template <int kNumFormerIters, int kGap, int kEnd>
+__device__ __host__ void outer_launch_k_iterations(const auto& inner_launch_k_iterations, const auto& func, int num_former_iters) {
+    if (num_former_iters == kNumFormerIters) {
+        inner_launch_k_iterations(func, cute::Int<kNumFormerIters>{});
+        return;
+    }
+
+    if constexpr (kNumFormerIters + kGap <= kEnd)
+        outer_launch_k_iterations<kNumFormerIters + kGap, kGap, kEnd>(inner_launch_k_iterations, func, num_former_iters);
+}
+
 template <uint32_t SHAPE_N, uint32_t SHAPE_K,
           uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumGroups, uint32_t kNumStages,
           uint32_t kNumTMAThreads, uint32_t kNumMathThreadsPerGroup,
-          uint32_t kNumTMAMulticast,
+          uint32_t kNumTMAMulticast, bool kIsTMAMulticastOnA,
           GemmType kGemmType>
 __global__ void __launch_bounds__(get_num_threads_per_sm<kNumTMAThreads, kNumMathThreadsPerGroup>(BLOCK_M), 1)
 fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
@@ -43,7 +54,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 900)) or defined(__CLION_IDE__)
     // Scaling checks
     DG_STATIC_ASSERT(BLOCK_K == 128, "Only support per-128-channel FP8 scaling");
-    DG_STATIC_ASSERT(ceil_div(BLOCK_N, BLOCK_K) == 1, "Too much B scales in a single block");
+    DG_STATIC_ASSERT(ceil_div(BLOCK_N, BLOCK_K) == 1 or (gcd(BLOCK_N, BLOCK_K) == BLOCK_N - BLOCK_K), "Too much B scales in a single block");
 
     // Types
     using WGMMA = typename FP8MMASelector<BLOCK_N>::type;
@@ -129,15 +140,23 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
     // For pipeline unrolling
     struct DivisibleK {};
     struct NotDivisibleK {};
-    auto launch_k_iterations = [](const auto& func) {
-        if constexpr (SHAPE_K % kFullKOfAllStages == 0) {
-            for (int k_iter = 0; k_iter < kNumIterations; ++ k_iter)
-                func(k_iter, DivisibleK{});
-        } else {
-            for (int k_iter = 0; k_iter < kNumIterations - 1; ++ k_iter)
-                func(k_iter, DivisibleK{});
-            func(kNumIterations - 1, NotDivisibleK{});
-        }
+    auto launch_k_iterations = [](const auto& func, int num_former_iters) {
+        constexpr bool kShouldOptimize = BLOCK_K / gcd(BLOCK_K, BLOCK_N) <= 4 and not kMustUseUniformedScaleB;
+        constexpr int kGap = gcd(BLOCK_K, BLOCK_N) / 8;
+        constexpr int kEnd = kShouldOptimize ? BLOCK_K / 8 : 0;
+
+        // NOTES: for too-many branches (> 5), we disable this optimization
+        // Otherwise, the compiler must know the dynamic variable `num_former_iters`'s real value
+        outer_launch_k_iterations<0, kGap, kEnd>([](const auto& func, auto num_former_iters_type) {
+            if constexpr (SHAPE_K % kFullKOfAllStages == 0) {
+                for (int k_iter = 0; k_iter < kNumIterations; ++ k_iter)
+                    func(k_iter, DivisibleK{}, num_former_iters_type);
+            } else {
+                for (int k_iter = 0; k_iter < kNumIterations - 1; ++ k_iter)
+                    func(k_iter, DivisibleK{}, num_former_iters_type);
+                func(kNumIterations - 1, NotDivisibleK{}, num_former_iters_type);
+            }
+        }, func, kShouldOptimize ? num_former_iters : 0);
     };
 
     // Register reconfigurations
@@ -146,7 +165,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
 
     // Block scheduler
     uint32_t m_block_idx, n_block_idx;
-    auto scheduler = Scheduler<kGemmType, SHAPE_N, BLOCK_M, BLOCK_N, kNumGroups, kNumTMAMulticast>(shape_m, grouped_layout);
+    auto scheduler = Scheduler<kGemmType, SHAPE_N, BLOCK_M, BLOCK_N, kNumGroups, kNumTMAMulticast, kIsTMAMulticastOnA>(shape_m, grouped_layout);
 
     if (threadIdx.x >= kNumMathThreads) {
         // TMA warp-group for loading data
@@ -156,10 +175,14 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
         if (threadIdx.x == kNumMathThreads) {
             // Persistently schedule over blocks
             while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
-                launch_k_iterations([&](int k_iter, auto type) {
+                launch_k_iterations([&](int k_iter, auto type, auto _) {
                     constexpr bool kHasDivisibleStages = std::is_same_v<decltype(type), DivisibleK>;
                     constexpr int kNumInnerStages = kHasDivisibleStages ? kNumStages : (SHAPE_K % kFullKOfAllStages) / BLOCK_K;
                     DG_STATIC_ASSERT(kNumInnerStages != 0, "Invalid number of inner stages");
+
+                    // Assign TMA multicast number into A and B
+                    constexpr int kNumTMAMulticastOnA = kIsTMAMulticastOnA ? kNumTMAMulticast : 1;
+                    constexpr int kNumTMAMulticastOnB = kIsTMAMulticastOnA ? 1 : kNumTMAMulticast;
 
                     // NOTES: unrolling and `kNumInnerStages` are vital for performance, NVCC will try to eliminate all
                     // shared memory pointers, e.g. `full_barriers` registers, if all the access indices are constant
@@ -168,18 +191,18 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
                         // Wait consumer release
                         empty_barriers[s]->wait((scheduler.current_iter * kNumIterations + k_iter + 1) & 1);
 
-                        // Issue TMA A with broadcasting
+                        // Issue TMA A
                         auto& full_barrier = *full_barriers[s];
                         int k_idx = k_iter * kFullKOfAllStages + s * BLOCK_K;
-                        tma_copy<kNumTMAMulticast>(&tensor_map_a, reinterpret_cast<uint64_t*>(&full_barrier),
-                                                   smem_a[s], k_idx, scheduler.get_global_idx(shape_m, BLOCK_M, m_block_idx));
-                        tma_copy<kNumTMAMulticast>(&tensor_map_scales_a, reinterpret_cast<uint64_t*>(&full_barrier),
-                                                   smem_scales_a[s], m_block_idx * BLOCK_M,
-                                                   scheduler.get_global_idx(SHAPE_K_SCALES, 1, k_idx / BLOCK_K));
+                        tma_copy<kNumTMAMulticastOnA>(&tensor_map_a, reinterpret_cast<uint64_t*>(&full_barrier),
+                                                      smem_a[s], k_idx, scheduler.get_global_idx(shape_m, BLOCK_M, m_block_idx));
+                        tma_copy<kNumTMAMulticastOnA>(&tensor_map_scales_a, reinterpret_cast<uint64_t*>(&full_barrier),
+                                                      smem_scales_a[s], m_block_idx * BLOCK_M,
+                                                      scheduler.get_global_idx(SHAPE_K_SCALES, 1, k_idx / BLOCK_K));
 
-                        // Issue TMA B without broadcasting
-                        tma_copy(&tensor_map_b, reinterpret_cast<uint64_t*>(&full_barrier),
-                                 smem_b[s], k_idx, scheduler.get_global_idx<false>(SHAPE_N, BLOCK_N, n_block_idx, m_block_idx));
+                        // Issue TMA B
+                        tma_copy<kNumTMAMulticastOnB>(&tensor_map_b, reinterpret_cast<uint64_t*>(&full_barrier),
+                                                      smem_b[s], k_idx, scheduler.get_global_idx<false>(SHAPE_N, BLOCK_N, n_block_idx, m_block_idx));
                         full_barrier.arrive_and_expect_tx(SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE + SMEM_SCALES_A_SIZE_PER_STAGE);
                     }
 
@@ -189,7 +212,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
                         empty_barriers[s]->wait((scheduler.current_iter * kNumIterations + k_iter + 1) & 1);
                         full_barriers[s]->arrive();
                     }
-                });
+                }, 0);
             }
 
             // To safely deconstruct distributed shared barriers, we need another round of empty waits
@@ -242,7 +265,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
             };
 
             // Launch MMAs
-            launch_k_iterations([&](int k_iter, auto type) {
+            launch_k_iterations([&](int k_iter, auto type, auto num_former_iters_type) {
                 constexpr bool kHasDivisibleStages = std::is_same_v<decltype(type), DivisibleK>;
                 constexpr int kNumInnerStages = kHasDivisibleStages ? kNumStages : (SHAPE_K % kFullKOfAllStages) / BLOCK_K;
                 DG_STATIC_ASSERT(kNumInnerStages != 0, "Invalid number of inner stages");
@@ -288,8 +311,10 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
                     float scale_0_1, scale_1_1;
                     if constexpr (not kMustUseUniformedScaleB)
                         scale_0_1 = scale_a_0 * scale_b_1, scale_1_1 = scale_a_1 * scale_b_1;
+
                     #pragma unroll
                     for (int i = 0; i < WGMMA::kNumAccum / 4; ++ i) {
+                        // NOTES: for unrolled `num_former_iters` cases, we expect the compiler to automatically make it a constant
                         bool predicate = kMustUseUniformedScaleB or i < num_former_iters;
                         final_accum[i * 4 + 0] += (predicate ? scale_0_0 : scale_0_1) * accum[i * 4 + 0];
                         final_accum[i * 4 + 1] += (predicate ? scale_0_0 : scale_0_1) * accum[i * 4 + 1];
@@ -304,7 +329,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
                     full_barriers[s]->wait((scheduler.current_iter * kNumIterations + k_iter) & 1);
                     empty_barrier_arrive(s);
                 }
-            });
+            }, num_former_iters);
 
             // Write back to shared memory using STSM
             DG_STATIC_ASSERT(WGMMA::kNumAccum % 4 == 0, "Invalid STSM x2 vectorization");
@@ -347,7 +372,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
 template <uint32_t SHAPE_N, uint32_t SHAPE_K,
           uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumGroups, uint32_t kNumStages,
-          uint32_t kNumTMAMulticast,
+          uint32_t kNumTMAMulticast, bool kIsTMAMulticastOnA,
           GemmType kGemmType>
 class Gemm {
 private:
@@ -369,7 +394,7 @@ public:
         constexpr uint32_t kNumMathThreadsPerGroup = 128;
         auto kernel = fp8_gemm_kernel<SHAPE_N, SHAPE_K, BLOCK_M, BLOCK_N, BLOCK_K,
                                       kNumGroups, kNumStages, kNumTMAThreads, kNumMathThreadsPerGroup,
-                                      kNumTMAMulticast, kGemmType>;
+                                      kNumTMAMulticast, kIsTMAMulticastOnA, kGemmType>;
         DG_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess);
 
         // Cluster launch
