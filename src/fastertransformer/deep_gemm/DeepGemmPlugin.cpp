@@ -296,6 +296,10 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedContiguous)
+
+    DISPATCH_DEEP_GEMM(4096, 7168, 8, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(7168, 4096, 8, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(7168, 2048, 8, DeepGemmType::GroupedContiguous)
     // EP 128
     DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedContiguous)
     DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedContiguous)

@@ -59,6 +59,10 @@ N_K_GROUP_TYPE= [
 ("7168", "4096", "128", "DeepGemmType::GroupedContiguous"),
 ("7168", "2048", "128", "DeepGemmType::GroupedContiguous"),
 
+("4096", "7168", "8", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "8", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "8", "DeepGemmType::GroupedContiguous"),
+
 ("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
 ("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
 ("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
