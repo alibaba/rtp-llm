@@ -135,6 +135,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setLoss(*update_info.loss);
     }
 
+    if (needReturnHiddenStates()) {
+        FT_CHECK(update_info.all_hidden_states != nullptr);
+        last_hidden_states_ = device_->clone(
+            {*update_info.all_hidden_states, ft::AllocationType::DEVICE});
+    }
+
+
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {
         FT_CHECK(update_info.softmax_probs->dim() == 2);
         FT_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);

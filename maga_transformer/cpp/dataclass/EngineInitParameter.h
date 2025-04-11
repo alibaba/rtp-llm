@@ -51,13 +51,45 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle) :
                     sp_type(sp_type), gen_num_per_circle(gen_num_per_circle) {}
 
+    // Consturctor for mtp propose model
+    ProposeModelEngineInitParams(std::string sp_type,
+                                 size_t gen_num_per_circle,
+                                 std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params) :
+        sp_type(sp_type),
+        gen_num_per_circle(gen_num_per_circle),
+        vanilla_model_params(nullptr),
+        mtp_model_params_(std::move(mtp_model_params)) {};
+
     bool gpt_model() {
+        return sp_type == "vanilla" || sp_type == "mtp";
+    }
+
+    bool isVanilla() {
         return sp_type == "vanilla";
     }
+
+    bool isMTP() {
+        return sp_type == "mtp";
+    }
+
+    const ft::GptInitParameter& getGptInitParameter() {
+        if (sp_type == "vanilla") {
+            return vanilla_model_params->gpt_init_parameter;
+        } else if (sp_type == "mtp") {
+            FT_CHECK(!mtp_model_params_->empty());
+            FT_CHECK(mtp_model_params_->at(0) != nullptr);
+            return mtp_model_params_->at(0)->gpt_init_parameter;
+        } else {
+            FT_FAIL("error sp type[%s] do not have GptInitParameter", sp_type.c_str());
+        }
+    }
+
 
     std::string                       sp_type;
     size_t                            gen_num_per_circle = 0;
     std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;
+
+    std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params_;
     py::object                        eagle_model;
     py::object                        medusa_model;
     kmonitor::MetricsReporterPtr      metrics_reporter = nullptr;
@@ -150,5 +182,11 @@ private:
 };
 
 std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
+
+// extract mtp model weights list from model in python world.
+// Note: keep mtp sequence.
+std::deque<std::unique_ptr<ft::Weights>> prepareMTPModelWeights(py::object model);
+
+std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::object model);
 
 }  // namespace rtp_llm

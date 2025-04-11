@@ -417,6 +417,10 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
             loss = device_->loss({all_logits, *label});
         }
+        BufferPtr all_hidden_states = nullptr;
+        if (stream->needReturnHiddenStates()) {
+            all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size);
+        }
         BufferPtr batch_softmax_result;
         BufferPtr current_softmax_result;
         if (stream->calculateSoftmaxProbs()) {
@@ -436,12 +440,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         if (stream->numBeams() > 1 && beam_index != nullptr) {
             StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
-                    current_softmax_result, batch_cum_log_probs, all_probs, loss};
+                    current_softmax_result, batch_cum_log_probs, all_probs, loss, all_hidden_states};
             stream->update(update_info);
             stream->beamSearchKvCacheUpdate(beam_index);
         } else {
             stream->update({new_tokens, 1, batch_hidden_states, batch_logits,
-                    current_softmax_result, batch_cum_log_probs, all_probs, loss});
+                    current_softmax_result, batch_cum_log_probs, all_probs, loss, all_hidden_states});
         }
         offset += batch;
         token_offset += token_size;

@@ -178,6 +178,8 @@ class ModelWeightsLoader:
 
 
     def _choose_weight_convert_device(self, current_device):
+        if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
+            return "cpu"
         model_size = self._weights_info.config.eval_model_size()
         device_mem_info = self._exported_device.get_mem_info()
         if device_mem_info is None:

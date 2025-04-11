@@ -32,6 +32,7 @@ createProposeExecutor(const EngineInitParams&                        score_model
                       std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
                       ft::DeviceBase*                                device,
                       const std::shared_ptr<CacheManager>&           cache_manager,
+                      const std::vector<std::shared_ptr<CacheManager>>&           mtp_cache_managers,
                       const std::shared_ptr<lora::LoraManager>&      lora_manager);
 
 }  // namespace rtp_llm

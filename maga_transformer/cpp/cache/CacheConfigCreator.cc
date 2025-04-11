@@ -5,13 +5,19 @@
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
-CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& param) {
+CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& param,
+                                                  bool is_mtp)
+{
     int local_head_num_kv = (param.head_num_kv_ > 1) ? param.head_num_kv_ / param.tp_size_ : param.head_num_kv_;
     const auto device_prop = ft::DeviceFactory::getDefaultDevice()->getDeviceProperties();
     auto dtype = param.kv_cache_data_type_;
     if (device_prop.type == ft::DeviceType::ArmCpu) {
         // Arm attention operator support FP32 data type only
         dtype = param.kv_cache_data_type_ == ft::DataType::TYPE_INT8 ? ft::TYPE_INT8 : ft::TYPE_FP32;
+    }
+    auto layer_num = param.num_layers_;
+    if (is_mtp) {
+        layer_num = 1;
     }
 
     if (param.use_mla_ && param.mla_ops_type_ != ft::MlaOpsType::MHA) {
@@ -23,7 +29,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& pa
                                          dtype});
     }
 
-    return CacheConfig(KVCacheParam{(uint)param.num_layers_,
+    return CacheConfig(KVCacheParam{(uint)layer_num,
                                     (uint)0,
                                     (uint)local_head_num_kv,
                                     (uint)param.size_per_head_,
@@ -154,17 +160,24 @@ CacheConfig CacheConfigCreator::createConfig(
 }
 
 std::tuple<CacheConfig, CacheConfig> CacheConfigCreator::createSpConfig(
-        const ft::GptInitParameter& score_param, const ft::GptInitParameter& propose_param,
-        const std::optional<WarmUpResult>& warm_up_result)
+        const ft::GptInitParameter& score_param,
+        const ft::GptInitParameter& propose_param,
+        const std::optional<WarmUpResult>& warm_up_result,
+        bool is_mtp = false)
 {
     CacheConfig  score_config         = CacheConfigCreator::createBasicConfig(score_param);
-    CacheConfig  propose_config         = CacheConfigCreator::createBasicConfig(propose_param);
+
+    CacheConfig  propose_config         = CacheConfigCreator::createBasicConfig(propose_param, is_mtp);
     size_t     block_nums     = 0;
     if (score_param.block_nums_ > 0) {
         block_nums = score_param.block_nums_;
     } else {
         const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
-        block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+        if (is_mtp) {
+            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * propose_param.num_layers_);
+        } else {
+            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+        }
     }
     FT_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
 

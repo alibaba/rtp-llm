@@ -30,4 +30,6 @@ public:
     std::unordered_map<size_t, SpeculativeExecutorStreamOutputPtr> outputs;  // stream_id -> SpeculativeExecutorStreamOutputPtr
 };
 
+using ProposeOutputPtr = std::shared_ptr<ProposeOutput>;
+
 }  // namespace rtp_llm

@@ -17,6 +17,14 @@ static const std::string final_ln_gamma       = "final_layernorm.gamma";
 static const std::string final_ln_beta        = "final_layernorm.beta";
 static const std::string linear_bias_slopes   = "linear_bias_slopes";
 
+// mtp
+
+static const std::string multi_tokens_predict_enorm   = "multi_tokens_predict_enorm.weight";
+static const std::string multi_tokens_predict_hnorm   = "multi_tokens_predict_hnorm.weight";
+static const std::string multi_tokens_predict_eh_proj = "multi_tokens_predict_eh_proj.weight";
+static const std::string multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma";
+static const std::string multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta";
+
 // layer
 static const std::string pre_ln_gamma      = "pre_layernorm_weights.gamma";
 static const std::string pre_ln_beta       = "pre_layernorm_weights.beta";

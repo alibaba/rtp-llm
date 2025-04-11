@@ -23,6 +23,7 @@ struct GptModelDescription {
     bool                 post_layernorm = false;
     double               input_embedding_scalar = 1;
     double               residual_scalar = 1;
+    bool                 reverse_e_h_norm = false;
 };
 
 struct GptModelInitParams {
@@ -48,6 +49,9 @@ struct GptModelInputs {
 
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
     ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
+
+    // for mtp model
+    ft::BufferPtr last_hidden_states;
 
     // for tp sync
     ft::BufferPtr lora_ids;           // [batch_size]
@@ -96,6 +100,8 @@ enum GptModelInputIndex : size_t{
     mmFeaturesSize, // hidden_size of mm features
     mmFeaturesDtype,
     needAllLogits,
+    mtpHiddenStates,
+    mtpHiddenStatesDtype,
     gptModelInputLength
 };
 
@@ -176,7 +182,7 @@ public:
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
-private:
+protected:
     ft::AttentionCommonInputs prepareAttentionInputs(
         const GptModelInputs& inputs,
         ft::DataType dtype,
@@ -189,6 +195,9 @@ private:
         const ft::BufferPtr& pre_decoder_residual,
         const ft::DataType dtype,
         const MicroBatchPlan& micro_batch_plan);
+
+    virtual ft::BufferPtr embeddingPost(const ft::BufferPtr& hidden_states, const GptModelInputs& inputs);
+
     ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
 
     GptLayerInputs forwardPreLayers(const GptModelInputs& inputs);
@@ -219,7 +228,7 @@ private:
         bool enable_sp,
         size_t token_num);
 
-private:
+protected:
     ft::DeviceBase* device_;
     const ft::DeviceProperties device_props_;
     const ft::Weights          weights_;

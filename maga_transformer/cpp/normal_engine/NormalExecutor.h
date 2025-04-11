@@ -27,6 +27,10 @@ public:
         batch_stream_processor_ = std::move(processor);
     }
 
+    void setGptModel(std::unique_ptr<GptModel> model) {
+        model_ = std::move(model);
+    }
+
 private:
     std::unique_ptr<GptModel>                   model_;
     std::unique_ptr<Sampler>                    sampler_;

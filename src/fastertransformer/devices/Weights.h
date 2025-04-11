@@ -128,6 +128,12 @@ struct LayerWeights {
     std::shared_ptr<const DenseWeights>     post_layernorm_quant_scale;
     FfnLayerWeights                         ffn_weights;
     std::shared_ptr<const LayerNormWeights> post_ffn_layernorm;
+
+    // mtp
+    std::shared_ptr<const LayerNormWeights> enorm;
+    std::shared_ptr<const LayerNormWeights> hnorm;
+    std::shared_ptr<const DenseWeights>     eh_proj;
+    std::shared_ptr<const LayerNormWeights> mtp_final_layernorm;
 };
 
 // TODO: This Weights class might be refactor into a complete model description
@@ -143,6 +149,7 @@ struct Weights {
     std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
     std::shared_ptr<const DenseWeights>     medusa_head;
+
 };
 
 using WeightsPtr = std::shared_ptr<const Weights>;

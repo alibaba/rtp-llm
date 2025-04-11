@@ -61,10 +61,10 @@ public:
                      << "propose_step: " << propose_step << ", accepted_token_nums: " << accepted_token_nums
                      << ", accepted_tokens: " << accepted_tokens->debugStringWithData<int32_t>();
         if (logits) {
-            debug_string << ", logits: " << logits->debugStringWithData<int32_t>();
+            debug_string << ", logits: " << logits->debugStringWithData<float>();
         }
         if (hidden_states) {
-            debug_string << ", hidden_states: " << hidden_states->debugStringWithData<int32_t>();
+            debug_string << ", hidden_states: " << hidden_states->debugStringWithData<float>();
         }
         debug_string << "}";
         return debug_string.str();

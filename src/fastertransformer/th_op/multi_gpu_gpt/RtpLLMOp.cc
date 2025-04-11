@@ -69,6 +69,8 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
                                                                              gen_num_per_circle,
                                                                              gpt_init_params,
                                                                              std::move(*gpt_weight));
+        } else if (sp_type == "mtp") {
+            params = rtp_llm::prepareMTPEngineInitParams(propose_model);
         } else if (sp_type == "deterministic") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle);
         } else if (sp_type == "eagle") {

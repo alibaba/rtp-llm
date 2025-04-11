@@ -40,6 +40,10 @@ public:
     absl::StatusOr<ScoreOutput> score(const std::list<GenerateStreamPtr>& streams,
                                       const ProposeOutput&                proposer_output);
 
+    absl::StatusOr<ScoreOutput> mtpScore(const std::list<GenerateStreamPtr>& streams,
+                                         const ProposeOutput&                proposer_output,
+                                         const std::list<GenerateStreamPtr>& prefill_streams);
+
 private:
     ft::DeviceBase* device_;
     NormalExecutor  score_normal_executor_;

@@ -51,8 +51,11 @@ public:
             output_buffer->logits = device_->clone({*update_info.logits, ft::AllocationType::DEVICE, {"score_logits"}});
         }
 
-        if (generate_input_->generate_config->return_hidden_states) {
-            output_buffer->hidden_states = device_->clone({*update_info.hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
+        if (needReturnHiddenStates()) {
+            FT_CHECK(update_info.all_hidden_states != nullptr);
+            last_hidden_states_ = device_->clone(
+                {*update_info.all_hidden_states, ft::AllocationType::DEVICE});
+            output_buffer->hidden_states = device_->clone({*update_info.all_hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
         }
 
         if (update_info.loss) {

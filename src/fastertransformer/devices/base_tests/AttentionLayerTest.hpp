@@ -9,7 +9,6 @@
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
 
-#define private public
 #include "maga_transformer/cpp/models/GptModel.h"
 
 using namespace std;
@@ -54,6 +53,12 @@ AttentionLayerWeights AttentionLayerTest<T>::getAttentionWeights(const GptAttent
     return attention_weights;
 }
 
+class TestGptModel : public GptModel {
+public:
+    TestGptModel(const GptModelInitParams& params) : GptModel(params) {};
+    using GptModel::prepareAttentionInputs;
+};
+
 template <typename T>
 void AttentionLayerTest<T>::testAttentionLayer(
     const CacheConfig& cache_conf,
@@ -64,7 +69,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     GptModelDescription description;
     Weights weights;
     description.attention_conf = attention_conf;
-    GptModel model({device_, weights, description});
+    TestGptModel model({device_, weights, description});
     auto dtype = getTensorType<TestType>();
     // 1. prepare inputs
     const auto context_token_num = std::accumulate(

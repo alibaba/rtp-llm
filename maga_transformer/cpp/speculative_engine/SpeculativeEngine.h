@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+
+
 class SpeculativeEngine: public EngineBase {
 public:
     explicit SpeculativeEngine(const EngineInitParams&                       engine_init_params,
@@ -33,6 +35,32 @@ private:
     WarmUpResult       warmUp();
     void         initLoadBalance();
     absl::Status step();
+
+    // do not walk through speculative process.
+    absl::Status normStep(std::list<GenerateStreamPtr>& streams);
+
+    // walk through sp process, but prefill do not propose.
+    absl::Status noPrefillProposeStep(std::list<GenerateStreamPtr>& streams);
+
+    // walk through sp process, prefill can propose.
+    absl::Status prefillProposeStep(std::list<GenerateStreamPtr>& streams);
+
+    std::list<GenerateStreamPtr> extractPrefillStreams(std::list<GenerateStreamPtr>& streams) {
+        std::list<GenerateStreamPtr> need_prefill_streams;
+        streams.erase(std::remove_if(streams.begin(),
+                                     streams.end(),
+                                    [&](GenerateStreamPtr stream) {
+                                        if (stream->getLastHiddenStates() == nullptr) {
+                                            need_prefill_streams.push_back(stream);
+                                            return true;
+                                        } else {
+                                            return false;
+                                        }
+                                    }), streams.end());
+        return need_prefill_streams;
+    };
+
+
     absl::Status startLoop();
     void         loop();
     absl::Status trySaveStepError() const;
@@ -46,6 +74,11 @@ private:
                                int64_t                         total_propose_token_num,
                                int64_t                         total_accepted_token_num);
 
+
+    bool checkAllHasHiddenStates(std::list<GenerateStreamPtr>& streams);
+
+    std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
+
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;
     std::unique_ptr<ProposeModelEngineInitParams> propose_model_params_;
@@ -58,6 +91,7 @@ private:
     std::unique_ptr<SpeculativeUpdater>       speculative_updater_ = nullptr;
     std::shared_ptr<SystemPrompt>             system_prompt_       = nullptr;
 
+    const std::string sp_type_;
     std::thread       loop_thread_;
     std::atomic<bool> running_{false};
     ResourceContext   resource_context_;

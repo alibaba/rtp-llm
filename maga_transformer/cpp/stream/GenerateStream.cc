@@ -692,6 +692,10 @@ ft::BufferPtr GenerateStream::getLoss() {
     return loss_;
 }
 
+ft::BufferPtr GenerateStream::getLastHiddenStates() {
+    return last_hidden_states_;
+}
+
 ft::BufferPtr GenerateStream::getSoftmaxProbs() {
     return softmax_probs_;
 }

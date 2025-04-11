@@ -60,7 +60,7 @@ ScoreBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_grou
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size, model_inputs.sequence_lengths);
     setCommonSamplerInputs(sampler_inputs, all_streams, true);
- 
+
     int batch_idx   = 0;
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
@@ -123,13 +123,18 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
         auto batch_hidden_states = model_output.hidden_states->slice(batch_idx, current_batch_size);
         auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
 
-        BufferPtr loss = nullptr; 
+        BufferPtr loss = nullptr;
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - current_batch_size);
             auto tokens = stream->currentExecuteTokens(0);
             ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU,
                 ft::DataType::TYPE_INT32, {tokens.size() - current_batch_size}, tokens.data() + 1}});
             loss = device_->loss({all_logits, *label});
+        }
+
+        BufferPtr all_hidden_states = nullptr;
+        if (stream->needReturnHiddenStates()) {
+            all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size);
         }
 
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32,
@@ -141,7 +146,7 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups&            
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         auto update_info = StreamUpdateInfo{new_tokens, 1, batch_hidden_states,
-                                            batch_logits, batch_softmax_result, nullptr, all_probs, loss};
+                                            batch_logits, batch_softmax_result, nullptr, all_probs, loss, all_hidden_states};
         stream->updateOutput(update_info);
         token_offset += token_size;
     }

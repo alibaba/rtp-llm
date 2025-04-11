@@ -1,5 +1,9 @@
 load("//:def.bzl", "copts")
 
+test_copts = [
+    "-fno-access-control",
+] + copts()
+
 cc_library(
     name = "basic_test_cases",
     srcs = glob([
@@ -9,7 +13,7 @@ cc_library(
         "//src/fastertransformer/devices/testing:device_test_utils",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = test_copts,
 )
 
 cc_library(
@@ -21,7 +25,7 @@ cc_library(
         "//src/fastertransformer/devices/testing:device_test_utils",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = test_copts,
 )
 
 cc_library(
@@ -35,5 +39,5 @@ cc_library(
         "//maga_transformer/cpp:models",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = test_copts,
 )

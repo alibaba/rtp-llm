@@ -272,6 +272,7 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 {
     auto        layers_weights = *layer_weights;
     ft::Weights gpt_weights;
+
     // make global weight
     gpt_weights.embedding = mayCreateDenseWeights(*global_weight,
                                                    W::embedding);
@@ -323,6 +324,18 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
         }
 
         layer_ws.ffn_weights = createFfnWeights(layer_weights);
+
+        // mtp
+        layer_ws.enorm = mayCreateLayerNormWeights(layer_weights, W::multi_tokens_predict_enorm);
+        layer_ws.hnorm = mayCreateLayerNormWeights(layer_weights, W::multi_tokens_predict_hnorm);
+        layer_ws.eh_proj = mayCreateDenseWeights(layer_weights, W::multi_tokens_predict_eh_proj);
+        layer_ws.mtp_final_layernorm = mayCreateLayerNormWeights(layer_weights,
+            W::multi_tokens_predict_final_ln_gamma,
+            W::multi_tokens_predict_final_ln_beta);
+        if (layer_ws.mtp_final_layernorm != nullptr) {
+            gpt_weights.final_layernorm = layer_ws.mtp_final_layernorm;
+        }
+
         gpt_weights.layers.emplace_back(std::move(layer_ws));
     }
     return std::make_unique<ft::Weights>(gpt_weights);
@@ -356,5 +369,31 @@ std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInit
     return {gpt_init_params, std::move(gpt_weight)};
 }
 
+
+std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::object model) {
+    auto sp_model = model.attr("model");
+    std::string sp_type = model.attr("sp_type").cast<std::string>();
+    size_t gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
+    FT_CHECK(sp_type == "mtp");
+
+    std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
+        std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    const ft::GptInitParameter& gpt_init_params = sp_model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+    py::object                  py_layers_weights = sp_model.attr("weight").attr("weights");
+    py::object                  py_global_weights = sp_model.attr("weight").attr("global_weights");
+    auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+
+    for (auto& layer_weigths : py_layers_weights_vec) {
+        py::list tmp;
+        tmp.append(layer_weigths);
+        auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
+        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(gpt_init_params, std::move(*gpt_weight))));
+    }
+
+    return std::move(std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,
+                                                                             gen_num_per_circle,
+                                                                             std::move(mtp_params)));
+};
 
 }  // namespace rtp_llm

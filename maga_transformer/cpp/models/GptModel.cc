@@ -336,6 +336,10 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     return micro_batch_inputs;
 }
 
+ft::BufferPtr GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {
+    return hidden_states;
+};
+
 GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "forwardPreLayers");
     bool enable_sp = device_->getDeviceProperties().enable_sp;
@@ -379,9 +383,12 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     if (residual_scale_fp32_ && residual_scale_->type() != dtype) {
         residual_scale_ = device_->convert({residual_scale_fp32_, dtype});
     }
+
     if (device_props_.tp_size > 1) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
+
+    hidden = embeddingPost(hidden, inputs);
 
     // pre layernorm
     BufferPtr pre_decoder_residual = nullptr;
@@ -985,6 +992,8 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
+    shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] = inputs.last_hidden_states.get() ? inputs.last_hidden_states->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] ? (std::uint8_t)inputs.last_hidden_states->type() : 0;
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -1010,6 +1019,7 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     auto combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto text_tokens_mask_size = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto mm_features_locs_size = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+    auto hidden_states_size = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
 
     if (device->getDeviceProperties().tp_rank) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
@@ -1046,6 +1056,15 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         if (shape_hints_ptr[GptModelInputIndex::loraInputLengths]) {
             inputs.lora_input_lengths = device->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, ft::AllocationType::HOST});
+        }
+        if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
+            auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
+            auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
+            FT_CHECK(hidden_states_size % hidden_states_dim0 == 0);
+            inputs.last_hidden_states = device->allocateBuffer(
+                {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
+                 {hidden_states_dim0, hidden_states_dim1},
+                 ft::AllocationType::DEVICE});
         }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = device->allocateBuffer(
@@ -1095,6 +1114,9 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         for (auto& mm_feature: inputs.multimodal_features.value()) {
             buffers.emplace_back(mm_feature);
         }
+    }
+    if (hidden_states_size) {
+        buffers.emplace_back(inputs.last_hidden_states);
     }
     device->broadcast({buffers, 0});
     device->syncAndCheck();

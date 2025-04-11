@@ -504,5 +504,45 @@ class DeepSeekV2(BaseModel):
         cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous().to(self.device).to(torch.float32)
         self.weight.global_weights[W.rope_cos_sin_cache] = cos_sin_cache
 
+class DeepSeekV3MtpWeight(DeepSeekV2Weight):
+
+    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+        super().__init__(config, tp_size, tp_rank)
+
+    def _get_weight_info(self):
+        layer_weights: List[List[WeightInfo]] = []
+        weights = [
+            WeightInfo(W.embedding, [CkptWeightInfo('model.layers.0.embed_tokens.weight', identity)], identity),
+            WeightInfo(W.lm_head, [CkptWeightInfo('model.layers.0.shared_head.head.weight', identity)], identity)
+        ]
+        assert self._num_layers == 1
+        for layer in range(self._num_layers):
+            layer_weights_tmp = self._get_hf_layer_weight_info(layer)
+            layer_weights_tmp.extend([
+                WeightInfo(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.shared_head.norm.weight', identity)], identity),
+                WeightInfo(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                WeightInfo(W.multi_tokens_predict_enorm, [CkptWeightInfo('model.layers.{i}.enorm.weight', identity)], identity),
+                WeightInfo(W.multi_tokens_predict_hnorm, [CkptWeightInfo('model.layers.{i}.hnorm.weight', identity)], identity),
+                WeightInfo(W.multi_tokens_predict_eh_proj, [CkptWeightInfo('model.layers.{i}.eh_proj.weight', identity)], transpose),
+            ])
+            layer_weights.append(layer_weights_tmp)
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+
+class DeepSeekV3Mtp(DeepSeekV2):
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        config.moe_layer_index = [i for i in range(config.layer_num)]
+        config.reverse_e_h_norm = True
+        return config
+
+    @staticmethod
+    def get_weight_cls():
+        return DeepSeekV3MtpWeight
+
+
 register_model('deepseek2', DeepSeekV2, ["DeepseekV2ForCausalLM"])
 register_model('deepseek3', DeepSeekV2, ["DeepseekV3ForCausalLM"])
+register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])

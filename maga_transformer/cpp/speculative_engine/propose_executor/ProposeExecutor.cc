@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/DeterministicExecutor.h"
+#include "maga_transformer/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 
 namespace rtp_llm {
 
@@ -9,6 +10,7 @@ createProposeExecutor(const EngineInitParams&                        score_model
                       std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
                       ft::DeviceBase*                                device,
                       const std::shared_ptr<CacheManager>&           cache_manager,
+                      const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_manager,
                       const std::shared_ptr<lora::LoraManager>&      lora_manager) {
     const std::string&               sp_type          = propose_model_engine_init_params->sp_type;
     std::unique_ptr<ProposeExecutor> propose_executor = nullptr;
@@ -18,6 +20,9 @@ createProposeExecutor(const EngineInitParams&                        score_model
     } else if (sp_type == "deterministic") {
         propose_executor.reset(
             new DeterministicExecutor(score_model_engine_init_params, propose_model_engine_init_params, device));
+    } else if (sp_type == "mtp") {
+        propose_executor.reset(
+            new MTPExecutor(propose_model_engine_init_params, device, mtp_cache_manager, lora_manager));
     } else {
         FT_FAIL("invalid sp_type: %s", sp_type);
     }

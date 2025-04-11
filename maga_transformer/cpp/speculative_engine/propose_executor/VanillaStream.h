@@ -12,7 +12,7 @@ namespace rtp_llm {
 class VanillaStream: public GenerateStream {
 public:
     VanillaStream(const GenerateStream&                     stream,
-                  ProposeOutput*                            propose_output,
+                  ProposeOutputPtr                          propose_output,
                   size_t                                    propose_step):
         GenerateStream(stream), propose_output_(propose_output), propose_step_(propose_step) {
         // WARNING: VanillaStream currently only support batch_size = 1
@@ -85,7 +85,7 @@ private:
 
 protected:
     int                                old_top_k_    = -1;
-    ProposeOutput*                     propose_output_;
+    ProposeOutputPtr                   propose_output_;
     size_t                             current_step_ = 0;
     size_t                             propose_step_ = 0;
 };

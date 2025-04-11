@@ -55,7 +55,7 @@ class ModelFactory:
         config.model_name = model_cls.__name__
         if issubclass(model_cls, MultiModalMixin):
             config.is_multimodal = True
-        
+
         return model_cls, config
 
     @staticmethod
@@ -72,10 +72,13 @@ class ModelFactory:
     @staticmethod
     def _create_sp_model(score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig):
         model = None
-        if model_config.sp_type == "vanilla":
-            global _model_factory
+        global _model_factory
+        if model_config.sp_type == "vanilla" or model_config.sp_type == "mtp":
             if model_config.model_type not in _model_factory:
                 raise Exception(f"model type {model_config.model_type} not registered!")
+            if model_config.model_type == "deepseek-v3-mtp" or model_config.model_type == "mixtbstars-mtp":
+                logging.warning(f"create sp model type is {model_config.model_type}, so change the sp type to mtp")
+                model_config.sp_type = "mtp"
             model_cls = _model_factory[model_config.model_type]
             # propose model's max seq len must be equal to score model's max seq len
             model_config.max_seq_len = score_model_gpt_config.max_seq_len
@@ -179,7 +182,7 @@ class ModelFactory:
         propose_model_config = None
 
         sp_type = os.environ.get("SP_TYPE", None)
-        if sp_type == "vanilla":
+        if sp_type == "vanilla" or sp_type == "mtp":
             logging.info("use vanilla speculative model")
             propose_model_type = os.environ.get("SP_MODEL_TYPE", None)
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
@@ -212,7 +215,7 @@ class ModelFactory:
         elif sp_type == "medusa":
             logging.info("use medusa speculative model")
             raise NotImplementedError
-        
+
         return propose_model_config
 
     @staticmethod

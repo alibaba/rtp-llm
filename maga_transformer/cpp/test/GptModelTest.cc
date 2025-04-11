@@ -1,8 +1,6 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
-#define private public
-
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
@@ -55,9 +53,11 @@ TEST_F(GptModelTest, testSimple) {
     const auto mask_buf = tensorToBuffer(mask_tensor);
     auto model = createGptModel({device_, *weights, description, cache_manager_->kvCacheBuffer()});
 
-    GptModelInputs inputs = {
-        std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
-    };
+    GptModelInputs inputs;
+    inputs.combo_tokens =  std::move(combo_tokens);
+    inputs.input_lengths = std::move(input_lengths);
+    inputs.sequence_lengths = std::move(sequence_lengths);
+
     inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;

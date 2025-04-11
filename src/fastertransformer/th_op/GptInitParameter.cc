@@ -367,7 +367,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(enable_speculative_decoding, enable_speculative_decoding_) \
     DEF_PROPERTY(model_name, model_name_)                               \
     DEF_PROPERTY(deepseek_rope_mscale, deepseek_rope_mscale_)           \
-    DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)
+    DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)     \
+    DEF_PROPERTY(reverse_e_h_norm, reverse_e_h_norm_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num

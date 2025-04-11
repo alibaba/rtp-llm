@@ -17,6 +17,7 @@ struct ResourceContext {
     std::shared_ptr<SystemPrompt>   system_prompt = nullptr;
     bool                            reuse_cache{false};
     bool                            use_cache_store{false};
+    std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
 };
 
 class StreamCacheResource {

@@ -26,6 +26,8 @@ struct StreamUpdateInfo {
     const ft::BufferPtr cum_log_probs;
     const ft::BufferPtr all_probs;
     const ft::BufferPtr loss;
+    // for mtp
+    const ft::BufferPtr all_hidden_states;
 };
 
 class GenerateStream {
@@ -170,6 +172,7 @@ public:
     // for test
     void setIsContextStream(bool is_context_stream);
     ft::BufferPtr getLoss();
+    ft::BufferPtr getLastHiddenStates();
     ft::BufferPtr getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void setPerfTest(bool perf_test_);
@@ -232,12 +235,24 @@ public:
         sp_edit_first_time_ = sp_edit_first_time;
     }
 
+    void setReturnLastHiddenStates(bool flag) {
+        return_all_hidden_states_ = flag;
+    }
+
     bool forceDisableSpRun() const {
         return generate_input_->generate_config->force_disable_sp_run;
     }
 
     bool disableSpRun() const {
         return numBeams() > 1 || forceDisableSpRun();
+    }
+
+    bool needReturnHiddenStates() {
+        return return_all_hidden_states_;
+    }
+
+    void setMtpTokenIndex(int mtp_token_index) {
+        mtp_token_index_ = mtp_token_index;
     }
 
     std::vector<int> getLatestTokens(size_t token_num);
@@ -312,8 +327,12 @@ protected:
     ft::BufferPtr                       all_probs_;
     ft::BufferPtr                       softmax_probs_;
     ft::BufferPtr                       loss_;
+    ft::BufferPtr                       last_hidden_states_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;
+
+    bool return_all_hidden_states_ = false;
+    int mtp_token_index_ = 0;
 
     std::optional<ft::BufferPtr>        context_position_ids_;
     PositionIdsStyle                    mm_position_ids_style_;

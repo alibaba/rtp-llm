@@ -11,14 +11,15 @@ namespace rtp_llm {
 
 class CacheConfigCreator {
 public:
-    static CacheConfig createBasicConfig(const ft::GptInitParameter& param);
+    static CacheConfig createBasicConfig(const ft::GptInitParameter& param, bool is_mtp=false);
     static CacheConfig createConfig(
         const ft::GptInitParameter& param,
         const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
     static std::tuple<CacheConfig, CacheConfig> createSpConfig(
         const ft::GptInitParameter& score_param,
         const ft::GptInitParameter& propose_param,
-        const std::optional<WarmUpResult>& warm_up_result);
+        const std::optional<WarmUpResult>& warm_up_result,
+        bool is_mtp);
 
 private:
     static size_t getDefaultRuntimeMemorySize(const ft::GptInitParameter& param);

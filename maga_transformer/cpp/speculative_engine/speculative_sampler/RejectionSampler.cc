@@ -65,10 +65,13 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             logits = device_->clone(
                 {scorer_stream_output->logits->view(0, accepted_len), ft::AllocationType::HOST, {"return_logits"}});
         }
-        if (stream->generateConfig()->return_hidden_states) {
+
+        if (stream->needReturnHiddenStates()) {
             hidden_states = device_->clone({scorer_stream_output->hidden_states->view(0, accepted_len),
-                                            ft::AllocationType::HOST,
-                                            {"return_hidden_states"}});
+                ft::AllocationType::DEVICE,
+                {"return_hidden_states"}});
+            FT_LOG_DEBUG("sample hidden states: %s", hidden_states->debugStringMeta().c_str());
+
         }
         if (scorer_stream_output->loss) {
             loss = device_->clone({*scorer_stream_output->loss, ft::AllocationType::HOST, {"return_loss"}});
@@ -99,7 +102,7 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
                                           const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const {
     torch::Tensor score_all_probs   = Buffer2torchTensor(scorer_stream_output->all_probs, false);
     size_t score_vocab_size   = score_all_probs.size(1);
-    
+
     if (!propose_stream_output->all_probs) {
         auto all_probs = device_->allocateBuffer(
             {ft::DataType::TYPE_FP32, {propose_step, score_vocab_size}, ft::AllocationType::HOST}, {""});
