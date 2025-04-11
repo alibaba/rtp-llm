@@ -70,7 +70,7 @@ public:
     bool in_think_mode      = false;
     int max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
-
+    bool gen_timeline = false;
     bool top1() {
         return top_k == 1;
     }

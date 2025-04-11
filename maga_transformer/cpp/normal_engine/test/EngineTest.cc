@@ -72,7 +72,7 @@ TEST_F(NormalEngineTest, testSimple) {
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 3;
         query->generate_config->is_streaming   = true;
-
+        query->generate_config->gen_timeline   = true;
         shared_ptr<GenerateStream> stream      = engine->enqueue(query);
 
         ASSERT_TRUE(stream != nullptr);
@@ -136,6 +136,7 @@ TEST_F(NormalEngineTest, testNewDevice) {
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
+    query->generate_config->gen_timeline   = true;
     query->generate_config->max_new_tokens = 1;
 
     shared_ptr<GenerateStream> stream = engine->enqueue(query);

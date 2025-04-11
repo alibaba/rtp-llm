@@ -26,6 +26,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , need_release_resource_(input->need_release_resource)
     , enable_fast_gen_(params.enable_fast_gen_)
     , use_cache_store_(params.use_cache_store_)
+    , gen_timeline_(input->generate_config->gen_timeline)
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
@@ -218,6 +219,10 @@ bool GenerateStream::returnLogits() const {
 
 bool GenerateStream::returnCumLogProbs() const {
     return generate_input_->generate_config->return_cum_log_probs;
+}
+
+bool GenerateStream::genTimeline() const {
+    return seqLength() <= inputLength() + 1 ? gen_timeline_ : false;
 }
 
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {

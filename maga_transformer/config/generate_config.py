@@ -65,6 +65,7 @@ class GenerateConfig(BaseModel):
     return_all_probs: bool = False
     return_softmax_probs: bool = False
     can_use_pd_separation: bool = True
+    gen_timeline: bool = False
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

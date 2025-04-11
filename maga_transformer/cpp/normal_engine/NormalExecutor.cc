@@ -1,13 +1,48 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
+#include <memory>
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "torch/csrc/autograd/profiler_kineto.h"
 
 using namespace std;
 
 namespace rtp_llm {
+namespace tap = torch::autograd::profiler;
+namespace tpi = torch::profiler::impl;
+
+class CudaProfiler {
+public:
+    CudaProfiler(const std::string& prefix): prefix_(prefix) {
+        tap::prepareProfiler(config_, activities_);
+    }
+    ~CudaProfiler() {
+        if (!stoped_) {
+            stoped_ = true;
+            stop();
+        }
+    }
+    void start() {
+        count += 1;
+        stoped_ = false;
+        tap::enableProfiler(config_, activities_);
+    }
+    void stop() {
+        std::unique_ptr<tap::ProfilerResult> res = tap::disableProfiler();
+        std::string file_name = prefix_ + std::to_string(count) + ".json";
+        res->save(file_name);
+        stoped_ = true;
+    }
+protected:
+    static size_t count;
+    std::string   prefix_;
+    tpi::ProfilerConfig config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
+    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CUDA};
+    bool stoped_ = true;
+};
+size_t CudaProfiler::count = 0;
 
 NormalExecutor::NormalExecutor(const EngineInitParams& params,
                                const std::shared_ptr<CacheManager>& cache_manager,
@@ -48,6 +83,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
+    std::shared_ptr<CudaProfiler> profiler;
+    if (stream_groups.genTimeline()) {
+        profiler = std::make_shared<CudaProfiler>("cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "+");
+        profiler->start();
+    }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector tps_collector;
     GptModelInputs model_input;

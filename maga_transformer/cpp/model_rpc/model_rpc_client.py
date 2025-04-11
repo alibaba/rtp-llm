@@ -69,6 +69,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
     generate_config_pb.return_softmax_probs = input_py.generate_config.return_softmax_probs
     generate_config_pb.can_use_pd_separation = input_py.generate_config.can_use_pd_separation
+    generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
+
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])

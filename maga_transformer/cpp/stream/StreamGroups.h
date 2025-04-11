@@ -33,6 +33,7 @@ public:
                 }
                 total_score_batch_size_   += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
+                gen_timeline_ |= stream->genTimeline();
             } else {
                 decode_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
@@ -45,6 +46,7 @@ public:
                 }
                 total_score_batch_size_   += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
+                gen_timeline_ |= stream->genTimeline();
             }
         }
     }
@@ -141,6 +143,9 @@ public:
         return context_streams_.size() + decode_streams_.size();
     }
 
+    bool genTimeline() {
+        return gen_timeline_;
+    }
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -177,6 +182,7 @@ private:
     size_t                       multimodal_features_len_  = 0;
     size_t                       total_score_batch_size_   = 0;
     bool                         has_multimodal_input_     = false;
+    bool                         gen_timeline_             = false;
     std::list<std::string>       adapter_names;
 };
 

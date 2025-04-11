@@ -62,6 +62,7 @@ message GenerateConfigPB {
     bool in_think_mode = 32;
     int32 max_thinking_tokens = 33;
     repeated int32 end_think_token_ids = 34;
+    bool gen_timeline = 35;
 }
 
 message MMPreprocessConfigPB {
