@@ -1,0 +1,25 @@
+diff --git tools/wheelmaker.py tools/wheelmaker.py
+index 8fa3e02d..59ac3d4d 100644
+--- tools/wheelmaker.py
++++ tools/wheelmaker.py
+@@ -104,7 +104,7 @@ class _WhlFile(zipfile.ZipFile):
+         mode,
+         distribution_prefix: str,
+         strip_path_prefixes=None,
+-        compression=zipfile.ZIP_DEFLATED,
++        compression=zipfile.ZIP_STORED,
+         **kwargs,
+     ):
+         self._distribution_prefix = distribution_prefix
+@@ -152,7 +152,7 @@ class _WhlFile(zipfile.ZipFile):
+         hash = hashlib.sha256()
+         size = 0
+         with open(real_filename, "rb") as fsrc:
+-            with self.open(zinfo, "w") as fdst:
++            with self.open(zinfo, "w", force_zip64=True) as fdst:
+                 while True:
+                     block = fsrc.read(2**20)
+                     if not block:
+-- 
+2.19.1.6.gb485710b
+
