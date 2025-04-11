@@ -264,8 +264,10 @@ const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) con
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
-    batch_resource_.resize(1);
-    batch_resource_.resize(0, stream_->seqLength(), true);
+    batch_resource_.resize(stream_->tileNum());
+    for (size_t i = 0; i < stream_->tileNum(); i++) {
+        batch_resource_.resize(i, stream_->seqLength(), true);
+    }
 }
 
 }  // namespace rtp_llm

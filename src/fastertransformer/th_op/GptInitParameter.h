@@ -126,6 +126,7 @@ public:
     int64_t              vocab_size_                 = 0;
     int64_t              input_vocab_size_           = 0; // 0 if not set
     int64_t              type_vocab_size_            = 0;
+    int64_t              embedding_size_             = 0;
     int64_t              expert_num_                 = 0;
     int64_t              moe_k_                      = 0;
     bool                 moe_normalize_expert_scale_ = false;

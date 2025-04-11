@@ -388,6 +388,11 @@ class BaseModel(object):
     def _initialize_weights(self):
         assert (self.weight is not None)
 
+        embedding_weight = self.weight.global_weights.get(W.embedding, None)
+        if embedding_weight != None:
+            self.config.embedding_size = embedding_weight.shape[0]
+            logging.info(f"embedding_size is {self.config.embedding_size}, vocab size is {self.config.vocab_size}")
+
         if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
             

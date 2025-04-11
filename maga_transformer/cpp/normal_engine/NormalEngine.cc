@@ -100,18 +100,24 @@ WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
     }
 }
 
-WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
+std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    fake_input->input_ids                     = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {seq_len}, ft::AllocationType::HOST});
     
     std::default_random_engine generator;
-    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
+    size_t token_size = params_.embedding_size_ ? std::min(params_.embedding_size_, params_.vocab_size_) : params_.vocab_size_;
+    std::uniform_int_distribution<int> distribution(0, token_size - 1);
     for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
         *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
     }
 
-    fake_input->generate_config               = make_shared<GenerateConfig>();
+    return fake_input;
+}
+
+WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
+    auto fake_input = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -127,19 +133,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 }
 
 WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
-    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
-
-    std::default_random_engine generator;
-    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
-    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
-        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
-    }
-
-    fake_input->generate_config               = make_shared<GenerateConfig>();
-    // TODO(xinfei.sxf) max_generate_batch_size?
-    fake_input->generate_config->num_return_sequences = 1;
+    auto fake_input = makeFakeInput((size_t)params_.max_seq_len_ - 1);
+    fake_input->generate_config->num_return_sequences = params_.max_generate_batch_size_;
     fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
@@ -160,17 +155,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
     FT_LOG_DEBUG("enqueue min fake query");
-    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids                     = device_->allocateBuffer(
-                                                {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
-    
-    std::default_random_engine generator;
-    std::uniform_int_distribution<int> distribution(0, params_.vocab_size_ - 1);
-    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
-        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
-    }
-
-    fake_input->generate_config               = make_shared<GenerateConfig>();
+    auto fake_input = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->generate_config->top_k = 1;
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

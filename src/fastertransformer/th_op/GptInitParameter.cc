@@ -226,6 +226,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(input_vocab_size, input_vocab_size_)                   \
     DEF_PROPERTY(hidden_size, hidden_size_)                             \
     DEF_PROPERTY(type_vocab_size, type_vocab_size_)                     \
+    DEF_PROPERTY(embedding_size, embedding_size_)                       \
     DEF_PROPERTY(gen_num_per_circle, gen_num_per_circle_)               \
     DEF_PROPERTY(inter_size, inter_size_)                               \
     DEF_PROPERTY(inter_padding_size, inter_padding_size_)               \
