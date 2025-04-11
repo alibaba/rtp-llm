@@ -547,20 +547,17 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
             });
             // FT_LOG_INFO("call layer %ld micro batch %ld ep combine done.", i, micro_batch_idx, hidden_states->shape()[0]);
 
-            // auto hook = combine_out.comm_barrier_hook
-            //           ? combine_out.comm_barrier_hook
-            //           : device_->createCommHook();
             auto hook = nullptr;
             if (combine_out.comm_barrier_hook) {
                 // FT_LOG_INFO("synchronize combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
                 // combine_out.comm_barrier_hook->hook_sync();
                 // FT_LOG_INFO("synchronize combine barrier for layer %ld, micro batch %ld done.", i, micro_batch_idx);
                 last_comm_hook_ = move(combine_out.comm_barrier_hook);
+            } else {
+                FT_LOG_DEBUG("no combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
             }
 
             combine_out.params.overlapped = false;
-            // auto out = device_->gatherCombineOutput(combine_out);
-            // auto output = out.hidden_states;
             auto output = combine_out.all_output;
 
             // printBufferData(*output, "moe_ffn_ep_out");
@@ -931,6 +928,8 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         // FT_LOG_INFO("synchronize dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
         // dispatched_output.comm_barrier_hook->hook_sync();
         // FT_LOG_INFO("synchronize dispatch barrier for layer %ld, micro batch %ld done", layer_id, inputs.micro_batch_inputs.size());
+    } else {
+        FT_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
     }
 
     return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};

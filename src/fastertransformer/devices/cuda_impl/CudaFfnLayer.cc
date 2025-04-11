@@ -168,9 +168,7 @@ MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
     }
     auto all2all_ret = allToAll({
         {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
-    auto all_output = all2all_ret.outputs[0];
-    return MoeCombineOutput({all_output, nullptr, params});
-    // return gatherCombineOutput(all_output, params);
+    return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, move(all2all_ret.comm_barrier_hook)});
 }
 
 FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_outputs) {
@@ -205,7 +203,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
-                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);                
+                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),
