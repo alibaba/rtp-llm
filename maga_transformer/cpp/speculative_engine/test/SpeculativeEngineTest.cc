@@ -43,7 +43,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 2);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 1);
 

@@ -132,9 +132,6 @@ public:
         if (!generate_config->top1()) {
             setReturnAllProbs(true);
         }
-        if (generate_config->top_k == 0 && generate_config->top_p > 0.0) {
-            generate_config->top_k = 20;
-        }
     }
 
 private:

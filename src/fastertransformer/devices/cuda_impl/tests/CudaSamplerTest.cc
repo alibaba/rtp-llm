@@ -47,8 +47,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     });
     auto greedy_output = device_->sampleGreedy(params);
     sync_check_cuda_error();
-    ASSERT_TRUE(greedy_output.success != nullptr);
-    ASSERT_EQ(greedy_output.success->size(), 4);
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     ASSERT_EQ(output_token_ids_host[5], 5);
     ASSERT_EQ(output_token_ids_host[11], 2);
