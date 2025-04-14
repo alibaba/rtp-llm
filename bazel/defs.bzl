@@ -183,7 +183,7 @@ def rpm_library(
     elif static_lib:
         bash_cmd += "&& cp -L " + lib_path + "/*.a" + " ../$(@D)/"
     if shared_lib:
-        bash_cmd += "&& cp -L " + lib_path + "/" + shared_lib + " ../$(@D) && patchelf --set-soname " + shared_lib + " ../$(@D)/" + shared_lib
+        bash_cmd += "&& echo $$PATH && which patchelf && patchelf --version && cp -L " + lib_path + "/" + shared_lib + " ../$(@D) && patchelf --set-soname " + shared_lib + " ../$(@D)/" + shared_lib
     for share_lib in shared_libs:
         outs.append(share_lib)
         bash_cmd += "&& cp -L " + lib_path + "/" + share_lib + " ../$(@D) && patchelf --set-soname " + share_lib + " ../$(@D)/" + share_lib

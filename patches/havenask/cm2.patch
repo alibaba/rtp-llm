@@ -1,0 +1,12 @@
+diff --git aios/apps/facility/cm2/cm_sub/wrr.h aios/apps/facility/cm2/cm_sub/wrr.h
+index 088278a3..95b3d6b9 100644
+--- aios/apps/facility/cm2/cm_sub/wrr.h
++++ aios/apps/facility/cm2/cm_sub/wrr.h
+@@ -17,6 +17,7 @@
+ #define __WEIGHT_RR_H_
+ 
+ #include <vector>
++#include <functional>
+ 
+ #include "autil/Log.h"
+ 

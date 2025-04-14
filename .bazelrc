@@ -109,12 +109,14 @@ build:rocm --copt="-Wno-array-parameter"
 build:rocm --copt="-Wno-error=array-bounds"
 build:rocm --copt="-Wno-error=unused-result"
 build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
-build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/"
 #build:rocm --action_env ROCM_HIPBLASLT_CONFIG="/ali/rtp-llm/gemm_config_bert61.csv" # blasLt config
 #build:rocm --action_env ROCM_DISABLE_HIPBLASLT=1 # to use blas only
 #build:rocm --action_env HIPBLASLT_LOG_MASK="32" # to log blasLt
 #build:rocm --action_env ROCBLAS_LAYER="4"
 #build:rocm --copt="-DENABLE_PROF=1"
+build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
+build:rocm --host_action_env LD_LIBRARY_PATH="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
+test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
