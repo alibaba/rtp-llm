@@ -270,4 +270,8 @@ void StreamCacheResource::fakeInitKVBlock() {
     }
 }
 
+int StreamCacheResource::mallocFailedTimes() const {
+    return malloc_failed_times_;
+}
+
 }  // namespace rtp_llm

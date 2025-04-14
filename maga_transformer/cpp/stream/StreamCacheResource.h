@@ -46,6 +46,7 @@ public:
     void releaseResource();
     int  singleBatchNeedBlocks(int seq_len) const;
     int  maxBlockSize() const;
+    int  mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);

@@ -114,6 +114,8 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_times_metric, "rtp_llm_batch_with_prefill_times");
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_len_metric, "rtp_llm_batch_with_prefill_len");
 
+    REGISTER_GAUGE_MUTABLE_METRIC(malloc_failed_times_metric, "rtp_llm_malloc_failed_times");
+
     return true;
 }
 
@@ -139,6 +141,8 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(fallback_times);
     REPORT_GAUGE(batch_with_prefill_times);
     REPORT_GAUGE(batch_with_prefill_len);
+
+    REPORT_GAUGE(malloc_failed_times);
 }
 
 // for rpc request

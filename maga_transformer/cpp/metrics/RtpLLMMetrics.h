@@ -114,6 +114,7 @@ public:
 
     int32_t batch_with_prefill_times = 0;
     int32_t batch_with_prefill_len = 0;
+    int32_t malloc_failed_times = 0;
 };
 
 class RtpLLMStreamMetrics: public kmonitor::MetricsGroup {
@@ -141,9 +142,10 @@ public:
     kmonitor::MutableMetric* fallback_tokens_metric        = nullptr;
     kmonitor::MutableMetric* fallback_times_metric         = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_times_metric = nullptr;
-    kmonitor::MutableMetric* batch_with_prefill_len_metric = nullptr;
+    kmonitor::MutableMetric* batch_with_prefill_len_metric   = nullptr;
      
-    kmonitor::MutableMetric* timeout_latency_us_metric       = nullptr;    
+    kmonitor::MutableMetric* timeout_latency_us_metric       = nullptr;  
+    kmonitor::MutableMetric* malloc_failed_times_metric      = nullptr;  
 
 private:
     AUTIL_LOG_DECLARE();

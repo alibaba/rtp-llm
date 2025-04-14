@@ -733,6 +733,7 @@ void GenerateStream::reportMetric() {
             collector.fallback_times         = fallback_times_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
+            collector.malloc_failed_times      = stream_cache_resource_.mallocFailedTimes();
             if (timeout) {
                 collector.timeout_latency_us = getTimeoutMs() * 1000;
             }
