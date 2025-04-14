@@ -114,7 +114,21 @@ public:
                                          const cublasLtMatmulAlgo_t* algo,
                                          void*                       workspace,
                                          size_t                      workspaceSizeInBytes,
-                                         cudaStream_t                stream);
+                                         cudaStream_t                stream,
+                                         bool                        findBest = true);
+
+    std::pair<bool, cublasLtMatmulAlgo_t> findHeuristicAlgo(cublasLtHandle_t       lightHandle,
+                                                            cublasLtMatmulDesc_t   computeDesc,
+                                                            const void*            alpha,
+                                                            const void*            A,
+                                                            cublasLtMatrixLayout_t Adesc,
+                                                            const void*            B,
+                                                            cublasLtMatrixLayout_t Bdesc,
+                                                            const void*            beta,
+                                                            const void*            C,
+                                                            cublasLtMatrixLayout_t Cdesc,
+                                                            void*                  D,
+                                                            cublasLtMatrixLayout_t Ddesc);
 
     std::pair<bool, cublasLtMatmulAlgo_t> findBestAlgo(cublasLtHandle_t       lightHandle,
                                                        cublasLtMatmulDesc_t   computeDesc,
