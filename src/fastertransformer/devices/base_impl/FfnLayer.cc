@@ -18,7 +18,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         output = moe_output.hidden_states;
 
         auto shared_expert_output = moeSharedExpert(params).hidden_states;
-        overlappedCommBarrier(); // TODO(wangyin): maybe this barrier should be removed.
 
         // for deep ep ll, the gather should be defered afater shared expert.
         if (moe_output.moe_combine_output) {

@@ -18,7 +18,7 @@ namespace fastertransformer {
 
 void hackMoeExpert(const MoeDispatchParams& params, BufferPtr& experts_ids_host) {
     auto elementNum = experts_ids_host->size();
-    auto const ep_size    = params.moe_configs.ep_size; 
+    auto const ep_size    = params.moe_configs.ep_size;
     auto const expert_num = params.moe_configs.expert_num;
     auto const top_k      = params.moe_configs.top_k;
     auto const token_num  = params.expert_ids.shape()[0];
@@ -163,9 +163,6 @@ MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
     }
 
     DevicePerfWrapper wrapper(this, "epCombine");
-    if (params.overlapped) {
-        overlap_hold_buffers_.clear();
-    }
     auto all2all_ret = allToAll({
         {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
     return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, move(all2all_ret.comm_barrier_hook)});
@@ -176,12 +173,6 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
     auto scatter_output = combine_outputs.scatter_output;
     const auto& params = combine_outputs.params;
 
-    // TODO(wangyin.yx): remove these overlap held buffers.
-    // if (params.overlapped) {
-        // overlap_hold_buffers_.emplace_back(all_output);
-        // overlap_hold_buffers_.emplace_back(params.input);
-        // overlap_hold_buffers_.emplace_back(params.indices);
-    // }
     torch::Tensor indices_tensor;
     cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
 
@@ -197,9 +188,6 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
                 {all_output->type(),
                  {current_token_num,
                   dim1_size}});
-            // if (params.overlapped) {
-            //     overlap_hold_buffers_.emplace_back(scatter_output);
-            // }
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
@@ -221,9 +209,6 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
         } else {
             padding_output =
                 allocateBuffer({all_output->type(), {tp_token_size * params.moe_configs.tp_size, dim1_size}});
-            // if (params.overlapped) {
-            //     overlap_hold_buffers_.emplace_back(padding_output);
-            // }
         }
         if (scatter_output->shape()[0] > 0) {
             copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),

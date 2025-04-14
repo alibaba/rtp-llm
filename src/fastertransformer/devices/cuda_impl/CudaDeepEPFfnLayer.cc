@@ -91,7 +91,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     // call dispatch and force sync, maybe sync is not necessary
     auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
         topk_idx_tensor, expert_num, nullptr /*previous_event*/, false /*async*/, false /*allocate_on_comm_stream*/);
-    // cudaDeviceSynchronize();
 
     deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
 
@@ -112,7 +111,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
 
     BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
     BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
-    // cudaDeviceSynchronize();
     const size_t num_experts_per_node = expert_num / moe_conf.ep_size;
     tensorrt_llm::kernels::genSourceRowRevert(recv_topk_idx_buffer->data<int>(), recv_topk_idx_buffer->shape()[0], recv_topk_idx_buffer->shape()[1], num_experts_per_node * moe_conf.ep_rank, stream_);
     BufferPtr recv_x_buffer;
@@ -132,9 +130,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
 }
 
 MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
-    if (params.overlapped) {
-        overlap_hold_buffers_.clear();
-    }
     FT_CHECK(params.deep_ep_output != nullptr && params.deep_ep_output->handle.has_value());
 
     torch::Tensor input_tensor;
@@ -156,7 +151,6 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   false /*async_finish*/,
                                                   false /*allocate_on_comm_stream*/);
     // wait combine kernel done, no need, will sync wait on next stream op
-    // cudaDeviceSynchronize();
     BufferPtr all_output;
     if (params.output != nullptr) {
         all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(params.output->type()));

@@ -211,7 +211,7 @@ public:
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
 
-    void moeGateSelectWithBias(const FfnLayerParams& params, 
+    void moeGateSelectWithBias(const FfnLayerParams& params,
                                BufferPtr gate,
                                BufferPtr expert_scales,
                                BufferPtr expert_for_source_row,
@@ -313,7 +313,6 @@ private:
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
     // BufferPtr will be error when multi stream, tmp hold
-    std::vector<BufferPtr> overlap_hold_buffers_;
     std::unique_ptr<CommBuffer> attn_ag_comm_buffer_ = nullptr;
     std::unique_ptr<CommBuffer> attn_ag_scale_comm_buffer_ = nullptr;
     std::unique_ptr<CommBuffer> attn_rs_comm_buffer_ = nullptr;

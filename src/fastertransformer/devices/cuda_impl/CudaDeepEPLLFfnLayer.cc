@@ -30,7 +30,6 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
     // prepare tensors for call deepep dispatch layout
     auto input_tensor = Buffer2torchTensorWithDstType(*hidden, false, c10::kBFloat16); // [num_token, hidden_size]
     torch::Tensor topk_idx_tensor = Buffer2torchTensorWithDstType(*expert_ids, false, c10::kLong); // [num_token, top_k]
-    // cudaDeviceSynchronize();
 
     auto dispatch_output = deepep_buffer_->lowLatencyDispatch(input_tensor,
                                                               topk_idx_tensor,
@@ -38,10 +37,8 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
                                                               expert_num,
                                                               true /*use_fp8*/,
                                                               false /*async_finish*/,
-                                                            //   false /*return_recv_hook*/
                                                               params.overlapped /*return_recv_hook*/
     );
-    // cudaDeviceSynchronize();
 
     BufferPtr packed_recv_x_buffer = torchTensor2Buffer(dispatch_output.packed_recv_x);
 
@@ -50,30 +47,16 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
     out.deep_ep_ll_output.reset(new DeepEPDispatchOutputLowLatency(dispatch_output));
 
     if (params.overlapped) {
-    // if (false) {
         RUNTIME_ASSERT_OP_ARG(dispatch_output.hook.has_value(), "recv hook is null when overlapped");
-        // std::vector<BufferPtr> hold_buffers;
-        // std::vector<torch::Tensor> hold_tensors;
-        // hold_tensors.push_back(dispatch_output.packed_recv_x);
-        // if (dispatch_output.packed_recv_x_scales.has_value()) {
-        //     hold_tensors.push_back(dispatch_output.packed_recv_x_scales.value());
-        // }
         out.comm_barrier_hook = std::make_unique<DeepEPRecvHook>(
             dispatch_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
-        // dispatch_output.hook.value()();
     }
-    // cudaDeviceSynchronize();
 
     return out;
 }
 
 MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
-    if (params.overlapped) {
-        overlap_hold_buffers_.clear();
-    }
     FT_CHECK(params.deep_ep_ll_output != nullptr);
-
-    // cudaDeviceSynchronize();
 
     auto& expert_ids    = params.expert_ids;
     auto& expert_scales = params.expert_scales;
@@ -82,7 +65,6 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
         Buffer2torchTensorWithDstType(*params.input, false, torch::kBFloat16);  // [num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]
     torch::Tensor topk_idx_tensor = Buffer2torchTensorWithDstType(*expert_ids, false, c10::kLong);
     torch::Tensor topk_weights_tensor = Buffer2torchTensorWithDstType(*expert_scales, false, c10::kFloat);
-    // cudaDeviceSynchronize();
 
     auto combine_output = deepep_buffer_->lowLatencyCombine(input_tensor,
                                                             topk_idx_tensor,
@@ -91,7 +73,6 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
                                                             false,
                                                             params.overlapped);
                                                             // false);
-    // cudaDeviceSynchronize();
 
     BufferPtr all_output;
     const auto output_type = params.output ? params.output->type() : params.input->type();
@@ -101,15 +82,12 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
 
     DeviceHookPtr comm_hook;
     if (params.overlapped) {
-    // if (false) {
         RUNTIME_ASSERT_OP_ARG(combine_output.hook.has_value(), "recv hook is null when overlapped");
         RUNTIME_ASSERT_OP_ARG(combined_type == output_type, "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
-        // combine_output.hook.value()();
         comm_hook = std::make_unique<DeepEPRecvHook>(
             combine_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
     }
 
-    // cudaDeviceSynchronize();
     return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});
 }
 
@@ -117,15 +95,12 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
     const auto&       moe_conf = params.configs.moe_configs.value();
     MoeDispatchOutput dispatched_output =
         deepEpLLDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf,
-            // init_params_.enable_comm_overlap});
             false});
 
-    // cudaDeviceSynchronize();
 
     auto moe_ffn_params =
         FfnLayerParams(*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme);
     auto out_hidden_states = deepEpFfnFp8(moe_ffn_params, dispatched_output).hidden_states;
-    // cudaDeviceSynchronize();
 
     // combine with local token expert_ids and expert_scales
     MoeCombineParams combine_params{
