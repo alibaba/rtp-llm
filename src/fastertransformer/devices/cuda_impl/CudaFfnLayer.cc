@@ -287,7 +287,9 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
                                             normalization_mode,
                                             stream_);
     }
-
+    if (autil::EnvUtil::getEnv("FAKE_BALANCE_EXPERT", 0L)) {
+        fake_balance_expert(expert_for_source_row->data<int>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
+    }
     return {expert_for_source_row, expert_scales};
 }
 
