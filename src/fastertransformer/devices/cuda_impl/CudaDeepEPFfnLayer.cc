@@ -32,14 +32,22 @@ bool CudaDevice::initDeepEPBuffer() {
     else{
         num_rdma_bytes = 0; // normal-kernel intranode
     }
-    deepep_buffer_.reset(new DeepEPBuffer(this,
-                                          world_rank,
-                                          world_size,
-                                          int(1e9),
-                                          num_rdma_bytes,
-                                          init_params_.use_deepep_low_latency,
-                                          init_params_.num_experts / init_params_.ep_size));
-    return deepep_buffer_->init();
+
+    try {
+        FT_LOG_INFO("deep ep init with num_rdma_bytes %ld, world_rank %ld, world_size %ld",
+                    num_rdma_bytes, world_rank, world_size);
+        deepep_buffer_.reset(new DeepEPBuffer(this,
+                                            world_rank,
+                                            world_size,
+                                            int(1e9),
+                                            num_rdma_bytes,
+                                            init_params_.use_deepep_low_latency,
+                                            init_params_.num_experts / init_params_.ep_size));
+        return deepep_buffer_->init();
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("Failed to create DeepEPBuffer: %s", e.what());
+        return false;
+    }
 }
 
 MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {

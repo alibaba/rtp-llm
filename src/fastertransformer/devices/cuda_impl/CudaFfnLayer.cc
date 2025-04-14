@@ -174,7 +174,6 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
     const auto& params = combine_outputs.params;
 
     torch::Tensor indices_tensor;
-    cudaStream_t  stream = params.overlapped ? communication_stream_ : stream_;
 
     if (params.moe_configs.tp_size > 1) {
         // TODO: can use torch all gather unequal size to avoid copy
@@ -191,7 +190,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
-                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream);
+                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream_);
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),
@@ -200,7 +199,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
                                                  params.indices->data<int32_t>(),
                                                  scatter_output->data(),
                                                  this->use_stable_scatter_add,
-                                                 stream);
+                                                 stream_);
             }
         }
         BufferPtr padding_output;
@@ -212,16 +211,15 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
         }
         if (scatter_output->shape()[0] > 0) {
             copy({padding_output->view(tp_token_size * params.moe_configs.tp_rank, scatter_output->shape()[0]),
-                    *scatter_output,
-                    params.overlapped});
+                    *scatter_output});
         }
-        allGather({{padding_output}, ParallelMode::TP, {}, true, params.overlapped});
+        allGather({{padding_output}, ParallelMode::TP, {}, true});
         if (params.origin_token_num == tp_token_size * params.moe_configs.tp_size) {
-            return {padding_output, createCommHook()};
+            return {padding_output};
         } else {
             BufferPtr output = params.output ? params.output : allocateBufferLike(padding_output->view(0, params.origin_token_num));
-            copy({*output, padding_output->view(0, params.origin_token_num), params.overlapped});
-            return {output, createCommHook()};
+            copy({*output, padding_output->view(0, params.origin_token_num)});
+            return {output};
         }
     } else {
         if (scatter_output == nullptr) {
@@ -229,7 +227,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             new_shape[0]             = params.origin_token_num;
             BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
             if (output->shape()[0] > 0 && params.origin_token_num > 0) {
-                cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream);
+                cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream_);
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),
@@ -238,11 +236,11 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
                                                  params.indices->data<int32_t>(),
                                                  output->data(),
                                                  this->use_stable_scatter_add,
-                                                 stream);
+                                                 stream_);
             }
-            return {output, createCommHook()};
+            return {output};
         } else {
-            return {all_output, createCommHook()};
+            return {all_output};
         }
     }
 }

@@ -121,7 +121,6 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, con
     auto combine_out = deepEpLLCombine(combine_params);
 
     if (combine_out.params.overlapped) {
-        combine_out.params.overlapped = false;
         return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
     } else {
         return gatherCombineOutput(combine_out);

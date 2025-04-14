@@ -545,7 +545,6 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                 FT_LOG_DEBUG("no combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
             }
 
-            combine_out.params.overlapped = false;
             auto output = combine_out.all_output;
 
             ep_outputs.push_back(EpFfnOutputs({output, move(combine_out), move(hook)}));

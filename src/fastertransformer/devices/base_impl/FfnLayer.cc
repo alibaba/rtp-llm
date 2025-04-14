@@ -236,7 +236,6 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
 
     // TODO(wangyin.yx): refact this defered combine.
     if (combine_out.comm_barrier_hook) {
-        combine_out.params.overlapped = false;
         return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
     } else {
         auto out = gatherCombineOutput(combine_out);
