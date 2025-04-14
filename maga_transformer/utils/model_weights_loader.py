@@ -163,7 +163,6 @@ class ModelWeightsLoader:
             return self.load_from_ft_style_weight(device)
         weights = self.create_model_weights(device)
         convert_device = self._choose_weight_convert_device(device)  # choose convert device to avoid out of mem
-        logging.info(f"load weight by device: {convert_device}")
         for (layer_id, name, tensor) in self.prepare_weights_from_scratch(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
@@ -634,7 +633,6 @@ class ModelWeightsLoader:
 
         for ckpt_weight in weight_info.weights:
             name = ckpt_weight.tensor_name(layer_id)
-            logging.info(f"tensor name: {name}")
             try:
                 before_merge_tensors.append(ckpt_weight.merge_fun([x.to(device) for x in self.load_tensor(name, convert_type)]))
             except Exception as e:
