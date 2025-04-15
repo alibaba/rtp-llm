@@ -64,7 +64,7 @@ inline int DeepGemmPlugin::getNumSms() {
     int            device_idx;
     check_cuda_error(cudaGetDevice(&device_idx));
     check_cuda_error(cudaGetDeviceProperties(&properties, device_idx));
-    
+
     num_sms = properties.multiProcessorCount;
     return num_sms;
 }
@@ -134,11 +134,11 @@ torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
     g = remove_dim? 1: lhs_scale.shape()[0];
     m = lhs_scale.shape()[1 - remove_dim];
     k = lhs_scale.shape()[2 - remove_dim];
-    
+
     int aligned_m = getTmaAlignedSize(m, lhs_scale.typeSize());
 	auto col_major_lhs_scale = torch::transpose(torch::empty({int(g), int(k), int(aligned_m)}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)), 1, 2);
     col_major_lhs_scale.index_put_(
-        {torch::indexing::Slice(), torch::indexing::Slice(0, m), torch::indexing::Slice()}, 
+        {torch::indexing::Slice(), torch::indexing::Slice(0, m), torch::indexing::Slice()},
         torch::from_blob(
             lhs_scale.data(), {int(g), int(m), int(k)}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
     );
@@ -156,10 +156,10 @@ public:
 
     DeepGemmConfig(uint32_t num_sms, uint32_t block_m, uint32_t block_n, uint32_t num_stages, uint32_t num_tma_multicast,
                    bool is_tma_multicast_on_a, uint32_t smem_size):
-        num_sms(num_sms), 
-        block_m(block_m), 
-        block_n(block_n), 
-        num_stages(num_stages), 
+        num_sms(num_sms),
+        block_m(block_m),
+        block_n(block_n),
+        num_stages(num_stages),
         num_tma_multicast(num_tma_multicast),
         smem_size(smem_size),
         is_tma_multicast_on_a(is_tma_multicast_on_a) {}
@@ -267,10 +267,10 @@ void runDeepGemm(__nv_bfloat16*         output,
                  DeepGemmType           gemm_type,
                  cudaStream_t           stream,
                  uint32_t               num_sms,
-                 uint32_t               smem_size) 
+                 uint32_t               smem_size)
 {
     FT_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n, is_tma_multicast_on_a:%u", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, is_tma_multicast_on_a);
-    
+
     // Normal Gemm
     DISPATCH_DEEP_GEMM(2112, 7168, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(4096, 7168, 1, DeepGemmType::Normal)
@@ -282,7 +282,7 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(18432, 7168, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(7168, 18432, 1, DeepGemmType::Normal)
 
-    // tp 8 
+    // tp 8
     DISPATCH_DEEP_GEMM(3072, 1536, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(2048, 512, 1, DeepGemmType::Normal)
     DISPATCH_DEEP_GEMM(2304, 7168, 1, DeepGemmType::Normal)
@@ -308,6 +308,10 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedMasked)
     DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedMasked)
     DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedMasked)
+    // EP 8
+    DISPATCH_DEEP_GEMM(4096, 7168, 32, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 4096, 32, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(7168, 2048, 32, DeepGemmType::GroupedMasked)
     // EP 128
     DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedMasked)
     DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedMasked)
@@ -334,7 +338,7 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
     auto best_config = getBestConfig(m, n, k, 1, num_sms);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
-                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(), 
+                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
                 reinterpret_cast<const QBuffer&>(lhs).scales().data<float>(),
                 reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
                 reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
@@ -366,7 +370,7 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
     m = lhs.shape()[0]; k = lhs.shape()[1]; n = rhs.shape()[1];
     int num_groups = rhs.shape()[0];
     FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%d) % 64 or k(%d) % 128 != 0", n, k);
-    
+
     auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
 
@@ -405,7 +409,7 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
     m = lhs.shape()[1]; k = lhs.shape()[2]; n = rhs.shape()[1];
     int num_groups = rhs.shape()[0];
     FT_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
-    
+
     int num_sms = getNumSms();
 
     auto best_config = getBestConfig(m, n, k, num_groups, num_sms);

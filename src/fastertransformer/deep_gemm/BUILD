@@ -45,7 +45,7 @@ N_K_GROUP_TYPE= [
 ("18432", "7168", "1", "DeepGemmType::Normal"),
 ("7168", "18432", "1", "DeepGemmType::Normal"),
 
-# tp 8 
+# tp 8
 ("3072", "1536", "1", "DeepGemmType::Normal"),
 ("2048", "512", "1", "DeepGemmType::Normal"),
 ("2304", "7168", "1", "DeepGemmType::Normal"),
@@ -70,6 +70,10 @@ N_K_GROUP_TYPE= [
 ("4096", "7168", "128", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "128", "DeepGemmType::GroupedMasked"),
 ("7168", "2048", "128", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "32", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "32", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "32", "DeepGemmType::GroupedMasked"),
 
 ("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
