@@ -886,7 +886,6 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
                                             description_.act_qscheme,
                                             std::move(ffn_output_buf)});
 
-    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
     // FT_LOG_INFO("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
@@ -903,6 +902,8 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         description_.act_qscheme
     });
     // FT_LOG_INFO("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
+
+    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
     if (dispatched_output.comm_barrier_hook) {
         last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
