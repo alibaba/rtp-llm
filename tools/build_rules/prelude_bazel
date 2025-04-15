@@ -1,0 +1,16 @@
+"""
+//tools/build_rules/prelude_bazel - 预定义 Bazel 规则，使自动 append 在所有 BUILD 前，实现对 py_test, cc_test 的规则覆写。
+若 `exec_properties` 中包含 "gpu"，则自动设置 `gpu_count` 为 1。
+"""
+
+def add_gpu_count(exec_properties):
+    if exec_properties and "gpu" in exec_properties:
+        exec_properties["gpu_count"] = "1"
+    return exec_properties
+
+def py_test(name, exec_properties = None, **kwargs):
+    native.py_test(name = name, exec_properties = add_gpu_count(exec_properties), **kwargs)
+
+
+def cc_test(name, exec_properties = None, **kwargs):
+    native.cc_test(name = name, exec_properties = add_gpu_count(exec_properties), **kwargs)
