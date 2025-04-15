@@ -91,6 +91,7 @@ struct FlashInferAttnParams {
     static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
             fastertransformer::DeviceBase *device,
             const fastertransformer::AttentionConfigs &attn_configs,
+            const BufferPtr &prefix_lengths_host,
             const BufferPtr &sequence_lengths_host,
             const BufferPtr &input_lengths_host,
             const BufferPtr &kv_cache_block_id_host,
@@ -218,7 +219,7 @@ public:
                                int normalization_mode);
     void prepareMoEGate(const FfnLayerParams& params,
                         BufferPtr             gate);
-    void mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) override;
+    void mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
     void mlaContextAttention(const MlaAttentionModuleParams& params) override;
     MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
     MoeCombineOutput epCombine(const MoeCombineParams& params) override;

@@ -7,6 +7,7 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
 #include "flashmla/flashmla.h"
+#include <cstdint>
 
 using namespace std;
 using namespace rtp_llm;
@@ -34,7 +35,7 @@ void CudaDevice::DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const tor
     torch::bmm_out(qkv_output_t.transpose_(0, 1), mla_out_t.transpose(0, 1), w_vc_t);
 }
 
-void CudaDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) {
+void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     DevicePerfWrapper wrapper(this, "mlaDecoder_layer_%d", params.layer_id);
 
     auto fused_q_input = allocateBuffer({params.q.type(), {params.q.shape()[0], params.configs.head_num, params.configs.kv_lora_rank + params.configs.rope_head_dim}, AllocationType::DEVICE});
@@ -43,18 +44,22 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params)
                            fused_q_input,
                            params.fused_qkv,
                            params.kv_offset,
-                           params.common.decode_flash_infer_attn_params,
+                           params.is_prefill ? params.common.prefill_flash_infer_attn_params : params.common.decode_flash_infer_attn_params,
                            params.common,
                            params.weights,
                            params.configs,
                            params.qscheme});
+    
+    if (params.is_prefill) {
+        writeCacheStore(params);
+    }
 
     auto fused_q_input_t = Buffer2torchTensor(fused_q_input, false);
     QInputBatchMatmulWrapper(fused_q_input_t, params);
     printBufferData(*fused_q_input, "fused_q_input");
 
     auto ckv = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
+    auto flash_infer_attn_params = params.is_prefill ? (FlashInferAttnParams*)params.common.prefill_flash_infer_attn_params.get() : (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (!flash_infer_attn_params) {
         throw std::runtime_error("flash_infer_attn_params must be setting when using mla");
     }
@@ -68,10 +73,17 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params)
     auto q_reshape = params.q.reshape({params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
     auto q_rope = fused_q_input_t.slice(-1, params.configs.kv_lora_rank, params.configs.kv_lora_rank + params.configs.rope_head_dim);
 
-    if (mla_ops_type == MlaOpsType::FLASH_MLA) {        
-	fused_q_input_t = fused_q_input_t.reshape({
-	    (int64_t)params.q.shape()[0], 1, (int64_t)params.configs.head_num, (int64_t)(params.configs.kv_lora_rank + params.configs.rope_head_dim)
-	  });
+    FT_LOG_DEBUG("mla_ops_type %d", mla_ops_type);
+    if (mla_ops_type == MlaOpsType::FLASH_MLA) {
+        if (params.is_prefill) {
+            fused_q_input_t = fused_q_input_t.reshape({
+                (int64_t)params.common.context_batch_size, (int64_t)(params.q.shape()[0] / params.common.context_batch_size), (int64_t)params.configs.head_num, (int64_t)(params.configs.kv_lora_rank + params.configs.rope_head_dim)
+            });
+        } else {
+            fused_q_input_t = fused_q_input_t.reshape({
+                (int64_t)params.q.shape()[0], 1, (int64_t)params.configs.head_num, (int64_t)(params.configs.kv_lora_rank + params.configs.rope_head_dim)
+            });
+        }
         // [batch_size, 1, num_heads, kv_lora_rank + rope_head_dim]
         printBufferData(*torchTensor2Buffer(fused_q_input_t), "fused_q_input_t");
 
@@ -84,8 +96,12 @@ void CudaDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params)
         FT_LOG_TRACE("kv_lora_rank = %zu", params.configs.kv_lora_rank);
 
         printBufferData(*torchTensor2Buffer(flashinfer.kvlen_t), "kvlen_t");
-        const auto generate_batch_size = params.common.decoder_batch_size;
-        const auto decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(0, c10::nullopt, c10::make_optional((int64_t)generate_batch_size));
+        torch::Tensor decode_kv_cache_block_id_t;
+        if (params.is_prefill) {
+            decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(params.common.decoder_batch_size, c10::nullopt, c10::make_optional((int64_t)params.common.context_batch_size));
+        } else {
+            decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(0, c10::nullopt, c10::make_optional((int64_t)params.common.decoder_batch_size));
+        }
         printBufferData(*torchTensor2Buffer(decode_kv_cache_block_id_t), "decode_kv_cache_block_id_t");
 
         const float softmax_scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);

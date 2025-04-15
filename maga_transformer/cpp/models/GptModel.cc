@@ -225,6 +225,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
                 context_batch_size, decoder_batch_size);
     auto prep_output = device_->prepareModelRun({
             description_.attention_conf,
+            inputs.prefix_lengths,
             inputs.sequence_lengths,
             inputs.input_lengths,
             inputs.kv_cache_block_id,

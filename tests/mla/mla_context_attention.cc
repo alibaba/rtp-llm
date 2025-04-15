@@ -94,12 +94,16 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         max_seq_len            = std::max(max_seq_len, cur_seq_len);
     }
 
+    torch::Tensor prefix_length_t = torch::zeros(batch_size, torch::dtype(torch::kInt32));
     BufferPtr sequence_lengths = torchTensor2Buffer(torch::empty({0}, torch::dtype(torch::kInt32)));
+    BufferPtr prefix_lengths = torchTensor2Buffer(prefix_length_t);
+
     BufferPtr kv_cache_block_id;
     BufferPtr input_lengths = torchTensor2Buffer(seq_len);
 
     auto device_prep_params = DevicePrepParams({
         attn_configs,
+        prefix_lengths,
         sequence_lengths,
         input_lengths,
         kv_cache_block_id,

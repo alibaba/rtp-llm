@@ -90,11 +90,12 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     auto      dtype         = input.type();
     auto qkv_output = allocateBuffer({dtype, {h_token_num, params.configs.head_num * params.configs.v_head_dim}}, {"qkv_output"});
     if (generate_batch_size) {
+        FT_LOG_DEBUG("absorb decode mla attention");
         FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
         auto generate_q = q->view(0, generate_batch_size);
         auto generate_fused_qkv = fused_qkv->view(0, generate_batch_size);
         auto generate_qkv_output = qkv_output->slice(0, generate_batch_size);
-        mlaDecoderSelfAttention({params.layer_id,
+        mlaAbsorbAttention({params.layer_id,
                                  generate_q,
                                  generate_fused_qkv,
                                  kv_offset,
@@ -104,26 +105,53 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                  params.configs,
                                  params.qscheme});
     }
+
     if (context_batch_size) {
-        // slice to get BufferPtr
-        auto context_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
-        auto context_fused_qkv = fused_qkv->slice(generate_batch_size, context_token_num);
-        auto context_q = q->view(generate_batch_size, context_token_num);
-        if (layer_kv_cache) {
-            auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
-            params.common.kv_cache->kv_cache_block_id =
-                layer_kv_cache_block_id->slice(generate_batch_size, context_batch_size);
+        bool use_absorb_attention = params.common.max_prefix_length > 0;
+        if (use_absorb_attention) {
+            FT_LOG_DEBUG("absorb context mla attention");
+            FT_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
+            auto generate_q = q->view(generate_batch_size, context_token_num);
+            auto generate_fused_qkv = fused_qkv->view(generate_batch_size, context_token_num);
+            auto generate_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
+            if (layer_kv_cache) {
+                auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
+                params.common.kv_cache->kv_cache_block_id =
+                    layer_kv_cache_block_id->slice(generate_batch_size, context_batch_size);
+            }
+            mlaAbsorbAttention({params.layer_id,
+                                    generate_q,
+                                    generate_fused_qkv,
+                                    kv_offset,
+                                    generate_qkv_output,
+                                    params.common,
+                                    params.weights,
+                                    params.configs,
+                                    params.qscheme,
+                                    true});
+        } else {
+            FT_LOG_DEBUG("no absorb context mla attention");
+            // slice to get BufferPtr
+            auto context_qkv_output = qkv_output->slice(generate_batch_size, context_token_num);
+            auto context_fused_qkv = fused_qkv->slice(generate_batch_size, context_token_num);
+            auto context_q = q->view(generate_batch_size, context_token_num);
+            if (layer_kv_cache) {
+                auto layer_kv_cache_block_id = layer_kv_cache->kv_cache_block_id;
+                params.common.kv_cache->kv_cache_block_id =
+                    layer_kv_cache_block_id->slice(generate_batch_size, context_batch_size);
+            }
+            mlaContextAttention({params.layer_id,
+                                context_q,
+                                *context_fused_qkv,
+                                kv_offset,
+                                context_qkv_output,
+                                params.common,
+                                params.weights,
+                                params.configs,
+                                params.qscheme});
         }
-        mlaContextAttention({params.layer_id,
-                             context_q,
-                             *context_fused_qkv,
-                             kv_offset,
-                             context_qkv_output,
-                             params.common,
-                             params.weights,
-                             params.configs,
-                             params.qscheme});
     }
+  
     printBufferData(*qkv_output, "attent_proj_input");
     auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel));
     auto attention_out = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;

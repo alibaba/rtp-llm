@@ -89,7 +89,8 @@ public:
                                                                 torch::Tensor input_length,
                                                                 int64_t       page_size,
                                                                 torch::Tensor block_id_map);
-    c10::intrusive_ptr<FlashInferParams> createContextFlashInferParams(torch::Tensor sequence_length,
+    c10::intrusive_ptr<FlashInferParams> createContextFlashInferParams(torch::Tensor prefix_length,
+                                                            torch::Tensor sequence_length,
                                                             torch::Tensor input_length,
                                                             int64_t       page_size,
                                                             torch::Tensor block_id_map);
@@ -135,13 +136,15 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t mla_ops_type,
     });
 }
 
-c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferParams(torch::Tensor sequence_length,
+c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferParams(torch::Tensor prefix_length,
+                                                                              torch::Tensor sequence_length,
                                                                               torch::Tensor input_length,
                                                                               int64_t       page_size,
                                                                               torch::Tensor block_id_map) {
     attn_configs.tokens_per_block = page_size;
     auto params                   = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                     attn_configs,
+                                                                    torchTensor2Buffer(prefix_length),
                                                                     torchTensor2Buffer(sequence_length),
                                                                     torchTensor2Buffer(input_length),
                                                                     torchTensor2Buffer(block_id_map),
@@ -230,7 +233,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
 
         auto mla_params = MlaAttentionModuleParams{
             0, *q_buffer,  *fused_qkv_buffer, kv_offset, qkv_output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};
-        device_->mlaDecoderSelfAttention(mla_params);
+        device_->mlaAbsorbAttention(mla_params);
 
         auto output_t = Buffer2torchTensorWithStride(*qkv_output, {    (int64_t)token_num, (int64_t)attn_configs.head_num, (int64_t)attn_configs.v_head_dim}, 0);
         return output_t.detach().clone();

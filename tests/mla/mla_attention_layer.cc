@@ -19,6 +19,7 @@ public:
                           std::vector<torch::Tensor> weights,
                           torch::Tensor ckv_cache,
                           torch::Tensor kpe_caches,
+                          torch::Tensor prefix_lengths_t,
                           torch::Tensor sequence_length_t,
                           torch::Tensor kvcache_block_id,
                           int64_t       page_size);
@@ -63,11 +64,13 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                       std::vector<torch::Tensor> weights,
                                       torch::Tensor ckv_cache,
                                       torch::Tensor kpe_caches,
+                                      torch::Tensor prefix_lengths_t,
                                       torch::Tensor sequence_length_t,
                                       torch::Tensor kvcache_block_id,
                                       int64_t       page_size) {
     try {
         attn_configs.tokens_per_block     = page_size;
+        BufferPtr prefix_lengths_host   = torchTensor2Buffer(prefix_lengths_t);
         BufferPtr input_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
@@ -81,6 +84,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         auto context_flash_infer_attn_params =
             FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                      attn_configs,
+                                                                     prefix_lengths_host,
                                                                      sequence_lengths_host,
                                                                      sequence_lengths_host,
                                                                      kvcache_block_id_host,

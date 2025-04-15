@@ -100,6 +100,7 @@ class TestMlaAttentionLayer(unittest.TestCase):
         
         sequence_lengths_mius_1 = [x - 1 for x in sequence_lengths]
         sequence_lengths_t = torch.tensor(sequence_lengths_mius_1, dtype=torch.int32)
+        prefix_lengths_t = torch.zeros(len(sequence_lengths_t) - len(sequence_lengths), dtype=torch.int32)
         benchmark_times = 5
         for _ in range(benchmark_times):
             with torch.cuda.nvtx.range("mla_attn_layer_op"):
@@ -108,6 +109,7 @@ class TestMlaAttentionLayer(unittest.TestCase):
                     weights,
                     ckv_cache, 
                     kpe_cache, 
+                    prefix_lengths_t,
                     sequence_lengths_t, 
                     kvcache_block_id, 
                     page_size

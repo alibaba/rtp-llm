@@ -505,6 +505,7 @@ struct MlaAttentionModuleParams {
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
+    bool                            is_prefill = false;
 };
 
 struct WriteMTPHiddenStatesParams {
@@ -830,6 +831,7 @@ using MaskOutput = BufferPtr;
 struct DevicePrepParams {
     const AttentionConfigs& configs;
 
+    const BufferPtr &prefix_lengths;
     const BufferPtr &sequence_lengths;
     const BufferPtr &input_lengths;
     const BufferPtr &kv_cache_block_id;

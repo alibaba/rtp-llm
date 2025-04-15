@@ -164,6 +164,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
 
         sequence_length_minus_1_t = torch.tensor([x - 1 for x in sequence_lengths], dtype=torch.int32)
         input_length_t = torch.tensor(input_lengths, dtype=torch.int32)
+        prefix_length_t = torch.zeros(len(input_lengths) - len(sequence_length_minus_1_t), dtype=torch.int32)
         page_nums = [math.ceil(x / page_size) for x in sequence_lengths]  + [math.ceil(x / page_size) for x in input_lengths[decode_batch_size:]]
         block_id_map = torch.zeros([batch_size, max(page_nums)], dtype=torch.int32)
         for i in range(block_id_map.size(0)):
@@ -171,7 +172,7 @@ class TestMlaDecodeAttention(unittest.TestCase):
                 block_id_map[i, j] = i*block_id_map.size(1) + j
         
         if context_batch_size > 0:
-            context_flash_infer_params = self.mla_decode_attn_op.createContextFlashInferParams(sequence_length_minus_1_t, input_length_t, page_size, block_id_map)
+            context_flash_infer_params = self.mla_decode_attn_op.createContextFlashInferParams(prefix_length_t, sequence_length_minus_1_t, input_length_t, page_size, block_id_map)
             # context        
             context_page_indptr = [0]
             context_page_indices = []

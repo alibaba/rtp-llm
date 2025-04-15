@@ -115,7 +115,7 @@ AttentionModuleOutput DeviceOps::mlaContextAttention(const MlaAttentionModulePar
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-AttentionModuleOutput DeviceOps::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) {
+AttentionModuleOutput DeviceOps::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

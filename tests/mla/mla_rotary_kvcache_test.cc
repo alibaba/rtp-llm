@@ -20,7 +20,7 @@ public:
                        double  softmax_extra_scale);
     
     AttentionConfigs                     attn_configs = AttentionConfigs({});
-    void init(torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size, torch::Tensor block_id_map);
+    void init(torch::Tensor prefix_length, torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size, torch::Tensor block_id_map);
     void applyRotaryKVCache(
         torch::Tensor q, torch::Tensor fused_qkv, int64_t kv_offset, torch::Tensor ckv_cache, torch::Tensor kpe_cache, torch::Tensor cos_sin_cache);
     DeviceBase* device_;
@@ -67,10 +67,11 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
     });
 }
 
-void MlaRotaryKVCacheOp::init(torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size, torch::Tensor block_id_map) {
+void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size, torch::Tensor block_id_map) {
     attn_configs.tokens_per_block = page_size;
     context_params_ = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
                                                                 attn_configs,
+                                                                torchTensor2Buffer(prefix_length),
                                                                 torchTensor2Buffer(sequence_length),
                                                                 torchTensor2Buffer(input_length),
                                                                 torchTensor2Buffer(block_id_map),
