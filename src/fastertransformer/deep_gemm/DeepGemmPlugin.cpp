@@ -1,7 +1,6 @@
 #include <vector>
 #include <map>
 #include <algorithm>
-
 #include <torch/torch.h>
 #include <cuda.h>
 #include <cuda_fp8.h>
@@ -181,7 +180,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     }
 
     int best_block_m = -1, best_block_n = -1;
-    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128})) {
+    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 144, 160})) {
         bool success = false;
         if (best_block_m == -1 || best_block_n == -1) {
             success = true;
@@ -227,7 +226,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
 
     for (int index = 0; index < 2; ++index) {
         if (m >= 512 && is_multicast_legal[index] && num_groups == 1) {
-            best_num_tma_multicast = 2; is_tma_multicast_on_a = (index == 0);
+            best_num_tma_multicast = 2; is_tma_multicast_on_a = (index == (best_block_m > best_block_n? 0: 1));
             break;
         }
     }
