@@ -38,6 +38,7 @@ private:
     std::shared_ptr<CacheManager>               cache_manager_;
     std::shared_ptr<lora::LoraManager>          lora_manager_;
     bool                                        warm_up_;
+    bool                                        gen_timeline_sync_ = false;
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
 };

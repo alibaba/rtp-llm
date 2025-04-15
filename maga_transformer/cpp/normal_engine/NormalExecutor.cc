@@ -53,6 +53,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
+    gen_timeline_sync_(autil::EnvUtil::getEnv("GEN_TIMELINE_SYNC", 0L)),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
 {
@@ -83,8 +84,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
+    bool gen_timeline = stream_groups.genTimeline();
+    if (gen_timeline_sync_) {
+        auto gen_timeline_buffer = device_->allocateBuffer(
+                {ft::DataType::TYPE_BOOL, {device_->getDeviceProperties().dp_size}, ft::AllocationType::HOST});
+        *(gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_rank)) = gen_timeline;
+        device_->allGather({{gen_timeline_buffer}, fastertransformer::ParallelMode::DP_AND_TP});
+        device_->syncCommunication();
+        gen_timeline = std::any_of(gen_timeline_buffer->data<bool>(), gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_size), [](auto s) { return s;});
+    }
     std::shared_ptr<CudaProfiler> profiler;
-    if (stream_groups.genTimeline()) {
+    if (gen_timeline) {
         profiler = std::make_shared<CudaProfiler>("cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
         profiler->start();
     }
