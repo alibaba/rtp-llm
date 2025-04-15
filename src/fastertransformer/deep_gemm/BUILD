@@ -67,6 +67,14 @@ N_K_GROUP_TYPE= [
 ("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
 ("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
 
+("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "32", "DeepGemmType::GroupedContiguous"),
+
+("4096", "7168", "64", "DeepGemmType::GroupedContiguous"),
+("7168", "4096", "64", "DeepGemmType::GroupedContiguous"),
+("7168", "2048", "64", "DeepGemmType::GroupedContiguous"),
+
 ("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
 ("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
@@ -78,6 +86,10 @@ N_K_GROUP_TYPE= [
 ("4096", "7168", "32", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "32", "DeepGemmType::GroupedMasked"),
 ("7168", "2048", "32", "DeepGemmType::GroupedMasked"),
+
+("4096", "7168", "64", "DeepGemmType::GroupedMasked"),
+("7168", "4096", "64", "DeepGemmType::GroupedMasked"),
+("7168", "2048", "64", "DeepGemmType::GroupedMasked"),
 
 ("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
