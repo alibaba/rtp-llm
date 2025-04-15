@@ -218,7 +218,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
 
-    FT_LOG_DEBUG("prepare model run sequence lengths: %s, input_lengths: %s, kv cache: %s, context batch size: %ld, decoder batch size: %ld",
+    FT_LOG_INFO("prepare model run sequence lengths: %s, input_lengths: %s, kv cache: %s, context batch size: %ld, decoder batch size: %ld",
                 inputs.sequence_lengths->debugStringWithData<int32_t>().c_str(),
                 inputs.input_lengths->debugStringWithData<int32_t>().c_str(),
                 inputs.kv_cache_block_id ? inputs.kv_cache_block_id->debugString().c_str() : "NULL",
@@ -271,20 +271,27 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto decoder_batch_size = sequence_lengths->shape()[0];
     const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
 
-    // NOTE: when context batch size > 0, to keep micro batching behavior consistent within dp ranks,
-    // we still need to enable micro batching, but send empty query to the second micro batch
-    if (context_batch_size || decoder_batch_size < 2) {
-        FT_LOG_DEBUG("micro batch disable when context batch size > 0");
-        return {true, {decoder_batch_size, 0}};
+    if (decoder_batch_size + context_batch_size < 2) {
+        FT_LOG_DEBUG("micro batch disable when batch size %ld is less than 2", decoder_batch_size + context_batch_size);
+        return {false, {}};
     }
 
-    // NOTE: for now, we simply split the decode batch into two micro batches equally
     // TODO: design better split strategy that consider the computational workload of each request
-    const auto batch_0_size = decoder_batch_size / 2;
-    const auto batch_1_size = decoder_batch_size - batch_0_size;
-    FT_LOG_DEBUG("micro batch enable, split decoder batch into two micro batches %ld, %ld",
-                batch_0_size, batch_1_size);
-    return {true, {batch_0_size, batch_1_size}};
+
+    // for request with both prefill and decode, we put all prefill into the first micro batch
+    // and all decode into the second micro batch
+    if (context_batch_size && decoder_batch_size) {
+        FT_LOG_INFO("split context in micro batch 0, decode in micro batch 1");
+        return {true, {{context_batch_size, 0}, {0, decoder_batch_size}}};
+    }
+
+    const auto batch_size_to_split = context_batch_size ? context_batch_size : decoder_batch_size;
+    const auto micro_batch_0_size = (batch_size_to_split + 1) / 2;
+    const auto micro_batch_1_size = batch_size_to_split - micro_batch_0_size;
+
+    FT_LOG_INFO("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
+    return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}}
+                              : MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
 }
 
 vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
@@ -296,12 +303,11 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
 {
     vector<LayerMicroBatchInputs> micro_batch_inputs;
     size_t sliced_token_idx = 0;
+    size_t sliced_batch_idx = 0; // for input_lengths and kv cache block id
+    size_t decode_batch_idx = 0; // for sequence_lengths
+    size_t prefill_batch_idx = 0; // for lm_output_indexes and prefix_lengths
 
-    const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
-    const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
-
-    if (context_batch_size || decoder_batch_size < 2) {
-        // if context request exists, then micro bacthing is de facto disabled
+    if (!micro_batch_plan.enable) {
         // we put everything into the first micro batch, and send empty query to the second micro batch
         auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, nullptr);
         micro_batch_inputs.push_back({hidden, pre_decoder_residual, attention_common_inputs});
@@ -315,22 +321,60 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
         fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
         auto fake_hidden = device_->allocateBuffer({dtype, {1, hidden->shape()[1]}});
         auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, dtype, nullptr);
-        micro_batch_inputs.push_back({move(fake_hidden), nullptr, move(attention_common_inputs_fake)});
+        micro_batch_inputs.push_back({move(fake_hidden), nullptr, move(attention_common_inputs_fake), true});
     } else {
-        // if context request does not exist, do normal micro batching
-        for (size_t i = 0; i < micro_batch_plan.decoder_sizes.size(); ++i) {
-            const auto& decode_batch_size = micro_batch_plan.decoder_sizes[i];
-            GptModelInputs micro_model_inputs = inputs;
-            micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, decode_batch_size);
-            micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_token_idx, decode_batch_size);
-            micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(sliced_token_idx, decode_batch_size);
-            micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_token_idx, decode_batch_size);
-            auto micro_hidden = hidden->slice(sliced_token_idx, decode_batch_size);
-            auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, decode_batch_size) : nullptr;
-            auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
-            micro_batch_inputs.push_back({
-                move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
-            sliced_token_idx += decode_batch_size;
+        // TODO(wangyin.yx): refact this splitting method, extract common code
+        for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
+            const auto& p_micro_batch_size = micro_batch_plan.batch_infos[i].prefill_num;
+            const auto& d_micro_batch_size = micro_batch_plan.batch_infos[i].decoder_num;
+            RUNTIME_ASSERT_OP_ARG(!(p_micro_batch_size && d_micro_batch_size),
+                "one micro batch can not contain both p and d tokens, but got %ld and %ld",
+                p_micro_batch_size, d_micro_batch_size);
+
+            if (d_micro_batch_size) {
+                GptModelInputs micro_model_inputs = inputs;
+                micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, d_micro_batch_size);
+                micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.attention_mask = inputs.attention_mask ? inputs.attention_mask->slice(sliced_batch_idx, d_micro_batch_size) : nullptr;
+                micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, d_micro_batch_size);
+                auto micro_hidden = hidden->slice(sliced_token_idx, d_micro_batch_size);
+                auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, d_micro_batch_size) : nullptr;
+                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
+                micro_batch_inputs.push_back({
+                    move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
+                sliced_token_idx += d_micro_batch_size;
+                sliced_batch_idx += d_micro_batch_size;
+                decode_batch_idx += d_micro_batch_size;
+                FT_LOG_INFO("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
+                            i, sliced_batch_idx, sliced_token_idx);
+            } else {
+                GptModelInputs micro_model_inputs = inputs;
+                micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.prefix_lengths = inputs.prefix_lengths->slice(prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.attention_mask = inputs.attention_mask ? inputs.attention_mask->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
+                auto slice_token_num = std::accumulate(
+                    micro_model_inputs.input_lengths->data<int32_t>(),
+                    micro_model_inputs.input_lengths->data<int32_t>() + p_micro_batch_size,
+                    0);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, slice_token_num);
+                micro_model_inputs.request_id = inputs.request_id ? inputs.request_id->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.request_pd_separation = inputs.request_pd_separation ? inputs.request_pd_separation->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.cache_keys = inputs.cache_keys ? inputs.cache_keys->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
+
+                auto micro_hidden = hidden->slice(sliced_token_idx, slice_token_num);
+                auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
+                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
+                micro_batch_inputs.push_back({
+                    move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
+                sliced_token_idx += slice_token_num;
+                sliced_batch_idx += p_micro_batch_size;
+                prefill_batch_idx += p_micro_batch_size;
+                FT_LOG_INFO("micro batch %ld sliced context, batch idx %ld, token idx %ld",
+                            i, sliced_batch_idx, sliced_token_idx);
+            }
         }
     }
     return micro_batch_inputs;
@@ -444,7 +488,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
 
     auto micro_batch_plan = planMicroBatches(inputs);
-    if (micro_batch_plan.enable) {
+    if (device_props_.enable_layer_micro_batch) {
         auto micro_batch_inputs = prepareMicroBatchInputs(
             inputs, hidden, pre_decoder_residual, dtype,  micro_batch_plan);
         return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
@@ -498,9 +542,6 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
             auto& batch_ep_input = ep_inputs[micro_batch_idx];
             const auto& ffn_params = batch_ep_input.moe_ffn_params;
             const auto& dispatched_output = batch_ep_input.dispatch_output;
-
-            // equivalent of moeFfnAndCombine
-            // auto out = device_->moeFfnAndCombine(ffn_params, dispatched_output);
 
             const auto& moe_conf = ffn_params.configs.moe_configs.value();
             auto hidden_states = dispatched_output.hidden;
@@ -601,7 +642,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
 
     const auto& hidden = layer_inputs.hidden;
     size_t copy_from_token_idx = 0;
-    if ((inputs.sequence_lengths->shape()[0] == inputs.input_lengths->shape()[0]) && inputs.input_lengths->shape()[0] > 1) {
+    if (!layer_inputs.micro_batch_inputs[1].fake) {
         for (size_t i = 0; i < micro_batch_layer_inputs.size(); ++i) {
             const auto& micro_batch_hidden = micro_batch_layer_inputs[i].hidden;
             const auto micro_batch_token_num = micro_batch_hidden->shape()[0];
@@ -835,11 +876,6 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
 
         const int32_t layer_id)
 {
-    // if (last_layer_defered_params.comm_barrier_hook) {
-    //     FT_LOG_INFO("synchronize previous layer barrier event for layer %ld", layer_id);
-    //     move(last_layer_defered_params.comm_barrier_hook)->hook_sync();
-    // }
-
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     const auto& layer = weights_.layers[layer_id];
@@ -907,9 +943,6 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
 
     if (dispatched_output.comm_barrier_hook) {
         last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
-        // FT_LOG_INFO("synchronize dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
-        // dispatched_output.comm_barrier_hook->hook_sync();
-        // FT_LOG_INFO("synchronize dispatch barrier for layer %ld, micro batch %ld done", layer_id, inputs.micro_batch_inputs.size());
     } else {
         FT_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
     }
@@ -1017,7 +1050,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     GptLayerOutputs layer_outputs;
 
-    if (layer_inputs.micro_batch_inputs.size()) {
+    if (device_props_.enable_layer_micro_batch) {
+        RUNTIME_ASSERT_OP_ARG(layer_inputs.micro_batch_inputs.size(), "no micro batch inputs when enabled");
         layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs);
     } else {
         for (int32_t i = 0; i < layer_num_; ++i) {

@@ -126,15 +126,21 @@ struct GptLayerOutputs {
     ft::BufferPtr pre_decoder_residual;
 };
 
+struct MicroBatchInfo {
+    size_t prefill_num;
+    size_t decoder_num;
+};
+
 struct MicroBatchPlan {
     bool enable = false;
-    std::vector<size_t> decoder_sizes;
+    std::vector<MicroBatchInfo> batch_infos;
 };
 
 struct LayerMicroBatchInputs {
     ft::BufferPtr hidden;
     ft::BufferPtr pre_decoder_residual;
     ft::AttentionCommonInputs attention_common_inputs;
+    bool fake = false;
 };
 
 struct GptLayerInputs {
