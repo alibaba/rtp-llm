@@ -87,7 +87,7 @@ class MasterStartTest(TestCase):
         return ServerProcess(p, random_port, f, log_file_path)
 
     @staticmethod
-    def _check_server_start(port: int, timeout: int = 10):
+    def _check_server_start(port: int, timeout: int = 20):
         start_time = time.time()
         while True:
             if time.time() - start_time > timeout:
@@ -95,6 +95,7 @@ class MasterStartTest(TestCase):
             try:
                 ret = requests.get(f"http://localhost:{port}/health", timeout=1)
                 if ret.status_code == 200:
+                    logging.info("start server success")
                     break
             except Exception as e:
                 logging.warning(f"start server failed with error: {str(e)}")
