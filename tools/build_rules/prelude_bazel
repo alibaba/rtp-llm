@@ -5,7 +5,7 @@
 
 def add_gpu_count(exec_properties):
     if exec_properties and "gpu" in exec_properties:
-        exec_properties["gpu_count"] = "1"
+        exec_properties["gpu_count"] = exec_properties.get("gpu_count", "1")
     return exec_properties
 
 def py_test(name, exec_properties = None, **kwargs):
