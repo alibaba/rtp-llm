@@ -78,12 +78,15 @@ void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::
     if (result.ok()) {
         part_success_times = 0;
         HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+        std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
         std::swap(host_load_balance_info_map_, temp);
     } else {
         if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
             if (part_success_times == wait_success_times) {
+                FT_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
                 part_success_times = 0;
                 HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+                std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
                 std::swap(host_load_balance_info_map_, temp);
             } else {
                 part_success_times++;
