@@ -74,7 +74,9 @@ class GangServer:
         if gang_info.master is None or gang_info.self is None:
             raise Exception(f"gang_info master {gang_info.master}, gang_info self {gang_info.self}")
         if len(gang_info.members) != g_parallel_info.world_size:
-            raise Exception(f'gang_size({gang_info.members}) != world_size({g_parallel_info.world_size})')
+            members_details = '\n'.join(str(member) for member in gang_info.members)
+            raise Exception(f"gang_info member : ({members_details}), "
+                            f"gang_info members size {len(gang_info.members)} != world_size({g_parallel_info.world_size})")
         for member in gang_info.members:
             if not member.ip or not member.name:
                 raise Exception(f'gang_info not complete: {gang_info}')
