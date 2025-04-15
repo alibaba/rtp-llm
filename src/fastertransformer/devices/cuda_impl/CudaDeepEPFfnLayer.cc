@@ -82,7 +82,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         topk_idx_tensor     = Buffer2torchTensor(expert_ids, false).toType(torch::kInt64);  //[num_tokens, top_k]
         topk_weights_tensor = Buffer2torchTensor(expert_scales, false);                     //[num_tokens, top_k]
     }
-    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16, "moe configs not set");
+    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16, "hidden must be bf16 in deepEpDispatch, actual: %d", int(hidden->type()));
     BufferPtr quantized_hidden;
     torch::Tensor x;
     std::optional<torch::Tensor> x_scales;
