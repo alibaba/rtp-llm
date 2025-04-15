@@ -6,6 +6,11 @@
 
 namespace rtp_llm {
 
+WRRLoadBalancer::WRRLoadBalancer() {
+    available_ratio_ = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
+    FT_LOG_INFO("wrr load balance avaiable ratio %lu", available_ratio_);
+}
+
 WRRLoadBalancer::~WRRLoadBalancer() {
     stop();
 }
@@ -30,7 +35,7 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz) 
     if (biz_hosts->hosts.empty()) {
         return nullptr;
     }
-    auto current_host = chooseHostByWeight(biz_hosts->hosts);
+    auto current_host = chooseHostByWeight(biz_hosts);
     if (current_host == nullptr) {
         FT_LOG_WARNING("choose host by concurrency failed");
         return biz_hosts->hosts[(*(biz_hosts->index))++ % biz_hosts->hosts.size()];  // choose host by RR
@@ -39,11 +44,17 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz) 
 }
 
 std::shared_ptr<const Host>
-WRRLoadBalancer::chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz_hosts) const {
+WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const {
     std::shared_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
-    double                              threshold  = calculateThreshold(biz_hosts);
+    auto& hosts = biz_hosts->hosts;
+    if (host_load_balance_info_map_.size() < hosts.size() * available_ratio_ / 100) {
+        // use round robin load balance
+        return hosts[(*(biz_hosts->index))++ % hosts.size()];
+    }
+
+    double                              threshold  = calculateThreshold(hosts);
     double                              weight_acc = 0;
-    for (auto& host : biz_hosts) {
+    for (auto& host : hosts) {
         // calculate weight sum
         const std::string spec = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
         auto              iter = host_load_balance_info_map_.find(spec);
@@ -80,20 +91,22 @@ void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::
         HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
         std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
         std::swap(host_load_balance_info_map_, temp);
-    } else {
-        if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
-            if (part_success_times == wait_success_times) {
-                FT_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
-                part_success_times = 0;
-                HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
-                std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
-                std::swap(host_load_balance_info_map_, temp);
-            } else {
-                part_success_times++;
-            }
-        }
+        return;
     }
-    
+
+    if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
+        if (part_success_times == wait_success_times) {
+            FT_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
+            part_success_times = 0;
+            HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+            std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
+            std::swap(host_load_balance_info_map_, temp);
+        } else {
+            part_success_times++;
+        }
+    } else {
+        FT_LOG_ERROR("worker status is failed, error msg is [%s]", ErrorCodeToString(result.status().code()).c_str());
+    }
 }
 
 }  // namespace rtp_llm

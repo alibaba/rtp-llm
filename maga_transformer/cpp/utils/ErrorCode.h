@@ -149,6 +149,10 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_EMPTY_ENGINE_ERROR";
         case ErrorCode::MM_NOT_SUPPORTED_ERROR:
             return "MM_NOT_SUPPORTED_ERROR";
+        case ErrorCode::GET_PART_NODE_STATUS_FAILED:
+            return "GET_PART_NODE_STATUS_FAILED";
+        case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
+            return "GET_ALL_NODE_STATUS_FAILED";
         default:
             return "Error: Unrecognized ErrorCode";
     }

@@ -18,7 +18,7 @@ public:
     std::shared_ptr<WRRLoadBalancer> load_balancer_;
 
 public:
-    void SetUp() override {
+    void initTest() {
         auto config    = makeConfig();
         load_balancer_ = std::make_shared<WRRLoadBalancer>();
         ASSERT_TRUE(load_balancer_->init(config));
@@ -78,6 +78,7 @@ void WRRLoadBalancerTest::initServer(const std::string& spec, int available_kv_c
 }
 
 TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
+    initTest();
     sleep(5);
     {
         std::shared_lock<std::shared_mutex> lock(load_balancer_->host_load_balance_info_map_mutex_);
@@ -94,6 +95,7 @@ TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
 }
 
 TEST_F(WRRLoadBalancerTest, testChooseHost) {
+    initTest();
     sleep(5);
     int count_200 = 0, count_400 = 0;
     for (int i = 0; i < 1000; i++) {
@@ -114,6 +116,9 @@ TEST_F(WRRLoadBalancerTest, testChooseHost) {
 
 TEST_F(WRRLoadBalancerTest, testChangeWeight) {
     // 10 host* 200 available kv cache, 20 host* 400 available kv cache
+    autil::EnvUtil::setEnv("WRR_AVAILABLE_RATIO", "0");
+    initTest();
+
     sleep(5);
     int count_200 = 0, count_400 = 0;
     for (int i = 0; i < 1000; i++) {

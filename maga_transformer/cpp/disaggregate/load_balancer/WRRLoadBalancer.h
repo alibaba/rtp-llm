@@ -8,19 +8,20 @@ namespace rtp_llm {
 
 class WRRLoadBalancer: public WorkerAwaredLoadBalancer {
 public:
-    WRRLoadBalancer() = default;
+    WRRLoadBalancer();
     virtual ~WRRLoadBalancer();
 
 public:
     std::shared_ptr<const Host> chooseHost(const std::string& biz) override;    
 
 private:
-    std::shared_ptr<const Host> chooseHostByWeight(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
+    std::shared_ptr<const Host> chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const;
     double                      calculateThreshold(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
     virtual void updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) override;    
 
     mutable std::shared_mutex                   host_load_balance_info_map_mutex_;
     mutable HeartbeatSynchronizer::NodeStatus   host_load_balance_info_map_;
+    int available_ratio_ = 0;
 };
 
 }  // namespace rtp_llm
