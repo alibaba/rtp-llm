@@ -20,6 +20,7 @@ copy_so("@flashinfer//:flashinfer_sm90")
 copy_so("@acext//:acext_1")
 copy_so("@acext//:acext_2")
 copy_so("@acext//:acext_3")
+copy_so("@deep_ep//:deep_ep_cu")
 
 filegroup(
     name = "libs",

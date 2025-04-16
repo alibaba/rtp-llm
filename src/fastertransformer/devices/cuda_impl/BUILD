@@ -25,7 +25,7 @@ cc_library(
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/core:torch_cuda_allocator",
         "//:th_utils",
-        "//3rdparty/deep_ep:deep_ep",
+        "@deep_ep//:deep_ep",
     ],
 )
 
