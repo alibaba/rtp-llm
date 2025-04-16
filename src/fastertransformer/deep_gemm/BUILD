@@ -170,35 +170,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# cc_test(
-#     name = "deep_gemm_test",
-#     srcs = [
-#         "test/deep_gemm_test.cpp",
-#     ],
-#     copts = sm90_cuda_copts,
-#     linkopts = [
-#         "-lpython3.10",
-#         "-ltorch",
-#         "-lc10",
-#         "-ltorch_cpu",
-#         "-ltorch_python",
-#         "-L/usr/local/cuda/lib64",
-#         "-lnvToolsExt",
-#         "-L/usr/local/cuda/extras/CUPTI/lib64",
-#         "-lcupti",
-#     ],
-#     deps = [
-#         ":deep_gemm_cu",
-#         "@com_google_googletest//:gtest",
-#         "//src/fastertransformer/core:buffer_torch",
-#         "//src/fastertransformer/devices/testing:device_test_utils",
-#         "//src/fastertransformer/devices/cuda_impl:gpu_base",
-#         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-#     ],
-#     tags = ["H20"],
-#     exec_properties = {'gpu':'H20'},
-# )
-
 cc_test(
     name = "deep_gemm_plugin_test",
     srcs = [
