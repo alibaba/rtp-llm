@@ -1,3 +1,7 @@
+import os
+import json
+import asyncio
+import logging
 
 from maga_transformer.pipeline import Pipeline
 from maga_transformer.model_factory import ModelFactory
@@ -5,10 +9,6 @@ from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
 from maga_transformer.distribute.worker_info import update_master_info, g_worker_info
 from maga_transformer.test.utils.port_util import get_consecutive_free_ports
-
-import asyncio
-import json
-import os
 
 async def main():
     start_port = get_consecutive_free_ports(1)[0]

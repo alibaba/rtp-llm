@@ -63,6 +63,14 @@ public:
         }
     }
 
+    void stop() override {
+        if (prefill_server_) {
+            prefill_server_->stop();
+        } else {
+            decode_server_->stop();
+        }
+    }
+
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer> decode_server_;

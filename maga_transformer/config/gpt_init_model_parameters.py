@@ -562,7 +562,7 @@ class GptInitModelParameters:
             logging.info(f'prefill_retry_times: {self.prefill_retry_times}')
             self.prefill_retry_timeout_ms = int(os.environ.get('PREFILL_RETRY_TIMEOUT_MS', 0))
             logging.info(f'prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}')
-            self.prefill_max_wait_timeout_ms = int(os.environ.get('PREFILL_MAX_WAIT_TIMEOUT_US', 60 * 1000 * 1000))
+            self.prefill_max_wait_timeout_ms = int(os.environ.get('PREFILL_MAX_WAIT_TIMEOUT_US', 600 * 1000 * 1000))
             logging.info(f'prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}')
             self.pd_sep_enable_fallback = bool(int(os.environ.get('PD_SEP_ENABLE_FALLBACK', 0)))
             logging.info(f'pd_sep_enable_fallback: {self.pd_sep_enable_fallback}')

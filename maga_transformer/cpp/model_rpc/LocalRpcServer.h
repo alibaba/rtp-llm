@@ -17,9 +17,7 @@
 #include "maga_transformer/cpp/dataclass/EngineScheduleInfo.h"
 #include "maga_transformer/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "maga_transformer/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
-
 namespace rtp_llm {
-
 class LocalRpcServer {
 public:
     LocalRpcServer() {}
@@ -49,6 +47,10 @@ public:
 
     bool ready() {
         return true;
+    }
+
+    void stop() {
+        (void)engine_->stop();
     }
 
     virtual EngineScheduleInfo getEngineScheduleInfo() {

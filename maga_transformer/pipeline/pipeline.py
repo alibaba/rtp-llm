@@ -43,7 +43,9 @@ class Pipeline(object):
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(model_config)
 
     def stop(self):
-        self.model_cls.stop()
+        if isinstance(self.model_cls, AsyncModel):
+            logging.info("async model stop")
+            self.model_cls.stop()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
