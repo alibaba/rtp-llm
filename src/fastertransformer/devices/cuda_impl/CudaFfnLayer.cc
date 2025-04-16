@@ -33,8 +33,8 @@ void hackMoeExpert(const MoeDispatchParams& params, BufferPtr& experts_ids_host)
 }
 
 MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
-    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
-        return deepEpLLDispatch(params);
+    if (init_params_.use_deepep_moe) {
+        return init_params_.use_deepep_low_latency ? deepEpLLDispatch(params) : deepEpDispatch(params);
     }
 
     DevicePerfWrapper wrapper(this, "epDispatch");
@@ -158,8 +158,8 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
 }
 
 MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
-    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
-        return deepEpLLCombine(params);
+    if (init_params_.use_deepep_moe) {
+        return init_params_.use_deepep_low_latency ? deepEpLLCombine(params) : deepEpCombine(params);
     }
 
     DevicePerfWrapper wrapper(this, "epCombine");

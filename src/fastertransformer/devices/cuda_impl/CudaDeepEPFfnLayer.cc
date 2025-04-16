@@ -169,28 +169,6 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     return MoeCombineOutput({all_output, all_output, params});
 }
 
-FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
-    const auto& moe_conf = params.configs.moe_configs.value();
-
-    MoeDispatchOutput dispatched_output =
-        deepEpDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf, false, params.qscheme});
-    auto moe_ffn_params = FfnLayerParams(
-            {*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme});
-    BufferPtr hidden_states =
-        moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
-    auto combine_out = deepEpCombine({hidden_states,
-                                      dispatched_output.indices,
-                                      // nullptr,
-                                      params.output,
-                                      dispatched_output.input_split_sizes,
-                                      dispatched_output.output_split_sizes,
-                                      moe_conf,
-                                      params.input.shape()[0],
-                                      init_params_.enable_comm_overlap,
-                                      dispatched_output.deep_ep_output});
-    return gatherCombineOutput(combine_out);
-}
-
 #else
 
 bool CudaDevice::initDeepEPBuffer() {
@@ -202,10 +180,6 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
 }
 
 MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-FfnLayerOutput CudaDevice::deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

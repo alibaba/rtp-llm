@@ -229,7 +229,6 @@ public:
 
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
     MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
-    FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
     MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);

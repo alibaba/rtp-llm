@@ -159,11 +159,8 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
 
-    if (init_params_.use_deepep_moe) {
-        if (init_params_.use_deepep_low_latency) {
+    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
             return deepEpLLMoeFfnLayer(params, gate_output);
-        }
-        return deepEpMoeFfnLayer(params, gate_output);
     }
 
     if (moe_conf.ep_size > 1) {
@@ -215,6 +212,7 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
     }
 }
 
+// TODO(wangyin.yx): remove this function
 FfnLayerOutput DeviceBase::moeFfnAndCombine(
         const FfnLayerParams& params,
         const MoeDispatchOutput& dispatched_output)
@@ -232,7 +230,8 @@ FfnLayerOutput DeviceBase::moeFfnAndCombine(
                                     dispatched_output.output_split_sizes,
                                     moe_conf,
                                     params.input.shape()[0],
-                                    init_params_.enable_comm_overlap});
+                                    init_params_.enable_comm_overlap,
+                                    dispatched_output.deep_ep_output});
 
     // TODO(wangyin.yx): refact this defered combine.
     if (combine_out.comm_barrier_hook) {
