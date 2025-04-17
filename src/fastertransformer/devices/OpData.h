@@ -623,11 +623,6 @@ struct FfnLayerParams {
     bool enable_sp;
 };
 
-struct MoeGateSelectOutput {
-    BufferPtr expert_ids;
-    BufferPtr expert_scales;
-};
-
 struct MoeDispatchOutput {
     BufferPtr                    hidden;
     BufferPtr                    expert_ids;
@@ -642,6 +637,12 @@ struct MoeDispatchOutput {
 
     std::shared_ptr<DeepEPDispatchOutput> deep_ep_output;
     std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output;
+};
+
+struct MoeGateSelectOutput {
+    BufferPtr expert_ids;
+    BufferPtr expert_scales;
+    std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output = nullptr;
 };
 
 struct MoeDispatchParams {

@@ -33,11 +33,14 @@ void hackMoeExpert(const MoeDispatchParams& params, BufferPtr& experts_ids_host)
 }
 
 MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
-    if (init_params_.use_deepep_moe) {
-        return init_params_.use_deepep_low_latency ? deepEpLLDispatch(params) : deepEpDispatch(params);
-    }
-
     DevicePerfWrapper wrapper(this, "epDispatch");
+    if (init_params_.use_deepep_moe) {
+        if (init_params_.use_deepep_low_latency) {
+            return deepEpLLDispatch(params);
+        } else {
+            return deepEpDispatch(params);
+        }
+    }    
     const auto& moe_conf = params.moe_configs;
 
     auto const ep_size    = moe_conf.ep_size;
@@ -158,11 +161,14 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
 }
 
 MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
-    if (init_params_.use_deepep_moe) {
-        return init_params_.use_deepep_low_latency ? deepEpLLCombine(params) : deepEpCombine(params);
-    }
-
     DevicePerfWrapper wrapper(this, "epCombine");
+    if (init_params_.use_deepep_moe) {
+        if (init_params_.use_deepep_low_latency) {
+            return deepEpLLCombine(params);
+        } else {
+            return deepEpCombine(params);
+        }
+    }
     auto all2all_ret = allToAll({
         {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
     return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, move(all2all_ret.comm_barrier_hook)});
@@ -330,6 +336,10 @@ void CudaDevice::prepareMoEGate(const FfnLayerParams& params, BufferPtr gate) {
 
 FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
+    // deepseek deepep low latency only
+    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
+        return deepEpLLMoeFfn(params, gate_outputs);
+    }
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
         return moeFfnFp8(params, gate_outputs);
     }

@@ -54,13 +54,13 @@ public:
     virtual FfnLayerOutput ffnLayer(const FfnLayerParams& params);
     virtual FfnLayerOutput microBatchedFfnLayer(const FfnLayerParams& params);
     virtual FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
+    virtual FfnLayerOutput epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output);
     virtual FfnLayerOutput moeSharedExpert(const FfnLayerParams& params);
     virtual MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params);
     virtual FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
-    virtual FfnLayerOutput moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
-    virtual FfnLayerOutput moeFfnAndCombine(const FfnLayerParams& params, const MoeDispatchOutput& dispatched_output);
-    virtual FfnLayerOutput deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
-    virtual FfnLayerOutput deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& gate_outputs);
+    virtual FfnLayerOutput moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);    
+    virtual FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    virtual FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
     virtual LoraLinearOutput loraLinear(const LoraLinearParams& params);
     virtual LoraLinearOutput loraLinearWithAllReduce(const LoraLinearParams& params);

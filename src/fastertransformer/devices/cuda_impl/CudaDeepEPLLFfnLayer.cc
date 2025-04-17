@@ -91,42 +91,6 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
     return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});
 }
 
-FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
-    const auto&       moe_conf = params.configs.moe_configs.value();
-    MoeDispatchOutput dispatched_output =
-        deepEpLLDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf,
-            false});
-
-
-    auto moe_ffn_params =
-        FfnLayerParams(*dispatched_output.hidden, params.configs, params.weights, params.residual, params.qscheme);
-    auto out_hidden_states = deepEpFfnFp8(moe_ffn_params, dispatched_output).hidden_states;
-
-    // combine with local token expert_ids and expert_scales
-    MoeCombineParams combine_params{
-        out_hidden_states,
-        nullptr,
-        params.output,
-        {},
-        {},
-        moe_conf,
-        params.input.shape()[0],
-        init_params_.enable_comm_overlap,
-        nullptr,
-        dispatched_output.deep_ep_ll_output,
-        std::make_shared<MoeGateSelectOutput>(gate_output),
-        dispatched_output.expert_ids,
-        dispatched_output.expert_scales,
-    };
-    auto combine_out = deepEpLLCombine(combine_params);
-
-    if (combine_out.params.overlapped) {
-        return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
-    } else {
-        return gatherCombineOutput(combine_out);
-    }
-}
-
 #else
 
 MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
@@ -134,10 +98,6 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
 }
 
 MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-FfnLayerOutput CudaDevice::deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

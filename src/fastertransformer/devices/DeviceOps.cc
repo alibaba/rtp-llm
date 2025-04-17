@@ -155,15 +155,15 @@ FfnLayerOutput DeviceOps::moeFfnFp8(const FfnLayerParams& params, const MoeGateS
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-FfnLayerOutput DeviceOps::moeFfnAndCombine(const FfnLayerParams& params, const MoeDispatchOutput& dispatched_output) {
+FfnLayerOutput DeviceOps::epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-FfnLayerOutput DeviceOps::deepEpLLMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+FfnLayerOutput DeviceOps::deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-FfnLayerOutput DeviceOps::deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& gate_outputs) {
+FfnLayerOutput DeviceOps::deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

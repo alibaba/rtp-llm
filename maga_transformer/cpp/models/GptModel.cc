@@ -548,14 +548,10 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
             if (hidden_states->shape()[0]) {
                 auto moe_ffn_params = FfnLayerParams(
                     {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
-                if (device_props_.use_deepep_moe && device_props_.use_deepep_low_latency) {
-                    hidden_states = device_->deepEpFfnFp8(moe_ffn_params, dispatched_output).hidden_states;
-                } else {
-                    hidden_states = device_->moeFfn(
-                        moe_ffn_params,
-                        {dispatched_output.expert_ids, dispatched_output.expert_scales}
-                    ).hidden_states;
-                }
+                hidden_states = device_->moeFfn(
+                    moe_ffn_params,
+                    {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
+                ).hidden_states;
             }
 
             if (last_comm_hook_) {

@@ -215,7 +215,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 #endif
 }
 
-FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeDispatchOutput& dispatch_outputs) {
+FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
 #ifdef ENABLE_FP8
 #ifdef ENABLE_DEEP_EP
     using T = __nv_bfloat16;
@@ -229,7 +229,7 @@ FfnLayerOutput CudaDevice::deepEpFfnFp8(const FfnLayerParams& params, const MoeD
 
     BufferPtr                                       quantize_hidden;
     BufferPtr                                       quantize_hidden_holder;
-    auto                                            deep_ep_ll_output = dispatch_outputs.deep_ep_ll_output;
+    auto                                            deep_ep_ll_output = gate_outputs.deep_ep_ll_output;
     torch::Tensor                                   hidden            = deep_ep_ll_output->packed_recv_x;
     vector<size_t>                                  hidden_shape;
     if (deep_ep_ll_output->packed_recv_x_scales.has_value()) {

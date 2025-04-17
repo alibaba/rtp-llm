@@ -154,29 +154,46 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     return FfnLayerOutput({std::move(output)});
 }
 
+FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
+    RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
+    const auto& moe_conf = params.configs.moe_configs.value();
+    MoeDispatchOutput dispatched_output = epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
+    auto hidden_states = dispatched_output.hidden;
+    auto moe_ffn_params = FfnLayerParams(
+            {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
+    hidden_states =
+        moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}).hidden_states;
+    auto combine_out = epCombine({hidden_states,
+                                    dispatched_output.indices,
+                                    params.output,
+                                    dispatched_output.input_split_sizes,
+                                    dispatched_output.output_split_sizes,
+                                    moe_conf,
+                                    params.input.shape()[0],
+                                    init_params_.enable_comm_overlap,
+                                    dispatched_output.deep_ep_output,
+                                    dispatched_output.deep_ep_ll_output,
+                                    std::make_shared<MoeGateSelectOutput>(gate_output),
+                                    dispatched_output.expert_ids,
+                                    dispatched_output.expert_scales});
+    // TODO(wangyin.yx): refact this defered combine.
+    if (combine_out.comm_barrier_hook) {
+        return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
+    } else {
+        auto out = gatherCombineOutput(combine_out);
+        printBufferData(*out.hidden_states, "moe_ffn_ep_out");
+        return out;
+    }
+}
+
 FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
-
-    if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
-            return deepEpLLMoeFfnLayer(params, gate_output);
-    }
-
     if (moe_conf.ep_size > 1) {
-        MoeDispatchOutput dispatched_output =
-            epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
-        return moeFfnAndCombine(params, dispatched_output);
-    } else {
-        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-            BufferPtr hidden_fp8 = quantize({params.input, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-            auto      moe_ffn_params =
-                FfnLayerParams({*hidden_fp8, params.configs, params.weights, params.residual, params.qscheme});
-            return moeFfnFp8(moe_ffn_params, gate_output);
-        } else {
-            return moeFfn(params, gate_output);
-        }
+        return epMoeFfnLayer(params, gate_output);
     }
+    return moeFfn(params, gate_output);
 }
 
 FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
@@ -209,37 +226,6 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
         return {shared_expert_output};
     } else {
         return {nullptr};
-    }
-}
-
-// TODO(wangyin.yx): remove this function
-FfnLayerOutput DeviceBase::moeFfnAndCombine(
-        const FfnLayerParams& params,
-        const MoeDispatchOutput& dispatched_output)
-{
-    const auto& moe_conf = params.configs.moe_configs.value();
-    auto hidden_states = dispatched_output.hidden;
-    auto moe_ffn_params = FfnLayerParams(
-            {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
-    hidden_states =
-        moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales}).hidden_states;
-    auto combine_out = epCombine({hidden_states,
-                                    dispatched_output.indices,
-                                    params.output,
-                                    dispatched_output.input_split_sizes,
-                                    dispatched_output.output_split_sizes,
-                                    moe_conf,
-                                    params.input.shape()[0],
-                                    init_params_.enable_comm_overlap,
-                                    dispatched_output.deep_ep_output});
-
-    // TODO(wangyin.yx): refact this defered combine.
-    if (combine_out.comm_barrier_hook) {
-        return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
-    } else {
-        auto out = gatherCombineOutput(combine_out);
-        printBufferData(*out.hidden_states, "moe_ffn_ep_out");
-        return out;
     }
 }
 
