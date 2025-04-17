@@ -70,11 +70,9 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     const auto &flashinfer = *flash_infer_attn_params;
     // maybe some shape check ?
 
-    auto q_reshape = params.q.reshape({params.q.shape()[0], params.configs.head_num, params.configs.nope_head_dim + params.configs.rope_head_dim});
-    auto q_rope = fused_q_input_t.slice(-1, params.configs.kv_lora_rank, params.configs.kv_lora_rank + params.configs.rope_head_dim);
 
     FT_LOG_DEBUG("mla_ops_type %d", mla_ops_type);
-    if (mla_ops_type == MlaOpsType::FLASH_MLA) {
+    if (flashinfer.mla_ops_type == MlaOpsType::FLASH_MLA) {
         if (params.is_prefill) {
             fused_q_input_t = fused_q_input_t.reshape({
                 (int64_t)params.common.context_batch_size, (int64_t)(params.q.shape()[0] / params.common.context_batch_size), (int64_t)params.configs.head_num, (int64_t)(params.configs.kv_lora_rank + params.configs.rope_head_dim)
@@ -98,7 +96,11 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
         printBufferData(*torchTensor2Buffer(flashinfer.kvlen_t), "kvlen_t");
         torch::Tensor decode_kv_cache_block_id_t;
         if (params.is_prefill) {
-            decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(params.common.decoder_batch_size, c10::nullopt, c10::make_optional((int64_t)params.common.context_batch_size));
+            decode_kv_cache_block_id_t =
+                flashinfer.kv_cache_block_id_t.slice(0,
+                                                     c10::make_optional((int64_t)params.common.decoder_batch_size),
+                                                     c10::make_optional((int64_t)params.common.context_batch_size
+                                                                        + (int64_t)params.common.decoder_batch_size));
         } else {
             decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(0, c10::nullopt, c10::make_optional((int64_t)params.common.decoder_batch_size));
         }
@@ -124,6 +126,8 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
             num_splits
         )[0].reshape({(int64_t)params.q.shape()[0], (int64_t)params.configs.head_num, (int64_t)params.configs.kv_lora_rank});
     } else {
+        auto q_rope = fused_q_input_t.slice(-1, params.configs.kv_lora_rank, params.configs.kv_lora_rank + params.configs.rope_head_dim);
+
         attn_out = allocateBuffer({datatype, {params.q.shape()[0], params.configs.head_num, params.configs.kv_lora_rank}, AllocationType::DEVICE});
         attn_out_t = Buffer2torchTensor(attn_out, false);
 

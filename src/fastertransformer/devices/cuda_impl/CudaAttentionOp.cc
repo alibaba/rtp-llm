@@ -36,6 +36,7 @@ void prepareDecodeFlashInferAttnParamsImpl(FlashInferAttnParams* params,
                                     const uint64_t tokens_per_block,
                                     const uint64_t max_batch_blocks){
     FT_CHECK_WITH_INFO(max_batch_blocks > 0 && kv_cache_block_id_host, "max_batch_blocks and kv_cache_block_id_host must be set for decode");
+    params->mla_ops_type = device->mla_ops_type;
     params->float_workspace = device->allocateBuffer({DataType::TYPE_INT8, {128 * 1024 *1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 *1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 *1024 *1024}, AllocationType::HOST}, {"int_host_workspace"});
@@ -112,6 +113,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
                                     const uint64_t                             tokens_per_block,
                                     const uint64_t                             max_batch_blocks,
                                     const uint64_t                             batch_size) {
+    params->mla_ops_type = device->mla_ops_type;
     params->float_workspace = device->allocateBuffer({DataType::TYPE_INT8, {128 * 1024 *1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 *1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 *1024 *1024}, AllocationType::HOST}, {"int_host_workspace"});
@@ -130,8 +132,14 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
 
     int offset = 0;
     int accu_q_length = 0;
+    int last_q_length = -1;
+    bool same_q_length = true;
     for (int i = 0; i < context_batch_size; i++) {
         int input_length = input_lengths_host->data<int>()[i + batch_size];
+        if (last_q_length > 0 && last_q_length != input_length) {
+            same_q_length = false;
+        }
+        last_q_length = input_length;
         int prefix_length = prefix_lengths_host->data<int>()[i];
         FT_LOG_DEBUG("[%d] input_length: %d, prefix_length: %d", i, input_length, prefix_length);
         for (int j = 0; j < input_length; j++) {
@@ -153,6 +161,11 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
             params->qo_indptr_host->data<int>()[i + 1]            = accu_q_length;
          
         }
+    }
+    if (!same_q_length && params->mla_ops_type == FLASH_MLA) {
+        FT_LOG_DEBUG("[WARNING] FLASH MLA only suport same q length, fallback to flashinfer");
+        // FLASH MLA only suport same q length, fallback to flashinfer
+        params->mla_ops_type = FLASH_INFER;
     }
 
     if (kv_cache_block_id_host) {
@@ -228,7 +241,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams
     auto params = (FlashInferAttnParams*)ret.get();
     prepareContextMLAFlashInferAttnParamsImpl(params, device, attn_configs, prefix_lengths_host, sequence_lengths_host, input_lengths_host, kv_cache_block_id_host, prefill_token_num, context_batch_size, tokens_per_block, max_batch_blocks, batch_size);
     if (kv_cache_block_id_host) {
-        if (attn_configs.use_mla && device->mla_ops_type == MlaOpsType::FLASH_INFER) {
+        if (attn_configs.use_mla && params->mla_ops_type == MlaOpsType::FLASH_INFER) {
             params->plan = BatchMLAPagedAttentionPlan(
                 params->float_workspace_t,
                 params->int_workspace_t,
@@ -241,7 +254,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams
                 true,
                 reinterpret_cast<int64_t>(cuda_device->getStream())
             );
-        } else if (attn_configs.use_mla && device->mla_ops_type == MlaOpsType::FLASH_MLA) {
+        } else if (attn_configs.use_mla && params->mla_ops_type == MlaOpsType::FLASH_MLA) {
             printBufferData(*torchTensor2Buffer(params->kvlen_t), "metadata kvlen_t");
             FT_LOG_TRACE("batch_size = %zu", batch_size);
             FT_LOG_TRACE("local_head_num = %zu", local_head_num);
@@ -306,7 +319,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
     // prepare flashinfer params for decode
     prepareDecodeFlashInferAttnParamsImpl(params, device, attn_configs, sequence_lengths_host, kv_cache_block_id_host, batch_size, tokens_per_block, max_batch_blocks);
     
-    if (!attn_configs.use_mla || device->mla_ops_type == MlaOpsType::MHA) {
+    if (!attn_configs.use_mla || params->mla_ops_type == MlaOpsType::MHA) {
         if (params->decode) {
             params->plan = BatchDecodeWithPagedKVCachePlan(
                     params->float_workspace_t, // float_workspace_buffer
@@ -345,7 +358,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
                     true, // causal
                     reinterpret_cast<int64_t>(cuda_device->getStream()));
         }
-    } else if (device->mla_ops_type == MlaOpsType::FLASH_INFER) {
+    } else if (params->mla_ops_type == MlaOpsType::FLASH_INFER) {
         params->plan = BatchMLAPagedAttentionPlan(
             params->float_workspace_t,
             params->int_workspace_t,
@@ -358,7 +371,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
             true,
             reinterpret_cast<int64_t>(cuda_device->getStream())
         );
-    } else if (device->mla_ops_type == MlaOpsType::FLASH_MLA) {
+    } else if (params->mla_ops_type == MlaOpsType::FLASH_MLA) {
         printBufferData(*torchTensor2Buffer(params->kvlen_t), "metadata kvlen_t");
         FT_LOG_TRACE("batch_size = %zu", batch_size);
         FT_LOG_TRACE("local_head_num = %zu", local_head_num);
@@ -368,7 +381,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
             1
         );
     } else {
-        FT_FAIL("unexpected mla ops type: %d", int(device->mla_ops_type));
+        FT_FAIL("unexpected mla ops type: %d", int(params->mla_ops_type));
     }
 
     return ret;

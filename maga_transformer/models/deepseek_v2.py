@@ -521,7 +521,10 @@ class DeepSeekV3MtpWeight(DeepSeekV2Weight):
         ]
         assert self._num_layers == 1
         for layer in range(self._num_layers):
-            layer_weights_tmp = self._get_hf_layer_weight_info(layer)
+            if self._quant_algo.isFp8():
+                layer_weights_tmp = self._get_fp8_layer_weight_info(layer)
+            else:
+                layer_weights_tmp = self._get_hf_layer_weight_info(layer)
             layer_weights_tmp.extend([
                 WeightInfo(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.shared_head.norm.weight', identity)], identity),
                 WeightInfo(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
@@ -531,7 +534,7 @@ class DeepSeekV3MtpWeight(DeepSeekV2Weight):
             ])
             layer_weights.append(layer_weights_tmp)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class DeepSeekV3Mtp(DeepSeekV2):
 

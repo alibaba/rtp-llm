@@ -76,6 +76,7 @@ struct FlashInferAttnParams {
     torch::Tensor kvlen_t;
 
     std::vector<torch::Tensor> flash_mla_plan;
+    MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
     bool decode = true;
     torch::Tensor plan;
