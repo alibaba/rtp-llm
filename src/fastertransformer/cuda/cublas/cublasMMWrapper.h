@@ -61,28 +61,31 @@ protected:
                    const int     mode,
                    const bool    per_column_scaling);
 
-    void cublasLtGemm(cublasHandle_t handle,
-                    cublasOperation_t transa,
-                    cublasOperation_t transb,
-                    int m,
-                    int n,
-                    int k,
-                    const void* alpha, /* host or device pointer */
-                    const void* A,
-                    cudaDataType Atype,
-                    int lda,
-                    const void* B,
-                    cudaDataType Btype,
-                    int ldb,
-                    const void* beta, /* host or device pointer */
-                    void* C,
-                    cudaDataType Ctype,
-                    int ldc,
-                    bool is_fp16_computeType,
-                    cublasLtMatmulAlgo_info info,
-                    bool findAlgo,
-                    int               math_sm_count,
-                    cudaStream_t       stream);
+    void cublasLtGemm(cublasHandle_t          handle,
+                      cublasOperation_t       transa,
+                      cublasOperation_t       transb,
+                      int                     m,
+                      int                     n,
+                      int                     k,
+                      const void*             alpha, /* host or device pointer */
+                      const void*             A,
+                      const void*             A_scale,
+                      cudaDataType            Atype,
+                      int                     lda,
+                      const void*             B,
+                      const void*             B_scale,
+                      cudaDataType            Btype,
+                      int                     ldb,
+                      const void*             beta, /* host or device pointer */
+                      void*                   C,
+                      cudaDataType            Ctype,
+                      int                     ldc,
+                      bool                    is_fp16_computeType,
+                      cublasLtMatmulAlgo_info info,
+                      bool                    findAlgo,
+                      int                     math_sm_count,
+                      int8_t                  fast_accum,
+                      cudaStream_t            stream);
 
 public:
     cublasMMWrapper(cublasHandle_t   cublas_handle_,
@@ -167,7 +170,10 @@ public:
               cudaDataType_t    computeType,
               float             f_alpha,
               float             f_beta,
+              const float*      A_scale, 
+              const float*      B_scale,
               int               math_sm_count,
+              int8_t            fast_accum,
               cudaStream_t      stream);
 
     void Gemm(cublasOperation_t transa,

@@ -114,15 +114,7 @@ struct CudaGemmArguments {
         stride_b = k * n;
         ldc = n;
         stride_c = m * n;
-
-        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            float input_scale = getCudaValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
-            float weight_scale = getCudaValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
-            alpha = params.alpha * input_scale * weight_scale;
-        } else {
-            alpha = params.alpha;
-        }
-        
+        alpha = params.alpha;
         beta = params.beta;
     }
 
@@ -259,6 +251,9 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
 #ifdef ENABLE_FP8
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && QBufferDtype2BufferDtype(params.A.type()) == DataType::TYPE_FP8_E4M3) {
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP8_E4M3, TYPE_QFP8_E4M3});
+        float *A_scale = reinterpret_cast<const QBuffer&>(params.A).scalesData<float>();
+        float *B_scale = reinterpret_cast<const QBuffer&>(params.B).scalesData<float>();
+
         cublas_mm_wrapper_->Gemm(CUBLAS_OP_T,
                                  CUBLAS_OP_N,
                                  arguments.n,
@@ -276,7 +271,10 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
                                  computeType,
                                  arguments.alpha,
                                  arguments.beta,
+                                 A_scale,
+                                 B_scale,
                                  params.math_sm_count,
+                                 0,
                                  params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
         sync_check_cuda_error();
     } else

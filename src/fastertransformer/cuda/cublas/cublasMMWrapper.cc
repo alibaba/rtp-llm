@@ -81,31 +81,34 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            float             f_beta,
                            int               math_sm_count,
                            cudaStream_t      stream) {
-    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta, math_sm_count, stream);                            
+    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta, nullptr, nullptr, math_sm_count, 0, stream);                            
 }
 
-void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
-                                cublasOperation_t transa,
-                                cublasOperation_t transb,
-                                int m,
-                                int n,
-                                int k,
-                                const void* alpha, /* host or device pointer */
-                                const void* A,
-                                cudaDataType Atype,
-                                int lda,
-                                const void* B,
-                                cudaDataType Btype,
-                                int ldb,
-                                const void* beta, /* host or device pointer */
-                                void* C,
-                                cudaDataType Ctype,
-                                int ldc,
-                                bool is_fp16_computeType,
-                                cublasLtMatmulAlgo_info info,
-                                bool findAlgo,
-                                int               math_sm_count,
-                                cudaStream_t      stream) {
+void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
+                                cublasOperation_t        transa,
+                                cublasOperation_t        transb,
+                                int                      m,
+                                int                      n,
+                                int                      k,
+                                const void*              alpha, /* host or device pointer */
+                                const void*              A,
+                                const void*              A_scale,
+                                cudaDataType             Atype,
+                                int                      lda,
+                                const void*              B,
+                                const void*              B_scale,
+                                cudaDataType             Btype,
+                                int                      ldb,
+                                const void*              beta, /* host or device pointer */
+                                void*                    C,
+                                cudaDataType             Ctype,
+                                int                      ldc,
+                                bool                     is_fp16_computeType,
+                                cublasLtMatmulAlgo_info  info,
+                                bool                     findAlgo,
+                                int                      math_sm_count,
+                                int8_t                   fast_accum,
+                                cudaStream_t             stream) {
     cublasLtMatrixLayout_t Adesc;
     cublasLtMatrixLayout_t Bdesc;
     cublasLtMatrixLayout_t Cdesc;
@@ -151,7 +154,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
     check_cuda_error(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
 #else
     check_cuda_error(cublasLtMatmulDescCreate(&operationDesc, computeType));
-#endif
+#endif    
     FT_SCOPE_GUARD([&](){ cublasLtMatmulDescDestroy(operationDesc); });
 
     if (math_sm_count > 0) {
@@ -163,6 +166,18 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t handle,
     check_cuda_error(cublasLtMatmulDescSetAttribute(operationDesc,
             CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t)));
 
+    check_cuda_error(cublasLtMatmulDescSetAttribute(operationDesc, 
+            CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fast_accum, sizeof(int8_t)));
+    if (A_scale != nullptr) {
+        check_cuda_error(cublasLtMatmulDescSetAttribute(operationDesc,
+                    CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &A_scale, sizeof(void*)));
+    }
+    if (B_scale != nullptr) {
+        check_cuda_error(cublasLtMatmulDescSetAttribute(operationDesc,
+                    CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &B_scale, sizeof(void*)));
+    }
+
+  
     cublasLtMatmulAlgo_t algo;
     void*                workSpace     = cublas_workspace_;
     uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
@@ -257,7 +272,10 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            cudaDataType_t    computeType,
                            float             f_alpha,
                            float             f_beta,
+                           const float*      A_scale,
+                           const float*      B_scale,
                            int               math_sm_count,
+                           int8_t            fast_accum,
                            cudaStream_t      stream) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     std::lock_guard<std::mutex> lock(*mutex_);
@@ -291,6 +309,8 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
     try {
         if (using_cublasLt) {
+            const void* A_scale_ptr = static_cast<const void*>(A_scale);
+            const void* B_scale_ptr = static_cast<const void*>(B_scale);
             cublasLtGemm(cublas_handle_,
                         transa,
                         transb,
@@ -299,9 +319,11 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                         k,
                         alpha,
                         A,
+                        A_scale_ptr,
                         Atype,
                         lda,
                         B,
+                        B_scale_ptr,
                         Btype,
                         ldb,
                         beta,
@@ -312,6 +334,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                         info,
                         findAlgo,
                         math_sm_count,
+                        fast_accum,
                         stream);
         } else {
             int cublasAlgo = info.algoId;
