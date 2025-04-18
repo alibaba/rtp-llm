@@ -72,6 +72,8 @@ public:
 
     virtual int64_t getLastScheduleTime() { return autil::TimeUtility::currentTimeInMilliSeconds(); }
 
+    virtual bool isMTP() { return false; }
+
 protected:
     ft::DeviceBase*                      device_;
     ResourceContext                      resource_context_;

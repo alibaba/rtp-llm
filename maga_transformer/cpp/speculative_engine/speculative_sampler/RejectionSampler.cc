@@ -67,9 +67,13 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
         }
 
         if (stream->needReturnHiddenStates()) {
-            hidden_states = device_->clone({scorer_stream_output->hidden_states->view(0, accepted_len),
-                ft::AllocationType::DEVICE,
-                {"return_hidden_states"}});
+            if (stream->getLastHiddenStates()) {
+                hidden_states = device_->clone({scorer_stream_output->hidden_states->view(0, accepted_len),
+                    ft::AllocationType::DEVICE,
+                    {"return_hidden_states"}});
+            } else {
+                hidden_states = device_->clone({*scorer_stream_output->hidden_states, ft::AllocationType::DEVICE, {"return_hidden_states"}});
+            }
             FT_LOG_DEBUG("sample hidden states: %s", hidden_states->debugStringMeta().c_str());
 
         }

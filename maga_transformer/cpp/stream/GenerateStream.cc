@@ -31,6 +31,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
+    , dtype_(ft::getDataType(params.data_type_))
+    , hidden_size_(params.hidden_size_)
 {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -756,8 +758,12 @@ std::string GenerateStream::debugString() const {
                  << ", tile_num:" << tileNum()
                  << ", need_release_resource: " << need_release_resource_
                  << ", fallback_prefix_length: " << fallback_prefix_length_
-                 << ", sp_edit_search_index: " << sp_edit_search_index_;
+                 << ", sp_edit_search_index: " << sp_edit_search_index_
+                 << ", mtp token indices" << mtp_token_index_;
 
+    if (last_hidden_states_) {
+        debug_string << ", hidden_state_token_num: " << last_hidden_states_->shape()[0];
+    }
     debug_string << ", complete_token_ids: [";
     for (size_t i = 0; i < tileNum(); i++) {
         debug_string << complete_token_ids_->toString(i) << ",";

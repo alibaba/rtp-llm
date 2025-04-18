@@ -79,7 +79,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
 
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
-    
+
     device_params.overlap_math_sm_count = autil::EnvUtil::getEnv("OVERLAP_MATH_SM_COUNT", 0UL);
     device_params.overlap_comm_type = autil::EnvUtil::getEnv("OVERLAP_COMM_TYPE", 0UL);
     device_params.max_seq_len       = params.max_seq_len_;
@@ -108,6 +108,18 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.use_deepep_moe = autil::EnvUtil::getEnv("USE_DEEPEP_MOE", 0L);
     device_params.use_deepep_internode = autil::EnvUtil::getEnv("USE_DEEPEP_INTERNODE", 0L);
     device_params.use_deepep_low_latency = autil::EnvUtil::getEnv("USE_DEEPEP_LOW_LATENCY", 1L);
+    auto sp_type = autil::EnvUtil::getEnv("SP_TYPE", "");
+    auto sp_model_type = autil::EnvUtil::getEnv("SP_MODEL_TYPE", "");
+    FT_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
+    FT_LOG_INFO("device_params sp_model_type is %s", sp_model_type.c_str());
+    if (((sp_type == "vanilla") && (sp_model_type == "mixtbstars-mtp"))      ||
+        ((sp_type == "vanilla") && (sp_model_type == "deepseek-v3-mtp"))    ||
+        (sp_type == "mtp"))
+    {
+        device_params.is_mtp = true;
+        FT_LOG_INFO("device_params.is_mtp true");
+    }
+
 
     FT_LOG_INFO("use deepep moe: %d, use deepep low latency: %d",
                 device_params.use_deepep_moe, device_params.use_deepep_low_latency);

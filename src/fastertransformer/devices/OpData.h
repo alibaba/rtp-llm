@@ -507,6 +507,17 @@ struct MlaAttentionModuleParams {
     const QScheme                   qscheme;
 };
 
+struct WriteMTPHiddenStatesParams {
+    bool pd_separation = false;
+    bool warmup;
+    size_t context_batch_size = 0;
+    size_t decoder_batch_size = 0;
+    BufferPtr request_pd_separation;
+    BufferPtr request_id;
+    BufferPtr hidden_states;
+    BufferPtr lm_output_indexes;
+};
+
 struct WriteCacheParams {
     AttentionCommonInputs&          common;
     const AttentionConfigs&         configs;

@@ -12,6 +12,10 @@ absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStrea
     std::list<GenerateStreamPtr> propose_streams;
     ProposeOutput propose_output;
 
+    for (auto& stream: streams) {
+        FT_LOG_DEBUG("before create mtp stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
     for (auto& stream : streams) {
         size_t stream_id = stream->streamId();
         propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();

@@ -956,7 +956,8 @@ GptModelOutputs GptModel::forwardPostLayers(
     const bool need_all_logits,
     const ft::BufferPtr lm_output_indexes,
     bool enable_sp,
-    size_t token_num)
+    size_t token_num,
+    const GptModelInputs& inputs)
 {
     DevicePerfWrapper wrapper(device_, "forwardPostLayers");
     BufferPtr all_gather_output = nullptr;
@@ -1009,6 +1010,20 @@ GptModelOutputs GptModel::forwardPostLayers(
         hidden = std::move(final_layernorm.output);
     }
     printBufferData(*hidden, "final_hidden");
+
+    if (device_->getDeviceProperties().is_mtp) {
+        const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
+        const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+
+        device_->writeHiddenStatesStore({inputs.pd_separation,
+                                        inputs.warmup,
+                                        context_batch_size,
+                                        decoder_batch_size,
+                                        inputs.request_pd_separation,
+                                        inputs.request_id,
+                                        hidden,
+                                        lm_output_indexes});
+    }
 
     const auto& lm_head = weights_.lm_head;
     if (lm_head) {
@@ -1063,7 +1078,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         inputs.need_all_logits,
         inputs.lm_output_indexes,
         layer_inputs.enable_sp,
-        layer_inputs.token_num);
+        layer_inputs.token_num,
+        inputs);
 
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);

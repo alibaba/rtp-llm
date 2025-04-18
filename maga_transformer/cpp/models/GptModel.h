@@ -234,7 +234,8 @@ protected:
         const bool need_all_logits,
         const ft::BufferPtr lm_output_indexes,
         bool enable_sp,
-        size_t token_num);
+        size_t token_num,
+        const GptModelInputs& inputs);
 
 protected:
     ft::DeviceBase* device_;

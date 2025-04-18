@@ -309,6 +309,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->use_deepep_moe = init_params_.use_deepep_moe;
         prop->use_deepep_internode = init_params_.use_deepep_internode;
         prop->use_deepep_low_latency = init_params_.use_deepep_low_latency;
+        prop->is_mtp = init_params_.is_mtp;
     }
     return *prop;
 }

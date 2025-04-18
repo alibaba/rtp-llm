@@ -65,6 +65,7 @@ struct DeviceInitParams {
     bool use_deepep_moe = false;
     bool use_deepep_internode = false;
     bool use_deepep_low_latency = false;
+    bool is_mtp = false;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -99,6 +100,7 @@ struct DeviceProperties {
     bool use_deepep_moe = false;
     bool use_deepep_internode = false;
     bool use_deepep_low_latency = false;
+    bool is_mtp = false;
 };
 
 struct MemoryStatus {

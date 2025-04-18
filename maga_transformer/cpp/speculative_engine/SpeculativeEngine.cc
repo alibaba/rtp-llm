@@ -13,8 +13,11 @@
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "maga_transformer/cpp/utils/Logger.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace std;
+using namespace fastertransformer;
+
 namespace rtp_llm {
 
 SpeculativeEngine::SpeculativeEngine(const EngineInitParams&                       engine_init_params,
@@ -22,12 +25,53 @@ SpeculativeEngine::SpeculativeEngine(const EngineInitParams&                    
     EngineBase(engine_init_params),
     metrics_reporter_(engine_init_params.metrics_reporter),
     propose_model_params_(std::move(propose_model_engine_init_params)),
-    score_model_params_(std::move(engine_init_params)) ,
+    score_model_params_(std::move(engine_init_params)),
     sp_type_(propose_model_params_->sp_type) {};
 
 SpeculativeEngine::~SpeculativeEngine() {
     FT_LOG_INFO("destory speculative engine");
     (void)stop();
+}
+
+std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states) {
+    FT_LOG_DEBUG("enqueue min fake query");
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids = device_->allocateBuffer(
+        {ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
+
+    std::default_random_engine generator;
+    std::uniform_int_distribution<int> distribution(0, score_model_params_.gpt_init_parameter.vocab_size_ - 1);
+    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
+        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
+    }
+
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    if (fake_hidden_states) {
+        fake_input->generate_config->max_new_tokens = max_new_tokens + 1;
+    } else {
+        fake_input->generate_config->max_new_tokens = max_new_tokens;
+    }
+    fake_input->generate_config->top_k = 1;
+    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->fake_query = true;
+    auto stream = makeStream(fake_input);
+    stream->setMetricsReporter(nullptr);
+
+    if (fake_hidden_states) {
+        auto dtype = ft::getDataType(score_model_params_.gpt_init_parameter.data_type_);
+        auto fake_hidden_states = device_->allocateBuffer(
+            {dtype, {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_}, ft::AllocationType::DEVICE});
+        stream->setReturnLastHiddenStates(true);
+        BufferPtr new_tokens = device_->allocateBuffer(
+            {ft::DataType::TYPE_INT32, {(size_t)1, 1}, ft::AllocationType::HOST});
+        *new_tokens->dataWithOffset<int32_t>(0) = distribution(generator);
+        StreamUpdateInfo update_info{new_tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, fake_hidden_states};
+        stream->update(update_info);
+        stream->setIsContextStream(false);
+    }
+
+    enqueue(stream);
+    return stream;
 }
 
 absl::Status SpeculativeEngine::init() {
@@ -76,21 +120,13 @@ absl::Status SpeculativeEngine::init() {
 
 void SpeculativeEngine::initLoadBalance() {
     FT_LOG_INFO("init load balance start");
-    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
-    fake_input->input_ids = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
-    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
-    fake_input->generate_config                 = make_shared<GenerateConfig>();
-    fake_input->generate_config->max_new_tokens = 3;
-    fake_input->generate_config->top_k          = 1;
-    fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    auto stream                                 = enqueue(fake_input);
-    while (!stream->finished() && !stream->stopped()) {
-        FT_LOG_INFO("wait load balance int run over for 1s");
+    auto stream = enqueueMinFakeQuery(3,  false);
+    while(!stream->finished() && !stream->stopped()) {
+        FT_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
     FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
-                step_recorder_.getStepPerMin(),
-                step_recorder_.getStepLatency());
+            step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
 }
 
 absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
@@ -161,7 +197,7 @@ WarmUpResult SpeculativeEngine::warmUp() {
     fake_input->generate_config                       = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences = socre_gpt_params.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(socre_gpt_params.warm_up_with_loss_);
-    fake_input->generate_config->top_k                = 2;  
+    fake_input->generate_config->top_k                = 2;
     fake_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 
@@ -271,21 +307,63 @@ void SpeculativeEngine::tpSyncDisableSPRun(bool& all_streams_disable_sp_run) {
     all_streams_disable_sp_run = disable_sp_run_ptr[(size_t)0];
 }
 
-absl::Status SpeculativeEngine::step() {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+void SpeculativeEngine::dpAndTpSyncNeedHiddenStates(bool& need_hidden_states) {
+    const auto properties = device_->getDeviceProperties();
+    size_t world_size = properties.dp_size;
+    if (world_size <= 1) {
+        return;
+    }
+    size_t local_rank = properties.dp_rank;
+    FT_LOG_DEBUG("local_rank is %d", local_rank);
+    auto flag = device_->allocateBuffer({ft::DataType::TYPE_INT32, {world_size}, ft::AllocationType::HOST});
+    auto flag_ptr = flag->data<int32_t>();
+    flag_ptr[(size_t)local_rank] = need_hidden_states;
+    printBufferData(*flag, "before dp flag");
 
-    // dynamic adjust propose_executor
-    online_adaptor_->dynamicUpdateProposerConfig(propose_executor_, scheduler_);
+    device_->allGather({{flag}, ParallelMode::DP});
+    device_->syncCommunication(false);
+    device_->syncAndCheck();
+    printBufferData(*flag, "after dp flag");
+    need_hidden_states = (std::accumulate(flag_ptr, flag_ptr + world_size, 0) >= 1);
+}
+
+absl::Status SpeculativeEngine::step() {
 
     list<GenerateStreamPtr> streams;
+
     if (device_->getDeviceProperties().tp_rank == 0) {
         if (scheduler_->empty() || step_recorder_.empty()) {
             step_recorder_.reset();
             step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), propose_executor_->reserveStep() / 2);
         }
-        CHECK_AND_ASSIGN(streams, scheduler_->schedule(propose_executor_->reserveStep()));
+        auto reserve_step = propose_executor_->reserveStep() + 1;
+
+        CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step));
+
         if (streams.empty()) {
+            if (score_model_params_.gpt_init_parameter.dp_size_ > 1) {
+                if (score_model_params_.gpt_init_parameter.pd_separation_ == 1) {
+                    enqueueMinFakeQuery(1, false);
+                } else {
+                    enqueueMinFakeQuery(1, true);
+                }
+            }
             return absl::OkStatus();
+        }
+        if (score_model_params_.gpt_init_parameter.dp_size_ > 1 &&
+            score_model_params_.gpt_init_parameter.pd_separation_ == 0)
+        {
+            bool has_hidden_states = false;
+            for (auto stream : streams) {
+                if (stream->getLastHiddenStates() != nullptr) {
+                    has_hidden_states = true;
+                    break;
+                }
+            }
+            if (!has_hidden_states) {
+                enqueueMinFakeQuery(1, true);
+                return absl::OkStatus();
+            }
         }
     }
 
@@ -297,6 +375,11 @@ absl::Status SpeculativeEngine::step() {
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 
     if (all_streams_disable_sp_run) {
+        if (sp_type_ == "mtp") {
+            for (auto& stream : streams) {
+                stream->setReturnLastHiddenStates(true);
+            }
+        }
         return normStep(streams);
     }
     if (sp_type_ == "mtp") {
@@ -451,28 +534,29 @@ std::list<GenerateStreamPtr> SpeculativeEngine::extractFirstPrefillStreams(std::
 
 
 absl::Status SpeculativeEngine::noPrefillProposeStep(std::list<GenerateStreamPtr>& streams) {
-    std::list<GenerateStreamPtr> need_prefill_streams;
+    std::list<GenerateStreamPtr> propose_streams;
+    std::list<GenerateStreamPtr> prefill_streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
-        need_prefill_streams = extractPrefillStreams(streams);
-        FT_LOG_DEBUG("need_prefill_streams is empty() %d", need_prefill_streams.empty());
-        FT_LOG_DEBUG("streams is empty() %d", streams.empty());
+        for (auto& stream: streams) {
+            if (stream->getLastHiddenStates() != nullptr) {
+                propose_streams.emplace_back(stream);
+            } else {
+                prefill_streams.emplace_back(stream);
+            }
+        }
+
+        for (auto& stream : propose_streams) {
+            FT_LOG_DEBUG("pre propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        }
+
+
+        for (auto& stream : prefill_streams) {
+            FT_LOG_DEBUG("pre prefill stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        }
+
     }
 
     // base model generate current hidden states.
-    {
-        bool all_need_prefill = false;
-        if (device_->getDeviceProperties().tp_rank == 0) {
-            all_need_prefill = !need_prefill_streams.empty() && streams.empty();
-        }
-        tpSyncDisableSPRun(all_need_prefill);
-        if (all_need_prefill) {
-            FT_LOG_DEBUG("norm step");
-            return normStep(need_prefill_streams);
-        }
-
-    }
-
-    FT_CHECK(checkAllHasHiddenStates(streams));
     // mtp model according to last hidden states from base model,
     // generate one token.
     // TODO(lidongjin) support multi mtp model.
@@ -485,22 +569,30 @@ absl::Status SpeculativeEngine::noPrefillProposeStep(std::list<GenerateStreamPtr
 
     ProposeOutput propose_output;
     {
-        FT_LOG_DEBUG("propose step");
-        CHECK_AND_ASSIGN(propose_output, propose_executor_->propose(streams));
+        bool skip_propose = propose_streams.empty();
+        tpSyncDisableSPRun(skip_propose);
+        if (!skip_propose) {
+            FT_LOG_DEBUG("propose step");
+            CHECK_AND_ASSIGN(propose_output, propose_executor_->propose(propose_streams));
+            FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
+        } else {
+            FT_LOG_DEBUG("skip propose");
+        }
 
-        FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
 
-        bool has_no_propose_output = propose_output.hasNoPropose();
+        for (const GenerateStreamPtr& stream : prefill_streams) {
+            size_t stream_id = stream->streamId();
+            propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
+            propose_output.outputs[stream_id]->propose_step = 0;
 
-        tpSyncDisableSPRun(has_no_propose_output);
-        // mtp propose must has one new token.
-        FT_CHECK(!has_no_propose_output);
+        }
     }
+
     // base model score propose new tokens.
     {
         FT_LOG_DEBUG("score step");
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        CHECK_AND_RETURN_REF(score_output, score_executor_->mtpScore(streams, propose_output, need_prefill_streams));
+        CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
         FT_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());
 
         if (device_->getDeviceProperties().tp_rank == 0) {

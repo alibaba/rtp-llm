@@ -120,7 +120,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
         FT_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
             decode_context.request_key.c_str(), error_info.ToString().c_str(), decode_context.time_info.loadCacheTimeMs());
     }
- 
+
     GenerateOutputsPB load_response;
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
@@ -263,7 +263,8 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     min_timeout_ms,
                                     1,
                                     0,
-                                    decode_context.server_context};
+                                    decode_context.server_context,
+                                    generate_stream->returnEmptyHiddenStates()};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -520,6 +521,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
+
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
             auto load_layer_cache =
@@ -534,9 +536,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
                 load_layer_cache->addBlock("k_" + cache_key, k_block_addr, k_block_size, true, true);
                 if (addr_info.k_scale_addr) {
-                    void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);                
-                    std::shared_ptr<void> k_block_scale_addr(k_scale_addr, [](void* p) {});                    
-                    load_layer_cache->addBlock("k_scale" + cache_key, k_block_scale_addr, scale_block_size, true, true);                    
+                    void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);
+                    std::shared_ptr<void> k_block_scale_addr(k_scale_addr, [](void* p) {});
+                    load_layer_cache->addBlock("k_scale" + cache_key, k_block_scale_addr, scale_block_size, true, true);
                 }
                 if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
                     continue;
@@ -547,7 +549,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (addr_info.v_scale_addr) {
                     void* v_scale_addr = (void*)((int64_t)addr_info.v_scale_addr + i * scale_block_size);
                     std::shared_ptr<void> v_block_scale_addr(v_scale_addr, [](void* p) {});
-                    load_layer_cache->addBlock("v_scale" + cache_key, v_block_scale_addr, scale_block_size, true, true);                
+                    load_layer_cache->addBlock("v_scale" + cache_key, v_block_scale_addr, scale_block_size, true, true);
                 }
             }
             layer_caches.push_back(load_layer_cache);
@@ -561,7 +563,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
         auto layer_cache_load_context =
             resource_.cache_store->loadBuffers(layer_caches,
-                                               ip_parts[0],    
+                                               ip_parts[0],
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
                                                load_context.timeout_ms,
@@ -573,6 +575,40 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
         }
         load_contexts.push_back(layer_cache_load_context);
+
+        if (engine_->isMTP() &&
+            engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
+            load_context.hidden_states_ != nullptr)
+        {
+            FT_LOG_DEBUG("mtp hidden states rdma get.");
+            std::vector<std::shared_ptr<RequestBlockBuffer>> hidden_states_caches;
+            auto load_layer_cache =
+                std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), "");
+            auto hidden_states_ptr = load_context.hidden_states_->data();
+            auto hidden_states_size = load_context.hidden_states_->sizeBytes();
+            FT_LOG_DEBUG("token_num is %d", load_context.hidden_states_->shape()[0]);
+            FT_LOG_DEBUG("decoder need hidden states size is %d", hidden_states_size);
+            std::shared_ptr<void> hidden_states_addr(hidden_states_ptr, [](void* p) {});
+            load_layer_cache->addBlock("hidden_states", hidden_states_addr, hidden_states_size, true, true);
+            hidden_states_caches.push_back(load_layer_cache);
+            auto hidden_states_load_context =
+                resource_.cache_store->loadBuffers(hidden_states_caches,
+                                                    ip_parts[0],
+                                                    autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
+                                                    autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
+                                                    load_context.timeout_ms,
+                                                    cancel_check_func,
+                                                    load_context.partition_count,
+                                                    load_context.partition_id);
+            if (!hidden_states_load_context) {
+                FT_LOG_WARNING("request [%s] load hidden_states failed, layer cache load context is nullptr", request_key.c_str());
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load hidden_states failed");
+            }
+            load_contexts.push_back(hidden_states_load_context);
+            FT_LOG_DEBUG("mtp hidden states rdma end.");
+        }
+
+
     }
 
     for (auto& layer_cache_load_context : load_contexts) {
@@ -589,6 +625,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return layer_cache_load_context->getErrorInfo();
     }
+
     return ErrorInfo::OkStatus();
 }
 
@@ -614,7 +651,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->timeout_ms(),
                                  request->partition_count(),
                                  request->partition_id(),
-                                 server_context});
+                                 server_context,
+                                 nullptr});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

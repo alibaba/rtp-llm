@@ -12,7 +12,7 @@ public:
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
-    
+
     grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* stream);
 
     grpc::Status RemoteLoad(grpc::ServerContext* server_context,
@@ -25,10 +25,12 @@ public:
     public:
         LoadKVCacheContext(int64_t request_id, const std::string& request_key, const std::vector<std::string>& peer_addrs,
                             const std::vector<int64_t>& cache_keys, const std::vector<int32_t>& block_ids,
-                            int64_t reuse_block_size, int64_t timeout_ms, int partition_count, int partition_id, grpc::ServerContext* server_context) :
+                            int64_t reuse_block_size, int64_t timeout_ms, int partition_count, int partition_id, grpc::ServerContext* server_context,
+                            ft::BufferPtr hidden_states) :
                             request_id(request_id), request_key(request_key), peer_addrs(peer_addrs),
                             cache_keys(cache_keys), block_ids(block_ids), reuse_block_size(reuse_block_size),
-                            timeout_ms(timeout_ms), partition_count(partition_count), partition_id(partition_id), server_context(server_context) {}
+                            timeout_ms(timeout_ms), partition_count(partition_count), partition_id(partition_id),
+                            server_context(server_context), hidden_states_(hidden_states) {}
         int64_t request_id;
         const std::string& request_key;
         const std::vector<std::string>& peer_addrs;
@@ -40,6 +42,7 @@ public:
         int partition_id;
 
         grpc::ServerContext* server_context;
+        ft::BufferPtr hidden_states_;
     };
 
 private:

@@ -11,8 +11,6 @@
 
 namespace rtp_llm {
 
-
-
 class SpeculativeEngine: public EngineBase {
 public:
     explicit SpeculativeEngine(const EngineInitParams&                       engine_init_params,
@@ -29,6 +27,14 @@ public:
 
     const ResourceContext& resourceContext() const {
         return resource_context_;
+    }
+
+    bool isMTP() override {
+        if (sp_type_ == "mtp") {
+            return true;
+        } else {
+            return false;
+        }
     }
 
 private:
@@ -67,6 +73,8 @@ private:
     absl::Status initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status initSystemPrompt();
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
+
+    void         dpAndTpSyncNeedHiddenStates(bool& need_hidden_states);
     void         reportMetrics(int64_t                         propose_begin_time_us,
                                int64_t                         score_begin_time_us,
                                int64_t                         sampler_begin_time_us,
@@ -76,8 +84,11 @@ private:
 
 
     bool checkAllHasHiddenStates(std::list<GenerateStreamPtr>& streams);
+    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
+
+
 
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;

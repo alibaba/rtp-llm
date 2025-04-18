@@ -53,8 +53,6 @@ public:
 
         if (needReturnHiddenStates()) {
             FT_CHECK(update_info.all_hidden_states != nullptr);
-            last_hidden_states_ = device_->clone(
-                {*update_info.all_hidden_states, ft::AllocationType::DEVICE});
             output_buffer->hidden_states = device_->clone({*update_info.all_hidden_states, ft::AllocationType::DEVICE, {"score_hidden_states"}});
         }
 

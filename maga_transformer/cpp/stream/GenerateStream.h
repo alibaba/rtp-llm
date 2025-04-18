@@ -173,6 +173,9 @@ public:
     void setIsContextStream(bool is_context_stream);
     ft::BufferPtr getLoss();
     ft::BufferPtr getLastHiddenStates();
+    void setLastHiddenStates(ft::BufferPtr hidden_states) {
+        last_hidden_states_ = hidden_states;
+    };
     ft::BufferPtr getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void setPerfTest(bool perf_test_);
@@ -186,6 +189,8 @@ public:
     void setReturnAllProbs(bool return_all_probs) {
         return_all_probs_ = return_all_probs;
     }
+
+
 
     bool getReturnAllProbs() {
         return return_all_probs_;
@@ -253,6 +258,14 @@ public:
 
     void setMtpTokenIndex(int mtp_token_index) {
         mtp_token_index_ = mtp_token_index;
+    }
+
+    ft::BufferPtr returnEmptyHiddenStates() {
+        FT_CHECK(last_hidden_states_ == nullptr);
+        FT_CHECK(seqLength() > 0);
+        last_hidden_states_ = device_->allocateBuffer(
+            {dtype_, {(size_t)seqLength(), hidden_size_}, ft::AllocationType::DEVICE});
+        return last_hidden_states_;
     }
 
     std::vector<int> getLatestTokens(size_t token_num);
@@ -340,6 +353,8 @@ protected:
     PositionIdsStyle                    mm_position_ids_style_;
 
     std::vector<StreamThinkInfo>        think_infos_;
+    ft::DataType dtype_;
+    size_t hidden_size_;
 
     // just for bool test
     bool perf_test_ = false;

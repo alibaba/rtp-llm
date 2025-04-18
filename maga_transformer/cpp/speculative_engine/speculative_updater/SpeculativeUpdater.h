@@ -25,7 +25,7 @@ public:
         size_t stream_index = 0;
         for (GenerateStreamPtr& stream : streams) {
             if (stream->stoppedWithoutLock() || stream->finishedWithoutLock()) {
-                return absl::OkStatus();
+                continue;
             }
             RETURN_IF_STATUS_ERROR(propose_compact_kv_cache(stream, sampler_output.outputs[stream_index]));
             RETURN_IF_STATUS_ERROR(score_compact_kv_cache(stream, sampler_output.outputs[stream_index]));
