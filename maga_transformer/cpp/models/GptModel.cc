@@ -320,6 +320,8 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
         fake_inputs.input_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.input_lengths->data<int32_t>()[0] = 1;
         fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
+        fake_inputs.prefix_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
+        fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
         auto fake_hidden = device_->allocateBuffer({dtype, {1, hidden->shape()[1]}});
         auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, dtype, nullptr);
         micro_batch_inputs.push_back({move(fake_hidden), nullptr, move(attention_common_inputs_fake), true});
