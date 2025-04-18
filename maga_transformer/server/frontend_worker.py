@@ -5,6 +5,8 @@ import json
 import logging
 import pathlib
 import torch
+import asyncio
+import traceback
 from functools import partial
 from typing import Any, Dict, List, Tuple, Optional, Union, NamedTuple, AsyncGenerator, Set
 
@@ -95,7 +97,13 @@ class FrontendWorker():
             #TODO temp fix sp with batch infer, will change request_id to str later
             for i, (text, urls, generate_config) in enumerate(zip(request.input_texts, request.input_urls, request.generate_configs)):
                 generators.append(self._yield_generate(request.request_id + i * 10000, text, urls, generate_config=generate_config, **kwargs))
-            return self._batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
+            has_num_beams = any(config.num_beams > 1 for config in request.generate_configs)
+            in_test = bool(int(os.environ.get('FT_SERVER_TEST', 0)))
+            parallel_batch = bool(int(os.environ.get('PARALLEL_BATCH', 0)))
+            if has_num_beams or (in_test and not parallel_batch):
+                return self._batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
+            else:
+                return self._parallel_batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
         else:
             return self._yield_generate(request.request_id, request.input_texts[0], request.input_urls[0], generate_config=request.generate_configs[0], **kwargs)
 
@@ -163,6 +171,50 @@ class FrontendWorker():
                         batch_state[idx] = PipelineResponse()
             if len(done_idxs) == len(iterators):
                 break
+            batch = batch_state
+            if batch_infer:
+                yield BatchPipelineResponse(response_batch=batch)
+            else:
+                yield batch[0]
+
+    async def _parallel_batch_async_generators(self, incremental: bool, num_return_sequences: int,
+                                      generators: List[AsyncGenerator[Dict[str, Any], None]],
+                                      batch_infer: bool) -> AsyncGenerator[Dict[str, Any], None]:
+        iterators = [gen.__aiter__() for gen in generators]
+        done_idxs: Set[int] = set()
+        batch_state: List[Any] = [None] * len(iterators)
+
+        while True:
+            # 创建并行任务
+            tasks = []
+            for idx, itr in enumerate(iterators):
+                if idx not in done_idxs:  # 仅为未完成的迭代器创建任务
+                    tasks.append((idx, itr.__anext__()))
+
+            # 使用 asyncio.gather() 获取结果
+            if tasks:
+                results = await asyncio.gather(*(task[1] for task in tasks), return_exceptions=True)
+                for idx, result in zip((task[0] for task in tasks), results):
+                    if isinstance(result, Exception):
+                        # 处理异常情况，如 StopAsyncIteration
+                        if isinstance(result, StopAsyncIteration):
+                            done_idxs.add(idx)
+                            if batch_state[idx] is None:
+                                batch_state[idx] = PipelineResponse()
+                            if incremental:
+                                batch_state[idx] = PipelineResponse()
+                        else:
+                            error_msg = f'ErrorMsg: {str(result)} \n Traceback: {"".join(traceback.format_tb(result.__traceback__))}'
+                            logging.warning(error_msg)
+                            raise result
+                    else:
+                        batch_state[idx] = result
+
+            # 检查是否所有迭代器都完成
+            if len(done_idxs) == len(iterators):
+                break
+
+            # 处理 batch 数据
             batch = batch_state
             if batch_infer:
                 yield BatchPipelineResponse(response_batch=batch)
