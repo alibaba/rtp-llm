@@ -11,6 +11,13 @@ config_setting(
     values = {"copt": "-DENABLE_DEEP_EP=1"},
 )
 
+config_setting(
+    name = "use_accl_ep",
+    values = {
+        "copt": "-DUSE_ACCL_EP=1",
+    },
+)
+
 cc_library(
     name = "deep_ep_buffer",
     hdrs = [
@@ -25,8 +32,12 @@ cc_library(
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/core:torch_cuda_allocator",
         "//:th_utils",
-        "@deep_ep//:deep_ep",
-    ],
+    ] + select({
+        ":use_accl_ep": [
+            "//3rdparty/accl_ep:accl_ep",
+        ],
+        "//conditions:default": ["@deep_ep//:deep_ep",],
+    }),
 )
 
 cc_library(

@@ -16,39 +16,51 @@ namespace fastertransformer {
 #ifdef ENABLE_DEEP_EP
 
 bool CudaDevice::initDeepEPBuffer() {
-    auto   nccl_param = getNcclParam(ParallelMode::DP_AND_TP);
-    size_t world_rank = nccl_param.rank_;
-    size_t world_size = nccl_param.world_size_;
+    auto   nccl_param  = getNcclParam(ParallelMode::DP_AND_TP);
+    size_t world_rank  = nccl_param.rank_;
+    size_t world_size  = nccl_param.world_size_;
     int    num_experts = init_params_.num_experts + init_params_.extra_experts;
 
     // TODO: check if get right
-    ll_num_max_token_per_rank = (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
-    int64_t num_rdma_bytes = 0;
-    int num_qps_per_rank = 1;
-    if(init_params_.use_deepep_low_latency) { // low-latency mode
+    ll_num_max_token_per_rank =
+        (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
+    int64_t num_rdma_bytes   = 0;
+    int     num_qps_per_rank = 1;
+    if (init_params_.use_deepep_low_latency) {  // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
         num_qps_per_rank = num_experts / init_params_.ep_size;
-    }
-    else if (init_params_.use_deepep_internode) { // normal-kernel internode
-        num_rdma_bytes = int(1e9);
+    } else if (init_params_.use_deepep_internode) {  // normal-kernel internode
+        num_rdma_bytes   = int(1e9);
         num_qps_per_rank = std::max(12, (int)(num_experts / init_params_.ep_size));
-    }
-    else{
-        num_rdma_bytes = 0; // normal-kernel intranode
+    } else {
+        num_rdma_bytes   = 0;  // normal-kernel intranode
         num_qps_per_rank = 1;
     }
 
     try {
         FT_LOG_INFO("deep ep init with num_rdma_bytes %ld, world_rank %ld, world_size %ld",
-                    num_rdma_bytes, world_rank, world_size);
+                    num_rdma_bytes,
+                    world_rank,
+                    world_size);
+#if USE_ACCL_EP
+        num_qps_per_rank = num_experts / init_params_.ep_size;
         deepep_buffer_.reset(new DeepEPBuffer(this,
-                                            world_rank,
-                                            world_size,
-                                            int(1e9),
-                                            num_rdma_bytes,
-                                            init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
-                                            num_qps_per_rank));
+                                              world_rank,
+                                              world_size,
+                                              int(1e9),
+                                              num_rdma_bytes,
+                                              init_params_.use_deepep_low_latency,
+                                              num_qps_per_rank));
+#else
+        deepep_buffer_.reset(new DeepEPBuffer(this,
+                                              world_rank,
+                                              world_size,
+                                              int(1e9),
+                                              num_rdma_bytes,
+                                              init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
+                                              num_qps_per_rank));
+#endif
         bool success = deepep_buffer_->init();
         if (!success) {
             FT_LOG_ERROR("Failed to initialize DeepEPBuffer");
@@ -100,16 +112,18 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         topk_idx_tensor     = Buffer2torchTensor(expert_ids, false).toType(torch::kInt64);  //[num_tokens, top_k]
         topk_weights_tensor = Buffer2torchTensor(expert_scales, false);                     //[num_tokens, top_k]
     }
-    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16, "hidden must be bf16 in deepEpDispatch, actual: %d", int(hidden->type()));
-    BufferPtr quantized_hidden;
-    torch::Tensor x;
+    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16,
+                          "hidden must be bf16 in deepEpDispatch, actual: %d",
+                          int(hidden->type()));
+    BufferPtr                    quantized_hidden;
+    torch::Tensor                x;
     std::optional<torch::Tensor> x_scales;
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
         quantized_hidden = quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-        auto kernel_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
-        auto scales_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
-        x = Buffer2torchTensor(kernel_ptr, false); // [num_tokens, hidden_size]
-        x_scales = Buffer2torchTensor(scales_ptr, false); // [num_tokens, hidden_size / 128]
+        auto kernel_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
+        auto scales_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
+        x                = Buffer2torchTensor(kernel_ptr, false);  // [num_tokens, hidden_size]
+        x_scales         = Buffer2torchTensor(scales_ptr, false);  // [num_tokens, hidden_size / 128]
     } else {
         x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
     }
@@ -117,12 +131,12 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     const auto dispatch_begin_event = deepep_buffer_->capture();
 
     try {
-    // call dispatch and force sync, maybe sync is not necessary
-    // FT_LOG_INFO("get dispatch layout expert num %ld, expert_ids: %s, expert_scales: %s, hidden: %s",
-    //             expert_num,
-    //             expert_ids->debugString().c_str(),
-    //             expert_scales ? expert_scales->debugString().c_str() : "null",
-    //             hidden->debugString().c_str());
+        // call dispatch and force sync, maybe sync is not necessary
+        // FT_LOG_INFO("get dispatch layout expert num %ld, expert_ids: %s, expert_scales: %s, hidden: %s",
+        //             expert_num,
+        //             expert_ids->debugString().c_str(),
+        //             expert_scales ? expert_scales->debugString().c_str() : "null",
+        //             hidden->debugString().c_str());
         auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
             topk_idx_tensor, expert_num, dispatch_begin_event, true /*async*/, true /*allocate_on_comm_stream*/);
 
@@ -160,28 +174,24 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
                 dispatch_layout_output.num_tokens_per_expert,
                 dispatch_layout_output.is_token_in_rank,
             };
-            comm_hook = std::make_unique<DeepEPCudaEventHook>(
-                *torch_default_stream_,
-                *(dispatch_output.event_overlap->event()),
-                hold_buffers,
-                hold_tensors,
-                dispatch_output.handle
-            );
+            comm_hook = std::make_unique<DeepEPCudaEventHook>(*torch_default_stream_,
+                                                              *(dispatch_output.event_overlap->event()),
+                                                              hold_buffers,
+                                                              hold_tensors,
+                                                              dispatch_output.handle);
         } else {
             dispatch_output.event_overlap->currentStreamWait();
         }
 
-        BufferPtr recv_topk_idx_buffer = torchTensor2Buffer(dispatch_output.recv_topk_idx.value());
+        BufferPtr recv_topk_idx_buffer     = torchTensor2Buffer(dispatch_output.recv_topk_idx.value());
         BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
         BufferPtr recv_x_buffer;
         if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-            recv_x_buffer.reset(new QBuffer(std::move(torchTensor2Buffer(dispatch_output.recv_x)),
-                                            std::move(torchTensor2Buffer(dispatch_output.recv_x_scales.value())),
-                                            std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
-                                                                        DataType::TYPE_INVALID,
-                                                                        {0},
-                                                                        nullptr)))));
-        } else  {
+            recv_x_buffer.reset(new QBuffer(
+                std::move(torchTensor2Buffer(dispatch_output.recv_x)),
+                std::move(torchTensor2Buffer(dispatch_output.recv_x_scales.value())),
+                std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
+        } else {
             recv_x_buffer = torchTensor2Buffer(dispatch_output.recv_x);
         }
         MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer};
@@ -220,7 +230,7 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     auto  combine_config  = deepep_buffer_->getCombineConfig();
     auto& dispatch_output = params.deep_ep_output;
 
-    auto compute_event = deepep_buffer_->capture();
+    auto compute_event  = deepep_buffer_->capture();
     auto combine_output = deepep_buffer_->combine(input_tensor,
                                                   dispatch_output->handle.value(),
                                                   dispatch_output->recv_topk_weights,
@@ -231,13 +241,16 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
 
     RUNTIME_ASSERT_OP_ARG(combine_output.event_overlap, "combine overlap should always exist.");
 
-    BufferPtr all_output;
-    const auto output_type = params.output ? params.output->type() : params.input->type();
+    BufferPtr  all_output;
+    const auto output_type   = params.output ? params.output->type() : params.input->type();
     const auto combined_type = torchDTypeToDataType(combine_output.recv_x.dtype());
 
     DeviceHookPtr comm_hook;
     if (params.overlapped) {
-        RUNTIME_ASSERT_OP_ARG(combined_type == output_type, "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
+        RUNTIME_ASSERT_OP_ARG(combined_type == output_type,
+                              "combined output type %d not equal expected output type %d when overlapped",
+                              combined_type,
+                              output_type);
         std::vector<BufferPtr> hold_buffers = {
             params.input,
         };
@@ -251,13 +264,11 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
         if (combine_output.recv_topk_weights) {
             hold_tensors.push_back(combine_output.recv_topk_weights.value());
         }
-        comm_hook = std::make_unique<DeepEPCudaEventHook>(
-            *torch_default_stream_,
-            *(combine_output.event_overlap->event()),
-            hold_buffers,
-            hold_tensors,
-            dispatch_output->handle
-        );
+        comm_hook = std::make_unique<DeepEPCudaEventHook>(*torch_default_stream_,
+                                                          *(combine_output.event_overlap->event()),
+                                                          hold_buffers,
+                                                          hold_tensors,
+                                                          dispatch_output->handle);
     } else {
         torch_default_stream_->unwrap().wait(*(combine_output.event_overlap->event().value().event));
         combine_output.event_overlap->currentStreamWait();

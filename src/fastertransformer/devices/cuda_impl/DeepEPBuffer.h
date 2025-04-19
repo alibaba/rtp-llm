@@ -43,6 +43,15 @@ public:
 public:
     bool init();
 
+private:
+    void setLowLatencyEnv();
+
+    std::vector<int> allGatherDeviceIds(int local_device_id);
+
+    std::vector<std::string> allGatherIpcHandles(const std::string& local_ipc_handle);
+
+    std::string getRootUniqueId();
+
 public:
     // Set the number of SMs to use in high-throughput kernels.
     void setNumSMs(size_t new_num_sms);
