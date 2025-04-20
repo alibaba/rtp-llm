@@ -237,16 +237,11 @@ void invokeComputeScalesAndQuantizeMatrix(T_OUT* output, T_S* quant_ptr, const T
 void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
                                  float*               quant_ptr,
                                  const __nv_bfloat16* weights,
-                                 const int64_t        numel,
+                                 const int64_t        dim0,
+                                 const int64_t        dim1,
+                                 const int64_t        size,
+                                 bool                 col_major_scale,
                                  cudaStream_t         stream);
-
-void invokeComputeFP8Quantize128ColMajorScale(__nv_fp8_e4m3*       fp8_output,
-                                              float*               quant_ptr,
-                                              const __nv_bfloat16* weights,
-                                              const int64_t        row,
-                                              const int64_t        col,
-                                              const int64_t        numel,
-                                              cudaStream_t         stream);
 
 } // namespace common
 } // namespace tensorrt_llm

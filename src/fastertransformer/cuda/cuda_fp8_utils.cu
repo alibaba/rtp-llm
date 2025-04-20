@@ -437,99 +437,101 @@ DEFINE_INVOKE_QUANTIZE_MATRIX(__nv_bfloat16, float, __nv_fp8_e4m3);
 #endif // ENABLE_FP8
 
 #ifdef ENABLE_FP8
-template<typename T_S>
+inline __device__ __nv_bfloat16 max_abs_op(bf16_4_t v) {
+    return cuda_max(cuda_max<__nv_bfloat16>(cuda_abs(v.x)), cuda_max<__nv_bfloat16>(cuda_abs(v.y)));
+}
+
+inline __device__ __nv_bfloat16 max_abs_op(bf16_8_t v) {
+    return cuda_max<__nv_bfloat16>(max_abs_op(bf16_4_t{v.x, v.y}), max_abs_op(bf16_4_t{v.z, v.w}));
+}
+
+inline __device__ __nv_bfloat162 mul(__nv_bfloat162 v, __nv_bfloat16 scale) {
+    return bf16hmul2(v, bf162bf162(scale));
+}
+
+inline __device__ bf16_4_t mul(bf16_4_t v, __nv_bfloat16 scale) {
+    bf16_4_t n;
+    n.x = mul(v.x, scale);
+    n.y = mul(v.y, scale);
+    return n;
+}
+
+inline __device__ bf16_8_t mul(bf16_8_t v, __nv_bfloat16 scale) {
+    bf16_8_t n;
+    n.x = mul(v.x, scale);
+    n.y = mul(v.y, scale);
+    n.z = mul(v.z, scale);
+    n.w = mul(v.w, scale);
+    return n;
+}
+
+inline __device__ void convert_to_fp8(fp8_4_t* v, const bf16_4_t u) {
+    v[0] = fp8_4_t(u.x, u.y);
+}
+
+inline __device__ void convert_to_fp8(fp8_8_t* v, const bf16_8_t u) {
+    v[0].x = fp8_2_t(u.x);
+    v[0].y = fp8_2_t(u.y);
+    v[0].z = fp8_2_t(u.z);
+    v[0].w = fp8_2_t(u.w);
+}
+
+template<typename T_S, bool COL_MAJOR_SCALE, int ELEM_PER_THREAD>
 __global__ void computeFP8Quantize128Kernel(__nv_fp8_e4m3*       fp8_output,
                                             T_S*                 quant_ptr,
                                             const __nv_bfloat16* weights,
+                                            const int64_t        dim0,
+                                            const int64_t        dim1,
                                             const int64_t        size) {
     const int64_t       global_idx     = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (global_idx * 4 >= size) {
+    using InputElem = typename packed_type<__nv_bfloat16, ELEM_PER_THREAD>::type;
+    using OutputElem = typename packed_type<__nv_fp8_e4m3, ELEM_PER_THREAD>::type;
+    auto weights_vec = reinterpret_cast<InputElem const*>(weights);
+    auto output_vec = reinterpret_cast<OutputElem *>(fp8_output);
+
+    if (global_idx * ELEM_PER_THREAD >= size) {
         return;
     }
-    using Pack4BF16 = packed_type<__nv_bfloat16, 4>::type;
-
-    Pack4BF16 w4    = *((Pack4BF16*)weights + global_idx);
-    float     scale = cuda_cast<float>(
-        cuda_max<__nv_bfloat16>(cuda_max<__nv_bfloat16>(cuda_abs(w4.x)), cuda_max<__nv_bfloat16>(cuda_abs(w4.y))));
-    scale = warpReduceMax<float>(scale);
-    scale = cuda_max((float)1e-4, scale) / FP8_E4M3_MAX;
-    __nv_fp8_4_e4m3 output;
-    output.array[0]                              = __nv_fp8_e4m3(float(w4.x.x) / scale);
-    output.array[1]                              = __nv_fp8_e4m3(float(w4.x.y) / scale);
-    output.array[2]                              = __nv_fp8_e4m3(float(w4.y.x) / scale);
-    output.array[3]                              = __nv_fp8_e4m3(float(w4.y.y) / scale);
-    *((__nv_fp8_4_e4m3*)fp8_output + global_idx) = output;
-    if (threadIdx.x % 32 == 0) {
-        quant_ptr[global_idx / 32] = scale;
+    auto w8 = weights_vec[global_idx];
+    float scale = cuda_max((float)1e-4, (float)max_abs_op(w8));
+    static constexpr int THREADS_PER_ROW = 128 / ELEM_PER_THREAD;
+#pragma unroll
+    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        scale = max(scale, __shfl_xor_sync(0xFFFFFFFF, scale, mask, THREADS_PER_ROW));
     }
-}
-
-template <typename T_OUT, typename T_IN>
-__global__ void transpose(T_OUT* dst, T_IN* src, const size_t dim0, const size_t dim1)
-{
-    for (size_t tid = threadIdx.x + blockIdx.x * blockDim.x; tid < dim0 * dim1; tid += blockDim.x * gridDim.x)
-    {
-        const size_t src_col_id = tid % dim1;
-        const size_t src_row_id = tid / dim1;
-        dst[src_col_id * dim0 + src_row_id] = (T_OUT) (src[tid]);
-    }
-}
-
-template<typename T_S>
-__global__ void computeFP8Quantize128ColMajorScaleKernel(__nv_fp8_e4m3*       fp8_output,
-                                                         T_S*                 quant_ptr,
-                                                         const __nv_bfloat16* weights,
-                                                         const int64_t        dim0,
-                                                         const int64_t        dim1,
-                                                         const int64_t        size) {
-    const int64_t       global_idx     = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (global_idx * 4 >= size) {
-        return;
-    }
-    using Pack4BF16 = packed_type<__nv_bfloat16, 4>::type;
-
-    Pack4BF16 w4    = *((Pack4BF16*)weights + global_idx);
-    float     scale = cuda_cast<float>(
-        cuda_max<__nv_bfloat16>(cuda_max<__nv_bfloat16>(cuda_abs(w4.x)), cuda_max<__nv_bfloat16>(cuda_abs(w4.y))));
-    scale = warpReduceMax<float>(scale);
-    scale = cuda_max((float)1e-4, scale) / FP8_E4M3_MAX;
-    __nv_fp8_4_e4m3 output;
-    output.array[0]                              = __nv_fp8_e4m3(float(w4.x.x) / scale);
-    output.array[1]                              = __nv_fp8_e4m3(float(w4.x.y) / scale);
-    output.array[2]                              = __nv_fp8_e4m3(float(w4.y.x) / scale);
-    output.array[3]                              = __nv_fp8_e4m3(float(w4.y.y) / scale);
-    *((__nv_fp8_4_e4m3*)fp8_output + global_idx) = output;
-    if (threadIdx.x % 32 == 0) {
-        const int64_t now_idx = global_idx / 32;
-        const int64_t row_idx = now_idx / dim1;
-        const int64_t col_idx = now_idx % dim1;
-        quant_ptr[col_idx * dim0 + row_idx] = scale;
+    scale = scale / FP8_E4M3_MAX;
+    w8 = mul(w8, (__nv_bfloat16)(1 / scale));
+    convert_to_fp8(output_vec + global_idx, w8);
+    if (threadIdx.x % THREADS_PER_ROW == 0) {
+        if constexpr (COL_MAJOR_SCALE) {
+            const int64_t now_idx = global_idx / THREADS_PER_ROW;
+            const int64_t row_idx = now_idx / dim1;
+            const int64_t col_idx = now_idx % dim1;
+            quant_ptr[col_idx * dim0 + row_idx] = scale;
+        } else {
+            quant_ptr[global_idx / THREADS_PER_ROW] = scale;
+        }
     }
 }
 
 void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
                                  float*               quant_ptr,
                                  const __nv_bfloat16* weights,
-                                 const int64_t        numel,
+                                 const int64_t        dim0,
+                                 const int64_t        dim1,
+                                 const int64_t        size,
+                                 bool                 col_major_scale,
                                  cudaStream_t         stream) {
-    const int num_per_grid = CTA_SIZE / 32;
-    dim3      grid((numel / 128 + num_per_grid - 1) / num_per_grid);
+    FT_CHECK(dim1 % 128 == 0);
+    static constexpr int ELEM_PER_THREAD = 8;
+    const int num_per_grid = CTA_SIZE / (128 / ELEM_PER_THREAD);
+    dim3      grid((size / 128 + num_per_grid - 1) / num_per_grid);
     dim3      block(CTA_SIZE);
-    computeFP8Quantize128Kernel<<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, numel);
-}
-
-void invokeComputeFP8Quantize128ColMajorScale(__nv_fp8_e4m3*       fp8_output,
-                                              float*               quant_ptr,
-                                              const __nv_bfloat16* weights,
-                                              const int64_t        row,
-                                              const int64_t        col,
-                                              const int64_t        numel,
-                                              cudaStream_t         stream) {
-    const int num_per_grid = CTA_SIZE / 32;
-    dim3      grid((numel / 128 + num_per_grid - 1) / num_per_grid);
-    dim3      block(CTA_SIZE);
-    computeFP8Quantize128ColMajorScaleKernel<<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, row, col / 128, numel);
+    if (col_major_scale) {
+        computeFP8Quantize128Kernel<float, true, ELEM_PER_THREAD><<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, dim0, dim1 / 128, size);
+    } else {
+        computeFP8Quantize128Kernel<float, false, ELEM_PER_THREAD><<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, dim0, dim1, size);
+    }
 }
 
 #endif // ENABLE_FP8

@@ -312,8 +312,8 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
 
     // Load 128-bits per thread, according to the smallest data type we read/write
     // constexpr int64_t ACTIVATION_ELEM_PER_THREAD
-    //     = 128 / std::min(cutlass::sizeof_bits<T>::value, cutlass::sizeof_bits<GemmOutputType>::value);
-    constexpr int64_t ACTIVATION_ELEM_PER_THREAD = 4;
+    //     = 128 / std::min(cutlass::sizeof_bits<__nv_bfloat16>::value, cutlass::sizeof_bits<GemmOutputType>::value);
+    constexpr int64_t ACTIVATION_ELEM_PER_THREAD = 8;
 
     using BiasElem = cutlass::Array<ScaleBiasType, ACTIVATION_ELEM_PER_THREAD>;
     using GemmResultElem = cutlass::Array<GemmOutputType, ACTIVATION_ELEM_PER_THREAD>;
@@ -352,12 +352,16 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
         // plus<Array<T, N>> op;
         cutlass::maximum_absolute_value_reduction<ComputeElem, false> max_abs_op;
         float scale = max_abs_op((float)1e-4, gate_act);
-        scale = warpReduceMax<float>(scale);
+        static constexpr int THREADS_PER_ROW = 128 / ACTIVATION_ELEM_PER_THREAD;
+#pragma unroll
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+            scale = max(scale, __shfl_xor_sync(0xFFFFFFFF, scale, mask, THREADS_PER_ROW));
+        }
         scale = scale / FP8_E4M3_MAX;
         gate_act = gate_act * (1 / scale);
         output_vec[elem_index] = arrayConvert<ComputeElem, OutputElem>(gate_act);
-        if (tid % 32 == 0) {
-            const int64_t now_idx = elem_index / 32;
+        if (tid % THREADS_PER_ROW == 0) {
+            const int64_t now_idx = elem_index / THREADS_PER_ROW;
             output_fp8_scale[now_idx * token_num + token_idx] = scale;
         }
     }

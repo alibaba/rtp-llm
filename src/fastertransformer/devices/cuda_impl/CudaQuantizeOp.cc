@@ -181,11 +181,8 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                                                         {0},
                                                                         nullptr)))));
         }
-        if (params.paddingSize) {
-            tensorrt_llm::common::invokeComputeFP8Quantize128ColMajorScale(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), input_shape[0], input_shape[1], params.input.size(), stream_);
-        } else {
-            tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), params.input.size(),stream_);
-        }
+        tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(), scales->data<float>(), params.input.data<__nv_bfloat16>(), input_shape[0], input_shape[1], params.input.size(), params.paddingSize, stream_);
+
         
 #endif
 #endif
