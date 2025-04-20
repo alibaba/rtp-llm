@@ -1,3 +1,4 @@
+#include "src/fastertransformer/kernels/eplb/experts_stats_kernels.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/Types.h"
@@ -15,7 +16,7 @@ namespace fastertransformer {
 MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
     const auto& moe_conf                         = params.moe_configs;
     auto const  tp_size                          = moe_conf.tp_size;
-    auto const  expert_num                       = moe_conf.expert_num;
+    auto const  expert_num                       = moe_conf.expert_num + moe_conf.extra_expert_num;
     size_t      token_num                        = params.expert_ids.shape()[0];
     size_t      tp_token_size                    = (token_num + tp_size - 1) / tp_size;
 
@@ -42,6 +43,22 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
 
         BufferPtr packed_recv_x_buffer = torchTensor2Buffer(dispatch_output.packed_recv_x);
 
+        auto expert_stats = params.expert_stats;
+        auto ep_rank = moe_conf.ep_rank;
+        auto packed_recv_count = dispatch_output.packed_recv_count;
+
+        auto stats_func = [this, expert_stats, packed_recv_count, ep_rank]() {
+            if (expert_stats.has_value()) {
+                auto& expert_stats_v = expert_stats.value();
+                int*  gpu_loads    = expert_stats_v.getLayerGpuLoads();
+                launch_update_gpu_loads_ll(packed_recv_count.data_ptr<int>(),
+                                           gpu_loads,
+                                           packed_recv_count.size(0),
+                                           ep_rank,
+                                           stream_);
+            }
+        };
+
         // TODO: deep_ep_output might should be removed from output objects.
         MoeDispatchOutput out{packed_recv_x_buffer, expert_ids, expert_scales};
         out.deep_ep_ll_output.reset(new DeepEPDispatchOutputLowLatency(dispatch_output));
@@ -49,7 +66,9 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
         if (params.overlapped) {
             RUNTIME_ASSERT_OP_ARG(dispatch_output.hook.has_value(), "recv hook is null when overlapped");
             out.comm_barrier_hook = std::make_unique<DeepEPRecvHook>(
-                dispatch_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
+                dispatch_output.hook.value(), std::move(stats_func), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
+        } else {
+            stats_func();
         }
 
         return out;
@@ -90,8 +109,9 @@ MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {
     if (params.overlapped) {
         RUNTIME_ASSERT_OP_ARG(combine_output.hook.has_value(), "recv hook is null when overlapped");
         RUNTIME_ASSERT_OP_ARG(combined_type == output_type, "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
+        auto empty_func = []() {};
         comm_hook = std::make_unique<DeepEPRecvHook>(
-            combine_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
+            combine_output.hook.value(), std::move(empty_func), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
     }
 
     return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});

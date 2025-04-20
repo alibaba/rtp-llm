@@ -57,6 +57,29 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
 {
+    auto& gpt_param = params.gpt_init_parameter;
+    if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
+        // use first moe layer weight as moe weight type
+        int  first_moe_layer = gpt_param.moe_layer_index_.front();
+        auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
+
+        expert_balancer_ = make_shared<ExpertBalancer>(gpt_param.expert_num_,
+                                                       gpt_param.phy_exp_num_,
+                                                       gpt_param.num_layers_,
+                                                       gpt_param.moe_inter_padding_size_,
+                                                       gpt_param.hidden_size_,
+                                                       gpt_param.eplb_update_time_,
+                                                       gpt_param.eplb_stats_update_time_,
+                                                       gpt_param.ep_rank_,
+                                                       gpt_param.ep_size_,
+                                                       gpt_param.py_eplb_,
+                                                       moe_weight_type,
+                                                       device_,
+                                                       gpt_param.eplb_mode_,
+                                                       gpt_param.quant_algo_,
+                                                       metrics_reporter_);
+    }
+
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
     SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
@@ -64,7 +87,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     // CacheManager::KVCacheBuffer kv_cache_buffer;
     // CacheConfig cache_config;
     // if (warmup) {
-    //     kv_cache_buffer.k_blocks = 
+    //     kv_cache_buffer.k_blocks =
     // } else {
     //     kv_cache_buffer = cache_manager->kvCacheBuffer();
     //     cache_config = cache_manager->cacheConfig();
@@ -76,6 +99,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
         genModelDescription(params.gpt_init_parameter),
         cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt
     }));
+
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
@@ -126,6 +150,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_output = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         FT_LOG_DEBUG("model forward done");
+    }
+    if (expert_balancer_) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        expert_balancer_->stepForward(*model_, executor_collector);
+        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_) {
         return absl::OkStatus();

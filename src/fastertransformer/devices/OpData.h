@@ -6,6 +6,7 @@
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/MlaConfig.h"
+#include "src/fastertransformer/stats/ExpertStats.h"
 
 #include "src/fastertransformer/core/Event.h"
 #include "src/fastertransformer/core/Buffer.h"
@@ -46,9 +47,15 @@ enum class ParallelMode {
     DP = 1,
     DP_AND_TP = 2,
     FFN_TP = 3,
-    EP        = 4
+    EP = 4,
+    EPLB = 5
     // DATA_PARALLEL = 2,
     // PIPELINE_PARALLEL = 3
+};
+
+enum class DeviceStream {
+    DEFAULT = 0,
+    // EPLB = 1
 };
 
 class OpStatus {
@@ -132,6 +139,7 @@ struct CopyParams {
     const Buffer& dst;
     const Buffer& src;
     bool overlapped = false;
+    const DeviceStream stream = DeviceStream::DEFAULT;
 
     void check() const {
         FT_CHECK_WITH_INFO(src.type() == dst.type(),
@@ -556,6 +564,7 @@ struct AttentionLayerParams {
 
 struct MoeConfigs {
     size_t expert_num;
+    size_t extra_expert_num = 0;
     size_t top_k;
 
     bool    normalize_expert_scale = false;
@@ -571,6 +580,11 @@ struct MoeConfigs {
     int scoring_func = 0;  // 0: softmax, 1: sigmoid
     int topk_group   = 1;
     int n_group      = 1;
+
+    bool enable_eplb = false;
+    int  ep_comp_size = 32;
+    // TODO(yinzhi): not used yet
+    EplbBalanceMethod balance_method = EplbBalanceMethod::EQUAL;
 };
 
 struct FfnConfigs {
@@ -596,6 +610,7 @@ struct MoeCombineParams {
     std::shared_ptr<MoeGateSelectOutput> select_output;
     BufferPtr expert_ids;
     BufferPtr expert_scales;
+    bool sp_model = false;
 };
 
 struct MoeCombineOutput {
@@ -618,9 +633,10 @@ struct FfnLayerParams {
                    const OptionalConstBufferRef residual = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
                    BufferPtr                    output = nullptr,
-                   bool                         enable_sp = false):
+                   bool                         enable_sp = false,
+                   bool                         sp_model = false):
         input(input), configs(configs), weights(weights), residual(residual),
-        qscheme(qscheme), output(std::move(output)), enable_sp(enable_sp) {}
+        qscheme(qscheme), output(std::move(output)), enable_sp(enable_sp), sp_model(sp_model) {}
 
     const Buffer& input;
     const FfnConfigs&            configs;
@@ -628,11 +644,14 @@ struct FfnLayerParams {
 
     const OptionalConstBufferRef residual; // for intel xft
 
+    OptionalExpertStats expert_stats = std::nullopt;
+
     const QScheme qscheme;
     BufferPtr                    output;
 
     lora::FfnLayerLoraInput      lora_input;
     bool enable_sp;
+    bool sp_model = false;
 };
 
 struct MoeDispatchOutput {
@@ -663,8 +682,10 @@ struct MoeDispatchParams {
                       const Buffer&     expert_scales,
                       const MoeConfigs& moe_configs,
                       bool              overlapped = false,
-                      const QScheme     qscheme  = QScheme::NoQuantize):
-        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs), overlapped(overlapped), qscheme(qscheme) {}
+                      const QScheme     qscheme  = QScheme::NoQuantize,
+                      OptionalExpertStats expert_stats = std::nullopt,
+                      bool sp_model = false):
+        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs), overlapped(overlapped), qscheme(qscheme), expert_stats(expert_stats), sp_model(sp_model) {}
 
     const Buffer&     input;
     const Buffer&     expert_ids;
@@ -672,6 +693,31 @@ struct MoeDispatchParams {
     const MoeConfigs& moe_configs;
     bool              overlapped = false;
     const QScheme     qscheme;
+    OptionalExpertStats expert_stats = std::nullopt;
+    bool sp_model = false;
+};
+
+struct MoeEpPlanParams {
+    BufferPtr expert_ids;
+    BufferPtr expert_scales;
+    const FfnLayerParams& params;
+    bool overlapped = false;
+};
+
+struct MoeEpPlanOutput {
+    BufferPtr           all_token_indices;
+    BufferPtr           balanced_expert_ids;
+    std::vector<size_t> input_split_sizes;
+    std::vector<size_t> output_split_sizes;
+};
+
+struct MoeBalanceOutput {
+    BufferPtr balance_expert_ids;
+};
+
+struct MoeBalanceParams {
+    const BufferPtr        experts_ids_host;
+    const FfnLayerParams&  params;
 };
 
 struct GreedyParams {
@@ -742,6 +788,7 @@ struct AllReduceParams {
     const ReduceOp op;
     bool overlapped = false;
     ParallelMode mode = ParallelMode::TP;
+    const BufferPtr dest = nullptr;
 };
 
 struct AllReduceOutput {

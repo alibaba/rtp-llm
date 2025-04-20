@@ -30,7 +30,7 @@ RtpLLMMasterEntry::RtpLLMMasterEntry() {
 LoadBalancerInitParams RtpLLMMasterEntry::createLoadBalancerInitParams(const MasterInitParameter& param) {
     LoadBalancerInitParams load_balance_params;
     load_balance_params.sync_status_interval_ms = param.load_balance_config.sync_status_interval_ms;
-    load_balance_params.update_interval_ms      = param.load_balance_config.update_interval_ms;    
+    load_balance_params.update_interval_ms      = param.load_balance_config.update_interval_ms;
         const PySubscribeConfig& py_config = param.load_balance_config.subscribe_config;
         if (py_config.type == PySubscribeConfigType::CM2) {
             CM2SubscribeServiceConfig config;
@@ -97,7 +97,7 @@ RtpLLMMasterEntry::~RtpLLMMasterEntry() {
 void registerRtpLLMMasterEntry(py::module m) {
     pybind11::class_<RtpLLMMasterEntry>(m, "RtpLLMMasterEntry")
         .def(pybind11::init<>())
-        .def("init", &RtpLLMMasterEntry::init);
+        .def("init", &RtpLLMMasterEntry::init, py::arg("param"));
 }
 
 }  // namespace rtp_llm_master

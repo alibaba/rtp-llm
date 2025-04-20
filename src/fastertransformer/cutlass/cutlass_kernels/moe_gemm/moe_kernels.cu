@@ -804,7 +804,7 @@ void invokeSelectExpertsForTokens(float const* input, float const* input_with_bi
         topkKernelLauncher(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows, num_experts, k, 0, k,
             start_expert, end_expert, norm_mode, stream);
     }
-
+    sync_check_cuda_error();
 }
 
 // ========================== CUB Sorting things ====================================

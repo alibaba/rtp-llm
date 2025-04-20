@@ -148,28 +148,56 @@ def sp_neg1_part_by_head(t: torch.Tensor, tp: int, tp_rank: int, head_num:int, s
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
-def sp_moe_neg1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, **kwargs: Any) -> torch.Tensor:
-    if ep > 1:
-        tp_rank = (dp_rank * tp + tp_rank) // ep
-        tp = tp * dp // ep
-    t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
-    if ep > 1:
-        t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
-    return t1
+
+def sp_moe_neg1(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    ep: int,
+    ep_rank: int,
+    dp: int,
+    dp_rank: int,
+    use_stack_weight: bool,
+    **kwargs: Any,
+) -> torch.Tensor:
+    if use_stack_weight:
+        if ep > 1:
+            tp_rank = (dp_rank * tp + tp_rank) // ep
+            tp = tp * dp // ep
+        t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
+        if ep > 1:
+            t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
+        return t1
+    else:
+        return t
 
 
-def sp_moe_w1(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, **kwargs: Any) -> torch.Tensor:
+def sp_moe_w1(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    ep: int,
+    ep_rank: int,
+    dp: int,
+    dp_rank: int,
+    use_stack_weight: bool,
+    **kwargs: Any,
+) -> torch.Tensor:
     # [expert_num, 2*n, k]
-    if ep > 1:
-        tp_rank = (dp_rank * tp + tp_rank) // ep
-        tp = tp * dp // ep
-    t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
-    t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
-    t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-    if ep > 1:
-        t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
-    t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-    return t3
+    if use_stack_weight:
+        if ep > 1:
+            tp_rank = (dp_rank * tp + tp_rank) // ep
+            tp = tp * dp // ep
+        t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
+        t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
+        t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
+        if ep > 1:
+            t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
+        t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
+        return t3
+    else:
+        return t
+
 
 def stack_(ts: List[torch.Tensor]):
     return torch.stack(ts, dim=0)
@@ -429,7 +457,7 @@ class W:
 
     mla_kc_s = "self_attention_weights.mla.kc.weight_only_quant_scale"
     mla_vc_s = "self_attention_weights.mla.vc.weight_only_quant_scale"
-    
+
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'
     ffn_b1 = 'ffn_weights.intermediate_weight.bias'
@@ -459,6 +487,10 @@ class W:
     moe_w2   = 'partial_moe_weights.intermediate_weight2.kernel'
     moe_b2   = 'partial_moe_weights.intermediate_weight2.bias'
     moe_gate = 'partial_moe_weights.gate.kernel'
+
+    # eplb
+    log2phy = 'moe_eplb.log2phy'
+    logic_expert_cnt = 'moe_eplb.logic_expert_cnt'
 
     # deepseek3 noaux_tc
     e_score_correction_b = 'partial_moe_weights.e_score_correction_bias'
@@ -947,8 +979,7 @@ class W:
         tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
         tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
         return tp_strategy
-    
-    
+
 
 class CkptWeightInfo:
     name: str
@@ -1156,6 +1187,12 @@ class ModelDeployWeightInfo:
         # for vit sep
         self.vit_separation = config.vit_separation
 
+        # for eplb
+        self.phy2log = config.phy2log
+
+        # for moe
+        self._use_stack_weight = False
+
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
@@ -1318,7 +1355,14 @@ class ModelDeployWeightInfo:
                 return True
         return False
 
-
+    def _get_selected_experts(self, layer_id: int) -> List[int]:
+        selected_experts = range(self.expert_num_)
+        if self.phy2log:
+            selected_experts = self.phy2log[layer_id]
+        expert_per_ep = len(selected_experts) // self.ep_size
+        ep_rank = self.ep_rank
+        selected_experts = selected_experts[expert_per_ep * ep_rank: expert_per_ep * (ep_rank + 1)]
+        return selected_experts
 
 class ModelWeights:
     def __init__(self, num_layers: int, device: str, dtype: torch.dtype):

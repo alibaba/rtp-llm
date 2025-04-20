@@ -133,6 +133,8 @@ class WeightConverter:
     @timer_wrapper('convert 1 tp')
     def _convert(self, tp_rank:int, dp_rank:int, world_rank: int, output_dir_base: str):
         env_params = copy.deepcopy(self.env_params)
+        for env_key, env_value in env_params.items():
+            os.environ[env_key] = env_value
         try:
             cuda_device_list = [str(i) for i in range(torch.cuda.device_count())]
             if len(cuda_device_list) > 0:

@@ -119,6 +119,16 @@ py_library(
 )
 
 py_library(
+    name = "eplb",
+    srcs = glob([
+        "eplb/*.py",
+    ]),
+    deps = [
+        ":utils",
+    ],
+)
+
+py_library(
     name = "gang",
     srcs = glob([
         "gang/*.py",
@@ -342,6 +352,7 @@ py_library(
     name = "maga_transformer_lib",
     deps = [
         ":utils",
+        ":eplb",
         ":ops",
         ":pipeline",
         ":models",
@@ -431,7 +442,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-] + whl_deps() + platform_deps() + xft_dep 
+] + whl_deps() + platform_deps() + xft_dep
 
 # target for wheel
 py_wheel(

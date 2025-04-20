@@ -18,6 +18,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -223,6 +224,8 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(sample_input_us_metric, "rtp_llm_sample_input_us");
     REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
 
+    REGISTER_GAUGE_MUTABLE_METRIC(eplb_step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
+
     return true;
 }
 
@@ -243,6 +246,7 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_GAUGE(model_forward_us);
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
+    REPORT_GAUGE(eplb_step_latency_us);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager *manager) {
@@ -319,6 +323,42 @@ bool RtpLLMKernelMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMKernelMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKernelMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kernel_exec_time_metric, collector->kernel_exec_time);
+}
+
+bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
+    REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
+    return true;
+}
+
+void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector) {
+    // ep stats metrics
+    int num_layer = collector->gpu_loads.size();
+    auto ep_tag = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
+    tags->MergeTags(&ep_tag);
+    for (int i = 0; i < num_layer; ++i) {
+        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
+        ep_tag.MergeTags(&layer_tag);
+        if (gpu_loads_metric) {
+            gpu_loads_metric->Report(&layer_tag, collector->gpu_loads[i]);
+        }
+    }
+
+    // update weights metrics
+    if (collector->update_weights_qps) {
+        REPORT_MUTABLE_QPS(update_weights_qps_metric);
+        REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
+
+        // report layer qps
+        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
+        tags->MergeTags(&layer_tag);
+        if (update_layer_weights_qps_metric) {
+            update_layer_weights_qps_metric->Report(&layer_tag, 1);
+        }
+        collector->update_weights_qps = false;
+    }
 }
 
 #undef REPORT_QPS

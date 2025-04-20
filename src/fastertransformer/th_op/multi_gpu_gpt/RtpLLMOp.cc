@@ -209,10 +209,25 @@ RtpLLMOp::~RtpLLMOp() {
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
-        .def("init",                  &torch_ext::RtpLLMOp::init)
-        .def("start_http_server",     &torch_ext::RtpLLMOp::startHttpServer)
-        .def("add_lora",              &torch_ext::RtpLLMOp::addLora)
-        .def("remove_lora",           &torch_ext::RtpLLMOp::removeLora)
+        .def("init",
+             &torch_ext::RtpLLMOp::init,
+             py::arg("model"),
+             py::arg("mm_process_engine"),
+             py::arg("propose_model"),
+             py::arg("token_processor"))
+        .def("start_http_server",
+             &torch_ext::RtpLLMOp::startHttpServer,
+             py::arg("model_weights_loader"),
+             py::arg("lora_infos"),
+             py::arg("gang_info"),
+             py::arg("tokenizer"),
+             py::arg("render"))
+        .def("add_lora",
+             &torch_ext::RtpLLMOp::addLora,
+             py::arg("adapter_name"),
+             py::arg("lora_a_weights"),
+             py::arg("lora_b_weights"))
+        .def("remove_lora", &torch_ext::RtpLLMOp::removeLora, py::arg("adapter_name"))
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo)

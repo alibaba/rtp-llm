@@ -260,12 +260,12 @@ public:
         return {input, moe_gating_weight, e_score_correction_bias};
     }
 
-    MoEGateSelectTestOutput MoEGateSelectRun(const MoEGateSelectTestInput &params, 
+    MoEGateSelectTestOutput MoEGateSelectRun(const MoEGateSelectTestInput &params,
                                              size_t         topk,
                                              size_t         group_num,
                                              size_t         group_topk,
                                              int            scoring_func,
-                                             bool           has_moe_norm, 
+                                             bool           has_moe_norm,
                                              const Bencher *bencher = nullptr,
                                              const char *   case_name = nullptr) {
         case_name = case_name != nullptr ? case_name : "unnamed case";
@@ -274,7 +274,7 @@ public:
 
         auto input_buf = torchTensor2Buffer(params.input);
 
-        MoeConfigs moe_configs{expert_num, topk};
+        MoeConfigs moe_configs{expert_num, 0, topk};
         moe_configs.has_moe_norm = has_moe_norm;
         moe_configs.scoring_func = scoring_func;
         if (params.e_score_correction_bias.has_value()) {
@@ -315,7 +315,7 @@ public:
         };
     }
 
-    MoEGateSelectTestOutput MoEGateSelectRefRun(const MoEGateSelectTestInput &params, 
+    MoEGateSelectTestOutput MoEGateSelectRefRun(const MoEGateSelectTestInput &params,
                                                 size_t topk,
                                                 size_t group_num,
                                                 size_t group_topk,
@@ -333,7 +333,7 @@ public:
         at::Tensor gate_with_bias;
         if (params.e_score_correction_bias.has_value()) {
             const auto &e_score_correction_bias = params.e_score_correction_bias.value();
-            
+
             auto scores_for_choice = gate.add(e_score_correction_bias);
             auto reshaped_scores   = scores_for_choice.view({(int)token_num, (int)group_num, -1});
             auto topk_result       = reshaped_scores.topk(2, /*dim=*/-1);
@@ -398,7 +398,7 @@ public:
         return { expert_ids, expert_scales };
     }
 
-    void assertEquivalentOutput(const MoEGateSelectTestOutput &out_a, 
+    void assertEquivalentOutput(const MoEGateSelectTestOutput &out_a,
                                 const MoEGateSelectTestOutput &out_b) {
         auto a = processOutput(out_a, true);
         auto b = processOutput(out_b, true);
@@ -530,8 +530,8 @@ public:
             auto down = QuantizeFP8Weights(down_t);
             auto gate = QuantizeFP8Weights(gate_t);
             weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
-            weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
-            weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
+            weights.moe_down_weight   = std::make_unique<DenseWeights>(DenseWeights(down));
+            weights.moe_gate_weight   = std::make_unique<DenseWeights>(DenseWeights(gate));
         } else {
             torch::Tensor gate_t;
             if (isGatedActivation(Atype)) {
@@ -542,10 +542,10 @@ public:
             auto gate       = tensorToBuffer(gate_t, alloc_type);
             auto down       = tensorToBuffer(params.down, alloc_type);
             weights.moe_gating_weight = std::make_unique<const DenseWeights>(DenseWeights(gating));
-            weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
-            weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
+            weights.moe_down_weight   = std::make_unique<DenseWeights>(DenseWeights(down));
+            weights.moe_gate_weight   = std::make_unique<DenseWeights>(DenseWeights(gate));
         }
-        MoeConfigs     moe_configs({expertNum, topK, false, (int64_t)inter_size, false});
+        MoeConfigs     moe_configs({expertNum, 0, topK, false, (int64_t)inter_size, false});
         FfnConfigs     ffn_configs({Atype, moe_configs});
         FfnLayerParams Opparams(*input, ffn_configs, weights, std::nullopt, type == DataType::TYPE_FP8_E4M3 ? QScheme::Qfp8PerTokenBlock: QScheme::NoQuantize);
         auto output = this->device_->ffnLayer(Opparams);

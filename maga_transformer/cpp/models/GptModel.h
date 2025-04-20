@@ -5,6 +5,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
+#include "src/fastertransformer/stats/ExpertStats.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include <string>
 #include <utility>
@@ -237,10 +238,15 @@ protected:
         size_t token_num,
         const GptModelInputs& inputs);
 
+    void prepareExpertStats(
+        const size_t layer_id,
+        ft::FfnLayerParams& ffn_layer_params);
+
+    void cleanExpertStats();
+
 protected:
-    ft::DeviceBase* device_;
+    ft::DeviceBase*            device_;
     const ft::DeviceProperties device_props_;
-    const ft::Weights          weights_;
     const size_t               layer_num_;
     const GptModelDescription  description_;
     ft::BufferPtr              k_cache_buffer_;
@@ -251,6 +257,9 @@ protected:
     ft::BufferPtr              residual_scale_;
 
     ft::DeviceHookPtr          last_comm_hook_;
+public:
+    ft::Weights            weights_;
+    ft::OverallExpertStats overall_expert_stats_;
 };
 
 }  // namespace rtp_llm

@@ -25,7 +25,7 @@
 #include "custom_ar_comm.h"
 
 namespace fastertransformer {
-    
+
 class ROCmEvent : public DeviceEvent {
 public:
     ROCmEvent(hipStream_t stream);
@@ -49,6 +49,7 @@ public:
     IAllocator* getHostAllocator() override { return hostAllocator_.get(); }
     void copy(const CopyParams& params) override;
     void noBlockCopy(const CopyParams& params) override;
+    void bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     void syncAndCheck() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;

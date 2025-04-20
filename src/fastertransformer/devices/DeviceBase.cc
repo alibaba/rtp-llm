@@ -98,11 +98,19 @@ void DeviceBase::syncAndCheck() {
     return;
 }
 
+void DeviceBase::syncDeviceStream(DeviceStream stream) {
+    return;
+}
+
 DevicePrepOutput DeviceBase::prepareModelRun(const DevicePrepParams& params) {
     return DevicePrepOutput();
 }
 
 void DeviceBase::syncCommunication(bool timeout) {
+    return;
+}
+
+void DeviceBase::syncCommunication(ParallelMode mode, bool timeout) {
     return;
 }
 
@@ -428,5 +436,41 @@ AllReduceOutput DeviceBase::allReduce(const AllReduceParams& params) {
 }
 
 void DeviceBase::prepareCommBuffer(const PrepareCommBufferParams& params) {}
+
+OverallExpertStats DeviceBase::createMoeExpertStates(const ExpertStatsParams& params)
+{
+    OverallExpertStats states;
+    auto const layer_num = params.layer_num;
+    auto const logic_expert_num = params.log_exp_num;
+    auto const physic_expert_num = params.phy_exp_num;
+    auto const ep_size = params.ep_size;
+
+    states.layer_num = layer_num;
+    states.ep_size = ep_size;
+    states.log_exp_num = logic_expert_num;
+    states.phy_exp_num = physic_expert_num;
+
+    auto logic_buff = allocateBuffer({DataType::TYPE_INT32, {layer_num, logic_expert_num}, AllocationType::DEVICE}, {"exp_log_cnt"});
+
+    auto gpu_load_buff = allocateBuffer({DataType::TYPE_INT32, {layer_num, ep_size}, AllocationType::DEVICE}, {"phy_gpu_load"});
+
+    states.stats_buf.log_stats_buf = logic_buff;
+    states.stats_buf.gpu_loads_buf = gpu_load_buff;
+
+
+    cleanMoeExpertStates(states);
+
+    return states;
+}
+
+void DeviceBase::cleanMoeExpertStates(const OverallExpertStats& stats)
+{
+    bufMemset(*stats.stats_buf.log_stats_buf, 0);
+    bufMemset(*stats.stats_buf.gpu_loads_buf, 0);
+}
+
+void DeviceBase::updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
 
 } // namespace fastertransformer

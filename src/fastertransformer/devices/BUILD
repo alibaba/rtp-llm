@@ -18,6 +18,7 @@ cc_library(
         "//:gpt_init_params",
         "//src/fastertransformer/models:weights_define",
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store_interface",
+        "//src/fastertransformer/stats:stats",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

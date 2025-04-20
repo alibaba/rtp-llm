@@ -8,6 +8,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/lora/LoraManager.h"
+#include "maga_transformer/cpp/eplb/ExpertBalancer.h"
 
 namespace rtp_llm {
 
@@ -37,6 +38,7 @@ private:
     std::unique_ptr<NormalBatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<CacheManager>               cache_manager_;
     std::shared_ptr<lora::LoraManager>          lora_manager_;
+    std::shared_ptr<ExpertBalancer>             expert_balancer_;
     bool                                        warm_up_;
     bool                                        gen_timeline_sync_ = false;
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;

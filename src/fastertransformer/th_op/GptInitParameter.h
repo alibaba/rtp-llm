@@ -5,8 +5,10 @@
 #include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/MlaConfig.h"
+#include "src/fastertransformer/utils/EplbConfig.h"
 #include "src/fastertransformer/utils/QuantInfo.h"
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/th_op/GptInitParameterRegister.h"
 
 #include <vector>
 #include <map>
@@ -136,6 +138,15 @@ public:
     int64_t              scoring_func_               = 0;
     std::vector<int64_t> moe_layer_index_            = {};
 
+    // EPLB
+    bool       enable_eplb_      = false;
+    int64_t    ep_comp_size_     = 32;
+    int64_t    phy_exp_num_      = 0;  // number of physical experts
+    int64_t    eplb_update_time_ = 5000;
+    int64_t    eplb_stats_update_time_ = 5000;
+    EplbMode   eplb_mode_        = EplbMode::NONE;
+    py::object py_eplb_;
+
     bool has_positional_encoding_    = false;
     bool has_pre_decoder_layernorm_  = false;
     bool has_post_decoder_layernorm_ = false;
@@ -185,22 +196,24 @@ public:
     bool use_medusa_ = false;
     bool use_expert_attention_ = false; // true for CogVLM2, false for other models
 
-    std::string nccl_ip_        = "";
-    int64_t     tp_nccl_port_   = 0;
-    int64_t     dp_nccl_port_   = 0;
-    int64_t     dp_tp_nccl_port_= 0;
+    std::string nccl_ip_          = "";
+    int64_t     tp_nccl_port_     = 0;
+    int64_t     dp_nccl_port_     = 0;
+    int64_t     dp_tp_nccl_port_  = 0;
     int64_t     ffn_tp_nccl_port_ = 0;
-    int64_t     http_port_      = 0;
-    int64_t     model_rpc_port_ = 0;
-    int64_t     tp_size_        = 1;
-    int64_t     tp_rank_        = 0;
-    int64_t     ep_size_        = 1;
-    int64_t     ep_rank_        = 0;
-    int64_t     dp_size_        = 1;
-    int64_t     dp_rank_        = 0;
-    int64_t     ffn_tp_size_    = 1;
-    int64_t     ffn_tp_rank_    = 0;
-    bool        enable_sp_      = false;
+    int64_t     ep_nccl_port_     = 0;
+    int64_t     eplb_nccl_port_   = 0;
+    int64_t     http_port_        = 0;
+    int64_t     model_rpc_port_   = 0;
+    int64_t     tp_size_          = 1;
+    int64_t     tp_rank_          = 0;
+    int64_t     ep_size_          = 1;
+    int64_t     ep_rank_          = 0;
+    int64_t     dp_size_          = 1;
+    int64_t     dp_rank_          = 0;
+    int64_t     ffn_tp_size_      = 1;
+    int64_t     ffn_tp_rank_      = 0;
+    bool        enable_sp_        = false;
 
     int64_t     world_size_     = 1;
 

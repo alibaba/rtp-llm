@@ -281,3 +281,16 @@ py_test(
     ]
 )
 
+cc_test(
+    name = "eplb_kernel_test",
+    srcs = [
+        "eplb/eplb_kernel_test.cc",
+    ],
+    copts = cuda_copts(),
+    deps = [
+        "@com_google_googletest//:gtest",
+        "//src/fastertransformer/kernels:kernels_cu"
+    ],
+    data = [
+    ],
+)

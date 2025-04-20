@@ -8,6 +8,7 @@ import os
 import json
 from typing import List, Any
 
+from maga_transformer.eplb.ep_balancer import MoeWeightInfo
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.utils.model_weight import (
     W,
@@ -136,25 +137,25 @@ def concat_0_tranpose(ts: List[torch.Tensor]):
 
 def dequant_weight_split_k(ts: List[torch.Tensor], block_size: int, head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
     from maga_transformer.models.deepseek_dequant import weight_dequant
-    return transpose_slice_k([weight_dequant(ts[0], ts[1], block_size)], 
+    return transpose_slice_k([weight_dequant(ts[0], ts[1], block_size)],
                              head_num, nope_head_dim, v_head_dim, lora_rank)
 
 def dequant_weight_split_v(ts: List[torch.Tensor], block_size: int, head_num: int, nope_head_dim: int, v_head_dim: int, lora_rank: int) -> torch.Tensor:
     from maga_transformer.models.deepseek_dequant import weight_dequant
-    return transpose_slice_v([weight_dequant(ts[0], ts[1], block_size)], 
+    return transpose_slice_v([weight_dequant(ts[0], ts[1], block_size)],
                              head_num, nope_head_dim, v_head_dim, lora_rank)
-    
+
 def transpose_kv_rope(ts: List[torch.Tensor], kv_lora_rank: int, rope_size: int):
     rope_size_half = rope_size // 2
     kva = ts[0]
-    kva[kv_lora_rank: , :]  = kva[kv_lora_rank: , :].reshape([rope_size_half, 2, -1]).transpose(0, 1).reshape([rope_size, -1])    
+    kva[kv_lora_rank: , :]  = kva[kv_lora_rank: , :].reshape([rope_size_half, 2, -1]).transpose(0, 1).reshape([rope_size, -1])
     return kva.reshape(ts[0].shape).contiguous()
 
 def transpose_q_rope(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_size: int):
     rope_size_half = rope_size // 2
     q = ts[0]
     q = q.reshape([head_num, nope_head_dim + rope_size, -1])
-    q[:, nope_head_dim: , :] = q[:, nope_head_dim: , :].reshape([head_num, rope_size_half, 2, -1]).transpose(1, 2).reshape([head_num, rope_size, -1])    
+    q[:, nope_head_dim: , :] = q[:, nope_head_dim: , :].reshape([head_num, rope_size_half, 2, -1]).transpose(1, 2).reshape([head_num, rope_size, -1])
     return q.reshape(ts[0].shape).contiguous()
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
@@ -189,7 +190,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             WeightInfo(W.mla_kv_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.kv_a_layernorm.weight', identity)],
                        identity),
         ]
-        
+
         if self.q_use_lora:
             mla_layer_weights.extend([
                 WeightInfo(W.mla_q_b_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_b_proj.weight', functools.partial(transpose_q_rope, head_num=self._head_num, nope_head_dim=self.nope_head_dim, rope_size=self.rope_head_dim))],
@@ -251,7 +252,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             mla_layer_weights.append(
                 WeightInfo(W.mla_kc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity), CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
                            functools.partial(dequant_weight_split_k, block_size=128, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
-            
+
             mla_layer_weights.append(
                 WeightInfo(W.mla_vc, [CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight', identity), CkptWeightInfo('model.layers.{i}.self_attn.kv_b_proj.weight_scale_inv', identity)],
                            functools.partial(dequant_weight_split_v, block_size=128, head_num=self._head_num, nope_head_dim=self.nope_head_dim, v_head_dim=self.v_head_dim, lora_rank=self.kv_lora_rank)))
@@ -266,10 +267,10 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             WeightInfo(W.mla_q_a_ln_gamma, [CkptWeightInfo('model.layers.{i}.self_attn.q_a_layernorm.weight', identity)],
                     identity),
             WeightInfo(W.mla_fusedqkrope_w, [
-                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity), 
+                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight', identity),
                 CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight', functools.partial(transpose_kv_rope, kv_lora_rank=self.kv_lora_rank, rope_size=self.rope_head_dim))], concat_0),
             WeightInfo(W.mla_fusedqkrope_s, [
-                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight_scale_inv', identity), 
+                CkptWeightInfo('model.layers.{i}.self_attn.q_a_proj.weight_scale_inv', identity),
                 CkptWeightInfo('model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight_scale_inv', identity)], concat_0)
             ]
         )
@@ -282,6 +283,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
 
+        selected_experts = self._get_selected_experts(layer_id)
+
         if layer_id in self.moe_layer_index_:
             layer_weights = [
                 WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], transpose),
@@ -290,9 +293,9 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_experts.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
                 WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight',
                                                      functools.partial(multipy_identity, scale=self.routed_scaling_factor)) \
-                                        for expert_id in range(self.expert_num_)], stack_),
-                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in range(self.expert_num_)] + \
-                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
+                                        for expert_id in selected_experts], stack_),
+                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in selected_experts] + \
+                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in selected_experts], stack_moe_w1),
             ]
             if self.has_e_score_correction_bias:
                 layer_weights.append(WeightInfo(W.e_score_correction_b, [CkptWeightInfo('model.layers.{i}.mlp.gate.e_score_correction_bias', identity)], identity))
@@ -310,6 +313,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     def _get_fp8_ffn_layer_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         group_size = self._quant_algo.getGroupSize()
+        selected_experts = self._get_selected_experts(layer_id)
+
         if layer_id in self.moe_layer_index_:
             layer_weights = [
                 WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], transpose),
@@ -324,15 +329,15 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
                 WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight',
                                                      identity) \
-                                        for expert_id in range(self.expert_num_)], stack_),
+                                        for expert_id in selected_experts], stack_),
                 WeightInfo(W.moe_s2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight_scale_inv',
                                         functools.partial(multipy_identity, scale=self.routed_scaling_factor)) \
-                        for expert_id in range(self.expert_num_)], stack_),
+                        for expert_id in selected_experts], stack_),
 
-                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in range(self.expert_num_)] + \
-                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
-                WeightInfo(W.moe_s1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight_scale_inv', identity) for expert_id in range(self.expert_num_)] + \
-                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight_scale_inv', identity) for expert_id in range(self.expert_num_)], stack_moe_w1),
+                WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in selected_experts] + \
+                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in selected_experts], stack_moe_w1),
+                WeightInfo(W.moe_s1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight_scale_inv', identity) for expert_id in selected_experts] + \
+                                     [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight_scale_inv', identity) for expert_id in selected_experts], stack_moe_w1),
             ]
             if self.has_e_score_correction_bias:
                 layer_weights.append(WeightInfo(W.e_score_correction_b, [CkptWeightInfo('model.layers.{i}.mlp.gate.e_score_correction_bias', identity)], identity))
@@ -486,6 +491,23 @@ class DeepSeekV2(BaseModel):
     def get_weight_cls():
         return DeepSeekV2Weight
 
+    def create_moe_weight_info(self):
+        if self.config.quant_algo.isFp8():
+            gate = CkptWeightInfo("model.layers.{}.mlp.experts.{}.gate_proj.weight", identity)
+            up = CkptWeightInfo("model.layers.{}.mlp.experts.{}.up_proj.weight", identity)
+            down = CkptWeightInfo("model.layers.{}.mlp.experts.{}.down_proj.weight", identity)
+
+            gate_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.gate_proj.weight_scale_inv', identity)
+            up_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.up_proj.weight_scale_inv', identity)
+            down_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.down_proj.weight_scale_inv', functools.partial(multipy_identity, scale=self.config.routed_scaling_factor))
+
+            return MoeWeightInfo(gate, up, down, True, gate_s, up_s, down_s)
+        else:
+            gate = CkptWeightInfo("model.layers.{}.mlp.experts.{}.gate_proj.weight", identity)
+            up = CkptWeightInfo("model.layers.{}.mlp.experts.{}.up_proj.weight", identity)
+            down = CkptWeightInfo("model.layers.{}.mlp.experts.{}.down_proj.weight", functools.partial(multipy_identity, scale=self.config.routed_scaling_factor))
+            return MoeWeightInfo(gate, up, down)
+
     def _initialize_rope(self):
         if self.config.mla_ops_type == MlaOpsType.MHA:
             return
@@ -543,6 +565,7 @@ class DeepSeekV3Mtp(DeepSeekV2):
         config = super()._create_config(ckpt_path)
         config.moe_layer_index = [i for i in range(config.layer_num)]
         config.reverse_e_h_norm = True
+        config.is_mtp = True
         return config
 
     @staticmethod

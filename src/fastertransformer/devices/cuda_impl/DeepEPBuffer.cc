@@ -20,7 +20,7 @@ bool DeepEPBuffer::init() {
 
         BufferPtr device_ids_buffer_cpu = vector2Buffer(device_ids);
         BufferPtr device_ids_buffer_gpu = device_->clone({*device_ids_buffer_cpu, AllocationType::DEVICE});
-        device_->allGather({{device_ids_buffer_gpu}, ParallelMode::EP});
+        device_->allGather({{device_ids_buffer_gpu}, ParallelMode::DP_AND_TP});
         device_->copy({*device_ids_buffer_cpu, *device_ids_buffer_gpu});
 
         device_ids = buffer2vector<int>(*device_ids_buffer_cpu);
@@ -43,7 +43,7 @@ bool DeepEPBuffer::init() {
         device_->copy({all_ipc_handle_buffer_gpu->view(world_rank_, 1), *local_ipc_handle_buffer_cpu});
 
         // do all gather and result to cpu
-        device_->allGather({{all_ipc_handle_buffer_gpu}, ParallelMode::EP});
+        device_->allGather({{all_ipc_handle_buffer_gpu}, ParallelMode::DP_AND_TP});
 
         BufferPtr all_ipc_handles_buffer_cpu = device_->clone({*all_ipc_handle_buffer_gpu, AllocationType::HOST});
 
@@ -86,7 +86,7 @@ bool DeepEPBuffer::init() {
                 {all_nvshmem_unique_ids_buffer_gpu->view(world_rank_, 1), *local_nvshmem_unique_id_buffer_cpu});
         }
 
-        device_->allGather({{all_nvshmem_unique_ids_buffer_gpu}, ParallelMode::EP});
+        device_->allGather({{all_nvshmem_unique_ids_buffer_gpu}, ParallelMode::DP_AND_TP});
 
         BufferPtr all_nvshmem_unique_ids_buffer_cpu =
             device_->clone({*all_nvshmem_unique_ids_buffer_gpu, AllocationType::HOST});

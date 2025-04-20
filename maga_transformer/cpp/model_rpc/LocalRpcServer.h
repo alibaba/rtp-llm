@@ -71,6 +71,7 @@ protected:
     EngineInitParams                        maga_init_params_;
     kmonitor::MetricsReporterPtr            metrics_reporter_;
     std::atomic<size_t>                     onflight_requests_{0};
+    ProposeModelEngineInitParams*           propose_maga_init_params_;
 };
 
 }  // namespace rtp_llm

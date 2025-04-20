@@ -14,10 +14,14 @@ torch_ext::EmbeddingHandlerOp create_linear_softmax_handler(const ft::GptInitPar
 void registerEmbeddingHandler(py::module& m) {
     pybind11::class_<torch_ext::EmbeddingHandlerOp>(m, "EmbeddingHandlerOp")
         .def(pybind11::init<>())  // quant_pre_scales
-        .def("load_tensor", &torch_ext::EmbeddingHandlerOp::loadTensor)
-        .def("forward", &torch_ext::EmbeddingHandlerOp::forward, py::call_guard<py::gil_scoped_release>());
+        .def("load_tensor", &torch_ext::EmbeddingHandlerOp::loadTensor, py::arg("weights"))
+        .def("forward",
+             &torch_ext::EmbeddingHandlerOp::forward,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("hidden_states"),
+             py::arg("input_lengths"));
     // register functions
-    m.def("create_linear_softmax_handler", &create_linear_softmax_handler);
+    m.def("create_linear_softmax_handler", &create_linear_softmax_handler, py::arg("gpt_init_params"));
 }
 
 } // namespace torch_ext

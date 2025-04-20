@@ -71,11 +71,14 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.dp_master_port    = params.dp_nccl_port_;
     device_params.dp_tp_master_port = params.dp_tp_nccl_port_;
     device_params.ffn_tp_master_port = params.ffn_tp_nccl_port_;
+    device_params.ep_master_port    = params.ep_nccl_port_;
+    device_params.eplb_master_port  = params.eplb_nccl_port_;
     device_params.tokens_per_block  = params.seq_size_per_block_;
     device_params.mla_ops_type      = params.mla_ops_type_;
     device_params.max_seq_len       = params.max_seq_len_;
     device_params.hidden_size       = params.hidden_size_;
     device_params.num_experts       = params.expert_num_;
+    device_params.extra_experts     = params.phy_exp_num_ - params.expert_num_;
 
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
@@ -200,11 +203,22 @@ void registerDeviceOps(py::module& m) {
     pybind11::class_<DeviceExporter, std::shared_ptr<DeviceExporter>>(m, "DeviceExporter")
         .def("get_device_type", &DeviceExporter::getDeviceType)
         .def("get_device_id", &DeviceExporter::getDeviceId)
-        .def("preprocess_gemm_weight_by_key", &DeviceExporter::preprocessGemmWeightByKey)
-        .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4)
-        .def("preprocess_weights_for_mixed_gemm", &DeviceExporter::preprocessWeightsForMixedGemm)
-        .def("symmetric_quantize_last_axis_of_batched_matrix", &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix)
-        .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale);
+        .def("preprocess_gemm_weight_by_key",
+             &DeviceExporter::preprocessGemmWeightByKey,
+             py::arg("key"),
+             py::arg("weight"))
+        .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4, py::arg("weight"))
+        .def("preprocess_weights_for_mixed_gemm",
+             &DeviceExporter::preprocessWeightsForMixedGemm,
+             py::arg("weight"),
+             py::arg("quant_type"),
+             py::arg("arch"))
+        .def("symmetric_quantize_last_axis_of_batched_matrix",
+             &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix,
+             py::arg("weight"),
+             py::arg("quant_type"),
+             py::arg("arch"))
+        .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
 }

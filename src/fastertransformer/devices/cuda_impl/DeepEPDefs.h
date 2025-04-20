@@ -251,9 +251,11 @@ class DeepEPRecvHook : public DeviceHook {
 public:
     DeepEPRecvHook(
         const std::function<void()>& hook,
+        const std::function<void()>&& stats_hook,
         const std::vector<BufferPtr>& hold_buffers,
         const std::vector<torch::Tensor>& hold_tensors)
     : hook_(hook)
+    , stats_hook_(stats_hook)
     , hold_buffers_(hold_buffers)
     , hold_tensors_(hold_tensors)
     , synchronized_(false)
@@ -267,12 +269,14 @@ public:
         FT_CHECK(!synchronized_);
         if (hook_) {
             hook_();
+            stats_hook_();
             synchronized_ = true;
         }
     }
 
 private:
     std::function<void()> hook_;
+    std::function<void()> stats_hook_;
     std::vector<BufferPtr> hold_buffers_;
     std::vector<torch::Tensor> hold_tensors_;
     mutable bool synchronized_;

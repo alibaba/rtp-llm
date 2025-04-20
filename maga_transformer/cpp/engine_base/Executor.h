@@ -42,6 +42,7 @@ public:
         auto moe_configs = params.moe_style_ ?
             (std::optional<ft::MoeConfigs>)ft::MoeConfigs({
                 (size_t)params.expert_num_,
+                (size_t)(params.phy_exp_num_-params.expert_num_),
                 (size_t)params.moe_k_,
                 params.moe_normalize_expert_scale_,
                 params.moe_inter_padding_size_ / moe_tp_size,
@@ -54,7 +55,9 @@ public:
                 (size_t)params.dp_size_,
                 (int)params.scoring_func_,
                 (int)params.moe_topk_group_,
-                (int)params.moe_n_group_
+                (int)params.moe_n_group_,
+                params.enable_eplb_,
+                (int)params.ep_comp_size_
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{
             ft::getActivationType(params.activation_type_str_),

@@ -223,6 +223,14 @@ void ROCmDevice::noBlockCopy(const CopyParams& params) {
     ROCM_CHECK(hipStreamSynchronize(no_block_copy_stream_));
 }
 
+void ROCmDevice::bufMemset(Buffer& buf, int val, DeviceStream stream) {
+    if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
+        std::memset(buf.data(), val, buf.sizeBytes());
+    } else {
+        ROCM_CHECK(hipMemsetAsync(buf.data(), val, buf.sizeBytes(), stream_));
+    }
+}
+
 TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
     const auto& input = params.input;
     const auto data_type = input.type();

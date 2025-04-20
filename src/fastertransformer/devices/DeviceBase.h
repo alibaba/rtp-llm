@@ -6,6 +6,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/Event.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheStore.h"
+#include "src/fastertransformer/stats/ExpertStats.h"
 
 namespace fastertransformer {
 
@@ -35,7 +36,9 @@ public:
                                  const AllocationType atype = AllocationType::DEVICE,
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
+    virtual void syncDeviceStream(DeviceStream stream);
     virtual void syncCommunication(bool timeout = true);
+    virtual void syncCommunication(ParallelMode mode, bool timeout = true);
     virtual void overlappedCommBarrier();
     virtual DeviceHookPtr createCommHook();
     virtual void overlappedComputeBarrier();
@@ -50,6 +53,13 @@ public:
     DeviceInitParams initParams() {
         return init_params_;
     }
+
+    // for record moe expert stats
+    virtual OverallExpertStats createMoeExpertStates(const ExpertStatsParams& params);
+    virtual void cleanMoeExpertStates(const OverallExpertStats& stats);
+
+    virtual void
+    updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 
 public:
     // device-independence op implementations

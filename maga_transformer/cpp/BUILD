@@ -249,9 +249,11 @@ cc_library(
     name = "normal_engine",
     hdrs = glob([
         "normal_engine/*.h",
+        "eplb/*.h",
     ]),
     srcs = glob([
         "normal_engine/*.cc",
+        "eplb/*.cc",
     ]),
     deps = torch_deps() + [
         ":dataclass",
@@ -414,7 +416,7 @@ cc_library(
         ":embedding_arpc_deps",
         "@havenask//aios/autil:net",
         "@havenask//aios/autil:time",
-        "//maga_transformer/cpp/api_server/common:common_service"
+        "//maga_transformer/cpp/api_server/common:common_service",
     ],
     visibility = ["//visibility:public"]
 )

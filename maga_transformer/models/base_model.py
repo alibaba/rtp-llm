@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import json
 import logging
@@ -13,13 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 import safetensors.torch
 
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode, MlaOpsType
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode, MlaOpsType, EplbMode
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.task_type import TaskType
+from maga_transformer.distribute.gang_info import get_gang_info
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.utils import create_custom_module
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
+from maga_transformer.utils.fuser import fetch_remote_file_to_local
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, ModelWeights
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, ModelWeightsLoader
@@ -28,6 +31,7 @@ from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
+from maga_transformer.eplb.ep_balancer import ExpertBalancer, MoeWeightInfo
 from collections import OrderedDict
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
@@ -266,7 +270,7 @@ class BaseModel(object):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             return
-        
+
         config_json = json.load(open(config_path))
         quant_config = None
         quant_method = None
@@ -279,7 +283,7 @@ class BaseModel(object):
             quant_method = quant_config['quant_algo'].lower()
         if quant_config is None:
             return
-        
+
         group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
         bits = quant_config['bits'] if 'bits' in quant_config else 0
         if quant_method == 'fp8':
@@ -288,7 +292,7 @@ class BaseModel(object):
                 weight_block = quant_config.get("weight_block_size")
                 assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
                 group_size = weight_block[0]
-        
+
         config.quant_algo.setQuantAlgo(quant_method, bits, group_size)
 
     @classmethod
@@ -300,7 +304,6 @@ class BaseModel(object):
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
-
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
@@ -411,7 +414,7 @@ class BaseModel(object):
 
         if self.config.vit_separation != 2 and self.is_multimodal():
             self.load_mm_weight(self.compute_dtype, self.device)
-            
+
         if self.config.vit_separation != 1:
             if self.task_type == TaskType.LANGUAGE_MODEL:
                 lm_head_w = self.weight.steal_global_weight(W.lm_head)
@@ -442,7 +445,7 @@ class BaseModel(object):
             if self.config.quant_algo.isPerTensorQuant() and \
                 (self.weight.global_weights.get(W.pre_decoder_ln_static_quant, None) == None or \
                 self.weight.global_weights.get(W.pre_decoder_ln_static_quant_reciprocal, None) == None):
-                    raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
+                raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
                                     are quired for per tensor quantization")
 
         ModelWeightsLoader.force_clean_cuda_memory()
@@ -450,8 +453,114 @@ class BaseModel(object):
     def _initialize_rope(self):
         pass
 
+    def create_moe_weight_info(self) -> MoeWeightInfo:
+        raise NotImplementedError()
+
+    def init_redundant_expert(self, num_node: int):
+        if self.config.expert_num == 0:
+            return
+
+        expert_num = self.config.expert_num
+        redundant_expert = self.config.phy_exp_num - expert_num
+        ep_size = self.parallel_info.ep_size
+        expert_num_per_ep = expert_num // ep_size
+        rank_per_node = ep_size // num_node
+
+        assert redundant_expert <= expert_num, "redundant_expert must less or equal than expert_num"
+
+        layer_num = self.config.layer_num
+
+        phy2log: List[List[int]] = []
+        phy2log_path = fetch_remote_file_to_local(os.environ.get("PHY2LOG_PATH", ""))
+
+        if phy2log_path:
+            with open(phy2log_path, "r") as f:
+                phy2log = json.load(f)
+                assert len(phy2log) == layer_num, f"phy2log len {len(phy2log)} != layer_num {layer_num}"
+                assert len(phy2log[0]) == self.config.phy_exp_num, f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {self.config.phy_exp_num}"
+        elif redundant_expert % ep_size == 0:
+            redundant_expert_per_ep = redundant_expert // ep_size
+            for _ in range(layer_num):
+                layer_phy2log: List[int] = []
+                for ep_rank in range(ep_size):
+                    node_id = ep_rank // rank_per_node
+                    layer_phy2log.extend(range(ep_rank * expert_num_per_ep, (ep_rank + 1) * expert_num_per_ep))
+                    for i in range(redundant_expert_per_ep):
+                        redundant_ep_id = (ep_rank + 1) % rank_per_node + node_id * rank_per_node
+                        expert_id = redundant_ep_id * expert_num_per_ep + i
+                        layer_phy2log.append(expert_id)
+                phy2log.append(layer_phy2log)
+        else:
+            for _ in range(layer_num):
+                layer_phy2log: List[int] = list(range(expert_num))
+                layer_phy2log.extend(list(range(redundant_expert)))
+                phy2log.append(layer_phy2log)
+
+        logging.info(f"phy2log: {phy2log}")
+
+        self.config.phy2log = phy2log
+
+    def init_eplb_weight(self, weight: ModelWeights):
+        expert_num = self.config.expert_num
+        redundant_expert = self.config.phy_exp_num - expert_num
+        layer_num = self.config.layer_num
+        phy2log = self.config.phy2log
+
+        if expert_num == 0 or redundant_expert == 0:
+            return
+
+        # init logic_expert_cnt and log2phy
+        for layer_id in range(layer_num):
+            logic_expert_cnt = torch.zeros((expert_num,), dtype=torch.int32)
+            log2phy = torch.empty((expert_num, redundant_expert + 1), dtype=torch.int32).fill_(-1)
+            layer_phy2log = phy2log[layer_id]
+
+            for phy_exp_id, expert_id in enumerate(layer_phy2log):
+                cnt = logic_expert_cnt[expert_id]
+                log2phy[expert_id, cnt] = phy_exp_id
+                logic_expert_cnt[expert_id] += 1
+
+            weight.weights[layer_id][W.logic_expert_cnt] = logic_expert_cnt.contiguous().to(self.device)
+            weight.weights[layer_id][W.log2phy] = log2phy.contiguous().to(self.device)
+
+    def init_eplb_config(self):
+        enable_eplb = self.config.eplb_mode != EplbMode.NONE
+        phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.config.expert_num
+
+        self.config.phy_exp_num = phy_exp_num
+        self.config.enable_eplb = enable_eplb
+
+        try:
+            num_nodes = get_gang_info().num_nodes
+        except:
+            num_nodes = 1
+
+        self.init_redundant_expert(num_nodes)
+
+        if enable_eplb:
+            # TODO(yinzhi): some base check
+            moe_weight_info = self.create_moe_weight_info()
+            model_path = None
+            if self.config.is_mtp:
+                model_path = self.config.ckpt_path
+            self.ep_balancer = ExpertBalancer(
+                self.config.expert_num,
+                self.config.phy_exp_num,
+                self.config.num_layers,
+                self.config.moe_n_group,
+                num_nodes,
+                self.config.ep_size,
+                self.config.moe_layer_index,
+                moe_weight_info,
+                self.config.phy2log,
+                model_path,
+            )
+            self.config.py_eplb = self.ep_balancer
+
     def load(self, device: str):
+        self.init_eplb_config()
         self._load_weights()
+        self.init_eplb_weight(self.weight)
         self._initialize_rope()
         self._initialize_weights()
 
@@ -482,7 +591,7 @@ class BaseModel(object):
                 attention_mask[b, :, input_length: ]= 0
         return attention_mask
 
-    def dump_weights(self, parallel_info, output_dir: str):
+    def dump_weights(self, parallel_info: ParallelInfo, output_dir: str):
         # dump with out load
         self.parallel_info = parallel_info
         self.device = self.parallel_info.device
@@ -491,6 +600,7 @@ class BaseModel(object):
         self.init_misc()
         self.init_database()
         self.load_static_lora()
+        self.init_eplb_config()
 
         tp_rank = self.parallel_info.tp_rank
         ep_rank = self.parallel_info.ep_rank

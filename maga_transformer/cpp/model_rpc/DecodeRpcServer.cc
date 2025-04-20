@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/utils/KVCacheUtils.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/model_rpc/DecodeRpcServer.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace std;
 using namespace autil::legacy;
@@ -145,6 +146,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
+    // if (generate_request.has_mtp_hidden_states()) {
+    //     FT_LOG_DEBUG("has mtp hidden states");
+    //     auto mtp_hidden_states_tensor = QueryConverter::transTensor(generate_request.mtp_hidden_states());
+    //     auto hidden_states = engine_->getDevice()->clone(*ft::torchTensor2Buffer(mtp_hidden_states_tensor));
+    //     printBufferData(*hidden_states, "decode host_hidden_states");
+    //     generate_stream->setLastHiddenStates(hidden_states);
+    // } else {
+    //     FT_LOG_DEBUG("has no mtp hidden states");
+    // }
     auto new_tokens = engine_->getDevice()->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)generate_stream->tileNum(), (size_t)1}, ft::AllocationType::HOST}, {});
     auto data           = new_tokens->data<int32_t>();
@@ -152,7 +162,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     *data               = first_token_id;
     generate_stream->incLastOutputPos();
     generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    if (propose_maga_init_params_) {
+        generate_stream->setReuseLength(generate_stream->seqLength() - 1);
+        generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
+        generate_stream->setSpEditRun(false);
+    }
     generate_stream->resetBeginTime(currentTimeUs());
+    FT_LOG_DEBUG("decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     FT_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =

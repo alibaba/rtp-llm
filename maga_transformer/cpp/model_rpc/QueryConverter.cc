@@ -86,6 +86,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
+
     return generate_input;
 }
 
@@ -95,9 +96,9 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
         auto mm_input = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty for now
-        inputs_vec.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(), 
+        inputs_vec.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(),
             mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps());
-    } 
+    }
     return inputs_vec;
 }
 

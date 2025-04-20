@@ -46,7 +46,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     if (token_num == 0) {
         return {output};
     }
-    const auto   num_experts          = params.weights.moe_gating_weight->kernel->shape()[1];
+    const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   top_k                = moe_conf.top_k;
     const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
@@ -250,7 +250,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     const auto& moe_conf            = params.configs.moe_configs.value();
     bool        is_gated_activation = isGatedActivation(params.configs.activation_type);
     const auto& weights             = params.weights;
-    const auto  num_experts         = params.weights.moe_gating_weight->kernel->shape()[1];
+    const auto num_experts = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
 

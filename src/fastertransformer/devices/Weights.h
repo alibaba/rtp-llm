@@ -57,7 +57,7 @@ struct DenseWeights {
 
 };
 
-typedef std::shared_ptr<const DenseWeights> DenseWeightsPtr;
+typedef std::shared_ptr<DenseWeights> DenseWeightsPtr;
 
 
 struct AttentionLayerWeights {
@@ -100,10 +100,10 @@ struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
-    std::shared_ptr<const DenseWeights>     moe_gate_weight;
+    std::shared_ptr<DenseWeights>     moe_gate_weight;
 
     std::shared_ptr<const DenseWeights>     down_weight;
-    std::shared_ptr<const DenseWeights>     moe_down_weight;
+    std::shared_ptr<DenseWeights>     moe_down_weight;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 
@@ -118,6 +118,9 @@ struct FfnLayerWeights {
     std::shared_ptr<FfnLayerWeights>        shared_expert;
     std::shared_ptr<const DenseWeights>     shared_expert_gate;
     ConstBufferPtr                          e_score_correction_bias; // noaux_tc
+
+    ConstBufferPtr log2phy;
+    ConstBufferPtr logic_expert_cnt;
 };
 
 struct LayerWeights {

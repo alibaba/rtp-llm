@@ -141,7 +141,9 @@ public:
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 
     void syncAndCheck() override;
+    void syncDeviceStream(DeviceStream stream) override;
     void syncCommunication(bool timeout = true) override;
+    void syncCommunication(ParallelMode mode, bool timeout = true) override;
     void overlappedCommBarrier() override;
     DeviceHookPtr createCommHook() override;
     void overlappedComputeBarrier() override;
@@ -163,6 +165,7 @@ private:
     bool initDeepEPBuffer();
     void checkUseGroupGemm();
     NcclParam getNcclParam(ParallelMode mode);
+    cudaStream_t getCommStream(ParallelMode mode, bool overlap);
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
     bool checkUseFlashinferSampleGreedy(const GreedyParams& params);
@@ -170,14 +173,19 @@ private:
     void processLogits(const GreedyParams& params, const BufferPtr &device_tokens, const BufferPtr &transposed_tokens);
     void completeSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens);
 
+    void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
+                              const OptionalExpertStats& expert_stats,
+                              BufferPtr                  expert_ids) override;
+
 public:
     cudaStream_t getStream() {return stream_;}
+    cudaStream_t getStream(DeviceStream stream);
     torch::Device getTorchDevice() override { return torch::Device(torch::kCUDA);};
 
 public:
     void copy(const CopyParams& params) override;
     void noBlockCopy(const CopyParams& params) override;
-    void bufMemset(Buffer& buf, int val) override;
+    void bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     AddBiasOutput addbias(const AddBiasParams& params) override;
     ConvertOutput convert(const ConvertParams& params) override;
@@ -232,7 +240,7 @@ public:
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
     MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
-    MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);    
+    MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
@@ -270,12 +278,16 @@ protected:
                           const BufferPtr&             v_output,
                           const BufferPtr&             qkv_buf_fp8);
 
+    MoeEpPlanOutput equalEpPlan(const MoeEpPlanParams& params);
+
 protected:
     std::unique_ptr<at::cuda::CUDAStream> torch_default_stream_;
     std::unique_ptr<at::cuda::CUDAStream> torch_comm_stream_;
     cudaStream_t stream_;
+    cudaStream_t eplb_stream_;
     cudaStream_t no_block_copy_stream_;
     cudaStream_t communication_stream_;
+
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
 
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
@@ -309,6 +321,8 @@ private:
     NcclParam dp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
+    NcclParam ep_nccl_param_;
+    NcclParam eplb_nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
 
@@ -326,6 +340,7 @@ private:
     std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
 #endif
 
+    std::vector<BufferPtr> moe_hold_host_buffers_;
 protected:
     bool use_trtv1_fmha             = false;
     bool use_trtv2_fmha             = false;

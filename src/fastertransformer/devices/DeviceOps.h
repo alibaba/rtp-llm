@@ -20,7 +20,7 @@ public:
     virtual ConcatOutput concat(const ConcatParams& params);
     virtual SplitOutput split(const SplitParams& params);
     virtual SliceOutput slice(const SliceParams& params);
-    virtual void         bufMemset(Buffer& buf, int val);
+    virtual void        bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT);
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);

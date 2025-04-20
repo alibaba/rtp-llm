@@ -107,6 +107,9 @@ static const std::string moe_b2   = "partial_moe_weights.intermediate_weight2.bi
 static const std::string moe_gate = "partial_moe_weights.gate.kernel";
 static const std::string moe_e_score_correction_b = "partial_moe_weights.e_score_correction_bias";
 
+// eplb
+static const std::string logic_expert_cnt = "moe_eplb.logic_expert_cnt";
+static const std::string log2phy = "moe_eplb.log2phy";
 
 static const std::string attn_qkv_z = "self_attention_weights.query_weight.zero";
 static const std::string attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale";

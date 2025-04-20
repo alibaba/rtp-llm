@@ -22,6 +22,10 @@ namespace fastertransformer {
 void CudaDevice::copy(const CopyParams& params) {
     params.check();
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    // if (params.stream == DeviceStream::EPLB) {
+    //     stream = eplb_stream_;
+    // }
+
     if (params.dst.isQBuffer() && params.src.isQBuffer()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
         auto src_ptr = reinterpret_cast<const QBuffer*>(&params.src);
@@ -317,14 +321,16 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
     switch (mode) {
         case ParallelMode::TP:
             return tp_nccl_param_;
-        case ParallelMode::DP:
-            return dp_nccl_param_;
+        // case ParallelMode::DP:
+        //     return dp_nccl_param_;
         case ParallelMode::DP_AND_TP:
             return dp_tp_nccl_param_;
         case ParallelMode::FFN_TP:
             return ffn_tp_nccl_param_;
-        case ParallelMode::EP:
-            return dp_tp_nccl_param_;
+        // case ParallelMode::EP:
+        //     return ep_nccl_param_;
+        // case ParallelMode::EPLB:
+        //     return eplb_nccl_param_;
         default:
             FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -332,19 +338,37 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
     }
 }
 
+cudaStream_t CudaDevice::getCommStream(ParallelMode mode, bool overlap) {
+    // if (mode == ParallelMode::EPLB) {
+    //     return eplb_stream_;
+    // }
+
+    if (overlap && init_params_.enable_comm_overlap) {
+        return communication_stream_;
+    }
+
+    return stream_;
+}
+
 void CudaDevice::broadcast(const BroadcastParams& params) {
-    FT_CHECK_WITH_INFO(params.mode == ParallelMode::TP, "broadcast not support mode [%d]", params.mode);
-    if (tp_nccl_param_.world_size_ < 2) {
+    FT_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::DP_AND_TP,
+                       "broadcast not support mode [%d]",
+                       params.mode);
+
+    bool overlapped = params.overlapped;
+    const auto nccl_param = getNcclParam(params.mode);
+    const auto stream     = getCommStream(params.mode, overlapped);
+
+    if (nccl_param.world_size_ < 2) {
         return;
     }
-    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
 
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.buffers.size(); ++i) {
         auto& buffer         = params.buffers[i];
         auto  root           = params.root;
         auto  nccl_data_type = getNcclDataType(buffer->type());
-        NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root, tp_nccl_param_.nccl_comm_, stream));
+        NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root, nccl_param.nccl_comm_, stream));
     }
     NCCLCHECK(ncclGroupEnd());
 }
@@ -355,10 +379,8 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         return AllReduceOutput{params.buffer};
     }
 
-    const auto stream =
-        ((params.overlapped || params.mode == ParallelMode::DP_AND_TP) && init_params_.enable_comm_overlap) ?
-            communication_stream_ :
-            stream_;
+    bool overlapped = params.overlapped && params.mode == ParallelMode::DP_AND_TP;
+    const auto stream = getCommStream(params.mode, overlapped);
     if (stream == communication_stream_) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
@@ -369,10 +391,16 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_op        = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
+    bool use_custom_ar =
+        !params.dest
+        && (params.mode == ParallelMode::TP
+            || (params.mode == ParallelMode::FFN_TP && tp_nccl_param_ == ffn_tp_nccl_param_))
+        && custom_allreduce_comm_ && nccl_op == ncclSum
+        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_);
+
     // if custom allreduce fails, fallback to the default ncclAllReduce
     // dp tmp not support custom_allreduce_comm
-    if ((params.mode == ParallelMode::TP || (params.mode == ParallelMode::FFN_TP && tp_nccl_param_ == ffn_tp_nccl_param_)) && custom_allreduce_comm_ && nccl_op == ncclSum
-        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_)) {
+    if (use_custom_ar) {
         auto custom_ar_res_buf =
             allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
         custom_allreduce_comm_->allReduce(
@@ -382,9 +410,10 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps, "Invalid reduce op: %d", int(params.op));
 
-    NCCLCHECK(ncclAllReduce(
-        buffer->data(), buffer->data(), buffer->size(), nccl_data_type, nccl_op, nccl_param.nccl_comm_, stream));
-    return AllReduceOutput{params.buffer};
+    auto& dest_buffer = params.dest ? params.dest : buffer;
+    NCCLCHECK(ncclAllReduce(buffer->data(), dest_buffer->data(), buffer->size(), nccl_data_type,
+                            nccl_op, nccl_param.nccl_comm_, stream));
+    return AllReduceOutput{dest_buffer};
 }
 
 PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams& params) {

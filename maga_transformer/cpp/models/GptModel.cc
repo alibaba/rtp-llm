@@ -24,11 +24,10 @@ string GptModelInputs::debugString() const {
         return "";
     }
     std::stringstream debug_string;
-    debug_string << "GptModelInputs { "
-                    << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
-                    << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
-                    << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
-                    << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
+    debug_string << "GptModelInputs { " << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
+                 << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
+                 << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
+                 << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
     if (combo_position_ids) {
         debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
     }
@@ -60,26 +59,31 @@ string GptModelInputs::debugString() const {
     return debug_string.str();
 }
 
-GptModel::GptModel(const GptModelInitParams& params)
-    : device_(params.device)
-    , device_props_(params.device->getDeviceProperties())
-    , weights_(params.weights)
-    , layer_num_(params.weights.layers.size())
-    , description_(params.description)
-    {
-        if (params.kv_cache_buffer) {
-            k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
-            v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
-            if (params.kv_cache_buffer->k_scale) {
-                k_scale_buffer_ = params.kv_cache_buffer->k_scale;
-                v_scale_buffer_ = params.kv_cache_buffer->v_scale;
-            }
-        }
-        if (abs(description_.residual_scalar - 1.0) > 1e-6) {
-            residual_scale_fp32_ = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
-            residual_scale_ = residual_scale_fp32_;
+GptModel::GptModel(const GptModelInitParams& params):
+    device_(params.device),
+    device_props_(params.device->getDeviceProperties()),
+    layer_num_(params.weights.layers.size()),
+    description_(params.description),
+    weights_(params.weights) {
+    if (params.kv_cache_buffer) {
+        k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
+        v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
+        if (params.kv_cache_buffer->k_scale) {
+            k_scale_buffer_ = params.kv_cache_buffer->k_scale;
+            v_scale_buffer_ = params.kv_cache_buffer->v_scale;
         }
     }
+    if (abs(description_.residual_scalar - 1.0) > 1e-6) {
+        residual_scale_fp32_ = device_->clone({*vector2Buffer(vector<float>{(float)description_.residual_scalar})});
+        residual_scale_      = residual_scale_fp32_;
+    }
+
+    if (params.description.ffn_conf.moe_configs.has_value()) {
+        auto moe_conf = params.description.ffn_conf.moe_configs.value();
+        overall_expert_stats_  = device_->createMoeExpertStates(
+            {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
+    }
+}
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
                                   int32_t*       cu_seqlens,
@@ -264,6 +268,10 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
 MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!device_props_.enable_layer_micro_batch) {
         FT_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    if (layer_num_ == 1) {
         return {false, {}};
     }
 
@@ -555,6 +563,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
 
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
+            prepareExpertStats(i, moe_ffn_params);
             hidden_states = device_->moeFfn(
                 moe_ffn_params,
                 {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
@@ -691,7 +700,12 @@ GptLayerOutputs GptModel::forwardGptLayer(
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                                             description_.act_qscheme,
                                             std::move(ffn_output_buf),
-                                            enable_sp});
+                                            enable_sp,
+                                            layer_num_ == 1});
+
+    // expert stats
+    prepareExpertStats(layer_id, ffn_layer_params);
+
     if (lora_model_input) {
         ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
     }
@@ -927,6 +941,8 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
                                             description_.act_qscheme,
                                             std::move(ffn_output_buf)});
 
+    prepareExpertStats(layer_id, ffn_layer_params);
+
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
@@ -945,9 +961,13 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         *gate_output.expert_scales,
         description_.ffn_conf.moe_configs.value(),
         device_props_.enable_comm_overlap,
+        description_.act_qscheme,
+        ffn_layer_params.expert_stats
     });
     printBufferData(*dispatched_output.hidden, "layer_" + to_string(layer_id) + "_dispatch_output");
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
+
+    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
     auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
@@ -1040,6 +1060,7 @@ GptModelOutputs GptModel::forwardPostLayers(
     }
 
     const auto& lm_head = weights_.lm_head;
+
     if (lm_head) {
         // gen last token hidden
         printBufferData(*lm_output_indexes, "lm_output_indexes");
@@ -1071,6 +1092,7 @@ GptModelOutputs GptModel::forwardPostLayers(
 }
 
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
+    cleanExpertStats();
     auto layer_inputs = forwardPreLayers(inputs);
 
     GptLayerOutputs layer_outputs;
@@ -1098,6 +1120,25 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     return outputs;
+}
+
+void GptModel::prepareExpertStats(const size_t        layer_id,
+                                  ft::FfnLayerParams& ffn_layer_params) {
+    OptionalExpertStats layer_expert_stats = nullopt;
+    if (overall_expert_stats_.log_exp_num != 0) {
+        layer_expert_stats = ExpertStats({layer_id,
+                                          overall_expert_stats_.ep_size,
+                                          overall_expert_stats_.log_exp_num,
+                                          overall_expert_stats_.phy_exp_num,
+                                          overall_expert_stats_.stats_buf});
+    }
+    ffn_layer_params.expert_stats = layer_expert_stats;
+}
+
+void GptModel::cleanExpertStats() {
+    if (overall_expert_stats_.log_exp_num != 0) {
+        device_->cleanMoeExpertStates(overall_expert_stats_);
+    }
 }
 
 void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {

@@ -5,6 +5,7 @@ import functools
 import torch
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.eplb.ep_balancer import MoeWeightInfo
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, \
     identity, zeros, transpose, concat_1, concat_0, merge_qkv_lora_A, merge_qkv_lora_B, stack_, stack_moe_w1
@@ -24,70 +25,74 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.final_ln_gamma, [CkptWeightInfo('model.norm.weight', identity)], identity),
             WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
-        layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', concat_1)], transpose),
-            WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.block_sparse_moe.gate.weight', concat_0)], transpose),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity),
-        ]
+        all_layer_weights: List[List[WeightInfo]] = []
+        for layer_id in range(self._num_layers):
+            layer_weights = [
+                WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
+                WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', concat_1)], transpose),
+                WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.block_sparse_moe.gate.weight', concat_0)], transpose),
+                WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity),
+            ]
 
-        layer_weights.append(
-                WeightInfo(W.attn_qkv_w,
-                           [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', concat_0),
-                            CkptWeightInfo('model.layers.{i}.self_attn.k_proj.weight', concat_0),
-                            CkptWeightInfo('model.layers.{i}.self_attn.v_proj.weight', concat_0)],
-                           functools.partial(merge_qkv_hf)) )
-        ffn_w1 = []
-        ffn_w2 = []
-        ffn_w3 = []
-        for expert_id in range(self.expert_num_):
-            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3.weight', identity))
-        for expert_id in range(self.expert_num_):
-            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1.weight', identity))
-            ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2.weight', identity))
+            layer_weights.append(
+                    WeightInfo(W.attn_qkv_w,
+                            [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', concat_0),
+                                CkptWeightInfo('model.layers.{i}.self_attn.k_proj.weight', concat_0),
+                                CkptWeightInfo('model.layers.{i}.self_attn.v_proj.weight', concat_0)],
+                            functools.partial(merge_qkv_hf)) )
+            ffn_w1 = []
+            ffn_w2 = []
+            selected_expert = self._get_selected_experts(layer_id)
+            for expert_id in selected_expert:
+                ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3.weight', identity))
+            for expert_id in selected_expert:
+                ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1.weight', identity))
+                ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2.weight', identity))
 
-        layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_moe_w1))
-        layer_weights.append(WeightInfo(W.moe_w2, ffn_w2, stack_))
+            layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_moe_w1))
+            layer_weights.append(WeightInfo(W.moe_w2, ffn_w2, stack_))
 
+            all_layer_weights.append(layer_weights)
 
-        lora_base_name = "base_model.model.{}.{}.weight"
-        lora_weights = []
+        # NOTE: no more support moe lora
+        # lora_base_name = "base_model.model.{}.{}.weight"
+        # lora_weights = []
 
-        for lora_name in ['lora_A', 'lora_B']:
-            ffn_w1_lora = []
-            ffn_w2_lora = []
-            ffn_w3_lora = []
-            for expert_id in range(self.expert_num_):
-                ffn_w1_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3', lora_name), transpose))
-            for expert_id in range(self.expert_num_):
-                ffn_w1_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1', lora_name), transpose))
-                ffn_w2_lora.append(CkptWeightInfo(
-                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2', lora_name), transpose))
+        # for lora_name in ['lora_A', 'lora_B']:
+        #     ffn_w1_lora = []
+        #     ffn_w2_lora = []
+        #     ffn_w3_lora = []
+        #     for expert_id in range(self.expert_num_):
+        #         ffn_w1_lora.append(CkptWeightInfo(
+        #             lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w3', lora_name), transpose))
+        #     for expert_id in range(self.expert_num_):
+        #         ffn_w1_lora.append(CkptWeightInfo(
+        #             lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w1', lora_name), transpose))
+        #         ffn_w2_lora.append(CkptWeightInfo(
+        #             lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(expert_id) +'.w2', lora_name), transpose))
 
-            lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_moe_w1))
-            lora_weights.append(WeightInfo(W.moe_w2 + "." + lora_name, ffn_w2_lora, stack_))
+        #     lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_moe_w1))
+        #     lora_weights.append(WeightInfo(W.moe_w2 + "." + lora_name, ffn_w2_lora, stack_))
 
-            lora_weights.append(
-                WeightInfo(W.moe_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))
+        #     lora_weights.append(
+        #         WeightInfo(W.moe_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))
 
-            lora_weights.append(
-                WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.o_proj', lora_name), concat_1)], transpose))
+        #     lora_weights.append(
+        #         WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.o_proj', lora_name), concat_1)], transpose))
 
-        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_A',
-                        [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_A'), identity),
-                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_A'), identity),
-                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_A'), identity)],
-                         functools.partial(merge_qkv_lora_A)))
+        # lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_A',
+        #                 [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_A'), identity),
+        #                  CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_A'), identity),
+        #                  CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_A'), identity)],
+        #                  functools.partial(merge_qkv_lora_A)))
 
-        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_B',
-                        [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_B'), identity),
-                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_B'), identity),
-                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_B'), identity)],
-                         functools.partial(merge_qkv_lora_B)))
+        # lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_B',
+        #                 [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_B'), identity),
+        #                  CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_B'), identity),
+        #                  CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_B'), identity)],
+        #                  functools.partial(merge_qkv_lora_B)))
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy(), lora_weights=lora_weights)
+        return ModelWeightInfo(layer_weights=all_layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class Mixtral(BaseModel):
     @staticmethod
@@ -122,5 +127,11 @@ class Mixtral(BaseModel):
         config.special_tokens.eos_token_id = 2
         config.special_tokens.bos_token_id = 1
         return config
+
+    def create_moe_weight_info(self):
+        gate = CkptWeightInfo("model.layers.{}.block_sparse_moe.experts.{}.w1.weight", identity)
+        up = CkptWeightInfo("model.layers.{}.block_sparse_moe.experts.{}.w3.weight", identity)
+        down = CkptWeightInfo("model.layers.{}.block_sparse_moe.experts.{}.w2.weight", identity)
+        return MoeWeightInfo(gate, up, down)
 
 register_model('mixtral', Mixtral, ['MixtralForCausalLM'])

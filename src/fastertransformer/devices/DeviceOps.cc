@@ -231,8 +231,12 @@ PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams&
     return PrepareAllReduceOutput{params.buffer};
 }
 
-void DeviceOps::bufMemset(Buffer& buf, int val) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+void DeviceOps::bufMemset(Buffer& buf, int val, DeviceStream stream) {
+    if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
+        std::memset(buf.data(), val, buf.sizeBytes());
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
 }
 
 void DeviceOps::noBlockCopy(const CopyParams& params) {

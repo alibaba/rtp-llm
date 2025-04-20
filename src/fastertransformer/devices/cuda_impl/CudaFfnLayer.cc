@@ -9,6 +9,7 @@
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
+#include "src/fastertransformer/kernels/eplb/experts_stats_kernels.h"
 #include <cstring>
 #include <numeric>
 
@@ -43,10 +44,11 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     }
     const auto& moe_conf = params.moe_configs;
 
+    // note: expert_num is physical expert number, including extra experts
+    auto const expert_num = moe_conf.expert_num + moe_conf.extra_expert_num;
+    auto const top_k      = moe_conf.top_k;
     auto const ep_size    = moe_conf.ep_size;
     auto const tp_size    = moe_conf.tp_size;
-    auto const expert_num = moe_conf.expert_num;
-    auto const top_k      = moe_conf.top_k;
     size_t     token_num  = params.expert_ids.shape()[0];
 
     assert(moe_conf.ep_size == tp_size * moe_conf.dp_size);
@@ -57,10 +59,6 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);
     auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);
     token_num = hidden->shape()[0];
-    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
-    if (hack_moe_expert_) {
-        hackMoeExpert(params, experts_ids_host);
-    }
     BufferPtr token_nums_per_rank =
         allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
     bufMemset(*token_nums_per_rank, 0);
@@ -70,6 +68,12 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     for (int i = 0; i < ep_size; ++i) {
         token_idx_per_rank[i].reserve(token_num);
     }
+
+    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST});
+    if (hack_moe_expert_) {
+        hackMoeExpert(params, experts_ids_host);
+    }
+
     int const num_experts_per_node = expert_num / ep_size;
     for (int i = 0; i < token_num; ++i) {
         for (int j = 0; j < top_k; ++j) {
@@ -82,6 +86,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
             }
         }
     }
+
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
     auto token_nums_per_rank_gpu     = clone({*token_nums_per_rank});
     auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
@@ -134,6 +139,9 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
                                                                         DataType::TYPE_INVALID,
                                                                         {0},
                                                                         nullptr)))));
+
+        updateExpertGpuLoads(moe_conf, params.expert_stats, global_buffers[2]);
+
         return {hidden_fp8,
                 global_buffers[2],
                 global_buffers[3],
@@ -146,6 +154,8 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
                 move(all2all_output.comm_barrier_hook)
             };
     } else {
+        updateExpertGpuLoads(moe_conf, params.expert_stats, global_buffers[1]);
+
         return {global_buffers[0],
                 global_buffers[1],
                 global_buffers[2],
@@ -259,6 +269,8 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto& hidden   = params.input;
 
     const auto token_num  = hidden.shape()[0];
+
+    // note: num_expert is real expert number, not including extra expert
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k      = moe_conf.top_k;
 
@@ -298,6 +310,34 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     if (autil::EnvUtil::getEnv("FAKE_BALANCE_EXPERT", 0L)) {
         fake_balance_expert(expert_for_source_row->data<int>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
     }
+
+    // EPLB
+    if (params.expert_stats.has_value() && params.weights.log2phy) {
+        const auto& moe_conf     = params.configs.moe_configs.value();
+        const auto& expert_stats = params.expert_stats.value();
+
+        int* log2phy = params.weights.log2phy->data<int>();
+        int* logic_expert_cnt = params.weights.logic_expert_cnt->data<int>();
+
+        switch (moe_conf.balance_method) {
+            case EplbBalanceMethod::EQUAL:
+                launch_equal_expert_balance(expert_for_source_row->data<int>(),
+                                            expert_stats.getLayerLogStats(),
+                                            log2phy,
+                                            logic_expert_cnt,
+                                            expert_stats.log_exp_num,
+                                            expert_stats.phy_exp_num,
+                                            expert_for_source_row->size(),
+                                            moe_conf.ep_rank,
+                                            stream_);
+                break;
+            default:
+                throw std::runtime_error("Unsupported balance method");
+                break;
+        }
+        sync_check_cuda_error();
+    }
+
     return {expert_for_source_row, expert_scales};
 }
 
@@ -342,10 +382,12 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     if (init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
         return deepEpLLMoeFfn(params, gate_outputs);
     }
+    const auto& moe_conf = params.configs.moe_configs.value();
+
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
         return moeFfnFp8(params, gate_outputs);
     }
-    const auto& moe_conf = params.configs.moe_configs.value();
+
     const auto& hidden   = params.input;
     const auto& weights  = params.weights;
     const auto  type     = hidden.type();
@@ -353,10 +395,13 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     const auto weight_type            = weights.moe_down_weight->kernel->type();
     const auto token_num              = hidden.shape()[0];
     const auto hidden_dim             = hidden.shape()[1];
-    const auto num_expert             = params.weights.moe_gating_weight->kernel->shape()[1];
+
+    // note: num_expert is physical expert number, including extra expert
+    const auto num_expert             = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto top_k                  = moe_conf.top_k;
     const auto moe_inter_size         = moe_conf.moe_inter_padding_size;
     const auto normalize_expert_scale = moe_conf.normalize_expert_scale;
+
     // TODO group_size
     auto group_size = 0;
     if (params.weights.moe_gate_weight->kernel->isQBuffer()) {

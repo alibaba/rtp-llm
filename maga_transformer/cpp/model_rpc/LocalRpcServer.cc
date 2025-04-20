@@ -15,7 +15,9 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
+
     if (propose_params) {
+        propose_maga_init_params_ = propose_params.get();
         FT_LOG_INFO("init speculative engine");
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Multimodal processing is not supported for speculative engine");

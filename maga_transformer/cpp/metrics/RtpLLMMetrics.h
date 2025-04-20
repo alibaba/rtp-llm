@@ -143,9 +143,9 @@ public:
     kmonitor::MutableMetric* fallback_times_metric         = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_times_metric = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_len_metric   = nullptr;
-     
-    kmonitor::MutableMetric* timeout_latency_us_metric       = nullptr;  
-    kmonitor::MutableMetric* malloc_failed_times_metric      = nullptr;  
+
+    kmonitor::MutableMetric* timeout_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* malloc_failed_times_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -322,6 +322,9 @@ public:
     int64_t model_forward_us                        = 0;
     int64_t sample_input_us                         = 0;
     int64_t dispatch_output_us                      = 0;
+
+    // eplb metrics
+    int64_t eplb_step_latency_us = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -344,6 +347,9 @@ public:
     kmonitor::MutableMetric* model_forward_us_metric                        = nullptr;
     kmonitor::MutableMetric* sample_input_us_metric                         = nullptr;
     kmonitor::MutableMetric* dispatch_output_us_metric                      = nullptr;
+
+    // eplb metrics
+    kmonitor::MutableMetric* eplb_step_latency_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -436,6 +442,32 @@ public:
     kmonitor::MutableMetric* updater_step_latency_us_metric = nullptr;
     kmonitor::MutableMetric* total_propose_token_num_metric = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric = nullptr;
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLmEplbMetricsCollector final {
+public:
+    int64_t ep_rank;
+    int64_t update_layer_id;
+
+    int64_t update_weights_latency_ms;
+    bool    update_weights_qps;
+
+    std::vector<int64_t> gpu_loads;
+};
+
+class RtpLLmEplbMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* update_weights_qps_metric = nullptr;
+    kmonitor::MutableMetric* update_layer_weights_qps_metric = nullptr;
+    kmonitor::MutableMetric* update_weights_latency_ms_metric = nullptr;
+    kmonitor::MutableMetric* gpu_loads_metric = nullptr;
+
 private:
     AUTIL_LOG_DECLARE();
 };

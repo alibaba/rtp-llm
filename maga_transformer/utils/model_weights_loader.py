@@ -113,7 +113,7 @@ class ModelWeightsLoader:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-    
+
     def set_data_type(self, data_type):
         self._data_type = data_type
 
@@ -354,7 +354,7 @@ class ModelWeightsLoader:
             logging.info(f"load weight: {weight_list}")
             load_weight([_[0] for _ in weight_list], torch.float8_e4m3fn)
             load_weight([_[1] for _ in weight_list], torch.float32)
-            
+
             return results
         elif self._weights_info._quant_algo.isFp8():
             qkv_w_weight = [weight for weight in layer_weights if weight.name == W.attn_qkv_w][0]
@@ -375,7 +375,7 @@ class ModelWeightsLoader:
             load_weight(W.sq_quant_shifts, torch.float32)
         elif self._weights_info._quant_algo.isPerTensorQuant():
             load_weight(W.static_quant_scales, torch.float32)
-            
+
         return results
 
     def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str):
@@ -670,7 +670,8 @@ class ModelWeightsLoader:
                        head_num=self._weights_info._head_num,
                        head_num_kv=self._weights_info._head_num_kv,
                        size_per_head=self._weights_info._size_per_head,
-                       bits=bits
+                       bits=bits,
+                       use_stack_weight=self._weights_info._use_stack_weight,
                        )
         if name in [W.moe_w1, W.moe_w2]:
                 return self._exported_device.shuffle_moe_weight(ts, self._data_type, name)

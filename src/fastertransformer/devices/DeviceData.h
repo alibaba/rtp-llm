@@ -34,11 +34,13 @@ struct DeviceInitParams {
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
     // they are only needed when tp_size > 1.
-    std::string master_ip         = "";
-    int64_t     tp_master_port    = 0;
-    int64_t     dp_master_port    = 0;
-    int64_t     dp_tp_master_port = 0;
+    std::string master_ip          = "";
+    int64_t     tp_master_port     = 0;
+    int64_t     dp_master_port     = 0;
+    int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
+    int64_t     ep_master_port     = 0;
+    int64_t     eplb_master_port   = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.
@@ -61,6 +63,7 @@ struct DeviceInitParams {
     int64_t max_seq_len = 0;
     int64_t hidden_size = 0;
     int64_t num_experts = 0;
+    int64_t extra_experts = 0;
 
     bool use_deepep_moe = false;
     bool use_deepep_internode = false;

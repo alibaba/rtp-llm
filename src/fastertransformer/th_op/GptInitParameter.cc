@@ -157,6 +157,12 @@ void registerGptInitParameter(py::module m) {
         .value("FLASH_INFER", MlaOpsType::FLASH_INFER)
         .value("FLASH_MLA", MlaOpsType::FLASH_MLA);
 
+    py::enum_<EplbMode>(m, "EplbMode")
+        .value("NONE", EplbMode::NONE)
+        .value("STATS", EplbMode::STATS)
+        .value("EPLB", EplbMode::EPLB)
+        .value("ALL", EplbMode::ALL);
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \
@@ -192,7 +198,10 @@ void registerGptInitParameter(py::module m) {
 
     pybind11::class_<QuantAlgo>(m, "QuantAlgo")
     .def(pybind11::init<>())  // quant_pre_scales
-    .def("setQuantAlgo", &QuantAlgo::setQuantAlgo)
+    .def("setQuantAlgo", &QuantAlgo::setQuantAlgo,
+        py::arg("quant_method"),
+        py::arg("bits"),
+        py::arg("group_size"))
     .def("isWeightOnlyPerCol", &QuantAlgo::isWeightOnlyPerCol)
     .def("isGptq", &QuantAlgo::isGptq)
     .def("isAwq", &QuantAlgo::isAwq)
@@ -314,6 +323,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(dp_nccl_port, dp_nccl_port_)                           \
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                     \
     DEF_PROPERTY(ffn_tp_nccl_port, ffn_tp_nccl_port_)                   \
+    DEF_PROPERTY(ep_nccl_port, ep_nccl_port_)                           \
+    DEF_PROPERTY(eplb_nccl_port, eplb_nccl_port_)                       \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                       \
     DEF_PROPERTY(http_port, http_port_)                                 \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
@@ -369,7 +380,14 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(model_name, model_name_)                               \
     DEF_PROPERTY(deepseek_rope_mscale, deepseek_rope_mscale_)           \
     DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)     \
-    DEF_PROPERTY(reverse_e_h_norm, reverse_e_h_norm_)
+    DEF_PROPERTY(reverse_e_h_norm, reverse_e_h_norm_)                   \
+    DEF_PROPERTY(enable_eplb, enable_eplb_)                             \
+    DEF_PROPERTY(ep_comp_size, ep_comp_size_)                           \
+    DEF_PROPERTY(phy_exp_num, phy_exp_num_)                             \
+    DEF_PROPERTY(eplb_update_time, eplb_update_time_)                   \
+    DEF_PROPERTY(eplb_stats_update_time, eplb_stats_update_time_)       \
+    DEF_PROPERTY(eplb_mode, eplb_mode_)                                 \
+    DEF_PROPERTY(py_eplb, py_eplb_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num
@@ -378,12 +396,21 @@ void registerGptInitParameter(py::module m) {
          int64_t,     // max_seq_len
          int64_t,     // vocab_size
          int64_t      // hidden_size
-         >())
-    .def("insertMultiTaskPromptTokens", &GptInitParameter::insertMultiTaskPromptTokens)
+         >(),
+         py::arg("head_num"),
+         py::arg("size_per_head"),
+         py::arg("num_layers"),
+         py::arg("max_seq_len"),
+         py::arg("vocab_size"),
+         py::arg("hidden_size"))
+    .def("insertMultiTaskPromptTokens", &GptInitParameter::insertMultiTaskPromptTokens,
+        py::arg("task_id"),
+        py::arg("tokens_id"))
     .def("setLayerNormType", &GptInitParameter::setLayerNormType)
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)
-    .def("setTaskType", &GptInitParameter::setTaskType)
+    .def("setTaskType", &GptInitParameter::setTaskType,
+        py::arg("task"))
     .def("setKvCacheDataType", &GptInitParameter::setKvCacheDataType)
     .def("isGatedActivation", &GptInitParameter::isGatedActivation)
     .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)  REGISTER_PROPERTYS;

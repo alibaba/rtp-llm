@@ -111,7 +111,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
 
 
 
-    return unique_ptr<const DenseWeights>(dense_weights);
+    return unique_ptr<DenseWeights>(dense_weights);
 }
 
 ft::FfnLayerWeights
@@ -146,6 +146,10 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
             ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
         }
     }
+
+    // eplb stats
+    ffn_weights.logic_expert_cnt = mayFindBuffer(map, W::logic_expert_cnt);
+    ffn_weights.log2phy = mayFindBuffer(map, W::log2phy);
 
     return ffn_weights;
 }

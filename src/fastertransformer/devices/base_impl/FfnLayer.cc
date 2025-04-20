@@ -161,6 +161,7 @@ FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const Moe
     auto hidden_states = dispatched_output.hidden;
     auto moe_ffn_params = FfnLayerParams(
             {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
+    moe_ffn_params.expert_stats = params.expert_stats;
     hidden_states =
         moeFfn(moe_ffn_params, {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}).hidden_states;
     auto combine_out = epCombine({hidden_states,

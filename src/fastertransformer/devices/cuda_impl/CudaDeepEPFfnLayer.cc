@@ -15,16 +15,17 @@ namespace fastertransformer {
 #ifdef ENABLE_DEEP_EP
 
 bool CudaDevice::initDeepEPBuffer() {
-    auto   nccl_param = getNcclParam(ParallelMode::EP);
+    auto   nccl_param = getNcclParam(ParallelMode::DP_AND_TP);
     size_t world_rank = nccl_param.rank_;
     size_t world_size = nccl_param.world_size_;
+    int    num_experts = init_params_.num_experts + init_params_.extra_experts;
 
     // TODO: check if get right
     ll_num_max_token_per_rank = (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
     int64_t num_rdma_bytes = 0;
     if(init_params_.use_deepep_low_latency) { // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
-            ll_num_max_token_per_rank, init_params_.hidden_size, world_size, init_params_.num_experts);
+            ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
     }
     else if (init_params_.use_deepep_internode) { // normal-kernel internode
         num_rdma_bytes = int(1e9);
@@ -42,7 +43,7 @@ bool CudaDevice::initDeepEPBuffer() {
                                             int(1e9),
                                             num_rdma_bytes,
                                             init_params_.use_deepep_low_latency,
-                                            init_params_.num_experts / init_params_.ep_size));
+                                            num_experts / init_params_.ep_size));
         bool success = deepep_buffer_->init();
         if (!success) {
             FT_LOG_ERROR("Failed to initialize DeepEPBuffer");
@@ -66,7 +67,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     const auto& moe_conf   = params.moe_configs;
     auto const  ep_size    = moe_conf.ep_size;
     auto const  tp_size    = moe_conf.tp_size;
-    auto const  expert_num = moe_conf.expert_num;
+    auto const  expert_num = moe_conf.expert_num + moe_conf.extra_expert_num;
     size_t      token_num  = params.expert_ids.shape()[0];
 
     FT_CHECK(ep_size == tp_size * moe_conf.dp_size);

@@ -100,6 +100,7 @@ class GangInfo(NamedTuple):
     members: List[WorkerInfo]
     master: WorkerInfo
     self: WorkerInfo
+    num_nodes: int
 
     def workers(self) -> List[WorkerInfo]:
         return [member for member in self.members if not member.equals(self.master)]
@@ -153,4 +154,4 @@ def get_gang_info() -> GangInfo:
             if part_rank == 0 and local_rank == 0:
                 master = new_member
     # not check master and self empty here for ut
-    return GangInfo(all_members, master, self)
+    return GangInfo(all_members, master, self, len(members))

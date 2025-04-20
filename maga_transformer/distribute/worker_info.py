@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 12
+MASTER_INFO_PORT_NUM = 14
 MIN_WORKER_INFO_PORT_NUM = 7
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -88,7 +88,7 @@ class ParallelInfo(object):
     @property
     def ffn_tp_rank(self) -> int:
         return self.tp_rank % self.ffn_tp_size
-    
+
     @property
     def local_rank(self) -> int:
         return self.world_rank % self.local_world_size
@@ -281,6 +281,8 @@ class MasterInfo:
     dp_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
+    ep_nccl_port: int
+    eplb_nccl_port: int
 
 g_master_info = MasterInfo(
     ip='',
@@ -290,17 +292,22 @@ g_master_info = MasterInfo(
     sp_gpt_nccl_port=0,
     dp_nccl_port=0,
     dp_tp_nccl_port=0,
-    ffn_tp_nccl_port=0)
+    ffn_tp_nccl_port=0,
+    ep_nccl_port=0,
+    eplb_nccl_port=0)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_nccl_port = base_port - 10
     g_master_info.dp_tp_nccl_port = base_port - 11
+    g_master_info.ep_nccl_port = base_port - 12
+    g_master_info.eplb_nccl_port = base_port - 13
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4
+    # note: reserve 4 ports for ffn_tp_nccl_port
     g_master_info.ffn_tp_nccl_port = base_port - 5
     if g_parallel_info.ffn_sp_size != g_parallel_info.tp_size:
         base_port -= g_parallel_info.ffn_sp_size

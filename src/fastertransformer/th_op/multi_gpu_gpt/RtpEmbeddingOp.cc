@@ -123,9 +123,16 @@ void registerRtpEmbeddingOp(const py::module& m) {
     rtp_llm::registerMultimodalInput(m);
     pybind11::class_<torch_ext::RtpEmbeddingOp>(m, "RtpEmbeddingOp")
         .def(pybind11::init<>())
-        .def("init", &torch_ext::RtpEmbeddingOp::init)
+        .def("init", &torch_ext::RtpEmbeddingOp::init, py::arg("model"), py::arg("mm_process_engine"))
         .def("stop", &torch_ext::RtpEmbeddingOp::stop)
-        .def("decode", &torch_ext::RtpEmbeddingOp::decode, py::call_guard<py::gil_scoped_release>());
+        .def("decode",
+             &torch_ext::RtpEmbeddingOp::decode,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("token_ids"),
+             py::arg("token_type_ids"),
+             py::arg("input_lengths"),
+             py::arg("request_id"),
+             py::arg("multimodal_inputs"));
 }
 
 }  // namespace torch_ext

@@ -1,34 +1,36 @@
 from __future__ import annotations
 import torch
 import typing
-__all__ = ['DeviceExporter', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'GptInitParameter', 'LoadBalanceInfo', 'MultimodalInput', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SpecialTokens', 'create_linear_softmax_handler', 'get_device']
+__all__ = ['DeviceExporter', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbMode', 'GptInitParameter', 'LoadBalanceInfo', 'MlaOpsType', 'MultimodalInput', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SpecialTokens', 'create_linear_softmax_handler', 'get_device']
 class DeviceExporter:
     def get_device_id(self) -> int:
         ...
     def get_device_type(self) -> DeviceType:
         ...
-    def pack_int8_tensor_to_packed_int4(self, arg0: torch.Tensor) -> torch.Tensor:
+    def pack_int8_tensor_to_packed_int4(self, weight: torch.Tensor) -> torch.Tensor:
         ...
-    def preprocess_gemm_weight_by_key(self, arg0: str, arg1: torch.Tensor) -> torch.Tensor:
+    def preprocess_gemm_weight_by_key(self, key: str, weight: torch.Tensor) -> torch.Tensor:
         ...
-    def preprocess_weights_for_mixed_gemm(self, arg0: torch.Tensor, arg1: typing.Any) -> torch.Tensor:
+    def preprocess_weight_scale(self, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         ...
-    def symmetric_quantize_last_axis_of_batched_matrix(self, arg0: torch.Tensor, arg1: typing.Any) -> list[torch.Tensor]:
+    def preprocess_weights_for_mixed_gemm(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> torch.Tensor:
+        ...
+    def symmetric_quantize_last_axis_of_batched_matrix(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> list[torch.Tensor]:
         ...
 class DeviceType:
     """
     Members:
-    
+
       Cpu
-    
+
       Cuda
-    
+
       Yitian
-    
+
       ArmCpu
-    
+
       ROCm
-    
+
       Ppu
     """
     ArmCpu: typing.ClassVar[DeviceType]  # value = <DeviceType.ArmCpu: 3>
@@ -64,23 +66,42 @@ class DeviceType:
     @property
     def value(self) -> int:
         ...
-class MlaOpsType:
+class EmbeddingHandlerOp:
+    def __init__(self) -> None:
+        ...
+    def forward(self, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
+        ...
+    def load_tensor(self, weights: dict[str, torch.Tensor]) -> None:
+        ...
+class EngineScheduleInfo:
+    finished_task_info_list: list[EngineTaskInfo]
+    last_schedule_delta: int
+    running_task_info_list: list[EngineTaskInfo]
+    def __init__(self) -> None:
+        ...
+class EngineTaskInfo:
+    input_length: int
+    prefix_length: int
+    request_id: int
+    def __init__(self) -> None:
+        ...
+class EplbMode:
     """
     Members:
-    
-      AUTO
 
-      MHA
+      NONE
 
-      FLASH_INFER
+      STATS
 
-      FLASH_MLA
+      EPLB
+
+      ALL
     """
-    AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
-    MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
-    FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
-    FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
-    __members__: typing.ClassVar[dict[str, MlaOpsType]]
+    ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
+    EPLB: typing.ClassVar[EplbMode]  # value = <EplbMode.EPLB: 2>
+    NONE: typing.ClassVar[EplbMode]  # value = <EplbMode.NONE: 0>
+    STATS: typing.ClassVar[EplbMode]  # value = <EplbMode.STATS: 1>
+    __members__: typing.ClassVar[dict[str, EplbMode]]  # value = {'NONE': <EplbMode.NONE: 0>, 'STATS': <EplbMode.STATS: 1>, 'EPLB': <EplbMode.EPLB: 2>, 'ALL': <EplbMode.ALL: 3>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -107,25 +128,6 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
-class EmbeddingHandlerOp:
-    def __init__(self) -> None:
-        ...
-    def forward(self, arg0: torch.Tensor, arg1: torch.Tensor) -> torch.Tensor:
-        ...
-    def load_tensor(self, arg0: dict[str, torch.Tensor]) -> None:
-        ...
-class EngineScheduleInfo:
-    finished_task_info_list: list[EngineTaskInfo]
-    last_schedule_delta: int
-    running_task_info_list: list[EngineTaskInfo]
-    def __init__(self) -> None:
-        ...
-class EngineTaskInfo:
-    input_length: int
-    prefix_length: int
-    request_id: int
-    def __init__(self) -> None:
-        ...
 class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
@@ -142,12 +144,28 @@ class GptInitParameter:
     decode_retry_timeout_ms: int
     decode_retry_times: int
     decode_use_async_load_cache: bool
+    deepseek_mscale_all_dim: float
+    deepseek_rope_mscale: float
+    dp_nccl_port: int
+    dp_rank: int
+    dp_size: int
+    dp_tp_nccl_port: int
+    enable_eplb: bool
     enable_fast_gen: bool
     enable_partial_fallback: bool
+    enable_sp: bool
+    ep_comp_size: int
+    ep_nccl_port: int
     ep_rank: int
     ep_size: int
+    eplb_mode: EplbMode
+    eplb_nccl_port: int
+    eplb_update_time: int
     expert_num: int
     fast_gen_max_context_len: int
+    ffn_tp_nccl_port: int
+    ffn_tp_rank: int
+    ffn_tp_size: int
     gen_num_per_circle: int
     has_lm_head: bool
     has_moe_norm: bool
@@ -184,17 +202,20 @@ class GptInitParameter:
     max_generate_batch_size: int
     max_rpc_timeout_ms: int
     max_seq_len: int
+    mla_ops_type: MlaOpsType
     mm_position_ids_style: int
     mm_sep_tokens: list[list[int]]
+    model_name: str
     model_rpc_port: int
     moe_inter_padding_size: int
     moe_k: int
     moe_layer_index: list[int]
+    moe_n_group: int
     moe_normalize_expert_scale: bool
     moe_style: int
+    moe_topk_group: int
     mrope_section: list[int]
     nccl_ip: str
-    nccl_port: int
     nope_head_dim: int
     norm_type: str
     num_layers: int
@@ -202,6 +223,7 @@ class GptInitParameter:
     org_embedding_max_pos: int
     pd_sep_enable_fallback: bool
     pd_separation: bool
+    phy_exp_num: int
     position_id_len_factor: int
     position_ids_style: int
     pre_allocate_op_mem: bool
@@ -209,6 +231,7 @@ class GptInitParameter:
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
     prefix_projection: bool
+    py_eplb: typing.Any
     q_lora_rank: int
     q_scaling: float
     qk_norm: bool
@@ -228,11 +251,13 @@ class GptInitParameter:
     rotary_factor1: float
     rotary_factor2: float
     scheduler_reserve_resource_ratio: int
+    scoring_func: int
     seq_size_per_block: int
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
     tokenizer_path: str
+    tp_nccl_port: int
     tp_rank: int
     tp_size: int
     type_vocab_size: int
@@ -249,15 +274,16 @@ class GptInitParameter:
     use_norm_input_residual: bool
     using_hf_sampling: bool
     v_head_dim: int
+    vit_separation: int
     vocab_size: int
     warm_up: bool
     warm_up_with_loss: bool
-    worker_port_offset: int
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
-    def __init__(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> None:
+    worker_port_offset: int
+    def __init__(self, head_num: int, size_per_head: int, num_layers: int, max_seq_len: int, vocab_size: int, hidden_size: int) -> None:
         ...
-    def insertMultiTaskPromptTokens(self, arg0: str, arg1: list[int]) -> None:
+    def insertMultiTaskPromptTokens(self, task_id: str, tokens_id: list[int]) -> None:
         ...
     def isGatedActivation(self) -> bool:
         ...
@@ -271,7 +297,7 @@ class GptInitParameter:
         ...
     def setNormType(self) -> None:
         ...
-    def setTaskType(self, arg0: str) -> None:
+    def setTaskType(self, task: str) -> None:
         ...
 class LoadBalanceInfo:
     available_kv_cache: int
@@ -281,11 +307,54 @@ class LoadBalanceInfo:
     total_kv_cache: int
     def __init__(self) -> None:
         ...
+class MlaOpsType:
+    """
+    Members:
+
+      AUTO
+
+      MHA
+
+      FLASH_INFER
+
+      FLASH_MLA
+    """
+    AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
+    FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
+    FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
+    MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
+    __members__: typing.ClassVar[dict[str, MlaOpsType]]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class MultimodalInput:
     mm_type: int
     tensor: torch.Tensor
     url: str
-    def __init__(self, arg0: str, arg1: torch.Tensor, arg2: int) -> None:
+    def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None:
         ...
 class QuantAlgo:
     def __getstate__(self) -> tuple:
@@ -294,11 +363,11 @@ class QuantAlgo:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
+    def getActivationBits(self) -> int:
+        ...
     def getGroupSize(self) -> int:
         ...
     def getWeightBits(self) -> int:
-        ...
-    def getActivationBits(self) -> int:
         ...
     def isAwq(self) -> bool:
         ...
@@ -318,7 +387,7 @@ class QuantAlgo:
         ...
     def isWeightOnlyPerCol(self) -> bool:
         ...
-    def setQuantAlgo(self, arg0: str, arg1: int, arg2: int) -> None:
+    def setQuantAlgo(self, quant_method: str, bits: int, group_size: int) -> None:
         ...
 class RoleSpecialTokens:
     eos_token_ids: list[int]
@@ -328,28 +397,28 @@ class RoleSpecialTokens:
 class RtpEmbeddingOp:
     def __init__(self) -> None:
         ...
-    def decode(self, arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: list[MultimodalInput]) -> typing.Any:
+    def decode(self, token_ids: torch.Tensor, token_type_ids: torch.Tensor, input_lengths: torch.Tensor, request_id: int, multimodal_inputs: list[MultimodalInput]) -> typing.Any:
         ...
-    def init(self, arg0: typing.Any, arg1: typing.Any) -> None:
+    def init(self, model: typing.Any, mm_process_engine: typing.Any) -> None:
         ...
     def stop(self) -> None:
         ...
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
-    def add_lora(self, arg0: str, arg1: typing.Any, arg2: typing.Any) -> None:
+    def add_lora(self, adapter_name: str, lora_a_weights: typing.Any, lora_b_weights: typing.Any) -> None:
         ...
     def get_engine_schedule_info(self) -> EngineScheduleInfo:
         ...
     def get_load_balance_info(self) -> LoadBalanceInfo:
         ...
-    def init(self, arg0: typing.Any, arg1: typing.Any, arg2: typing.Any, arg3: typing.Any) -> None:
+    def init(self, model: typing.Any, mm_process_engine: typing.Any, propose_model: typing.Any, token_processor: typing.Any) -> None:
         ...
     def ready(self) -> bool:
         ...
-    def remove_lora(self, arg0: str) -> None:
+    def remove_lora(self, adapter_name: str) -> None:
         ...
-    def start_http_server(self, arg0: typing.Any, arg1: typing.Any) -> None:
+    def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, gang_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
         ...
@@ -365,7 +434,7 @@ class SpecialTokens:
     user: RoleSpecialTokens
     def __init__(self) -> None:
         ...
-def create_linear_softmax_handler(arg0: GptInitParameter) -> EmbeddingHandlerOp:
+def create_linear_softmax_handler(gpt_init_params: GptInitParameter) -> EmbeddingHandlerOp:
     ...
 def get_device() -> DeviceExporter:
     ...

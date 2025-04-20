@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/utils/Cm2Config.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/model_rpc/PrefillRpcServer.h"
-
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -174,7 +174,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
     prefill_context.decode_addr = decode_addr;
     prefill_context.grpc_connection = connect_status.value();
-    
+
     FT_LOG_DEBUG("request [%ld] get rpc connection done", prefill_context.request_id);
 }
 
@@ -235,7 +235,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
         prefill_context.generate_input->generate_config->adapter_name);
     FT_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
-    prefill_context.setStream(stream);    
+    prefill_context.setStream(stream);
     FT_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 
@@ -289,6 +289,17 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
     generate_request.set_stage(RemoteStage::GENERATE);
+    // if (prefill_context.getStream()->getLastHiddenStates() != nullptr) {
+    //     FT_LOG_DEBUG("prefill remoteGenerate generate last hidden states.");
+    //     auto device_hidden_states = prefill_context.getStream()->getLastHiddenStates();
+    //     auto host_hidden_states = engine_->getDevice()->clone({*device_hidden_states, ft::AllocationType::HOST});
+    //     printBufferData(*host_hidden_states, "prefill host_hidden_states");
+    //     QueryConverter::transTensorPB(generate_request.mutable_mtp_hidden_states(),
+    //                                   host_hidden_states.get());
+    // } else {
+    //     FT_LOG_DEBUG("prefill no mtp hidden states");
+    // }
+
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Write(generate_request),
                             ErrorCode::REMOTE_GENERATE_FAILED);
 }
