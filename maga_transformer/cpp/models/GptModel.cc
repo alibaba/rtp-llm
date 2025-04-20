@@ -969,8 +969,6 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
 
     auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
-    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
-
     if (dispatched_output.comm_barrier_hook) {
         last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
     } else {
