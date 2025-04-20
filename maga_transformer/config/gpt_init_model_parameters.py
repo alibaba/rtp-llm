@@ -518,6 +518,11 @@ class GptInitModelParameters:
 
         load_cutlass_gemm_config(self.quant_algo)
 
+        hack_layer_num = int(os.environ.get('HACK_LAYER_NUM', 0))
+        if (hack_layer_num):
+            logging.info(f"hack layernum to {hack_layer_num}")
+            self.layer_num = hack_layer_num
+
         self.seq_size_per_block = closest_power_of_2(int(max(seq_size_per_block, self.max_seq_len // 128))) # must be 2^n
         self.seq_size_per_block = int(os.environ.get('SEQ_SIZE_PER_BLOCK', self.seq_size_per_block))
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')

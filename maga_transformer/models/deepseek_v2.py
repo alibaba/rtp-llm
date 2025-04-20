@@ -391,10 +391,6 @@ class DeepSeekV2(BaseModel):
             has_post_decoder_layernorm=True)
         config.activation_type = "gated-silu"
         DeepSeekV2._from_hf(config, ckpt_path)
-        hack_layer_num = int(os.environ.get('HACK_LAYER_NUM', 0))
-        if (hack_layer_num):
-            logging.info(f"hack layernum to {hack_layer_num}")
-            config.layer_num = hack_layer_num
         return config
 
     @staticmethod
