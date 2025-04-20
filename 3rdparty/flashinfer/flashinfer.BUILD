@@ -5,8 +5,8 @@ load("@//3rdparty/flashinfer:def.bzl", "sub_lib")
 
 common_copts = [
     '-DFLASHINFER_ENABLE_BF16',
-    '-DFLASHINFER_ENABLE_FP8',
     '-DFLASHINFER_ENABLE_F16',
+    '-DFLASHINFER_ENABLE_FP8_E4M3',
 ]
 
 sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + [
@@ -18,13 +18,11 @@ cc_library(
     name = "dispatch",
     hdrs = ["dispatch.inc"],
     include_prefix = "generated",
-    copts = cuda_copts() + common_copts,
 )
 
 cc_library(
     name = "aot_default_additional_params",
     hdrs = ["aot_default_additional_params.h"],
-    copts = cuda_copts() + common_copts,
 )
 
 cc_library(
@@ -45,7 +43,6 @@ cc_library(
         "@local_config_cuda//cuda:cublasLt",
     ] + torch_deps(),
     strip_include_prefix = "include",
-    copts = cuda_copts() + common_copts,
     visibility = ["//visibility:public"],
 )
 
@@ -131,6 +128,35 @@ sub_lib('flashinfer_single_prefill', single_decode, cuda_copts() + common_copts)
 sub_lib('flashinfer_sm90', [":generated_sm90"], sm90_cuda_copts)
 
 cc_library(
+    name = "flashinfer_mla",
+    srcs = [
+        "csrc/batch_mla_plan.cu",
+        "csrc/batch_mla_run.cu",
+    ] + glob([
+        "csrc/*.h",
+        "csrc/*.inc",
+    ]) + [
+        "flashinfer_single_decode",
+        "flashinfer_single_prefill",
+        "flashinfer_batch_paged_prefill",
+        "flashinfer_batch_paged_decode",
+        "flashinfer_batch_ragged_prefill",
+        "flashinfer_sm90"
+    ],
+    implementation_deps = [
+        ":dispatch",
+        ":flashinfer_hdrs",
+        ":aot_default_additional_params",
+    ],
+    # mla not support fp8 on current commit
+    copts = cuda_copts() + [
+        '-DFLASHINFER_ENABLE_BF16',
+        '-DFLASHINFER_ENABLE_F16',
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "flashinfer",
     srcs = [
         "csrc/bmm_fp8.cu",
@@ -145,8 +171,6 @@ cc_library(
         "csrc/activation.cu",
         "csrc/batch_decode.cu",
         "csrc/batch_prefill.cu",
-        "csrc/batch_mla_plan.cu",
-        "csrc/batch_mla_run.cu",
         "csrc/single_decode.cu",
         "csrc/single_prefill.cu",
         "csrc/group_gemm_sm90.cu",
@@ -164,6 +188,7 @@ cc_library(
         "flashinfer_sm90"
     ],
     implementation_deps = [
+        ":flashinfer_mla",
         ":dispatch",
         ":flashinfer_hdrs",
         ":aot_default_additional_params",
