@@ -330,11 +330,27 @@ class BaseModel(object):
         return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
 
     def load_tokenizer(self):
-        if self.config.tokenizer_path:
-            self.tokenizer = self.get_tokenizer(self.config)
-            if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
-                self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+        if not self.config.tokenizer_path:
+            self.tokenizer = None
+            return
+        def error_handler(func: Any):
+            def wrapper(*args: Any, **kwargs: Any):
+                try:    
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    method_name = func.__name__
+                    raise RuntimeError(f"{method_name} failed, with input args: {args}, kwargs: {kwargs}")
+            return wrapper
+        
+        self.tokenizer = self.get_tokenizer(self.config)
+        if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
+            self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
             self.config.update_task_prompt_tokens_id(self.tokenizer)
+        if getattr(self.tokenizer, 'encode', None):
+            self.tokenizer.encode = error_handler(self.tokenizer.encode)
+        if getattr(self.tokenizer, 'decode', None):
+            self.tokenizer.decode = error_handler(self.tokenizer.decode)
+        
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)

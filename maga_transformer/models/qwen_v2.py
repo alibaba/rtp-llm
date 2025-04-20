@@ -216,7 +216,7 @@ class QWenV2(QWen):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, verbose=False, trust_remote_code=True, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, verbose=False, trust_remote_code=True)
         tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
         tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
         return tokenizer
