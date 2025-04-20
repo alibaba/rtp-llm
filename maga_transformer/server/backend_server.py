@@ -110,8 +110,8 @@ class BackendServer(object):
         start_time = time.time()
         if isinstance(request, str):
             request = json.loads(request)
-        request[request_id_field_name] = self._global_controller.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+        request[request_id_field_name] = self._global_controller.increment()
 
         try:
             assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
@@ -184,10 +184,10 @@ class BackendServer(object):
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()
-        request[request_id_field_name] = self._global_controller.increment()
         lora_infos: Dict[str, Any] = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})
+        request[request_id_field_name] = self._global_controller.increment()
 
         try:
             assert self._lora_manager
@@ -202,15 +202,15 @@ class BackendServer(object):
             rep = ORJSONResponse(None)
             kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
             kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
+            return rep
         except Exception as e:
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
             rep = ORJSONResponse(format_exception(e), status_code=error_code)
+            return rep
         finally:
             self._global_controller.decrement()
-            
-        return rep
 
     def add_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None

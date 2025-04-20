@@ -23,5 +23,5 @@ class BackendRPCServerVisitor:
         if max_new_tokens <= 0:
             raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
                 f"model max tokens is {self.config.max_seq_len}, " \
-                "request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
+                f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
         return self.model_rpc_client.enqueue(input)

@@ -64,7 +64,8 @@ class AsyncModel:
         max_new_tokens = min(self.config.max_seq_len - input.prompt_length, input.generate_config.max_new_tokens)
         if max_new_tokens <= 0:
             raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                                     f"model max tokens is {self.config.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
+                                     f"model max tokens is {self.config.max_seq_len}, " \
+                                     f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
         return self.decoder_engine_.decode(input)
 
     def get_load_balance_info(self) -> LoadBalanceInfo:

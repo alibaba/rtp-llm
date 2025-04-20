@@ -130,7 +130,10 @@ class FrontendApp(object):
 
         @app.get("/worker_status")
         def worker_status():
-            return request_server("get", g_worker_info.backend_server_port, "worker_status", {})
+            response = request_server("get", g_worker_info.backend_server_port, "worker_status", {})
+            if "error" not in response:
+                response["frontend_available_concurrency"] = self.frontend_server._global_controller.get_available_concurrency()
+            return response
 
         # example : {"peft_info": {"lora_info": {"lora_0": "/lora/llama-lora-test/""}}}
         @app.post("/update")

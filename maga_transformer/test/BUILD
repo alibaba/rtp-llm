@@ -132,4 +132,5 @@ py_test(
     ],
     timeout = 'short',
     exec_properties = {'gpu':'A10'},
+    shard_count = 1,
 )
