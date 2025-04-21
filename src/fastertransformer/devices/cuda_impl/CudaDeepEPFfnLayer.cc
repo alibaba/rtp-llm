@@ -43,7 +43,19 @@ bool CudaDevice::initDeepEPBuffer() {
                                             num_rdma_bytes,
                                             init_params_.use_deepep_low_latency,
                                             init_params_.num_experts / init_params_.ep_size));
-        return deepep_buffer_->init();
+        bool success = deepep_buffer_->init();
+        if (!success) {
+            FT_LOG_ERROR("Failed to initialize DeepEPBuffer");
+            return false;
+        }
+        auto deep_ep_num_sm = autil::EnvUtil::getEnv("DEEP_EP_NUM_SM", 0UL);
+        if (deep_ep_num_sm) {
+            FT_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", deep_ep_num_sm);
+            deepep_buffer_->setNumSMs(deep_ep_num_sm);
+        } else {
+            FT_LOG_INFO("Deep EP use default sm num");
+        }
+        return true;
     } catch (const std::exception& e) {
         FT_LOG_ERROR("Failed to create DeepEPBuffer: %s", e.what());
         return false;

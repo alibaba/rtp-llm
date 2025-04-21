@@ -65,6 +65,11 @@ inline int DeepGemmPlugin::getNumSms() {
     check_cuda_error(cudaGetDeviceProperties(&properties, device_idx));
 
     num_sms = properties.multiProcessorCount;
+    FT_LOG_INFO("cuda device property has sm num %d", num_sms);
+
+    num_sms = autil::EnvUtil::getEnv("DEEP_GEMM_NUM_SM", num_sms);
+    FT_LOG_INFO("deep gemm uses sm num %d", num_sms);
+
     return num_sms;
 }
 

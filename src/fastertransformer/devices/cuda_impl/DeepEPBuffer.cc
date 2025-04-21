@@ -105,6 +105,7 @@ bool DeepEPBuffer::init() {
 }
 
 void DeepEPBuffer::setNumSMs(size_t new_num_sms) {
+    FT_LOG_INFO("DeepEP set num sm = %ld", new_num_sms);
     FT_CHECK(new_num_sms % 2 == 0);
     num_sms_ = new_num_sms;
 }

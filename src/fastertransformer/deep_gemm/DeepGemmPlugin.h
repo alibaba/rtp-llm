@@ -6,7 +6,7 @@
 
 namespace fastertransformer {
 
-class DeepGemmPlugin 
+class DeepGemmPlugin
 {
 public:
     static void gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &output, cudaStream_t stream);
