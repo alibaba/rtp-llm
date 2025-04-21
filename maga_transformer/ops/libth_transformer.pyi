@@ -150,16 +150,15 @@ class GptInitParameter:
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
+    embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
     enable_partial_fallback: bool
     enable_sp: bool
-    ep_comp_size: int
-    ep_nccl_port: int
+    enable_speculative_decoding: bool
     ep_rank: int
     ep_size: int
     eplb_mode: EplbMode
-    eplb_nccl_port: int
     eplb_update_time: int
     expert_num: int
     fast_gen_max_context_len: int
@@ -228,6 +227,7 @@ class GptInitParameter:
     position_ids_style: int
     pre_allocate_op_mem: bool
     pre_seq_len: int
+    prefill_max_wait_timeout_ms: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
     prefix_projection: bool
@@ -241,6 +241,7 @@ class GptInitParameter:
     reserve_runtime_mem_mb: int
     residual_scalar: float
     reuse_cache: bool
+    reverse_e_h_norm: bool
     rope_head_dim: int
     rotary_embedding_base: float
     rotary_embedding_dim: int
@@ -281,6 +282,7 @@ class GptInitParameter:
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     worker_port_offset: int
+    world_size: int
     def __init__(self, head_num: int, size_per_head: int, num_layers: int, max_seq_len: int, vocab_size: int, hidden_size: int) -> None:
         ...
     def insertMultiTaskPromptTokens(self, task_id: str, tokens_id: list[int]) -> None:
@@ -421,6 +423,8 @@ class RtpLLMOp:
     def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, gang_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
+        ...
+    def update_scheduler_info(self, arg0: str) -> None:
         ...
 class SpecialTokens:
     assistant: RoleSpecialTokens

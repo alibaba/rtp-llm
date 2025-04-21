@@ -71,8 +71,6 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.dp_master_port    = params.dp_nccl_port_;
     device_params.dp_tp_master_port = params.dp_tp_nccl_port_;
     device_params.ffn_tp_master_port = params.ffn_tp_nccl_port_;
-    device_params.ep_master_port    = params.ep_nccl_port_;
-    device_params.eplb_master_port  = params.eplb_nccl_port_;
     device_params.tokens_per_block  = params.seq_size_per_block_;
     device_params.mla_ops_type      = params.mla_ops_type_;
     device_params.max_seq_len       = params.max_seq_len_;

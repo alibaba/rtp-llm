@@ -104,7 +104,6 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       moe_size,
                                size_t                       hidden_size,
                                size_t                       update_time,
-                               size_t                       stats_update_time,
                                size_t                       ep_rank,
                                size_t                       ep_size,
                                py::object                   py_eplb,
@@ -143,7 +142,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
     load_flags_.init(device_);
     load_flags_.setReady(false, device_);
-    clean_stats_step_ = (stats_update_time + update_time - 1) / update_time;
+
     resetPlan(true);
 }
 
@@ -222,6 +221,7 @@ void ExpertBalancer::excuteEplbPlan(ft::OverallExpertStats& stats, GptModel& mod
                     applyPlanWeights(model);
                     load_flags_.setReady(false, device_);
                     setPlanStatus(EplbPlanStatus::INIT);
+                    update_cnt_ = 0;
                     resetPlan();
                 }
                 break;
@@ -231,7 +231,6 @@ void ExpertBalancer::excuteEplbPlan(ft::OverallExpertStats& stats, GptModel& mod
 
 void ExpertBalancer::resetPlan(bool force_clean) {
     stats_.reset();
-    update_cnt_ = 0;
 }
 
 void ExpertBalancer::copyFromTensor(torch::Tensor& tensor, ft::BufferPtr& buffer) {

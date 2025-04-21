@@ -39,8 +39,6 @@ struct DeviceInitParams {
     int64_t     dp_master_port     = 0;
     int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
-    int64_t     ep_master_port     = 0;
-    int64_t     eplb_master_port   = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.

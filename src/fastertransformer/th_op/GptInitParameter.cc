@@ -323,8 +323,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(dp_nccl_port, dp_nccl_port_)                           \
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                     \
     DEF_PROPERTY(ffn_tp_nccl_port, ffn_tp_nccl_port_)                   \
-    DEF_PROPERTY(ep_nccl_port, ep_nccl_port_)                           \
-    DEF_PROPERTY(eplb_nccl_port, eplb_nccl_port_)                       \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                       \
     DEF_PROPERTY(http_port, http_port_)                                 \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
@@ -382,10 +380,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(deepseek_mscale_all_dim, deepseek_mscale_all_dim_)     \
     DEF_PROPERTY(reverse_e_h_norm, reverse_e_h_norm_)                   \
     DEF_PROPERTY(enable_eplb, enable_eplb_)                             \
-    DEF_PROPERTY(ep_comp_size, ep_comp_size_)                           \
     DEF_PROPERTY(phy_exp_num, phy_exp_num_)                             \
     DEF_PROPERTY(eplb_update_time, eplb_update_time_)                   \
-    DEF_PROPERTY(eplb_stats_update_time, eplb_stats_update_time_)       \
     DEF_PROPERTY(eplb_mode, eplb_mode_)                                 \
     DEF_PROPERTY(py_eplb, py_eplb_)
 

@@ -70,14 +70,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
             ffn_tp_nccl_param_ = tp_nccl_param_;
         }
     }
-    // if (params.dp_size > 1 && params.tp_rank == 0) {
-    //     initNcclParam(params.dp_rank,
-    //                   params.dp_size,
-    //                   params.master_ip,
-    //                   params.dp_master_port,
-    //                   "RTP_LLM_DP_GROUP_",
-    //                   dp_nccl_param_);
-    // }
+
     if (params.ep_size > 1) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,
@@ -85,20 +78,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
                       params.dp_tp_master_port,
                       "RTP_LLM_DP_TP_GROUP_",
                       dp_tp_nccl_param_);
-    }
-    if (params.ep_size > 1 && params.ep_size == params.dp_size * params.tp_size) {
-        // initNcclParam(params.ep_rank,
-        //               params.ep_size,
-        //               params.master_ip,
-        //               params.ep_master_port,
-        //               "RTP_LLM_EP_GROUP_",
-        //               ep_nccl_param_);
-        // initNcclParam(params.ep_rank,
-        //               params.ep_size,
-        //               params.master_ip,
-        //               params.eplb_master_port,
-        //               "RTP_LLM_EPLB_GROUP_",
-        //               eplb_nccl_param_);
     }
 
     cuggemm_runner_.reset(new cuggemm());
@@ -195,7 +174,6 @@ CudaDevice::~CudaDevice() {
     }
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
-    check_cuda_error(cudaStreamDestroy(eplb_stream_));
     check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
@@ -210,12 +188,6 @@ CudaDevice::~CudaDevice() {
     }
     if (dp_tp_nccl_param_.nccl_comm_) {
         ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
-    }
-    if (ep_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(ep_nccl_param_.nccl_comm_);
-    }
-    if (eplb_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(eplb_nccl_param_.nccl_comm_);
     }
     cache_store_.reset();
 }
@@ -263,7 +235,6 @@ void CudaDevice::initNcclParam(size_t             rank,
 
 void CudaDevice::syncAndCheck() {
     syncCommunication();
-    // note: not sync eplb_stream_ here
     cudaStreamSynchronize(stream_);
     cudaStreamSynchronize(communication_stream_);
     cudaStreamSynchronize(no_block_copy_stream_);
@@ -295,10 +266,6 @@ void CudaDevice::syncCommunication(bool timeout) {
     if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
         FT_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
-    }
-    if (ep_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize ep NCCL communicators rank %d of %d.", ep_nccl_param_.rank_, ep_nccl_param_.world_size_);
-        ftNcclStreamSynchronize(ep_nccl_param_, stream_, timeout);
     }
 }
 
@@ -459,8 +426,6 @@ bool CudaDevice::useGroupGemm() const {
 
 cudaStream_t CudaDevice::getStream(DeviceStream stream) {
     switch (stream) {
-        // case DeviceStream::EPLB:
-        //     return eplb_stream_;
         default:
             return stream_;
     }

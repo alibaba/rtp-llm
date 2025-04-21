@@ -582,8 +582,7 @@ struct MoeConfigs {
     int n_group      = 1;
 
     bool enable_eplb = false;
-    int  ep_comp_size = 32;
-    // TODO(yinzhi): not used yet
+    // NOTE(yinzhi): not used yet
     EplbBalanceMethod balance_method = EplbBalanceMethod::EQUAL;
 };
 

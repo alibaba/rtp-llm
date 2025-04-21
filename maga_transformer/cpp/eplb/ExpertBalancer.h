@@ -75,7 +75,6 @@ public:
                    size_t          moe_size,
                    size_t          hidden_size,
                    size_t          update_time,
-                   size_t          stats_update_time,
                    size_t          ep_rank,
                    size_t          ep_size,
                    py::object      py_eplb,
@@ -119,7 +118,6 @@ private:
     size_t update_time_ = 0;
 
     size_t eplb_plan_cnt_ = 0;
-    size_t clean_stats_step_ = 0;
 
     size_t ep_rank_     = 0;
     size_t ep_size_     = 1;

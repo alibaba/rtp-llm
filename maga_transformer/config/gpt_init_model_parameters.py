@@ -137,16 +137,15 @@ class GptInitModelParameters:
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
+    embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
     enable_partial_fallback: bool
     enable_sp: bool
-    ep_comp_size: int
-    ep_nccl_port: int
+    enable_speculative_decoding: bool
     ep_rank: int
     ep_size: int
     eplb_mode: EplbMode
-    eplb_nccl_port: int
     eplb_update_time: int
     expert_num: int
     fast_gen_max_context_len: int
@@ -215,6 +214,7 @@ class GptInitModelParameters:
     position_ids_style: int
     pre_allocate_op_mem: bool
     pre_seq_len: int
+    prefill_max_wait_timeout_ms: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
     prefix_projection: bool
@@ -228,6 +228,7 @@ class GptInitModelParameters:
     reserve_runtime_mem_mb: int
     residual_scalar: float
     reuse_cache: bool
+    reverse_e_h_norm: bool
     rope_head_dim: int
     rotary_embedding_base: float
     rotary_embedding_dim: int
@@ -268,6 +269,7 @@ class GptInitModelParameters:
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     worker_port_offset: int
+    world_size: int
 
     def __init__(self,
                  head_num: int,
@@ -308,8 +310,6 @@ class GptInitModelParameters:
         self.dp_nccl_port = g_master_info.dp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
-        self.ep_nccl_port = g_master_info.ep_nccl_port
-        self.eplb_nccl_port = g_master_info.eplb_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
@@ -331,9 +331,7 @@ class GptInitModelParameters:
 
         self.world_size = g_parallel_info.world_size
         self.phy2log: List[List[int]] = []
-        self.ep_comp_size = int(os.environ.get('EP_COMP_SIZE', 32))
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
-        self.eplb_stats_update_time = int(os.environ.get("EPLB_STATS_UPDATE_TIME", 5000))
         self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]
         self.is_mtp = False
 

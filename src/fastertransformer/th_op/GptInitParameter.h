@@ -140,10 +140,8 @@ public:
 
     // EPLB
     bool       enable_eplb_      = false;
-    int64_t    ep_comp_size_     = 32;
     int64_t    phy_exp_num_      = 0;  // number of physical experts
     int64_t    eplb_update_time_ = 5000;
-    int64_t    eplb_stats_update_time_ = 5000;
     EplbMode   eplb_mode_        = EplbMode::NONE;
     py::object py_eplb_;
 
@@ -201,8 +199,6 @@ public:
     int64_t     dp_nccl_port_     = 0;
     int64_t     dp_tp_nccl_port_  = 0;
     int64_t     ffn_tp_nccl_port_ = 0;
-    int64_t     ep_nccl_port_     = 0;
-    int64_t     eplb_nccl_port_   = 0;
     int64_t     http_port_        = 0;
     int64_t     model_rpc_port_   = 0;
     int64_t     tp_size_          = 1;

@@ -56,8 +56,7 @@ public:
                 (int)params.scoring_func_,
                 (int)params.moe_topk_group_,
                 (int)params.moe_n_group_,
-                params.enable_eplb_,
-                (int)params.ep_comp_size_
+                params.enable_eplb_
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{
             ft::getActivationType(params.activation_type_str_),

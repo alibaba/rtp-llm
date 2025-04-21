@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 14
+MASTER_INFO_PORT_NUM = 12
 MIN_WORKER_INFO_PORT_NUM = 7
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -30,7 +30,7 @@ class FrontendServerInfo(object):
 
     @staticmethod
     def from_env() -> FrontendServerInfo:
-        return FrontendServerInfo.from_params(dict(os.environ))   
+        return FrontendServerInfo.from_params(dict(os.environ))
 
     @staticmethod
     def from_params(params: Dict[str, str]) -> FrontendServerInfo:
@@ -281,8 +281,6 @@ class MasterInfo:
     dp_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
-    ep_nccl_port: int
-    eplb_nccl_port: int
 
 g_master_info = MasterInfo(
     ip='',
@@ -293,15 +291,12 @@ g_master_info = MasterInfo(
     dp_nccl_port=0,
     dp_tp_nccl_port=0,
     ffn_tp_nccl_port=0,
-    ep_nccl_port=0,
-    eplb_nccl_port=0)
+)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_nccl_port = base_port - 10
     g_master_info.dp_tp_nccl_port = base_port - 11
-    g_master_info.ep_nccl_port = base_port - 12
-    g_master_info.eplb_nccl_port = base_port - 13
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.tp_nccl_port = base_port - 2

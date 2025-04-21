@@ -321,8 +321,6 @@ private:
     NcclParam dp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
-    NcclParam ep_nccl_param_;
-    NcclParam eplb_nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
 
