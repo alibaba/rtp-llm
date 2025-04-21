@@ -60,6 +60,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 functools.partial(merge_qkv_hf)),
             WeightInfo(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
                        transpose),
+            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')]),
+            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')]),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
                        identity),
         ]

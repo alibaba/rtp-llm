@@ -15,10 +15,6 @@ from maga_transformer.model_factory_register import register_model
 class QWenV2MoeWeight(QWenV2Weight):
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_layer_weight_info(layer_id)
-        layer_weights.extend([ 
-            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')]),
-            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')]),
-        ])
         
         return layer_weights
     
