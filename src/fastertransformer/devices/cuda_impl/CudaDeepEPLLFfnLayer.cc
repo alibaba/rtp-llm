@@ -30,29 +30,35 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
     // prepare tensors for call deepep dispatch layout
     auto input_tensor = Buffer2torchTensorWithDstType(*hidden, false, c10::kBFloat16); // [num_token, hidden_size]
     torch::Tensor topk_idx_tensor = Buffer2torchTensorWithDstType(*expert_ids, false, c10::kLong); // [num_token, top_k]
+    try {
+        auto dispatch_output = deepep_buffer_->lowLatencyDispatch(input_tensor,
+                                                                topk_idx_tensor,
+                                                                ll_num_max_token_per_rank,
+                                                                expert_num,
+                                                                true /*use_fp8*/,
+                                                                false /*async_finish*/,
+                                                                params.overlapped /*return_recv_hook*/
+        );
 
-    auto dispatch_output = deepep_buffer_->lowLatencyDispatch(input_tensor,
-                                                              topk_idx_tensor,
-                                                              ll_num_max_token_per_rank,
-                                                              expert_num,
-                                                              true /*use_fp8*/,
-                                                              false /*async_finish*/,
-                                                              params.overlapped /*return_recv_hook*/
-    );
+        BufferPtr packed_recv_x_buffer = torchTensor2Buffer(dispatch_output.packed_recv_x);
 
-    BufferPtr packed_recv_x_buffer = torchTensor2Buffer(dispatch_output.packed_recv_x);
+        // TODO: deep_ep_output might should be removed from output objects.
+        MoeDispatchOutput out{packed_recv_x_buffer, expert_ids, expert_scales};
+        out.deep_ep_ll_output.reset(new DeepEPDispatchOutputLowLatency(dispatch_output));
 
-    // TODO: deep_ep_output might should be removed from output objects.
-    MoeDispatchOutput out{packed_recv_x_buffer, expert_ids, expert_scales};
-    out.deep_ep_ll_output.reset(new DeepEPDispatchOutputLowLatency(dispatch_output));
+        if (params.overlapped) {
+            RUNTIME_ASSERT_OP_ARG(dispatch_output.hook.has_value(), "recv hook is null when overlapped");
+            out.comm_barrier_hook = std::make_unique<DeepEPRecvHook>(
+                dispatch_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
+        }
 
-    if (params.overlapped) {
-        RUNTIME_ASSERT_OP_ARG(dispatch_output.hook.has_value(), "recv hook is null when overlapped");
-        out.comm_barrier_hook = std::make_unique<DeepEPRecvHook>(
-            dispatch_output.hook.value(), std::vector<BufferPtr>(), std::vector<torch::Tensor>());
+        return out;
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("DeepEP ll dispatch failed: %s", e.what());
+        fflush(stdout);
+        fflush(stderr);
+        throw OpException({OpErrorType::ERROR_INTERNAL, "dispatch failed " + std::string(e.what())});
     }
-
-    return out;
 }
 
 MoeCombineOutput CudaDevice::deepEpLLCombine(const MoeCombineParams& params) {

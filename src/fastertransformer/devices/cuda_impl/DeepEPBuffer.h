@@ -48,7 +48,7 @@ public:
     void setNumSMs(size_t new_num_sms);
 
     // Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
-    EventOverlap capture();
+    std::shared_ptr<EventOverlap> capture();
 
     // Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
     static size_t

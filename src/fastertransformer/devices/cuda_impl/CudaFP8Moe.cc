@@ -21,6 +21,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     BufferPtr hidden_fp8;
     BufferPtr hidden_fp8_scales;
     BufferPtr quantize_buffer;
+
+    printBufferData(params.input, "moeFfnFp8_input");
     if (params.input.isQBuffer()) {
         hidden_fp8        = reinterpret_cast<const QBuffer&>(params.input).kernelPtr();
         hidden_fp8_scales = reinterpret_cast<const QBuffer&>(params.input).scalesPtr();
@@ -65,6 +67,20 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     int const  end_expert            = start_expert + num_experts_per_node;
     auto       expert_for_source_row = gate_outputs.expert_ids;
     auto       expert_scales         = gate_outputs.expert_scales;
+    printBufferData(*expert_for_source_row, "expert_for_source_row");
+
+    // these logics are from DeepEPDispatch, might could be fused.
+    if (expert_for_source_row->type() != DataType::TYPE_INT32) {
+        auto expert_idx_tensor = Buffer2torchTensor(expert_for_source_row, false);
+        expert_for_source_row = torchTensor2BufferWithDstType(expert_idx_tensor, torch::kInt32);
+        tensorrt_llm::kernels::genSourceRowRevert(
+            expert_for_source_row->data<int>(),
+            expert_for_source_row->shape()[0],
+            expert_for_source_row->shape()[1],
+            num_experts_per_node * moe_conf.ep_rank,
+            stream_);
+    }
+
     trt::genSourceRow(expert_for_source_row->data<int>(),
                       source_rows->data<int>(),
                       token_num,
@@ -73,6 +89,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                       start_expert,
                       end_expert,
                       stream_);
+    printBufferData(*source_rows, "source_rows");
     trt::sortAndScanSoftmaxOutput(expert_for_source_row->data<int>(),
                                   source_rows->data<int>(),
                                   permuted_experts->data<int>(),
@@ -85,6 +102,9 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                                   sorter,
                                   static_cast<void*>(sorter_ws->data()),
                                   stream_);
+    printBufferData(*permuted_experts, "permuted_experts");
+    printBufferData(*permuted_rows, "permuted_rows");
+    printBufferData(*expert_first_token_offset, "expert_first_token_offset");
     sync_check_cuda_error();
 
     const auto expert_first_token_offset_host     = clone({*expert_first_token_offset, AllocationType::HOST});
@@ -119,6 +139,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
         {DataType::TYPE_FP32, {total_padding_num, hidden_size / 128}}, {"permuted_padding_input_fp8_scales"});
     BufferPtr permuted_padding_scales =
         allocateBuffer({DataType::TYPE_FP32, {total_padding_num}}, {"permuted_padding_scales"});
+    printBufferData(*hidden_fp8, "moe_hidden_fp8");
+    printBufferData(*hidden_fp8_scales, "moe_hidden_fp8_scales");
     expandInputRowsKernelLauncherContiguous<__nv_fp8_e4m3>(hidden_fp8->data<__nv_fp8_e4m3>(),
                                                            hidden_fp8_scales->data<float>(),
                                                            permuted_padding_input->data<__nv_fp8_e4m3>(),
@@ -147,11 +169,13 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                     std::move(permuted_padding_input_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
 
+    printBufferData(*permuted_padding_input_fp8, "fc1_input_fp8");
     DeepGemmPlugin::groupedGemmFp8Contiguous(*permuted_padding_input_fp8,
                                              *weights.moe_gate_weight->kernel,
                                              *fc1_result,
                                              padding_group_index_device->view(0, total_padding_num),
                                              stream_);
+    printBufferData(*fc1_result, "fc1_result");
 
     sync_check_cuda_error();
     using GemmOutputType = __nv_bfloat16;
@@ -181,12 +205,13 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
         new QBuffer(std::move(fc1_activation),
                     std::move(fc1_activation_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
+    printBufferData(*fc1_activation_fp8, "fc1_activation_fp8");
     DeepGemmPlugin::groupedGemmFp8Contiguous(*fc1_activation_fp8,
                                              *weights.moe_down_weight->kernel,
                                              *fc2_result,
                                              padding_group_index_device->view(0, total_padding_num),
                                              stream_);
-
+    printBufferData(*fc2_result, "fc2_result");
     sync_check_cuda_error();
     using OutputType = __nv_bfloat16;
 
@@ -206,6 +231,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
         parallel_config,
         trt::MOEExpertScaleNormalizationMode::NONE,
         stream_);
+
+    printBufferData(*output, "moe_ffn_out");
 
     sync_check_cuda_error();
     return {output};

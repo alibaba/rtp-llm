@@ -40,7 +40,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
         } else {
             return deepEpDispatch(params);
         }
-    }    
+    }
     const auto& moe_conf = params.moe_configs;
 
     auto const ep_size    = moe_conf.ep_size;
@@ -232,6 +232,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             vector<size_t> new_shape = all_output->shape();
             new_shape[0]             = params.origin_token_num;
             BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
+            printBufferData(*output, "scatter_add_input");
             if (output->shape()[0] > 0 && params.origin_token_num > 0) {
                 cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream_);
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
@@ -244,6 +245,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
                                                  this->use_stable_scatter_add,
                                                  stream_);
             }
+            printBufferData(*output, "scatter_add_output");
             return {output};
         } else {
             return {all_output};

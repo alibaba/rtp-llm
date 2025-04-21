@@ -109,8 +109,8 @@ void DeepEPBuffer::setNumSMs(size_t new_num_sms) {
     num_sms_ = new_num_sms;
 }
 
-EventOverlap DeepEPBuffer::capture() {
-    return EventOverlap(deep_ep::EventHandle());
+std::shared_ptr<EventOverlap> DeepEPBuffer::capture() {
+    return std::make_shared<EventOverlap>(deep_ep::EventHandle());
 }
 
 /**

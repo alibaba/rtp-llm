@@ -271,6 +271,8 @@ protected:
                           const BufferPtr&             qkv_buf_fp8);
 
 protected:
+    std::unique_ptr<at::cuda::CUDAStream> torch_default_stream_;
+    std::unique_ptr<at::cuda::CUDAStream> torch_comm_stream_;
     cudaStream_t stream_;
     cudaStream_t no_block_copy_stream_;
     cudaStream_t communication_stream_;

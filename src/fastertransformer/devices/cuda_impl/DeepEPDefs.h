@@ -12,6 +12,7 @@ namespace fastertransformer {
  *   event: the CUDA event captured.
  *   extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
  */
+// TODO(wangyin.yx): this event overlap should be removed.
 class EventOverlap {
 
 public:
@@ -22,9 +23,6 @@ public:
         event_(event), extra_tensors_(extra_tensors) {}
 
     ~EventOverlap() {
-        if (event_.has_value()) {
-            event_.value().current_stream_wait();
-        }
     }
 
 public:
@@ -261,7 +259,9 @@ public:
     , synchronized_(false)
     {};
 
-    ~DeepEPRecvHook() override {};
+    ~DeepEPRecvHook() override {
+        FT_CHECK(synchronized_);
+    };
 
     void hook_sync() const override {
         FT_CHECK(!synchronized_);
@@ -275,6 +275,44 @@ private:
     std::function<void()> hook_;
     std::vector<BufferPtr> hold_buffers_;
     std::vector<torch::Tensor> hold_tensors_;
+    mutable bool synchronized_;
+};
+
+class DeepEPCudaEventHook : public DeviceHook {
+public:
+    DeepEPCudaEventHook(
+        at::cuda::CUDAStream main_stream,
+        deep_ep::EventHandle event_handle,
+        const std::vector<BufferPtr>& hold_buffers = {},
+        const std::vector<torch::Tensor>& hold_tensors = {},
+        std::optional<DeepEPDispatchHandle> dispatch_handle = std::nullopt
+    )
+    : main_stream_(main_stream)
+    , event_handle_(event_handle)
+    , hold_buffers_(hold_buffers)
+    , hold_tensors_(hold_tensors)
+    , dispatch_handle_(dispatch_handle)
+    , synchronized_(false)
+    {
+        FT_CHECK(bool(event_handle_.event));
+    };
+
+    ~DeepEPCudaEventHook() override {
+        FT_CHECK(synchronized_);
+    };
+
+    void hook_sync() const override {
+        FT_CHECK(!synchronized_);
+        main_stream_.unwrap().wait(*event_handle_.event);
+        synchronized_ = true;
+    }
+
+private:
+    at::cuda::CUDAStream main_stream_;
+    deep_ep::EventHandle event_handle_;
+    std::vector<BufferPtr> hold_buffers_;
+    std::vector<torch::Tensor> hold_tensors_;
+    std::optional<DeepEPDispatchHandle> dispatch_handle_;
     mutable bool synchronized_;
 };
 

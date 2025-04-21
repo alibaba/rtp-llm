@@ -24,12 +24,18 @@ using namespace rtp_llm;
 
 namespace fastertransformer {
 
-CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
+CudaDevice::CudaDevice(const DeviceInitParams& params)
+    : DeviceBase(params)
+{
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
-    stream_ = at::cuda::getCurrentCUDAStream().stream();
+
+    torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
+    torch_comm_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
+    stream_ = torch_default_stream_->stream();
+    communication_stream_ = torch_comm_stream_->stream();
+
     check_cuda_error(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
-    check_cuda_error(cudaStreamCreateWithFlags(&communication_stream_, cudaStreamNonBlocking));
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));

@@ -96,45 +96,86 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
     }
 
+    const auto dispatch_begin_event = deepep_buffer_->capture();
+
+    try {
     // call dispatch and force sync, maybe sync is not necessary
-    auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
-        topk_idx_tensor, expert_num, nullptr /*previous_event*/, false /*async*/, false /*allocate_on_comm_stream*/);
+    // FT_LOG_INFO("get dispatch layout expert num %ld, expert_ids: %s, expert_scales: %s, hidden: %s",
+    //             expert_num,
+    //             expert_ids->debugString().c_str(),
+    //             expert_scales ? expert_scales->debugString().c_str() : "null",
+    //             hidden->debugString().c_str());
+        auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
+            topk_idx_tensor, expert_num, dispatch_begin_event, true /*async*/, true /*allocate_on_comm_stream*/);
 
-    deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
+        deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
 
-    auto dispatch_output = deepep_buffer_->dispatch(x,
-                                                    x_scales /*x_scales*/,
-                                                    std::nullopt /*handle*/,
-                                                    dispatch_layout_output.num_tokens_per_rank,
-                                                    dispatch_layout_output.num_tokens_per_rdma_rank,
-                                                    dispatch_layout_output.is_token_in_rank,
-                                                    dispatch_layout_output.num_tokens_per_expert,
-                                                    std::optional<torch::Tensor>(topk_idx_tensor),
-                                                    std::optional<torch::Tensor>(topk_weights_tensor),
-                                                    1 /*expert_alignment*/,
-                                                    dispatch_config,
-                                                    nullptr /*previous_event*/,
-                                                    false /*async_finish*/,
-                                                    false /*allocate_on_comm_stream*/);
+        auto dispatch_output = deepep_buffer_->dispatch(x,
+                                                        x_scales /*x_scales*/,
+                                                        std::nullopt /*handle*/,
+                                                        dispatch_layout_output.num_tokens_per_rank,
+                                                        dispatch_layout_output.num_tokens_per_rdma_rank,
+                                                        dispatch_layout_output.is_token_in_rank,
+                                                        dispatch_layout_output.num_tokens_per_expert,
+                                                        std::optional<torch::Tensor>(topk_idx_tensor),
+                                                        std::optional<torch::Tensor>(topk_weights_tensor),
+                                                        1 /*expert_alignment*/,
+                                                        dispatch_config,
+                                                        dispatch_layout_output.event_overlap,
+                                                        true /*async_finish*/,
+                                                        true /*allocate_on_comm_stream*/);
 
-    BufferPtr recv_topk_idx_buffer = torchTensor2BufferWithDstType(dispatch_output.recv_topk_idx.value(), torch::kInt32);
-    BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
-    const size_t num_experts_per_node = expert_num / moe_conf.ep_size;
-    tensorrt_llm::kernels::genSourceRowRevert(recv_topk_idx_buffer->data<int>(), recv_topk_idx_buffer->shape()[0], recv_topk_idx_buffer->shape()[1], num_experts_per_node * moe_conf.ep_rank, stream_);
-    BufferPtr recv_x_buffer;
-    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        recv_x_buffer.reset(new QBuffer(std::move(torchTensor2Buffer(dispatch_output.recv_x)),
-                                        std::move(torchTensor2Buffer(dispatch_output.recv_x_scales.value())),
-                                        std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
-                                                                       DataType::TYPE_INVALID,
-                                                                       {0},
-                                                                       nullptr)))));
-    } else  {
-        recv_x_buffer = torchTensor2Buffer(dispatch_output.recv_x);
+        DeviceHookPtr comm_hook;
+        if (params.overlapped) {
+            std::vector<BufferPtr> hold_buffers = {
+                hidden,
+                expert_ids,
+                expert_scales,
+            };
+            std::vector<torch::Tensor> hold_tensors = {
+                x,
+                x_scales.value_or(torch::Tensor()),
+                topk_idx_tensor,
+                topk_weights_tensor,
+                dispatch_layout_output.num_tokens_per_rank,
+                dispatch_layout_output.num_tokens_per_rdma_rank.value_or(torch::Tensor()),
+                dispatch_layout_output.num_tokens_per_expert,
+                dispatch_layout_output.is_token_in_rank,
+            };
+            comm_hook = std::make_unique<DeepEPCudaEventHook>(
+                *torch_default_stream_,
+                *(dispatch_output.event_overlap->event()),
+                hold_buffers,
+                hold_tensors,
+                dispatch_output.handle
+            );
+        } else {
+            dispatch_output.event_overlap->currentStreamWait();
+        }
+
+        BufferPtr recv_topk_idx_buffer = torchTensor2Buffer(dispatch_output.recv_topk_idx.value());
+        BufferPtr recv_topk_weights_buffer = torchTensor2Buffer(dispatch_output.recv_topk_weights.value());
+        BufferPtr recv_x_buffer;
+        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            recv_x_buffer.reset(new QBuffer(std::move(torchTensor2Buffer(dispatch_output.recv_x)),
+                                            std::move(torchTensor2Buffer(dispatch_output.recv_x_scales.value())),
+                                            std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                                                                        DataType::TYPE_INVALID,
+                                                                        {0},
+                                                                        nullptr)))));
+        } else  {
+            recv_x_buffer = torchTensor2Buffer(dispatch_output.recv_x);
+        }
+        MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer};
+        out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
+        out.comm_barrier_hook = std::move(comm_hook);
+        return out;
+    } catch (const std::exception& e) {
+        FT_LOG_ERROR("Failed to dispatch: %s", e.what());
+        fflush(stdout);
+        fflush(stderr);
+        throw OpException({OpErrorType::ERROR_INTERNAL, "dispatch failed " + std::string(e.what())});
     }
-    MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer, nullptr};
-    out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
-    return out;
 }
 
 MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
@@ -151,22 +192,53 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     auto  combine_config  = deepep_buffer_->getCombineConfig();
     auto& dispatch_output = params.deep_ep_output;
 
+    auto compute_event = deepep_buffer_->capture();
     auto combine_output = deepep_buffer_->combine(input_tensor,
                                                   dispatch_output->handle.value(),
                                                   dispatch_output->recv_topk_weights,
                                                   combine_config,
-                                                  nullptr /*previous_event*/,
-                                                  false /*async_finish*/,
-                                                  false /*allocate_on_comm_stream*/);
-    // wait combine kernel done, no need, will sync wait on next stream op
+                                                  compute_event,
+                                                  true /*async_finish*/,
+                                                  true /*allocate_on_comm_stream*/);
+
+    RUNTIME_ASSERT_OP_ARG(combine_output.event_overlap, "combine overlap should always exist.");
+
     BufferPtr all_output;
-    if (params.output != nullptr) {
-        all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(params.output->type()));
+    const auto output_type = params.output ? params.output->type() : params.input->type();
+    const auto combined_type = torchDTypeToDataType(combine_output.recv_x.dtype());
+
+    DeviceHookPtr comm_hook;
+    if (params.overlapped) {
+        RUNTIME_ASSERT_OP_ARG(combined_type == output_type, "combined output type %d not equal expected output type %d when overlapped", combined_type, output_type);
+        std::vector<BufferPtr> hold_buffers = {
+            params.input,
+        };
+        std::vector<torch::Tensor> hold_tensors = {
+            input_tensor,
+            combine_output.recv_x,
+        };
+        if (dispatch_output->recv_topk_weights) {
+            hold_tensors.push_back(dispatch_output->recv_topk_weights.value());
+        }
+        if (combine_output.recv_topk_weights) {
+            hold_tensors.push_back(combine_output.recv_topk_weights.value());
+        }
+        comm_hook = std::make_unique<DeepEPCudaEventHook>(
+            *torch_default_stream_,
+            *(combine_output.event_overlap->event()),
+            hold_buffers,
+            hold_tensors,
+            dispatch_output->handle
+        );
     } else {
-        all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(params.input->type()));
+        torch_default_stream_->unwrap().wait(*(combine_output.event_overlap->event().value().event));
+        combine_output.event_overlap->currentStreamWait();
     }
+
+    all_output = torchTensor2BufferWithDstType(combine_output.recv_x, dataTypeToTorchType(output_type));
+
     printBufferData(*all_output, "all_output");
-    return MoeCombineOutput({all_output, all_output, params});
+    return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});
 }
 
 #else

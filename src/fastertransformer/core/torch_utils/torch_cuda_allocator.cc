@@ -16,7 +16,7 @@ bool TorchCudaAllocator::initialized() {
 
 #ifdef UNDER_TORCH_2_6
 at::DataPtr TorchCudaAllocator::allocate(size_t size) {
-#else 
+#else
 at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
 #endif
     auto buffer = device_->allocateBuffer({size}, {"torch_allocated"});
@@ -57,7 +57,7 @@ bool TorchCudaAllocator::isEnabled() const {
 void TorchCudaAllocator::beginAllocateToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id, std::function<bool(cudaStream_t)> filter) {
     throw std::runtime_error("not implemented.");
 };
-  
+
 void TorchCudaAllocator::endAllocateToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id){
     throw std::runtime_error("not implemented.");
 }
@@ -73,7 +73,7 @@ c10::cuda::CUDACachingAllocator::ShareableHandle TorchCudaAllocator::shareIpcHan
 void TorchCudaAllocator::beginAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream, at::cuda::MempoolId_t mempool_id) {
     throw std::runtime_error("not implemented.");
 };
-  
+
 void TorchCudaAllocator::endAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream) {
     throw std::runtime_error("not implemented.");
 }
@@ -111,7 +111,6 @@ void* TorchCudaAllocator::getBaseAllocation(void* ptr, size_t* outSize) {
 }
 
 void TorchCudaAllocator::recordStream(const at::DataPtr& ptr, at::cuda::CUDAStream stream) {
-    throw std::runtime_error("not implemented.");
 }
 
 at::cuda::CUDACachingAllocator::SnapshotInfo TorchCudaAllocator::snapshot() {
