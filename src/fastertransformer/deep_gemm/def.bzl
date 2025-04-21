@@ -10,10 +10,7 @@ preloaded_deps = [
     ":deepgemm_hdrs",
 ] + torch_deps()
 
-sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + [
-    '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
-    '--compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi'
-]
+sm90_cuda_copts = ["-x", "cuda", "-std=c++17", "-shared", "--cuda-include-ptx=sm_90a", "--cuda-gpu-arch=sm_90a", "--compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi"]
 
 def sub_lib(name, srcs):
     native.cc_library(

@@ -2,12 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("//src/fastertransformer/deep_gemm:def.bzl", "sub_lib")
-
-sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + [
-    '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
-    '--compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi'
-]
+load("//src/fastertransformer/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts")
 
 test_linkopts = [
     "-lpython3.10",
