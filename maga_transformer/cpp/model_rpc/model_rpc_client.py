@@ -1,4 +1,5 @@
 import sys
+import os
 from typing import Any, Optional, AsyncGenerator
 import asyncio
 import numpy as np
@@ -142,7 +143,10 @@ class ModelRpcClient(object):
         if not address:
             address = f'localhost:{g_worker_info.rpc_server_port}'
         self._addresses = []
-        if g_parallel_info.dp_size > 1:
+        # for test usage
+        hack_ep_single_entry = bool(int(os.environ.get('HACK_EP_SINGLE_ENTRY', 0)))
+        logging.info(f"hack ep single entry: {hack_ep_single_entry}")
+        if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
             members_info_str = f"[world_rank: {g_parallel_info.world_rank}]"+ \
                 f"[tp_size: {g_parallel_info.tp_size}] all members: " + "{"
             members = get_gang_info().members
