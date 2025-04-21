@@ -140,7 +140,7 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
 
 ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
-        ft::DataType dtype,
+        ft::DataType attn_dtype,
         ft::BufferPtr combo_position_ids)
 {
     AttentionCommonInputs attention_inputs({
@@ -233,7 +233,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
             inputs.sequence_lengths,
             inputs.input_lengths,
             inputs.kv_cache_block_id,
-            dtype,
+            attn_dtype,
             context_batch_size,
             decoder_batch_size,
             (bool)k_cache_buffer_,
@@ -257,7 +257,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         attention_inputs.attention_mask = device_->attentionMask({
                 inputs.input_lengths->view(decoder_batch_size, context_batch_size),
                 *inputs.prefix_lengths,
-                dtype,
+                attn_dtype,
                 description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
             });
     }
@@ -306,7 +306,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     const GptModelInputs& inputs,
     const BufferPtr& hidden,
     const BufferPtr& pre_decoder_residual,
-    const ft::DataType dtype,
+    const ft::DataType attn_dtype,
     const MicroBatchPlan& micro_batch_plan)
 {
     vector<LayerMicroBatchInputs> micro_batch_inputs;
@@ -318,7 +318,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     if (!micro_batch_plan.enable) {
         FT_LOG_DEBUG("micro batch disable when enable is false, use fake");
         // we put everything into the first micro batch, and send empty query to the second micro batch
-        auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, nullptr);
+        auto attention_common_inputs = prepareAttentionInputs(inputs, attn_dtype, nullptr);
         micro_batch_inputs.push_back({hidden, pre_decoder_residual, attention_common_inputs});
 
         // The fake query
@@ -330,8 +330,8 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
         fake_inputs.sequence_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
         fake_inputs.prefix_lengths = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
-        auto fake_hidden = device_->allocateBuffer({dtype, {1, hidden->shape()[1]}});
-        auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, dtype, nullptr);
+        auto fake_hidden = device_->allocateBuffer({hidden->type(), {1, hidden->shape()[1]}});
+        auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, attn_dtype, nullptr);
         micro_batch_inputs.push_back({move(fake_hidden), nullptr, move(attention_common_inputs_fake), true});
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
@@ -354,7 +354,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, d_micro_batch_size);
                 auto micro_hidden = hidden->slice(sliced_token_idx, d_micro_batch_size);
                 auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, d_micro_batch_size) : nullptr;
-                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
+                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
                 micro_batch_inputs.push_back({
                     move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
                 sliced_token_idx += d_micro_batch_size;
@@ -381,7 +381,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
 
                 auto micro_hidden = hidden->slice(sliced_token_idx, slice_token_num);
                 auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
-                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, dtype, nullptr);
+                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
                 micro_batch_inputs.push_back({
                     move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
                 sliced_token_idx += slice_token_num;
@@ -438,9 +438,8 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
             weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
             weights_.token_type_embedding ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
-    const auto dtype = hidden->type();
-    if (residual_scale_fp32_ && residual_scale_->type() != dtype) {
-        residual_scale_ = device_->convert({residual_scale_fp32_, dtype});
+    if (residual_scale_fp32_ && residual_scale_->type() != hidden->type()) {
+        residual_scale_ = device_->convert({residual_scale_fp32_, hidden->type()});
     }
 
     if (device_props_.tp_size > 1) {
@@ -448,6 +447,12 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
 
     hidden = embeddingPost(hidden, inputs);
+
+    auto hidden_dtype = hidden->type();
+    auto attn_dtype = hidden_dtype;
+    if (description_.act_qscheme == QScheme::Qfp8PerTensor) {
+        attn_dtype = DataType::TYPE_QFP8_E4M3;
+    }
 
     // pre layernorm
     BufferPtr pre_decoder_residual = nullptr;
@@ -490,13 +495,8 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         const size_t ffn_rs_hidden = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];
         const size_t ffn_ag_hidden = layer0.ffn_weights.gate_weight->kernel->shape()[0];
-        DataType rs_output_type = dtype;
-        DataType ag_input_type = dtype ;
-        if (description_.act_qscheme == QScheme::Qint8PerTensor) {
-            ag_input_type = DataType::TYPE_QINT8;
-        } else if (description_.act_qscheme == QScheme::Qfp8PerTensor) {
-            ag_input_type = DataType::TYPE_QFP8_E4M3;
-        }
+        DataType rs_output_type = hidden->type();
+        DataType ag_input_type = attn_dtype;
         bool enable_per_token_scale = description_.act_qscheme == QScheme::Qint8PerToken;
         bool enable_ffn_tp = enable_sp && device_props_.ffn_tp_size > 1;
         device_->prepareCommBuffer({max_batch_seq_len, attn_rs_hidden, ffn_rs_hidden, attn_ag_hidden, ffn_ag_hidden, rs_output_type, ag_input_type, enable_per_token_scale, enable_ffn_tp});
@@ -505,12 +505,12 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     auto micro_batch_plan = planMicroBatches(inputs);
     if (device_props_.enable_layer_micro_batch) {
         auto micro_batch_inputs = prepareMicroBatchInputs(
-            inputs, hidden, pre_decoder_residual, dtype,  micro_batch_plan);
-        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
+            inputs, hidden, pre_decoder_residual, attn_dtype,  micro_batch_plan);
+        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), hidden_dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
     } else {
         // prepare resources for all layers
-        auto attention_common_inputs = prepareAttentionInputs(inputs, dtype, combo_position_ids);
-        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), dtype, {}, enable_sp, token_num, pad_token_num};
+        auto attention_common_inputs = prepareAttentionInputs(inputs, attn_dtype, combo_position_ids);
+        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), hidden_dtype, {}, enable_sp, token_num, pad_token_num};
     }
 }
 

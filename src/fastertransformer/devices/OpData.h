@@ -882,7 +882,7 @@ struct DevicePrepParams {
     const BufferPtr &input_lengths;
     const BufferPtr &kv_cache_block_id;
 
-    DataType dtype = DataType::TYPE_INVALID;
+    DataType attn_dtype = DataType::TYPE_INVALID;
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
     bool has_kv_cache     = true;

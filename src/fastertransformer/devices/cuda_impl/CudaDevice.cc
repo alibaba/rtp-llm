@@ -334,7 +334,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
     bool found_cufmha_runner = false;
     use_fp8_fmha_            = useFp8Fmha(params);
-    DataType fmha_datatype   = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.dtype;
+    DataType fmha_datatype   = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.attn_dtype;
     for (auto& runner : cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
                                    params.configs.mask_type,
@@ -372,7 +372,7 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     fmha_type_ = FMHAType::NONE;
-    if (params.dtype == DataType::TYPE_FP32) {
+    if (params.attn_dtype == DataType::TYPE_FP32) {
         fmha_type_       = FMHAType::NONE;
         output.need_mask = true;
     } else if (params.context_batch_size) {
@@ -406,7 +406,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             params.sequence_lengths,
             params.input_lengths,
             params.kv_cache_block_id,
-            params.dtype);
+            params.attn_dtype);
     output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
             this,
             params.configs,
@@ -414,7 +414,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             params.sequence_lengths,
             params.input_lengths,
             params.kv_cache_block_id,
-            params.dtype
+            params.attn_dtype
     );
 
     return output;

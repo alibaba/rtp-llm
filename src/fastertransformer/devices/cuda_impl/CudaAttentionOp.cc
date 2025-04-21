@@ -23,6 +23,10 @@ using namespace rtp_llm;
 
 namespace fastertransformer {
 
+using Slice = torch::indexing::Slice;
+
+constexpr auto TNone = torch::indexing::None;
+
 void flashInferAttnParamsDeleter(void* p) {
     delete (FlashInferAttnParams*)p;
 }
@@ -119,13 +123,13 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
     params->int_host_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 *1024 *1024}, AllocationType::HOST}, {"int_host_workspace"});
     params->page_indptr_host = device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST}, {"prefill_page_indptr_host"});
     params->qo_indptr_host = device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST}, {"qo_indptr_host"});
-    
+
     params->batch_indice_host = device->allocateBuffer({DataType::TYPE_INT32, {prefill_token_num}, AllocationType::HOST}, {"prefill_batch_indices_host"});
     params->positions_host = device->allocateBuffer({DataType::TYPE_INT32, {prefill_token_num}, AllocationType::HOST}, {"prefill_positions_host"});
     params->kvlen_host = device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size}, AllocationType::HOST}, {"kvlen_host"});
     params->paged_kv_last_page_len_1_host = device->allocateBuffer({DataType::TYPE_INT32, {context_batch_size}, AllocationType::HOST}, {"prefill_kv_last_page_len_1_host"});
-    
-    
+
+
     params->qo_indptr_host->data<int>()[0] = 0;
     params->page_indptr_host->data<int>()[0] = 0;
     std::vector<int> prefill_page_indices_vec;
@@ -150,7 +154,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
         if (kv_cache_block_id_host) {
             params->paged_kv_last_page_len_1_host->data<int>()[i] = (input_length - 1) % tokens_per_block + 1;
             params->kvlen_host->data<int>()[i]                    = prefix_length + input_length;
-  
+
             int page_nums = ((input_length + prefix_length) + tokens_per_block - 1) / tokens_per_block;
             for (int j = 0; j < page_nums; j++) {
                 auto page_idx = kv_cache_block_id_host->data<int>()[(i + batch_size) * max_batch_blocks + j];
@@ -159,7 +163,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
             params->page_indptr_host->data<int>()[i + 1]          = int(prefill_page_indices_vec.size());
             accu_q_length                                         += input_length;
             params->qo_indptr_host->data<int>()[i + 1]            = accu_q_length;
-         
+
         }
     }
     if (!same_q_length && params->mla_ops_type == FLASH_MLA) {
@@ -170,7 +174,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
 
     if (kv_cache_block_id_host) {
         params->page_indice_host =
-            device->allocateBuffer({DataType::TYPE_INT32, {size_t(prefill_page_indices_vec.size())}, AllocationType::HOST}, 
+            device->allocateBuffer({DataType::TYPE_INT32, {size_t(prefill_page_indices_vec.size())}, AllocationType::HOST},
                                    {"prefill_page_indices_host"});
         std::copy(
             prefill_page_indices_vec.begin(), prefill_page_indices_vec.end(), params->page_indice_host->data<int>());
@@ -197,7 +201,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
     params->float_workspace_t = Buffer2torchTensor(params->float_workspace, false);
     params->int_workspace_t = Buffer2torchTensor(params->int_workspace, false);
     params->int_host_workspace_t = Buffer2torchTensor(params->int_host_workspace, false);
-   
+
     params->batch_indice_t      = Buffer2torchTensor(params->batch_indice, false);
     params->positions_t          = Buffer2torchTensor(params->positions, false);
 
@@ -222,7 +226,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams
         const BufferPtr &input_lengths_host,
         const BufferPtr &kv_cache_block_id_host,
         fastertransformer::DataType dtype)
-{    
+{
     auto cuda_device = dynamic_cast<CudaDevice*>(device);
     const size_t batch_size         = sequence_lengths_host->shape()[0];
     const int local_head_num        = attn_configs.head_num;
@@ -294,9 +298,15 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
     const int group_size = local_head_num / local_head_num_kv;
     const int tokens_per_block = attn_configs.tokens_per_block;
 
+    // to underlay buffer dtype
+    if (dtype == DataType::TYPE_QFP8_E4M3) {
+        dtype = DataType::TYPE_FP8_E4M3;
+    }
+
     if (!cuda_device ||
         (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16 && dtype != DataType::TYPE_FP8_E4M3) ||
-        attn_configs.kv_cache_dtype != KvCacheDataType::BASE ||
+        (attn_configs.kv_cache_dtype != KvCacheDataType::BASE &&
+	 !(attn_configs.kv_cache_dtype == KvCacheDataType::FP8 && dtype == DataType::TYPE_FP8_E4M3)) ||
         (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)  ||
         attn_configs.mask_type != causalMask ||
         attn_configs.q_scaling != 1.0f ||
@@ -318,7 +328,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
 
     // prepare flashinfer params for decode
     prepareDecodeFlashInferAttnParamsImpl(params, device, attn_configs, sequence_lengths_host, kv_cache_block_id_host, batch_size, tokens_per_block, max_batch_blocks);
-    
+
     if (!attn_configs.use_mla || params->mla_ops_type == MlaOpsType::MHA) {
         if (params->decode) {
             params->plan = BatchDecodeWithPagedKVCachePlan(
@@ -346,7 +356,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
                     params->int_host_workspace_t, // page_locked_int_workspace_buffer
                     params->qo_indptr_host_t, // qo_indptr
                     params->page_indptr_host_t, // kv_indptr
-                    torch::empty(0, dataTypeToTorchType(dtype)), // kv_len_arr, not in use yet
+                    torch::empty(0, dataTypeToTorchType(DataType::TYPE_INT32)), // kv_len_arr, not in use yet
                     batch_size, // total_num_rows
                     batch_size, // batch_size
                     local_head_num, // num_qo_heads
@@ -458,10 +468,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         }
     }
 
-    // int8
-    float* scale_out_ptr = nullptr;
-    int    int8_mode     = 0;
-
     if (fmha_type_ == FMHAType::NONE && prefix_prompt_param.max_prefix_prompt_length > 0) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                          invokeLoadPrefixKVCache,
@@ -474,8 +480,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                          head_num,
                                          kv_head_num,
                                          size_per_head,
-                                         scale_out_ptr,
-                                         int8_mode,
+                                         nullptr, // scale_out_ptr,
+                                         0, //int8_mode,
                                          stream_);
         sync_check_cuda_error();
     }
@@ -512,8 +518,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             size_per_head,
             params.configs.rope_config,
             params.configs.use_logn_attn,
-            scale_out_ptr,
-            int8_mode,
+            nullptr, // scale_out_ptr,
+            0, // int8_mode,
             fmha_type_ == FMHAType::PAGED_TRT_V2,
             store_qkv,
             store_q,
@@ -565,13 +571,13 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const auto& output = params.output;
 
     const T* qkv_buf_ptr = params.input.data<T>();
-    void* qkv_buf_2_ = nullptr;
-    BufferPtr fp8_qkv_buf;
+    void* attn_out_ptr = nullptr;
+    BufferPtr f16_out;
     if (use_fp8_fmha) {
-        fp8_qkv_buf = device->allocateBuffer({DataType::TYPE_FP16, output.shape(), AllocationType::DEVICE}, {"fp8_qkv_buf"});
-        qkv_buf_2_ = fp8_qkv_buf->data();
+        f16_out = device->allocateBuffer({params.input.type(), output.shape(), AllocationType::DEVICE}, {"f16_out"});
+        attn_out_ptr = f16_out->data();
     } else {
-        qkv_buf_2_ = output.data();
+        attn_out_ptr = output.data();
     }
 
     const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
@@ -591,15 +597,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const float* linear_bias_slopes = params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
     const bool* masked_tokens = nullptr;
 
-    // TODO(lidongjin) support int8
-    const float* query_weight_scale_out            = nullptr;
-    const float* attention_output_orig_quant_scale = nullptr;
-
-    if (params.weights.static_scale_reciprocal_weight) {
-        attention_output_orig_quant_scale = reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data());
-    }
-
-    int int8_mode = 0;
     tensorrt_llm::common::QuantMode kv_cache_quant_mode = trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
     if (params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, true, false, true);
@@ -607,19 +604,32 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
     }
 
+    // TODO: refactor QBuffer to suppport view and return QBuffer
+    if (params.output.isQBuffer()) {
+        params.output.updateTypeAndShape(DataType::TYPE_FP8_E4M3, params.output.shape());
+    }
+
     auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (flash_infer_attn_params && flash_infer_attn_params->plan.numel() > 0) {
         const auto &flashinfer = *flash_infer_attn_params;
+
         at::Tensor qkv_input = Buffer2torchTensor(params.input, false);
         if (params.weights.qkv_weight->bias) {
-            qkv_input = at::add(Buffer2torchTensor(params.weights.qkv_weight->bias, false), qkv_input);
+             qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
         }
         qkv_input = qkv_input.reshape({-1, int(local_head_num + local_head_num_kv * 2), int(size_per_head)});
-        auto q = qkv_input.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None, local_head_num), torch::indexing::Slice(torch::indexing::None)});
-        auto append_k = qkv_input.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(local_head_num, local_head_num + local_head_num_kv), torch::indexing::Slice(torch::indexing::None)});
-        auto append_v = qkv_input.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(local_head_num + local_head_num_kv, torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+        auto q = qkv_input.index({Slice(TNone), Slice(TNone, local_head_num), Slice(TNone)});
+        auto append_k = qkv_input.index({Slice(TNone), Slice(local_head_num, local_head_num + local_head_num_kv), Slice(TNone)});
+        auto append_v = qkv_input.index({Slice(TNone), Slice(local_head_num + local_head_num_kv, TNone), Slice(TNone)});
         auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
         auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
+	at::Tensor out;
+
+	if (params.output.type() == DataType::TYPE_FP8_E4M3) {
+	    out = Buffer2torchTensor(f16_out, false);
+	} else {
+	    out = Buffer2torchTensor(params.output, false);
+	}
 
         apply_rope_pos_ids(q,
                            append_k,
@@ -633,8 +643,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                            reinterpret_cast<int64_t>(stream));
         sync_check_cuda_error();
 
-        append_paged_kv_cache(append_k,
-                              append_v,
+        append_paged_kv_cache(append_k.to(k_cache.type()),
+                              append_v.to(v_cache.type()),
                               flashinfer.batch_indice_t,
                               flashinfer.positions_t,
                               k_cache,
@@ -643,8 +653,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                               flashinfer.page_indptr_t,
                               flashinfer.paged_kv_last_page_len_t,
                               1, reinterpret_cast<int64_t>(stream));
-        sync_check_cuda_error();
 
+        sync_check_cuda_error();
         if (flashinfer.decode) {
             BatchDecodeWithPagedKVCacheRun(
                     flashinfer.float_workspace_t, // float_workspace_buffer
@@ -656,7 +666,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                     flashinfer.page_indptr_t, // paged_kv_indptr
                     flashinfer.page_indice_t, // paged_kv_indices
                     flashinfer.paged_kv_last_page_len_1_t, // paged_kv_last_page_len
-                    Buffer2torchTensor(params.output, false), // o
+                    out,
                     std::nullopt, // maybe_lse
                     1, // kv_layout_code
                     -1, // window_left
@@ -678,7 +688,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                     flashinfer.page_indptr_t, // paged_kv_indptr
                     flashinfer.page_indice_t, // paged_kv_indices
                     flashinfer.paged_kv_last_page_len_1_t, // paged_kv_last_page_len
-                    Buffer2torchTensor(params.output, false), // o
+                    out,
                     std::nullopt, // maybe_lse
                     1, // mask_mode_code,
                     1, // layout
@@ -692,15 +702,23 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                     params.configs.rope_config.base,
                     reinterpret_cast<int64_t>(stream));
         }
-
-        sync_check_cuda_error();
+        if (params.weights.static_scale_reciprocal_weight) {
+            auto scale = Buffer2torchTensor(params.weights.static_scale_reciprocal_weight->kernel, false);
+            auto fp8_out = Buffer2torchTensor(params.output, false);
+            fp8_out.copy_((scale * out).to(torch::kFloat8_e4m3fn));
+        }
     } else {
+        const float* attention_output_orig_quant_scale = nullptr;
+
+        if (params.weights.static_scale_reciprocal_weight) {
+            attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
+        }
         fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
                 qkv_buf_ptr,
                 bias_ptr,
                 relative_attention_bias_ptr,
                 nullptr, // cache_indir
-                reinterpret_cast<T*>(qkv_buf_2_),
+                reinterpret_cast<T*>(attn_out_ptr),
                 nullptr, // finished
                 sequence_lengths,
                 batch_size,
@@ -721,9 +739,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                 relative_attention_bias_stride,
                 linear_bias_slopes,
                 masked_tokens,
-                query_weight_scale_out,
+                nullptr, // query_weight_scale_out
                 attention_output_orig_quant_scale,
-                int8_mode,
+                0, // int8_mode,
                 kv_cache_quant_mode,
                 use_multi_block_mode,
                 (int)max_seq_len_tile,
@@ -734,13 +752,12 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                 params.configs.softmax_extra_scale,
                 kv_block_array,
                 stream);
+        sync_check_cuda_error();
+        if (f16_out) {
+            cudaMemcpyAsync(output.data(), f16_out->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
+        }
+        sync_check_cuda_error();
     }
-    sync_check_cuda_error();
-
-    if (fp8_qkv_buf) {
-        cudaMemcpyAsync(output.data(), fp8_qkv_buf->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
-    }
-    sync_check_cuda_error();
 }
 
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {

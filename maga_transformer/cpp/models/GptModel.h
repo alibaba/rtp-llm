@@ -194,7 +194,7 @@ public:
 protected:
     ft::AttentionCommonInputs prepareAttentionInputs(
         const GptModelInputs& inputs,
-        ft::DataType dtype,
+        ft::DataType attn_dtype,
         ft::BufferPtr combo_position_ids);
 
     MicroBatchPlan planMicroBatches(const GptModelInputs& inputs);
@@ -202,7 +202,7 @@ protected:
         const GptModelInputs& model_inputs,
         const ft::BufferPtr& hidden,
         const ft::BufferPtr& pre_decoder_residual,
-        const ft::DataType dtype,
+        const ft::DataType attn_dtype,
         const MicroBatchPlan& micro_batch_plan);
 
     virtual ft::BufferPtr embeddingPost(const ft::BufferPtr& hidden_states, const GptModelInputs& inputs);

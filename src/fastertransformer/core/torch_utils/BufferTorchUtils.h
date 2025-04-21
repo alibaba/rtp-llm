@@ -162,7 +162,7 @@ inline torch::Tensor Buffer2torchTensor(const Buffer& buf, bool copyData = true)
         if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
             memcpy(out.data_ptr(), buf.data(), buf.sizeBytes());
         } else {
-            throw std::runtime_error("not implemented");
+            throw std::runtime_error("Buffer2torchTensor gpu copy not implemented");
         }
         return out;
     } else {
