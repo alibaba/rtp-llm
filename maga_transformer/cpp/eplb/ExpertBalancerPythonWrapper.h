@@ -16,9 +16,26 @@ struct EplbPlanTensors {
 
     void init(int log_exp_num, int phy_exp_num);
 
-    std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-    to_tuple() const {
-        return {layer_id, layer_id_buf, logic_expert_cnt, log2phy, phy2log, moe_weight_1, moe_weight_2};
+    using tuple_type = std::tuple<int,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor,
+                                  torch::Tensor>;
+
+    tuple_type to_tuple() const {
+        return {layer_id,
+                layer_id_buf,
+                logic_expert_cnt,
+                log2phy,
+                phy2log,
+                moe_weight_1,
+                moe_weight_2,
+                moe_scale_1,
+                moe_scale_2};
     }
 };
 
