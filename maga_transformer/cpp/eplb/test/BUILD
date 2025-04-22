@@ -32,5 +32,6 @@ py_test(
         ":th_eplb_py_wrapper_test"
     ],
     deps = [
+        "//maga_transformer:torch"
     ],
 )
