@@ -12,8 +12,10 @@
 #define RETURN_IF_STATUS_OR_ERROR(status_or)                                                                           \
     do {                                                                                                               \
         auto&& _status_or = (status_or);                                                                               \
-        if (ABSL_PREDICT_FALSE(!_status_or.ok()))                                                                      \
+        if (ABSL_PREDICT_FALSE(!_status_or.ok())) {                                                                    \
+            FT_LOG_ERROR("error msg: %s", _status_or.status().ToString().c_str());                                     \
             return _status_or.status();                                                                                \
+	} \
     } while (0)
 
 #define RETURN_IF_STATUS_ERROR(status)                                                                                 \
