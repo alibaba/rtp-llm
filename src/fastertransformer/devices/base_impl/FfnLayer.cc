@@ -157,7 +157,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto& moe_conf = params.configs.moe_configs.value();
-    MoeDispatchOutput dispatched_output = epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf});
+    MoeDispatchOutput dispatched_output = epDispatch({params.input, *gate_output.expert_ids, *gate_output.expert_scales, moe_conf, false, QScheme::NoQuantize, params.expert_stats});
     auto hidden_states = dispatched_output.hidden;
     auto moe_ffn_params = FfnLayerParams(
             {*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
