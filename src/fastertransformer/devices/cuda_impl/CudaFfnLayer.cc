@@ -312,31 +312,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     }
 
     // EPLB
-    if (params.expert_stats.has_value() && params.weights.log2phy) {
-        const auto& moe_conf     = params.configs.moe_configs.value();
-        const auto& expert_stats = params.expert_stats.value();
-
-        int* log2phy = params.weights.log2phy->data<int>();
-        int* logic_expert_cnt = params.weights.logic_expert_cnt->data<int>();
-
-        switch (moe_conf.balance_method) {
-            case EplbBalanceMethod::EQUAL:
-                launch_equal_expert_balance(expert_for_source_row->data<int>(),
-                                            expert_stats.getLayerLogStats(),
-                                            log2phy,
-                                            logic_expert_cnt,
-                                            expert_stats.log_exp_num,
-                                            expert_stats.phy_exp_num,
-                                            expert_for_source_row->size(),
-                                            moe_conf.ep_rank,
-                                            stream_);
-                break;
-            default:
-                throw std::runtime_error("Unsupported balance method");
-                break;
-        }
-        sync_check_cuda_error();
-    }
+    balanceExperts(expert_for_source_row, params.expert_stats, params.configs.moe_configs.value(), params.weights);
 
     return {expert_for_source_row, expert_scales};
 }

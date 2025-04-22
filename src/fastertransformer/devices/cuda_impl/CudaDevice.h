@@ -173,10 +173,6 @@ private:
     void processLogits(const GreedyParams& params, const BufferPtr &device_tokens, const BufferPtr &transposed_tokens);
     void completeSampleGreedy(const GreedyParams& params, const BufferPtr &transposed_tokens);
 
-    void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
-                              const OptionalExpertStats& expert_stats,
-                              BufferPtr                  expert_ids) override;
-
 public:
     cudaStream_t getStream() {return stream_;}
     cudaStream_t getStream(DeviceStream stream);
@@ -279,6 +275,15 @@ protected:
                           const BufferPtr&             qkv_buf_fp8);
 
     MoeEpPlanOutput equalEpPlan(const MoeEpPlanParams& params);
+
+    void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
+        const OptionalExpertStats& expert_stats,
+        BufferPtr                  expert_ids) override;
+
+    void balanceExperts(BufferPtr expert_ids,
+    const OptionalExpertStats& expert_stats,
+    const MoeConfigs&      moe_conf,
+    const FfnLayerWeights& weights);
 
 protected:
     std::unique_ptr<at::cuda::CUDAStream> torch_default_stream_;

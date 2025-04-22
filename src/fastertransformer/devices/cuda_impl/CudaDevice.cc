@@ -679,4 +679,34 @@ void CudaDevice::updateExpertGpuLoads(const MoeConfigs&          moe_conf,
                                 stream_);
     }
 }
+
+void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
+                                const OptionalExpertStats& expert_stats,
+                                const MoeConfigs&          moe_conf,
+                                const FfnLayerWeights&     weights) {
+    if (expert_stats.has_value() && weights.log2phy) {
+        const auto& expert_stats_v = expert_stats.value();
+
+        int* log2phy          = weights.log2phy->data<int>();
+        int* logic_expert_cnt = weights.logic_expert_cnt->data<int>();
+
+        switch (moe_conf.balance_method) {
+            case EplbBalanceMethod::EQUAL:
+                launch_equal_expert_balance(expert_ids->data<int>(),
+                                            expert_stats_v.getLayerLogStats(),
+                                            log2phy,
+                                            logic_expert_cnt,
+                                            expert_stats_v.log_exp_num,
+                                            expert_stats_v.phy_exp_num,
+                                            expert_ids->size(),
+                                            moe_conf.ep_rank,
+                                            stream_);
+                break;
+            default:
+                throw std::runtime_error("Unsupported balance method");
+                break;
+        }
+        sync_check_cuda_error();
+    }
+}
 }; // namespace fastertransformer
