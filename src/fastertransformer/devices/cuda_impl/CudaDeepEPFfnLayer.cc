@@ -23,15 +23,19 @@ bool CudaDevice::initDeepEPBuffer() {
     // TODO: check if get right
     ll_num_max_token_per_rank = (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
     int64_t num_rdma_bytes = 0;
+    int num_qps_per_rank = 1;
     if(init_params_.use_deepep_low_latency) { // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
+        num_qps_per_rank = num_experts / init_params_.ep_size;
     }
     else if (init_params_.use_deepep_internode) { // normal-kernel internode
         num_rdma_bytes = int(1e9);
+        num_qps_per_rank = std::max(12, (int)(num_experts / init_params_.ep_size));
     }
     else{
         num_rdma_bytes = 0; // normal-kernel intranode
+        num_qps_per_rank = 1;
     }
 
     try {
@@ -42,8 +46,8 @@ bool CudaDevice::initDeepEPBuffer() {
                                             world_size,
                                             int(1e9),
                                             num_rdma_bytes,
-                                            init_params_.use_deepep_low_latency,
-                                            num_experts / init_params_.ep_size));
+                                            init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
+                                            num_qps_per_rank));
         bool success = deepep_buffer_->init();
         if (!success) {
             FT_LOG_ERROR("Failed to initialize DeepEPBuffer");

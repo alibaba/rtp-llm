@@ -29,7 +29,7 @@ bool DeepEPBuffer::init() {
     std::vector<std::string> ipc_handles(world_size_, "");
     {
         // init ipc handles, ipc handles is struct
-        std::string local_ipc_handle = buffer_->get_local_ipc_handle();
+        std::string local_ipc_handle = buffer_->get_local_ipc_handle_string();
         assert(local_ipc_handle.size() == CUDA_IPC_HANDLE_SIZE);
 
         // local ipc handle to buffer
@@ -57,26 +57,25 @@ bool DeepEPBuffer::init() {
 
     std::string root_unique_id;
     if (buffer_->get_num_rdma_ranks() > 1 || low_latency_mode_) {
-        if (low_latency_mode_) {
-            // low latency set env
-            FT_CHECK(num_qps_per_rank_ > 0);
-            setenv("NVSHMEM_DISABLE_P2P", "1", 1);
-            setenv("NVSHMEM_IB_ENABLE_IBGDA", "1", 1);
-            setenv("NVSHMEM_IBGDA_NIC_HANDLER", "gpu", 1);
-            std::string num_qps_per_rank_str = std::to_string(num_qps_per_rank_);
-            setenv("NVSHMEM_IBGDA_NUM_RC_PER_PE", num_qps_per_rank_str.c_str(), 1);
-            //! Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            setenv("NVSHMEM_QP_DEPTH", "1024", 1);
-            //! NVSHMEM initialization requires at least 256 MiB
-            std::string nvshmem_cumem_granularity_str = std::to_string(1 << 29);  // 2^29 = 536870912 (512 MiB)
-            setenv("NVSHMEM_CUMEM_GRANULARITY", nvshmem_cumem_granularity_str.c_str(), 1);
-        }
+        // low latency set env
+        FT_CHECK(num_qps_per_rank_ > 0);
+        setenv("NVSHMEM_DISABLE_P2P", "1", 1);
+        setenv("NVSHMEM_IB_ENABLE_IBGDA", "1", 1);
+        setenv("NVSHMEM_IBGDA_NIC_HANDLER", "gpu", 1);
+        std::string num_qps_per_rank_str = std::to_string(num_qps_per_rank_);
+        setenv("NVSHMEM_IBGDA_NUM_RC_PER_PE", num_qps_per_rank_str.c_str(), 1);
+        FT_LOG_DEBUG("num_qps_per_rank is set to %s", num_qps_per_rank_str.c_str());
+        //! Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
+        setenv("NVSHMEM_QP_DEPTH", "1024", 1);
+        //! NVSHMEM initialization requires at least 256 MiB
+        std::string nvshmem_cumem_granularity_str = std::to_string(1 << 29);  // 2^29 = 536870912 (512 MiB)
+        setenv("NVSHMEM_CUMEM_GRANULARITY", nvshmem_cumem_granularity_str.c_str(), 1);
 
         auto      NVSHMEM_UNIQUE_ID_SIZE            = sizeof(nvshmemx_uniqueid_t);
         BufferPtr all_nvshmem_unique_ids_buffer_gpu = device_->allocateBuffer(
             {DataType::TYPE_INT8, {world_size_, NVSHMEM_UNIQUE_ID_SIZE}, AllocationType::DEVICE});
         if ((low_latency_mode_ && world_rank_ == 0) || (!low_latency_mode_ && buffer_->get_rdma_rank() == 0)) {
-            auto local_nvshmem_unique_id = buffer_->get_local_nvshmem_unique_id();
+            auto local_nvshmem_unique_id = buffer_->get_local_nvshmem_unique_id_string();
             FT_CHECK(local_nvshmem_unique_id.size() == NVSHMEM_UNIQUE_ID_SIZE);
             std::vector<int8_t> local_nvshmem_unique_id_vec(local_nvshmem_unique_id.begin(),
                                                             local_nvshmem_unique_id.end());
@@ -100,7 +99,7 @@ bool DeepEPBuffer::init() {
         }
     }
 
-    buffer_->sync(device_ids, ipc_handles, root_unique_id);
+    buffer_->sync_string(device_ids, ipc_handles, root_unique_id);
     return true;
 }
 
