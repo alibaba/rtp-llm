@@ -136,7 +136,8 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         #TODO: CHECK COS SIN CACHE TYPE
         cos_sin_cache = self.cos_sin_cache
         sequence_length_mins_one = torch.tensor([x - 1 for x in sequence_lengths], dtype=torch.int32)
-        self.mla_rotary_kvcache_op.init(sequence_length_mins_one, torch.tensor(intput_lengths, dtype=torch.int32), page_size, block_id_map)
+        prefix_length_t = torch.zeros((len(intput_lengths) - len(sequence_lengths)), dtype=torch.int32)
+        self.mla_rotary_kvcache_op.init(prefix_length_t, sequence_length_mins_one, torch.tensor(intput_lengths, dtype=torch.int32), page_size, block_id_map)
         
         kv_cache = torch.zeros([total_page_num, page_size, self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
         ckv_cache = kv_cache[:, :, :self.config.kv_lora]

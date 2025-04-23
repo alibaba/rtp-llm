@@ -102,7 +102,7 @@ void ROCmDevice::DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const tor
     torch::bmm_out(qkv_output_t.transpose_(0, 1), mla_out_t.transpose(0, 1), w_vc_t);
 }
 
-void ROCmDevice::mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) {
+void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     auto fused_q_input = allocateBuffer({params.q.type(), {params.q.shape()[0], params.configs.head_num, params.configs.kv_lora_rank + params.configs.rope_head_dim}, AllocationType::DEVICE});
     auto fused_q_input_t = Buffer2torchTensor(fused_q_input, false);
     mlaRotaryWriteKVCache({params.q,

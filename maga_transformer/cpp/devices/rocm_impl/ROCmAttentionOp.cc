@@ -162,6 +162,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
  FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(
          fastertransformer::DeviceBase *device,
          const fastertransformer::AttentionConfigs &attn_configs,
+         const BufferPtr &prefix_lengths_host,
          const BufferPtr &sequence_lengths_host,
          const BufferPtr &input_lengths_host,
          const BufferPtr &kv_cache_block_id_host,

@@ -76,20 +76,21 @@ namespace rtp_llm {
         torch::Tensor plan;
     
         static FlashInferAttnParamsPtr prepareDecodeFlashInferAttnParams(
-                fastertransformer::DeviceBase *device,
-                const fastertransformer::AttentionConfigs &attn_configs,
-                const BufferPtr &sequence_lengths_host,
-                const BufferPtr &input_lengths_host,
-                const BufferPtr &kv_cache_block_id_host,
-                DataType dtype);
+            fastertransformer::DeviceBase *device,
+            const fastertransformer::AttentionConfigs &attn_configs,
+            const BufferPtr &sequence_lengths_host,
+            const BufferPtr &input_lengths_host,
+            const BufferPtr &kv_cache_block_id_host,
+            DataType dtype);
     
         static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
-                fastertransformer::DeviceBase *device,
-                const fastertransformer::AttentionConfigs &attn_configs,
-                const BufferPtr &sequence_lengths_host,
-                const BufferPtr &input_lengths_host,
-                const BufferPtr &kv_cache_block_id_host,
-                DataType dtype);
+            fastertransformer::DeviceBase *device,
+            const fastertransformer::AttentionConfigs &attn_configs,
+            const BufferPtr &prefix_lengths_host,
+            const BufferPtr &sequence_lengths_host,
+            const BufferPtr &input_lengths_host,
+            const BufferPtr &kv_cache_block_id_host,
+            DataType dtype);
     };
 
 class ROCmEvent : public DeviceEvent {
@@ -151,7 +152,7 @@ public:
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
     void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
 
-    void mlaDecoderSelfAttention(const MlaAttentionModuleParams& params) override;
+    void mlaAbsorbAttention(const MlaAttentionModuleParams& params);
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     SliceOutput slice(const SliceParams& params) override;
 

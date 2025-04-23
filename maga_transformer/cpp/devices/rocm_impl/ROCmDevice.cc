@@ -176,14 +176,15 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
              params.sequence_lengths,
              params.input_lengths,
              params.kv_cache_block_id,
-             params.dtype);
+             params.attn_dtype);
      output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
              this,
              params.configs,
+             params.prefix_lengths,
              params.sequence_lengths,
              params.input_lengths,
              params.kv_cache_block_id,
-             params.dtype
+             params.attn_dtype
      );
     return std::move(output);
 }
