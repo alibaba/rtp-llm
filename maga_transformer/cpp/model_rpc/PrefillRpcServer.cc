@@ -289,16 +289,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
     generate_request.set_stage(RemoteStage::GENERATE);
-    // if (prefill_context.getStream()->getLastHiddenStates() != nullptr) {
-    //     FT_LOG_DEBUG("prefill remoteGenerate generate last hidden states.");
-    //     auto device_hidden_states = prefill_context.getStream()->getLastHiddenStates();
-    //     auto host_hidden_states = engine_->getDevice()->clone({*device_hidden_states, ft::AllocationType::HOST});
-    //     printBufferData(*host_hidden_states, "prefill host_hidden_states");
-    //     QueryConverter::transTensorPB(generate_request.mutable_mtp_hidden_states(),
-    //                                   host_hidden_states.get());
-    // } else {
-    //     FT_LOG_DEBUG("prefill no mtp hidden states");
-    // }
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Write(generate_request),
                             ErrorCode::REMOTE_GENERATE_FAILED);

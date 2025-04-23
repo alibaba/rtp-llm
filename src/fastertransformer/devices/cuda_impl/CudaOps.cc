@@ -22,9 +22,6 @@ namespace fastertransformer {
 void CudaDevice::copy(const CopyParams& params) {
     params.check();
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
-    // if (params.stream == DeviceStream::EPLB) {
-    //     stream = eplb_stream_;
-    // }
 
     if (params.dst.isQBuffer() && params.src.isQBuffer()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
@@ -321,16 +318,10 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
     switch (mode) {
         case ParallelMode::TP:
             return tp_nccl_param_;
-        // case ParallelMode::DP:
-        //     return dp_nccl_param_;
         case ParallelMode::DP_AND_TP:
             return dp_tp_nccl_param_;
         case ParallelMode::FFN_TP:
             return ffn_tp_nccl_param_;
-        // case ParallelMode::EP:
-        //     return ep_nccl_param_;
-        // case ParallelMode::EPLB:
-        //     return eplb_nccl_param_;
         default:
             FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -339,10 +330,6 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
 }
 
 cudaStream_t CudaDevice::getCommStream(ParallelMode mode, bool overlap) {
-    // if (mode == ParallelMode::EPLB) {
-    //     return eplb_stream_;
-    // }
-
     if (overlap && init_params_.enable_comm_overlap) {
         return communication_stream_;
     }

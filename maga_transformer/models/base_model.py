@@ -338,13 +338,13 @@ class BaseModel(object):
             return
         def error_handler(func: Any):
             def wrapper(*args: Any, **kwargs: Any):
-                try:    
+                try:
                     return func(*args, **kwargs)
                 except Exception as e:
                     method_name = func.__name__
                     raise RuntimeError(f"{method_name} failed, with input args: {args}, kwargs: {kwargs}")
             return wrapper
-        
+
         self.tokenizer = self.get_tokenizer(self.config)
         if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
             self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
@@ -353,7 +353,6 @@ class BaseModel(object):
             self.tokenizer.encode = error_handler(self.tokenizer.encode)
         if getattr(self.tokenizer, 'decode', None):
             self.tokenizer.decode = error_handler(self.tokenizer.decode)
-        
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)
@@ -467,6 +466,7 @@ class BaseModel(object):
         rank_per_node = ep_size // num_node
 
         assert redundant_expert <= expert_num, "redundant_expert must less or equal than expert_num"
+        assert self.config.phy_exp_num % ep_size == 0, "phy_exp_num must be divisible by ep_size"
 
         layer_num = self.config.layer_num
 
@@ -538,11 +538,16 @@ class BaseModel(object):
         self.init_redundant_expert(num_nodes)
 
         if enable_eplb:
-            # TODO(yinzhi): some base check
             moe_weight_info = self.create_moe_weight_info()
             model_path = None
             if self.config.is_mtp:
                 model_path = self.config.ckpt_path
+            else:
+                model_path = fetch_remote_file_to_local(
+                    os.environ.get(
+                        "ORIGINAL_CHECKPOINT_PATH", self.config.ckpt_path
+                    )
+                )
             self.ep_balancer = ExpertBalancer(
                 self.config.expert_num,
                 self.config.phy_exp_num,

@@ -323,7 +323,6 @@ private:
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
 
     NcclParam tp_nccl_param_;
-    NcclParam dp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 

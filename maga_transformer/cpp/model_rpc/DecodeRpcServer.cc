@@ -146,15 +146,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
-    // if (generate_request.has_mtp_hidden_states()) {
-    //     FT_LOG_DEBUG("has mtp hidden states");
-    //     auto mtp_hidden_states_tensor = QueryConverter::transTensor(generate_request.mtp_hidden_states());
-    //     auto hidden_states = engine_->getDevice()->clone(*ft::torchTensor2Buffer(mtp_hidden_states_tensor));
-    //     printBufferData(*hidden_states, "decode host_hidden_states");
-    //     generate_stream->setLastHiddenStates(hidden_states);
-    // } else {
-    //     FT_LOG_DEBUG("has no mtp hidden states");
-    // }
+
     auto new_tokens = engine_->getDevice()->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)generate_stream->tileNum(), (size_t)1}, ft::AllocationType::HOST}, {});
     auto data           = new_tokens->data<int32_t>();

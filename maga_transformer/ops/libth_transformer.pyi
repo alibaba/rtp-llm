@@ -146,7 +146,6 @@ class GptInitParameter:
     decode_use_async_load_cache: bool
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
-    dp_nccl_port: int
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int

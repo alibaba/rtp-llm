@@ -49,13 +49,10 @@ enum class ParallelMode {
     FFN_TP = 3,
     EP = 4,
     EPLB = 5
-    // DATA_PARALLEL = 2,
-    // PIPELINE_PARALLEL = 3
 };
 
 enum class DeviceStream {
     DEFAULT = 0,
-    // EPLB = 1
 };
 
 class OpStatus {

@@ -183,9 +183,6 @@ CudaDevice::~CudaDevice() {
     if (tp_nccl_param_.nccl_comm_) {
         ncclCommDestroy(tp_nccl_param_.nccl_comm_);
     }
-    if (dp_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(dp_nccl_param_.nccl_comm_);
-    }
     if (dp_tp_nccl_param_.nccl_comm_) {
         ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
     }
@@ -252,11 +249,6 @@ void CudaDevice::syncCommunication(bool timeout) {
             "Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(tp_nccl_param_, stream_, timeout);
     }
-    if (dp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG(
-            "Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
-        ftNcclStreamSynchronize(dp_nccl_param_, stream_, timeout);
-    }
     if (dp_tp_nccl_param_.world_size_ > 1) {
         FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
                      dp_tp_nccl_param_.rank_,
@@ -281,7 +273,7 @@ void CudaDevice::syncCommunication(ParallelMode mode, bool timeout) {
 void CudaDevice::overlappedCommBarrier() {
     // NOTE: when all the overlapped communication and computation done,
     // we need to ensure the communication has been finished before starting the next computation.
-    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
+    if (tp_nccl_param_.world_size_ * init_params_.dp_size * ffn_tp_nccl_param_.world_size_ > 1) {
         cudaEvent_t event;
         check_cuda_error(cudaEventCreate(&event));
         check_cuda_error(cudaEventRecord(event, communication_stream_));
@@ -296,7 +288,7 @@ DeviceHookPtr CudaDevice::createCommHook() {
 void CudaDevice::overlappedComputeBarrier() {
     // NOTE: when all the overlapped communication and computation done,
     // we need to ensure the communication has been finished before starting the next computation.
-    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
+    if (tp_nccl_param_.world_size_ * init_params_.dp_size * ffn_tp_nccl_param_.world_size_ > 1) {
         cudaEvent_t event;
         check_cuda_error(cudaEventCreate(&event));
         check_cuda_error(cudaEventRecord(event, stream_));

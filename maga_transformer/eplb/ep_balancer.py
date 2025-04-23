@@ -75,8 +75,6 @@ class ExpertBalancer:
         self.moe_layer_index = moe_layer_index
         self.moe_weight_info = moe_weight_info
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.last_std = torch.zeros((num_layers, num_experts), dtype=torch.float32)
-        self.cur_std = torch.zeros((num_layers, num_experts), dtype=torch.float32)
         self.queue: Queue[int] = Queue()
         select_layer_method = os.environ.get("BALANCE_METHOD", "mix")
         self.select_layer_method = SelectLayerMethod(select_layer_method)
@@ -92,15 +90,8 @@ class ExpertBalancer:
         # record the expert count, used for dump stats
         self.log_exp_cnt = torch.zeros((num_layers, num_experts), dtype=torch.int32)
 
-        if model_path:
-            moe_ckpt_path = model_path
-        else:
-            moe_ckpt_path = fetch_remote_file_to_local(
-                os.environ.get("ORIGINAL_CHECKPOINT_PATH", os.environ["CHECKPOINT_PATH"])
-            )
-
         assert moe_ckpt_path is not None
-        self.moe_ckpt_path = moe_ckpt_path
+        self.moe_ckpt_path = model_path
 
     @torch.inference_mode()
     def get_balanced_layer(self, gpu_loads: torch.Tensor) -> int:
@@ -133,13 +124,12 @@ class ExpertBalancer:
 
     @torch.inference_mode()
     def find_most_unbalanced_layer(self, gpu_loads: torch.Tensor) -> int:
-        std_per_layer = gpu_loads.float().std(dim=1, unbiased=False)
-        self.cur_std = std_per_layer
+        max_per_layer = gpu_loads.max(dim=1).values
 
         # note: select idx must in moe_layer_index
         most_unbalanced_idx = -1
         for idx in self.moe_layer_index:
-            if most_unbalanced_idx == -1 or std_per_layer[idx] > std_per_layer[most_unbalanced_idx]:
+            if most_unbalanced_idx == -1 or max_per_layer[idx] > max_per_layer[most_unbalanced_idx]:
                 most_unbalanced_idx = idx
 
         return most_unbalanced_idx
@@ -177,8 +167,6 @@ class ExpertBalancer:
         }
         with open(file_name, "a") as f:
             f.write(json.dumps(log_data) + "\n")
-
-        self.last_std = self.cur_std
 
         # note log2phy need to padding
         pad_k = self.num_replicas - self.num_experts + 1

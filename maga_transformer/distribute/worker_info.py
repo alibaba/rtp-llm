@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 12
+MASTER_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 7
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -278,7 +278,6 @@ class MasterInfo:
     tp_nccl_port: int
     nccl_op_port: int
     sp_gpt_nccl_port: int
-    dp_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
 
@@ -288,15 +287,13 @@ g_master_info = MasterInfo(
     tp_nccl_port = 0,
     nccl_op_port=0,
     sp_gpt_nccl_port=0,
-    dp_nccl_port=0,
     dp_tp_nccl_port=0,
     ffn_tp_nccl_port=0,
 )
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
-    g_master_info.dp_nccl_port = base_port - 10
-    g_master_info.dp_tp_nccl_port = base_port - 11
+    g_master_info.dp_tp_nccl_port = base_port - 10
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.tp_nccl_port = base_port - 2

@@ -36,7 +36,6 @@ struct DeviceInitParams {
     // they are only needed when tp_size > 1.
     std::string master_ip          = "";
     int64_t     tp_master_port     = 0;
-    int64_t     dp_master_port     = 0;
     int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
 

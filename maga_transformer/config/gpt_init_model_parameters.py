@@ -133,7 +133,6 @@ class GptInitModelParameters:
     decode_use_async_load_cache: bool
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
-    dp_nccl_port: int
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
@@ -307,7 +306,6 @@ class GptInitModelParameters:
         self.need_ffn_act_scale = False
         self.nccl_ip = g_master_info.ip
         self.tp_nccl_port = g_master_info.tp_nccl_port
-        self.dp_nccl_port = g_master_info.dp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
