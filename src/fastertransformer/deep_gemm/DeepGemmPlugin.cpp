@@ -71,6 +71,18 @@ inline int DeepGemmPlugin::getNumSms() {
     return num_sms;
 }
 
+int getMaxSmem() {
+    static int max_smem_per_block = -1;
+    if (max_smem_per_block != -1) {
+        return max_smem_per_block;
+    }
+    int device_idx = 0;
+    check_cuda_error(cudaGetDevice(&device_idx));
+    check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_idx));
+    return max_smem_per_block;
+}
+
+
 inline int ceil_div(int a, int b) {
     FT_CHECK_WITH_INFO(b != 0, "division cannot be zero");
     return (a + b - 1) / b;
@@ -201,7 +213,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     FT_CHECK_WITH_INFO(best_block_m != -1, "block m size cannot be None in best config");
     FT_CHECK_WITH_INFO(best_block_n != -1, "block n size cannot be None in best config");
     int best_num_stages = -1, best_smem_size = -1;
-    const int sm90_capacitty = 232448;
+    const int sm90_capacitty = getMaxSmem();
     vector<int> num_stages_vec;
     if (128 % best_block_n) {
         num_stages_vec = vector<int>({6, 5, 4});
