@@ -115,6 +115,7 @@ void PrefillGenerateContext::closeGrpcConnection() {
 
 void PrefillGenerateContext::reset() {
     GenerateContext::reset();
+    client_stream.reset();
     grpc_stream_closed = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
 }
