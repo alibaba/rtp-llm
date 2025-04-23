@@ -66,6 +66,7 @@ class Pipeline(object):
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer)
+        config.add_stop_ids_from_str(tokenizer)
         config.validate()
         return config
 

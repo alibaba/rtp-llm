@@ -132,6 +132,25 @@ class GenerateConfig(BaseModel):
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag)
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = bool(int(os.environ.get("THINK_MODE", 0))) and len(self.end_think_token_ids) >= 0
+    
+    def add_stop_ids_from_str(self, tokenizer):
+        ids_list = []
+        for word in self.stop_words_str:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                token_id = tokenizer.convert_tokens_to_ids(word)
+                if isinstance(token_id, int):
+                    ids_list.append([token_id])
+                elif isinstance(token_id, list):
+                    ids_list.append(token_id)
+                else:
+                    ids_list.append(tokenizer.encode(word, add_special_tokens=True))
+            else:
+                ids_list.append(tokenizer.encode(word))
+        
+        # remove duplicate element
+        for item in ids_list:
+            if item not in self.stop_words_list:
+                self.stop_words_list.append(item)
 
     def validate(self):
         try:
