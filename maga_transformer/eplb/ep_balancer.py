@@ -90,7 +90,7 @@ class ExpertBalancer:
         # record the expert count, used for dump stats
         self.log_exp_cnt = torch.zeros((num_layers, num_experts), dtype=torch.int32)
 
-        assert moe_ckpt_path is not None
+        assert model_path is not None, "not found eplb model path"
         self.moe_ckpt_path = model_path
 
     @torch.inference_mode()
