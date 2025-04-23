@@ -62,9 +62,21 @@ GROUPED_CONTIGUOUS_GEMM_CASES = [
     ("7168", "4096", "8", "DeepGemmType::GroupedContiguous"),
     ("7168", "2048", "8", "DeepGemmType::GroupedContiguous"),
 
+    ("4096", "7168", "9", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "9", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "9", "DeepGemmType::GroupedContiguous"),
+
+    ("4096", "7168", "10", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "10", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "10", "DeepGemmType::GroupedContiguous"),
+
     ("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
     ("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
     ("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
+
+    ("4096", "7168", "16", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "16", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "16", "DeepGemmType::GroupedContiguous"),
 
     ("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
     ("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
@@ -96,9 +108,21 @@ GROUPED_MASKED_GEMM_CASES = [
     ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
     ("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
 
+    ("4096", "7168", "16", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "16", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "16", "DeepGemmType::GroupedMasked"),
+
     ("4096", "7168", "8", "DeepGemmType::GroupedMasked"),
     ("7168", "4096", "8", "DeepGemmType::GroupedMasked"),
     ("7168", "2048", "8", "DeepGemmType::GroupedMasked"),
+
+    ("4096", "7168", "9", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "9", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "9", "DeepGemmType::GroupedMasked"),
+
+    ("4096", "7168", "10", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "10", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "10", "DeepGemmType::GroupedMasked"),
 ]
 
 QWEN_CASES = [
@@ -128,6 +152,11 @@ QWEN_CASES = [
     ("4096", "1536", "5", "DeepGemmType::GroupedContiguous"),
     ("3072", "4096", "5", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "5", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "16", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "16", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "4", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "4", "DeepGemmType::GroupedContiguous"),
