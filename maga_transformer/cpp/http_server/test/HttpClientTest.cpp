@@ -19,6 +19,7 @@ public:
         json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
         json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
         json.Jsonize("iterate_count", load_balance_info.iterate_count);
+        json.Jsonize("onflight_requests", load_balance_info.onflight_requests);
         json.Jsonize("alive", alive);
     }
 
@@ -60,6 +61,7 @@ std::shared_ptr<http_server::HttpServer> HttpClientTest::initServer(const std::s
             "total_kv_cache": 18416,
             "step_latency_ms": 29.23,
             "step_per_minute": 2052,
+            "onflight_requests": 0,
             "iterate_count": 1,
             "version": 0,
             "alive": true

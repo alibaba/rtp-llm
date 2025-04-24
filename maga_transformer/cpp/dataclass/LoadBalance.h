@@ -85,6 +85,7 @@ struct LoadBalanceInfo {
     int64_t step_per_minute = 0;
     int64_t available_kv_cache = 0;
     int64_t total_kv_cache = 0;
+    int64_t onflight_requests = 0;
 };
 
 struct Host {

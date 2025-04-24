@@ -25,6 +25,7 @@ class FakeServer:
                 "step_latency_ms": 10,
                 "step_per_minute": 100,
                 "iterate_count" : 100,
+                "onflight_requests": 0,
                 "alive": True,
                 "running_task_list": [{"prefix_length": 5, "input_length": 5, "task_id": "100"}],
                 "finished_task_list": [{"prefix_length": 5, "input_length": 5, "task_id": "100"}],

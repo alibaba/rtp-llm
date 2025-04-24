@@ -301,11 +301,14 @@ class GptInitParameter:
     def setTaskType(self, task: str) -> None:
         ...
 class LoadBalanceInfo:
+    onflight_requests: int
     available_kv_cache: int
     iterate_count: int
     step_latency_us: int
     step_per_minute: int
     total_kv_cache: int
+    onflight_requests: int
+    
     def __init__(self) -> None:
         ...
 class MlaOpsType:

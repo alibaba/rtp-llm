@@ -23,6 +23,7 @@ public:
         json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
         json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
         json.Jsonize("iterate_count", load_balance_info.iterate_count);
+        json.Jsonize("onflight_requests", load_balance_info.onflight_requests);
         json.Jsonize("version", load_balance_version);
         json.Jsonize("alive", alive);
     }

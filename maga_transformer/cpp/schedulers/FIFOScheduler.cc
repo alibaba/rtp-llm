@@ -263,12 +263,17 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     return running_streams_;
 }
 
-int FIFOScheduler::waitingStreamsSize() {
+int64_t FIFOScheduler::waitingStreamsSize() {
     return waiting_streams_.size();
 }
 
-int FIFOScheduler::runningStreamsSize() {
+int64_t FIFOScheduler::runningStreamsSize() {
     return running_streams_.size();
+}
+
+int64_t FIFOScheduler::onflightStreams() {
+    unique_lock<mutex> lock(lock_);
+    return waiting_streams_.size() + running_streams_.size();
 }
 
 void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {

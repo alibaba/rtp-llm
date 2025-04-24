@@ -205,7 +205,8 @@ LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
         (int64_t)step_recorder_.getStepCount(),
         (int64_t)step_recorder_.getStepPerMin(),
         (int64_t)kv_cache_info.available_kv_cache,
-        (int64_t)kv_cache_info.total_kv_cache
+        (int64_t)kv_cache_info.total_kv_cache,
+        (int64_t)scheduler_->onflightStreams()
     };
 }
 

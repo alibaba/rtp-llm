@@ -100,7 +100,7 @@ absl::StatusOr<EstimateInfo> PrefillLoadBalancer::chooseHostWithTask(const std::
         }
     }
     if (!choosed_host) {
-        return absl::InternalError(autil::StringUtil::formatString("failed to choose host in biz: %s, last error: %s", biz.c_str(), last_error_msg.c_str()));
+        return absl::InternalError(autil::StringUtil::formatString("here7 failed to choose host in biz: %s, last error: %s", biz.c_str(), last_error_msg.c_str()));
     }
     auto& choosed_worker = worker_map_[choosed_host_key];
     choosed_worker.insertPendingTaskUpdateTime(task, estimate_cost_time);

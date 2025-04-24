@@ -22,6 +22,7 @@ private:
     mutable std::shared_mutex                   host_load_balance_info_map_mutex_;
     mutable HeartbeatSynchronizer::NodeStatus   host_load_balance_info_map_;
     int available_ratio_ = 0;
+    int rank_factor_     = 0;
 };
 
 }  // namespace rtp_llm

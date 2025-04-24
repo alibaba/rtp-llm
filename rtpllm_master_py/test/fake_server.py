@@ -48,6 +48,7 @@ class FakeServer:
                 "total_kv_cache": 1000,
                 "step_latency_ms": 10,
                 "step_per_minute": 100,
+                "onflight_requests": 0,
                 "iterate_count" : 100,
                 "alive": True,
                 "running_task_list": running_task_list,

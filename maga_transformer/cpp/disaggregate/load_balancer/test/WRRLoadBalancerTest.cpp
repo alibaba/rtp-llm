@@ -60,6 +60,7 @@ void WRRLoadBalancerTest::initServer(const std::string& spec, int available_kv_c
             "total_kv_cache": 18416,
             "step_latency_ms": 29.23,
             "step_per_minute": 2052,
+            "onflight_requests": 0,
             "iterate_count": 1,
             "version": 0,
             "alive": true

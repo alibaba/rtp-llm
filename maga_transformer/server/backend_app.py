@@ -161,6 +161,7 @@ class BackendApp(object):
                 "total_kv_cache": load_balance_info.total_kv_cache,
                 "step_latency_ms": load_balance_info.step_latency_us / 1000,
                 "step_per_minute": load_balance_info.step_per_minute,
+                "onflight_requests": load_balance_info.onflight_requests,
                 "iterate_count": load_balance_info.iterate_count,
                 "version": load_balance_version,
                 "alive": True,

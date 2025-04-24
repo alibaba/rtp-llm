@@ -135,6 +135,12 @@ public:
     int64_t lastScheduleTime() override {
         return 0;  // 默认返回值
     }
+
+    int64_t onflightStreams() override {
+        std::lock_guard<std::mutex> lock(lock_);
+        return waiting_streams_.size() + running_streams_.size();
+    }
+
 private:
     std::mutex lock_;
     std::condition_variable cond_;

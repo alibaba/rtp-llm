@@ -27,8 +27,9 @@ public:
 
 public:
     // for test
-    int waitingStreamsSize();
-    int runningStreamsSize();
+    int64_t waitingStreamsSize();
+    int64_t runningStreamsSize();
+    int64_t onflightStreams() override;
 
 private:
     void evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;

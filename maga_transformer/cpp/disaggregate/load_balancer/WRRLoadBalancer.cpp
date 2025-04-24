@@ -2,13 +2,17 @@
 #include <random>
 
 #include "maga_transformer/cpp/utils/Logger.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 
 namespace rtp_llm {
 
 WRRLoadBalancer::WRRLoadBalancer() {
     available_ratio_ = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
-    FT_LOG_INFO("wrr load balance avaiable ratio %lu", available_ratio_);
+    // rank factor: 0: KV_CACHE, 1: ONFLIGHT_REQUESTS
+    rank_factor_ = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
+    FT_CHECK_WITH_INFO(rank_factor_ == 0 || rank_factor_ == 1, "rank factor should be 0 or 1");
+    FT_LOG_INFO("wrr load balance avaiable ratio %lu, rank factor = %ld", available_ratio_, rank_factor_);
 }
 
 WRRLoadBalancer::~WRRLoadBalancer() {
@@ -52,8 +56,21 @@ WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) 
         return hosts[(*(biz_hosts->index))++ % hosts.size()];
     }
 
+    int max_onflight_requests = 0;
+    for (const auto& pair : host_load_balance_info_map_) {
+        const WorkerStatusResponse& response = pair.second;
+        if (response.load_balance_info.onflight_requests > max_onflight_requests) {
+            max_onflight_requests = response.load_balance_info.onflight_requests;
+        }
+    }
+    for (auto& pair : host_load_balance_info_map_) {
+        WorkerStatusResponse& response = pair.second;
+        response.load_balance_info.onflight_requests = max_onflight_requests - response.load_balance_info.onflight_requests;
+    }
+
     double                              threshold  = calculateThreshold(hosts);
     double                              weight_acc = 0;
+    
     for (auto& host : hosts) {
         // calculate weight sum
         const std::string spec = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
@@ -61,7 +78,8 @@ WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) 
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_acc += iter->second.load_balance_info.available_kv_cache;
+        weight_acc += rank_factor_ == 0 ?
+            iter->second.load_balance_info.available_kv_cache : iter->second.load_balance_info.onflight_requests;
         if (weight_acc >= threshold) {
             return host;
         }
