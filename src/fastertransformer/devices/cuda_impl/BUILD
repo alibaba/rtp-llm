@@ -59,7 +59,6 @@ cc_library(
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils",
         "//src/fastertransformer/deep_gemm:deep_gemm_plugins_impl",
-        "//src/fastertransformer/deep_gemm:deep_gemm_plugins_hdr",
         "//:th_utils",
         ":trt_plugins",
         "@havenask//aios/autil:string_helper",

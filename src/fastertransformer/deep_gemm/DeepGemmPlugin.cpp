@@ -227,10 +227,62 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     return value;
 }
 
-#define DISPATCH_DEEP_GEMM(N, K, GROUP_NUM, GEMM_TYPE) \
-    if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == GEMM_TYPE) { \
-        dispatchBlockNK<N, K, GROUP_NUM, GEMM_TYPE>(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, bm, bn, bk, num_stages, num_tma_multicast, stream, num_sms, smem_size); \
-        return; \
+#define DISPATCH_DEEP_GEMM_NORMAL(N, K, GROUP_NUM)                                                                     \
+    if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == DeepGemmType::Normal) {                            \
+        dispatchBlockNK<N, K, GROUP_NUM, DeepGemmType::Normal>(output,                                                 \
+                                                               lhs,                                                    \
+                                                               lhs_scale,                                              \
+                                                               rhs,                                                    \
+                                                               rhs_scale,                                              \
+                                                               grouped_layout,                                         \
+                                                               m,                                                      \
+                                                               bm,                                                     \
+                                                               bn,                                                     \
+                                                               bk,                                                     \
+                                                               num_stages,                                             \
+                                                               num_tma_multicast,                                      \
+                                                               stream,                                                 \
+                                                               num_sms,                                                \
+                                                               smem_size);                                             \
+        return;                                                                                                        \
+    }
+
+#define DISPATCH_DEEP_GEMM_MOE(N, K, GROUP_NUM)                                                                        \
+    if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == DeepGemmType::GroupedContiguous) {                 \
+        dispatchBlockNK<N, K, GROUP_NUM, DeepGemmType::GroupedContiguous>(output,                                      \
+                                                                          lhs,                                         \
+                                                                          lhs_scale,                                   \
+                                                                          rhs,                                         \
+                                                                          rhs_scale,                                   \
+                                                                          grouped_layout,                              \
+                                                                          m,                                           \
+                                                                          bm,                                          \
+                                                                          bn,                                          \
+                                                                          bk,                                          \
+                                                                          num_stages,                                  \
+                                                                          num_tma_multicast,                           \
+                                                                          stream,                                      \
+                                                                          num_sms,                                     \
+                                                                          smem_size);                                  \
+        return;                                                                                                        \
+    }                                                                                                                  \
+    if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == DeepGemmType::GroupedMasked) {                     \
+        dispatchBlockNK<N, K, GROUP_NUM, DeepGemmType::GroupedMasked>(output,                                          \
+                                                                      lhs,                                             \
+                                                                      lhs_scale,                                       \
+                                                                      rhs,                                             \
+                                                                      rhs_scale,                                       \
+                                                                      grouped_layout,                                  \
+                                                                      m,                                               \
+                                                                      bm,                                              \
+                                                                      bn,                                              \
+                                                                      bk,                                              \
+                                                                      num_stages,                                      \
+                                                                      num_tma_multicast,                               \
+                                                                      stream,                                          \
+                                                                      num_sms,                                         \
+                                                                      smem_size);                                      \
+        return;                                                                                                        \
     }
 
 void runDeepGemm(__nv_bfloat16*         output,
@@ -255,82 +307,81 @@ void runDeepGemm(__nv_bfloat16*         output,
 {
     FT_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast);
 
-    // Normal Gemm
-    DISPATCH_DEEP_GEMM(2112, 7168, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(4096, 7168, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(7168, 2048, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(2048, 7168, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(16384, 512, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(24576, 1536, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(7168, 16384, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(18432, 7168, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(7168, 18432, 1, DeepGemmType::Normal)
+    /*
+    Deepseek Normal Gemm
+    */ 
+    DISPATCH_DEEP_GEMM_NORMAL(2112, 7168, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(4096, 7168, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(7168, 2048, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(2048, 7168, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(16384, 512, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(24576, 1536, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(7168, 16384, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(18432, 7168, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(7168, 18432, 1)
 
     // tp 8
-    DISPATCH_DEEP_GEMM(3072, 1536, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(2048, 512, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(2304, 7168, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(7168, 2304, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM_NORMAL(3072, 1536, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(2048, 512, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(2304, 7168, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(7168, 2304, 1)
 
     // Grouped Contiguous
-    DISPATCH_DEEP_GEMM(4096, 7168, 256, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 256)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 256)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 256)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 128)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 128)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 128)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 8, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 8, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 8, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 8)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 8)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 8)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 64, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 64, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 64, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 64)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 64)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 64)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 32, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 32, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 32, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 32)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 32)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 32)
 
     // EP 128
-    DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM_MOE(4096, 7168, 2)
+    DISPATCH_DEEP_GEMM_MOE(7168, 4096, 2)
+    DISPATCH_DEEP_GEMM_MOE(7168, 2048, 2)
+        
+    /*
+    QWEN3
+    */ 
+    // tp1 
+    DISPATCH_DEEP_GEMM_NORMAL(9216, 4096, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(4096, 8192, 1)
+    // tp2
+    DISPATCH_DEEP_GEMM_NORMAL(4608, 4096, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(4096, 4096, 1)
+    // tp4
+    DISPATCH_DEEP_GEMM_NORMAL(2304, 4096, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(4096, 2048, 1)
 
-    // masked
-    DISPATCH_DEEP_GEMM(4096, 7168, 256, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 4096, 256, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 2048, 256, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(4096, 7168, 128, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 4096, 128, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 2048, 128, DeepGemmType::GroupedMasked)
+    // moe ep1
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 128)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 128)
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 128)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 128)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 32, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 4096, 32, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 2048, 32, DeepGemmType::GroupedMasked)
+    // moe ep4
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 32)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 32)
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 32)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 32)
 
-    DISPATCH_DEEP_GEMM(4096, 7168, 64, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 4096, 64, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 2048, 64, DeepGemmType::GroupedMasked)
-
-    DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedMasked)
-
-
-    // QWEN3
-    DISPATCH_DEEP_GEMM(9216, 4096, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(4096, 8192, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(4608, 4096, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(4096, 4096, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(2304, 4096, 1, DeepGemmType::Normal)
-    DISPATCH_DEEP_GEMM(4096, 2048, 1, DeepGemmType::Normal)
-
-    DISPATCH_DEEP_GEMM(3072, 4096, 128, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(4096, 1536, 128, DeepGemmType::GroupedContiguous)
-    DISPATCH_DEEP_GEMM(3072, 4096, 128, DeepGemmType::GroupedMasked)
-    DISPATCH_DEEP_GEMM(4096, 1536, 128, DeepGemmType::GroupedMasked)
+    // moe ep 64
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 2)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 2)
+    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 2)
+    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 2)
 
     FT_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
 }

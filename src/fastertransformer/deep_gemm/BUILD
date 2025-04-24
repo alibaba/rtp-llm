@@ -2,6 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
+load("//src/fastertransformer/deep_gemm:def.bzl", "sub_lib")
 
 sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + [
     '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
@@ -34,82 +35,106 @@ test_linkopts = [
 
 
 
-N_K_GROUP_TYPE= [
-("2112", "7168", "1", "DeepGemmType::Normal"),
-("4096", "7168", "1", "DeepGemmType::Normal"),
-("7168", "2048", "1", "DeepGemmType::Normal"),
-("2048", "7168", "1", "DeepGemmType::Normal"),
-("16384", "512", "1", "DeepGemmType::Normal"),
-("24576", "1536", "1", "DeepGemmType::Normal"),
-("7168", "16384", "1", "DeepGemmType::Normal"),
-("18432", "7168", "1", "DeepGemmType::Normal"),
-("7168", "18432", "1", "DeepGemmType::Normal"),
+NORMAL_GEMM_CASES = [
+    ("2112", "7168", "1", "DeepGemmType::Normal"),
+    ("4096", "7168", "1", "DeepGemmType::Normal"),
+    ("7168", "2048", "1", "DeepGemmType::Normal"),
+    ("2048", "7168", "1", "DeepGemmType::Normal"),
+    ("16384", "512", "1", "DeepGemmType::Normal"),
+    ("24576", "1536", "1", "DeepGemmType::Normal"),
+    ("7168", "16384", "1", "DeepGemmType::Normal"),
+    ("18432", "7168", "1", "DeepGemmType::Normal"),
+    ("7168", "18432", "1", "DeepGemmType::Normal"),
 
-# tp 8
-("3072", "1536", "1", "DeepGemmType::Normal"),
-("2048", "512", "1", "DeepGemmType::Normal"),
-("2304", "7168", "1", "DeepGemmType::Normal"),
-("7168", "2304", "1", "DeepGemmType::Normal"),
+    # tp 8
+    ("3072", "1536", "1", "DeepGemmType::Normal"),
+    ("2048", "512", "1", "DeepGemmType::Normal"),
+    ("2304", "7168", "1", "DeepGemmType::Normal"),
+    ("7168", "2304", "1", "DeepGemmType::Normal")
+]
 
-("4096", "7168", "256", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "256", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "256", "DeepGemmType::GroupedContiguous"),
+GROUPED_CONTIGUOUS_GEMM_CASES = [
+    ("4096", "7168", "256", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "256", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "256", "DeepGemmType::GroupedContiguous"),
 
-("4096", "7168", "128", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "128", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "128", "DeepGemmType::GroupedContiguous"),
+    ("4096", "7168", "128", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "128", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "128", "DeepGemmType::GroupedContiguous"),
 
-("4096", "7168", "8", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "8", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "8", "DeepGemmType::GroupedContiguous"),
+    ("4096", "7168", "8", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "8", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "8", "DeepGemmType::GroupedContiguous"),
 
-("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
+    ("4096", "7168", "2", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "2", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "2", "DeepGemmType::GroupedContiguous"),
 
-("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "32", "DeepGemmType::GroupedContiguous"),
+    ("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "32", "DeepGemmType::GroupedContiguous"),
 
-("4096", "7168", "64", "DeepGemmType::GroupedContiguous"),
-("7168", "4096", "64", "DeepGemmType::GroupedContiguous"),
-("7168", "2048", "64", "DeepGemmType::GroupedContiguous"),
+    ("4096", "7168", "64", "DeepGemmType::GroupedContiguous"),
+    ("7168", "4096", "64", "DeepGemmType::GroupedContiguous"),
+    ("7168", "2048", "64", "DeepGemmType::GroupedContiguous"),
+]
 
-("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
-("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
-("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
+GROUPED_MASKED_GEMM_CASES = [
+    ("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
 
-("4096", "7168", "128", "DeepGemmType::GroupedMasked"),
-("7168", "4096", "128", "DeepGemmType::GroupedMasked"),
-("7168", "2048", "128", "DeepGemmType::GroupedMasked"),
+    ("4096", "7168", "128", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "128", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "128", "DeepGemmType::GroupedMasked"),
 
-("4096", "7168", "32", "DeepGemmType::GroupedMasked"),
-("7168", "4096", "32", "DeepGemmType::GroupedMasked"),
-("7168", "2048", "32", "DeepGemmType::GroupedMasked"),
+    ("4096", "7168", "32", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "32", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "32", "DeepGemmType::GroupedMasked"),
 
-("4096", "7168", "64", "DeepGemmType::GroupedMasked"),
-("7168", "4096", "64", "DeepGemmType::GroupedMasked"),
-("7168", "2048", "64", "DeepGemmType::GroupedMasked"),
+    ("4096", "7168", "64", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "64", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "64", "DeepGemmType::GroupedMasked"),
 
-("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
-("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
-("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
+    ("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
 
-# qwen3
-("9216", "4096", "1", "DeepGemmType::Normal"),
-("4096", "8192", "1", "DeepGemmType::Normal"),
-("4608", "4096", "1", "DeepGemmType::Normal"),
-("4096", "4096", "1", "DeepGemmType::Normal"),
-("2304", "4096", "1", "DeepGemmType::Normal"),
-("4096", "2048", "1", "DeepGemmType::Normal"),
+    ("4096", "7168", "8", "DeepGemmType::GroupedMasked"),
+    ("7168", "4096", "8", "DeepGemmType::GroupedMasked"),
+    ("7168", "2048", "8", "DeepGemmType::GroupedMasked"),
+]
 
-("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
-("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
+QWEN_CASES = [
+    ("9216", "4096", "1", "DeepGemmType::Normal"),
+    ("4096", "8192", "1", "DeepGemmType::Normal"),
+    ("4608", "4096", "1", "DeepGemmType::Normal"),
+    ("4096", "4096", "1", "DeepGemmType::Normal"),
+    ("2304", "4096", "1", "DeepGemmType::Normal"),
+    ("4096", "2048", "1", "DeepGemmType::Normal"),
 
-("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
-("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
+    ("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "64", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "64", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "64", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "64", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "32", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "32", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "2", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "2", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "2", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "2", "DeepGemmType::GroupedMasked"),
 
 ]
+
 template_header = """
 #include "src/fastertransformer/deep_gemm/deep_gemm_template.h"
 #include "src/fastertransformer/deep_gemm/utils.h"
@@ -140,59 +165,44 @@ template_tail = """
 }
 """
 
-gen_cpp_code("deepgemm_inst", [N_K_GROUP_TYPE],
+gen_cpp_code("deepgemm_dpsk", [NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES],
              template_header, template, template_tail, element_per_file=1, suffix=".cu")
 
 
+gen_cpp_code("deepgemm_qwen", [QWEN_CASES],
+             template_header, template, template_tail, element_per_file=1, suffix=".cu")
+
 cc_library(
-    name = "deep_gemm_cu",
+    name = "deepgemm_hdrs",
     hdrs = [
         "deep_gemm_template.h",
         "utils.h",
-    ] + select({
-        "@//:using_cuda12": glob([
-            "include/*.cuh"
-        ]),
-        "//conditions:default": [],
-    }),
-    srcs = select({
-        "@//:using_cuda12": [
-            "deepgemm_inst",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + glob([
+        "include/*.cuh"
+    ]),
     deps = [
-        "//src/fastertransformer/core:buffer_torch",
-        "//src/fastertransformer/cuda:nvtx",
-        "//src/fastertransformer/utils",
-        "//src/fastertransformer/cuda:cuda_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "@cutlass//:cutlass"
+        "@cutlass//:cutlass",
     ] + torch_deps(),
     copts = sm90_cuda_copts,
     visibility = ["//visibility:public"],
-    alwayslink = True,
 )
+
+sub_lib("deepgemm_dpsk_inst", ":deepgemm_dpsk")
+sub_lib("deepgemm_qwen_inst", ":deepgemm_qwen")
 
 cc_library(
     name = "deep_gemm_plugins_impl",
-    hdrs = ["DeepGemmPlugin.h"],
-    srcs = ["DeepGemmPlugin.cpp"],
+    hdrs = ["DeepGemmPlugin.h", "utils.h"],
+    srcs = ["DeepGemmPlugin.cpp", ":deepgemm_dpsk_inst", ":deepgemm_qwen_inst"],
     copts = copts(),
     deps = [
-        ":deep_gemm_cu",
         "//src/fastertransformer/core:buffer_torch",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/cuda:nvtx",
     ] + torch_deps(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "deep_gemm_plugins_hdr",
-    hdrs = ["DeepGemmPlugin.h", "utils.h"],
     visibility = ["//visibility:public"],
 )
 
@@ -215,7 +225,6 @@ cc_test(
     ],
     deps = [
         ":deep_gemm_plugins_impl",
-        ":deep_gemm_plugins_hdr",
         "@com_google_googletest//:gtest",
         "//src/fastertransformer/core:buffer_torch",
         "//src/fastertransformer/devices/testing:device_test_utils",

@@ -3,7 +3,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "src/fastertransformer/deep_gemm/utils.h"
-#include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <cuda_fp8.h>
 #include <cuda_bf16.h>
 
@@ -97,7 +96,7 @@ void dispatchBlockNK(__nv_bfloat16*         output,
 #ifdef ENABLE_FP8
     DISPATCH_BLOCK_MK(64, 128)
     DISPATCH_BLOCK_MK(128, 128)
-    FT_FAIL("DISPATCH_DEEP_GEMM(BLOCK_M=%u, BLOCK_N=%u, BLOCK_K=%u) no template found", bm, bn, bk);
+    throw std::runtime_error("DISPATCH_DEEP_GEMM(BLOCK_M=%u, BLOCK_N=%u, BLOCK_K=%u) no template found");
 #endif
 }
 }
