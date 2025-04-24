@@ -28,7 +28,6 @@ void dispatchBlockNK(__nv_bfloat16*         output,
                      uint32_t               bk,
                      uint32_t               num_stages,
                      uint32_t               num_tma_multicast,
-                     bool                   is_tma_multicast_on_a,
                      cudaStream_t           stream,
                      uint32_t               num_sms,
                      uint32_t               smem_size);
@@ -48,7 +47,6 @@ void runDeepGemm(__nv_bfloat16*         output,
                  uint32_t               num_groups,
                  uint32_t               num_stages,
                  uint32_t               num_tma_multicast,
-                 bool                   is_is_tma_multicast_on_a,
                  DeepGemmType           gemm_type,
                  cudaStream_t           stream,
                  uint32_t               num_sms,
@@ -155,18 +153,14 @@ torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
 
 class DeepGemmConfig {
 public:
-    uint32_t num_sms, block_m, block_n, num_stages, num_tma_multicast, smem_size;
-    bool is_tma_multicast_on_a;
+    uint32_t block_m, block_n, num_stages, num_tma_multicast, smem_size;
 
-    DeepGemmConfig(uint32_t num_sms, uint32_t block_m, uint32_t block_n, uint32_t num_stages, uint32_t num_tma_multicast,
-                   bool is_tma_multicast_on_a, uint32_t smem_size):
-        num_sms(num_sms),
+    DeepGemmConfig(uint32_t block_m, uint32_t block_n, uint32_t num_stages, uint32_t num_tma_multicast, uint32_t smem_size):
         block_m(block_m),
         block_n(block_n),
         num_stages(num_stages),
         num_tma_multicast(num_tma_multicast),
-        smem_size(smem_size),
-        is_tma_multicast_on_a(is_tma_multicast_on_a) {}
+        smem_size(smem_size){}
 };
 
 DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, bool is_grouped_contiguous = false) {
@@ -185,7 +179,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     }
 
     int best_block_m = -1, best_block_n = -1;
-    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 144, 160})) {
+    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128})) {
         bool success = false;
         if (best_block_m == -1 || best_block_n == -1) {
             success = true;
@@ -209,8 +203,8 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     int best_num_stages = -1, best_smem_size = -1;
     const int sm90_capacitty = 232448;
     vector<int> num_stages_vec;
-    if ((128 % best_block_n) && (128 / __gcd(128, best_block_n) <= 4)) {
-        num_stages_vec = vector<int>({4});
+    if (128 % best_block_n) {
+        num_stages_vec = vector<int>({6, 5, 4});
     } else {
         num_stages_vec = vector<int>({8, 7, 6, 5, 4});
     }
@@ -223,32 +217,19 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, b
     }
     FT_CHECK_WITH_INFO(best_num_stages != -1, "stages num cannot be None in best config");
 
-    int best_num_tma_multicast = 1; bool is_tma_multicast_on_a = true;
-
-    vector<bool> is_multicast_legal = best_block_m > best_block_n ?
-        vector<bool>({isTmaMulticastLegal(n, best_block_n, 2, num_sms), isTmaMulticastLegal(m, best_block_m, 2, num_sms)}):
-        vector<bool>({isTmaMulticastLegal(m, best_block_m, 2, num_sms), isTmaMulticastLegal(n, best_block_n, 2, num_sms)});
-
-    for (int index = 0; index < 2; ++index) {
-        if (m >= 512 && is_multicast_legal[index] && num_groups == 1) {
-            best_num_tma_multicast = 2; is_tma_multicast_on_a = (index == (best_block_m > best_block_n? 0: 1));
-            break;
-        }
+    int best_num_tma_multicast = 1;
+    if (m >= 1024 && isTmaMulticastLegal(n, best_block_n, 2, num_sms) && num_groups == 1) {
+        best_num_tma_multicast = 2;
     }
 
-    auto num_waves = getNumWaves(m, n, best_block_m, best_block_n, num_groups, num_sms);
-    auto num_min_sms = ceil_div(ceil_div(m, best_block_m) * ceil_div(n, best_block_n) * num_groups, num_waves);
-    num_min_sms = ceil_div(max(num_min_sms, num_sms - 8), best_num_tma_multicast) * best_num_tma_multicast;
-
-    FT_CHECK_WITH_INFO(num_min_sms <= num_sms, "num_min_sms(%d) should not less than num_sms(%d)", num_min_sms, num_sms);
-    DeepGemmConfig value = DeepGemmConfig(num_min_sms, best_block_m, best_block_n, best_num_stages, best_num_tma_multicast, is_tma_multicast_on_a, best_smem_size);
+    DeepGemmConfig value = DeepGemmConfig(best_block_m, best_block_n, best_num_stages, best_num_tma_multicast, best_smem_size);
     best_configs.emplace(key, value);
     return value;
 }
 
 #define DISPATCH_DEEP_GEMM(N, K, GROUP_NUM, GEMM_TYPE) \
     if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == GEMM_TYPE) { \
-        dispatchBlockNK<N, K, GROUP_NUM, GEMM_TYPE>(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, bm, bn, bk, num_stages, num_tma_multicast, is_tma_multicast_on_a, stream, num_sms, smem_size); \
+        dispatchBlockNK<N, K, GROUP_NUM, GEMM_TYPE>(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, bm, bn, bk, num_stages, num_tma_multicast, stream, num_sms, smem_size); \
         return; \
     }
 
@@ -267,13 +248,12 @@ void runDeepGemm(__nv_bfloat16*         output,
                  uint32_t               num_groups,
                  uint32_t               num_stages,
                  uint32_t               num_tma_multicast,
-                 bool                   is_tma_multicast_on_a,
                  DeepGemmType           gemm_type,
                  cudaStream_t           stream,
                  uint32_t               num_sms,
                  uint32_t               smem_size)
 {
-    FT_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n, is_tma_multicast_on_a:%u", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, is_tma_multicast_on_a);
+    FT_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\n", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast);
 
     // Normal Gemm
     DISPATCH_DEEP_GEMM(2112, 7168, 1, DeepGemmType::Normal)
@@ -337,6 +317,21 @@ void runDeepGemm(__nv_bfloat16*         output,
     DISPATCH_DEEP_GEMM(4096, 7168, 2, DeepGemmType::GroupedMasked)
     DISPATCH_DEEP_GEMM(7168, 4096, 2, DeepGemmType::GroupedMasked)
     DISPATCH_DEEP_GEMM(7168, 2048, 2, DeepGemmType::GroupedMasked)
+
+
+    // QWEN3
+    DISPATCH_DEEP_GEMM(9216, 4096, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(4096, 8192, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(4608, 4096, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(4096, 4096, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(2304, 4096, 1, DeepGemmType::Normal)
+    DISPATCH_DEEP_GEMM(4096, 2048, 1, DeepGemmType::Normal)
+
+    DISPATCH_DEEP_GEMM(3072, 4096, 128, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(4096, 1536, 128, DeepGemmType::GroupedContiguous)
+    DISPATCH_DEEP_GEMM(3072, 4096, 128, DeepGemmType::GroupedMasked)
+    DISPATCH_DEEP_GEMM(4096, 1536, 128, DeepGemmType::GroupedMasked)
+
     FT_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
 }
 #endif
@@ -373,10 +368,9 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
                 1,   // num_groups
                 best_config.num_stages,
                 best_config.num_tma_multicast,
-                best_config.is_tma_multicast_on_a,
                 DeepGemmType::Normal,
                 stream,
-                best_config.num_sms,
+                num_sms,
                 best_config.smem_size);
 #endif
 }
@@ -412,10 +406,9 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
                 num_groups,   // num_groups
                 best_config.num_stages,
                 best_config.num_tma_multicast,
-                best_config.is_tma_multicast_on_a,
                 DeepGemmType::GroupedContiguous,
                 stream,
-                best_config.num_sms,
+                num_sms,
                 best_config.smem_size);
 #endif
 }
@@ -450,10 +443,9 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
                 num_groups,   // num_groups
                 best_config.num_stages,
                 best_config.num_tma_multicast,
-                best_config.is_tma_multicast_on_a,
                 DeepGemmType::GroupedMasked,
                 stream,
-                best_config.num_sms,
+                num_sms,
                 best_config.smem_size);
 #endif
 }

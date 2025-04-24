@@ -94,6 +94,21 @@ N_K_GROUP_TYPE= [
 ("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
 ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
 ("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
+
+# qwen3
+("9216", "4096", "1", "DeepGemmType::Normal"),
+("4096", "8192", "1", "DeepGemmType::Normal"),
+("4608", "4096", "1", "DeepGemmType::Normal"),
+("4096", "4096", "1", "DeepGemmType::Normal"),
+("2304", "4096", "1", "DeepGemmType::Normal"),
+("4096", "2048", "1", "DeepGemmType::Normal"),
+
+("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
+("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
+
+("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
+("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
+
 ]
 template_header = """
 #include "src/fastertransformer/deep_gemm/deep_gemm_template.h"
@@ -117,7 +132,6 @@ template void dispatchBlockNK<{0}, {1}, {2}, {3}>(__nv_bfloat16*         output,
                      uint32_t               bk,
                      uint32_t               num_stages,
                      uint32_t               num_tma_multicast,
-                     bool                   is_tma_multicast_on_a,
                      cudaStream_t           stream,
                      uint32_t               num_sms,
                      uint32_t               smem_size);

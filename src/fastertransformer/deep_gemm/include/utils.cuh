@@ -43,11 +43,6 @@ do {                                                                            
 #endif
 
 template <typename T>
-__device__ __host__ constexpr T ceil_div(T a, T b) {
+__device__ __host__ constexpr T cell_div(T a, T b) {
     return (a + b - 1) / b;
-}
-
-template <typename T>
-__device__ __host__ constexpr T gcd(T a, T b) {
-    return b == 0 ? a : gcd(b, a % b);
 }
