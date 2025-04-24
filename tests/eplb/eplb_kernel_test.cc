@@ -15,21 +15,24 @@ public:
     void TearDown() override {}
 };
 
-int* createDeviceBufferFromVector(const vector<int>& vec) {
-    int* device_buf;
-    cudaMalloc(&device_buf, vec.size() * sizeof(int));
-    cudaMemcpy(device_buf, vec.data(), vec.size() * sizeof(int), cudaMemcpyHostToDevice);
+template<typename T>
+T* createDeviceBufferFromVector(const vector<T>& vec) {
+    T* device_buf;
+    cudaMalloc(&device_buf, vec.size() * sizeof(T));
+    cudaMemcpy(device_buf, vec.data(), vec.size() * sizeof(T), cudaMemcpyHostToDevice);
     return device_buf;
 }
 
-vector<int> createVectorFromDeviceBuffer(int* device_buf, int size) {
-    vector<int> vec(size);
-    cudaMemcpy(vec.data(), device_buf, size * sizeof(int), cudaMemcpyDeviceToHost);
+template<typename T>
+vector<T> createVectorFromDeviceBuffer(T* device_buf, int size) {
+    vector<T> vec(size);
+    cudaMemcpy(vec.data(), device_buf, size * sizeof(T), cudaMemcpyDeviceToHost);
     return vec;
 }
 
-vector<int> generateRandomVector(int size, int max_val) {
-    vector<int> vec(size);
+template<typename T>
+vector<T> generateRandomVector(int size, int max_val) {
+    vector<T> vec(size);
     for (int i = 0; i < size; i++) {
         vec[i] = rand() % max_val;
     }
@@ -109,8 +112,16 @@ void updateGpuLoadsLLHost(
     }
 }
 
+void updateGpuLoadsDeepEP(vector<int64_t>& expert_ids, vector<int>& gpu_loads, int total_tokens, int ep_rank) {
+    for (int i = 0; i < total_tokens; ++i) {
+        if (expert_ids[i] >= 0) {
+            gpu_loads[ep_rank]++;
+        }
+    }
+}
+
 void equalExpertBalanceTest(int total_tokens, int log_exp_num, int phy_exp_num, int ep_rank, int ep_size) {
-    vector<int> experts_ids = generateRandomVector(total_tokens, log_exp_num);
+    vector<int> experts_ids = generateRandomVector<int>(total_tokens, log_exp_num);
     vector<int> log_stats(log_exp_num, 0);
     auto [log2phy, logic_expert_cnt] = generateRandomBalancePlan(log_exp_num, phy_exp_num);
 
@@ -145,7 +156,7 @@ void equalExpertBalanceTest(int total_tokens, int log_exp_num, int phy_exp_num, 
 }
 
 void updateGpuLoadsTest(int total_tokens, int log_exp_num, int phy_exp_num, int ep_rank, int ep_size) {
-    vector<int> experts_ids = generateRandomVector(total_tokens, phy_exp_num);
+    vector<int> experts_ids = generateRandomVector<int>(total_tokens, phy_exp_num);
     vector<int> gpu_loads(ep_size, 0);
 
     int* experts_ids_d = createDeviceBufferFromVector(experts_ids);
@@ -166,7 +177,7 @@ void updateGpuLoadsTest(int total_tokens, int log_exp_num, int phy_exp_num, int 
 
 void updateGpuLoadsLLTest(int local_experts_num, int ep_rank, int ep_size)
 {
-    vector<int> experts_cnts = generateRandomVector(local_experts_num, 10000);
+    vector<int> experts_cnts = generateRandomVector<int>(local_experts_num, 10000);
     vector<int> gpu_loads(ep_size, 0);
 
     int* experts_cnts_d = createDeviceBufferFromVector(experts_cnts);
@@ -182,6 +193,31 @@ void updateGpuLoadsLLTest(int local_experts_num, int ep_rank, int ep_size)
 
     // host
     updateGpuLoadsLLHost(experts_cnts, gpu_loads, local_experts_num, ep_rank);
+    EXPECT_EQ(gpu_loads_res, gpu_loads);
+}
+
+void updateGpuLoadsDeepEPTest(int total_tokens, int log_exp_num, int phy_exp_num, int ep_rank, int ep_size)
+{
+    int local_experts_num = phy_exp_num / ep_size;
+    vector<int64_t> expert_ids = generateRandomVector<int64_t>(total_tokens, local_experts_num + 1);
+    for (auto& id : expert_ids) {
+        id--;
+    }
+    vector<int> gpu_loads(ep_size, 0);
+
+    int64_t* expert_ids_d = createDeviceBufferFromVector(expert_ids);
+    int* gpu_loads_d = createDeviceBufferFromVector(gpu_loads);
+
+    // device
+    cudaStream_t stream = cudaStreamDefault;
+    update_gpu_loads_deepep_kernel(expert_ids_d, gpu_loads_d, total_tokens, ep_rank, stream);
+    cudaStreamSynchronize(stream);
+
+    // copy back to host
+    vector<int> gpu_loads_res = createVectorFromDeviceBuffer(gpu_loads_d, ep_size);
+
+    // host
+    updateGpuLoadsDeepEP(expert_ids, gpu_loads, total_tokens, ep_rank);
     EXPECT_EQ(gpu_loads_res, gpu_loads);
 }
 
@@ -228,6 +264,24 @@ TEST_F(EplbKernelTest, updateGpuLoadsLLTest) {
     updateGpuLoadsLLTest(2, 7, 16);
     updateGpuLoadsLLTest(65, 0, 16);
     updateGpuLoadsLLTest(65, 7, 16);
+}
+
+TEST_F(EplbKernelTest, updateGpuLoadsDeepEPTestNoRedundancy) {
+    updateGpuLoadsDeepEPTest(1, 256, 256, 0, 16);
+    updateGpuLoadsDeepEPTest(1, 256, 256, 7, 16);
+    updateGpuLoadsDeepEPTest(8, 256, 256, 0, 16);
+    updateGpuLoadsDeepEPTest(8, 256, 256, 7, 16);
+    updateGpuLoadsDeepEPTest(1024, 256, 256, 0, 16);
+    updateGpuLoadsDeepEPTest(1024, 256, 256, 7, 16);
+}
+
+TEST_F(EplbKernelTest, updateGpuLoadsDeepEPTestRedundancy) {
+    updateGpuLoadsDeepEPTest(1, 256, 288, 0, 16);
+    updateGpuLoadsDeepEPTest(1, 256, 288, 7, 16);
+    updateGpuLoadsDeepEPTest(8, 256, 288, 0, 16);
+    updateGpuLoadsDeepEPTest(8, 256, 288, 7, 16);
+    updateGpuLoadsDeepEPTest(1024, 256, 288, 0, 16);
+    updateGpuLoadsDeepEPTest(1024, 256, 288, 7, 16);
 }
 
 int main(int argc, char** argv) {

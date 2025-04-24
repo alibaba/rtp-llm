@@ -1,3 +1,4 @@
+#include "src/fastertransformer/kernels/eplb/experts_stats_kernels.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/Types.h"
@@ -186,6 +187,16 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         MoeDispatchOutput out{recv_x_buffer, recv_topk_idx_buffer, recv_topk_weights_buffer};
         out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
         out.comm_barrier_hook = std::move(comm_hook);
+
+        if (params.expert_stats.has_value()) {
+            auto& experts_stats = params.expert_stats.value();
+            update_gpu_loads_deepep_kernel(recv_topk_idx_buffer->data<int64_t>(),
+                                           experts_stats.getLayerGpuLoads(),
+                                           recv_topk_idx_buffer->size(),
+                                           moe_conf.ep_rank,
+                                           stream_);
+        }
+
         return out;
     } catch (const std::exception& e) {
         FT_LOG_ERROR("Failed to dispatch: %s", e.what());

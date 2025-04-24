@@ -60,6 +60,36 @@ update_gpu_loads_kernel(int* experts_ids, int* gpu_loads, int total_token_num, i
     }
 }
 
+__global__ void update_gpu_loads_deepep_kernel(int64_t* experts_ids, int* gpu_loads, int total_token_num, int ep_rank) {
+    // use shared memory to reduce global memory access
+    __shared__ int shared_sum[256];
+
+    int tid = threadIdx.x;
+    int i   = blockIdx.x * blockDim.x + tid;
+
+    int contribute = 0;
+    if (i < total_token_num) {
+        contribute = (experts_ids[i] >= 0) ? 1 : 0;
+    }
+
+    // save the contribution to shared memory
+    shared_sum[tid] = contribute;
+    __syncthreads();
+
+    // reduce the contributions in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_sum[tid] += shared_sum[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // write the result to global memory
+    if (tid == 0) {
+        atomicAdd(&gpu_loads[ep_rank], shared_sum[0]);
+    }
+}
+
 __global__ void
 update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank)
 {
@@ -101,6 +131,15 @@ void launch_update_gpu_loads(int*         experts_ids,
 
     update_gpu_loads_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
         experts_ids, gpu_loads, total_token_num, experts_per_gpu, ep_rank);
+}
+
+void update_gpu_loads_deepep_kernel(
+    int64_t* experts_ids, int* gpu_loads, int total_token_num, int ep_rank, cudaStream_t stream) {
+    int block_size = 256;
+    int grid_size  = (total_token_num + block_size - 1) / block_size;
+
+    update_gpu_loads_deepep_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
+        experts_ids, gpu_loads, total_token_num, ep_rank);
 }
 
 void launch_update_gpu_loads_ll(

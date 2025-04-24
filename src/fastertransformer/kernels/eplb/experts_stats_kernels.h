@@ -21,6 +21,9 @@ void launch_update_gpu_loads(int*         experts_ids,
                              int          ep_size,
                              cudaStream_t stream);
 
+void update_gpu_loads_deepep_kernel(
+    int64_t* experts_ids, int* gpu_loads, int total_token_num, int ep_rank, cudaStream_t stream);
+
 void launch_update_gpu_loads_ll(
     int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank, cudaStream_t stream);
 
