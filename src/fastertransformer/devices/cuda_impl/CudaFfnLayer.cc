@@ -308,12 +308,14 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
                                             stream_);
     }
     if (autil::EnvUtil::getEnv("FAKE_BALANCE_EXPERT", 0L)) {
-        fake_balance_expert(expert_for_source_row->data<int>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
+        fake_balance_expert(expert_for_source_row->data<int>(),  expert_scales->data<float>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
     }
 
     // EPLB
     balanceExperts(expert_for_source_row, params.expert_stats, params.configs.moe_configs.value(), params.weights);
 
+    printBufferData(*expert_for_source_row, "expert_for_source_row");
+    printBufferData(*expert_scales, "expert_scales");
     return {expert_for_source_row, expert_scales};
 }
 

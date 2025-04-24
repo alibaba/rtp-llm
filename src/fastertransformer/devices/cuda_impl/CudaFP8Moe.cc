@@ -168,15 +168,15 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
         new QBuffer(std::move(permuted_padding_input),
                     std::move(permuted_padding_input_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
-
     printBufferData(*permuted_padding_input_fp8, "fc1_input_fp8");
+    printBufferData(*weights.moe_gate_weight->kernel, "moe_gate_weight");
+    printBufferData(*padding_group_index_device, "padding_group_index_device");
     DeepGemmPlugin::groupedGemmFp8Contiguous(*permuted_padding_input_fp8,
                                              *weights.moe_gate_weight->kernel,
                                              *fc1_result,
                                              padding_group_index_device->view(0, total_padding_num),
                                              stream_);
     printBufferData(*fc1_result, "fc1_result");
-
     sync_check_cuda_error();
     using GemmOutputType = __nv_bfloat16;
     using ScaleBiasType  = __nv_bfloat16;

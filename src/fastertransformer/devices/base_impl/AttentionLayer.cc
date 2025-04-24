@@ -169,7 +169,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         attn_output = gemm_output;
     }
      
-    if(params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTensor) {
+    if(params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qint8PerToken) {
         OptionalConstBufferRef smoother_weight =
             params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
                                              std::nullopt;
@@ -187,7 +187,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             params.weights.static_scale_reciprocal_weight ?
                 (OptionalConstBufferRef) * (params.weights.static_scale_reciprocal_weight->kernel) :
                 std::nullopt;
-        auto quant_data_type = params.qscheme == QScheme::Qfp8PerTokenBlock ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+        auto quant_data_type = DataType::TYPE_INT8;
         auto quant_params = QuantizeParams(
             *qkv_output,
             quant_data_type,

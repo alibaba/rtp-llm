@@ -1783,15 +1783,16 @@ INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_bfloat16);
 INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_fp8_e4m3);
 #endif
 
-__global__ void fakeBalanceExpertKernel(int* expert, int start, int expert_num, int size) {
+__global__ void fakeBalanceExpertKernel(int* expert, float* expert_scales, int start, int expert_num, int size) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < size) {
-        expert[index] = (start + index * 2) % expert_num;
+        expert[index] = (start + index) % expert_num;
+        expert_scales[index] = 1.0f;
     }
 }
 
-void fake_balance_expert(int* expert, int start, int expert_num, int size, cudaStream_t stream) {
-    fakeBalanceExpertKernel<<<(size + 255) / 256, 256, 0, stream>>>(expert, start, expert_num, size);
+void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
+    fakeBalanceExpertKernel<<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
 }
 
 }  // namespace fastertransformer

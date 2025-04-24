@@ -65,27 +65,19 @@ NormalEngine::~NormalEngine() {
 }
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(
-        const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
-    try {
-        auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
-        if (mode == preRunMode::prefill_warm_up) {
-            stream->setPerfTest(true);
-        } else if (mode == preRunMode::decode_warm_up) {
-            stream->setIsContextStream(false);
-            stream->fakeInitKVBlock();
-        } else if (mode == preRunMode::build_system_prompt) {
-            THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
-        };
-        std::list<GenerateStreamPtr> streams{stream};
-        THROW_IF_STATUS_ERROR(executor_->process(streams));
-        return stream;
-    } catch (const std::exception& e) {
-        FT_LOG_ERROR("pre run failed in pre run mode [%s] : %s", preRunModeToString(mode).c_str(), e.what());
-        throw;
-    } catch (...) {
-        FT_LOG_ERROR("catch unknown exception when in pre run mode : [%s]", preRunModeToString(mode).c_str());
-        throw;
-    }
+    const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
+    auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
+    if (mode == preRunMode::prefill_warm_up) {
+        stream->setPerfTest(true);
+    } else if (mode == preRunMode::decode_warm_up) {
+        stream->setIsContextStream(false);
+        stream->fakeInitKVBlock();
+    } else if (mode == preRunMode::build_system_prompt) {
+        THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
+    };
+    std::list<GenerateStreamPtr> streams{stream};
+    THROW_IF_STATUS_ERROR(executor_->process(streams));
+    return stream;
 }
 
 int64_t NormalEngine::getLastScheduleTime() {

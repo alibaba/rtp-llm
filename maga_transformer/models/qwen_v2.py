@@ -67,7 +67,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
         ]
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
-
+    
+    def _get_fp8_hf_layer_weight_info(self, layer_id: int):
+        raise NotImplementedError("fp8 weight info for qwen_v2 is not implemented")
     
     def _get_hf_quant_weight_info(self, layer_id):
         layer_quant_weights =[
@@ -136,14 +138,17 @@ class QWenV2Weight(ModelDeployWeightInfo):
             if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
                 w = self._get_hf_quant_weight_info(layer)
                 layer_weights.append(w)
-            elif self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
-                hf_w = self._get_hf_layer_weight_info(layer)
-                w = get_trt_engine_layer_weight_info(hf_w, True)
-                scale_w = get_layer_per_tensor_fp8_scale_weight_info(w)
-                w.extend(scale_w)
-                layer_weights.append(w)
+            elif self._quant_algo.isFp8():
+                if self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
+                    hf_w = self._get_hf_layer_weight_info(layer)
+                    w = get_trt_engine_layer_weight_info(hf_w, True)
+                    scale_w = get_layer_per_tensor_fp8_scale_weight_info(w)
+                    w.extend(scale_w)
+                    layer_weights.append(w)
+                else:
+                    layer_weights.append(self._get_fp8_hf_layer_weight_info(layer))
             elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
-                inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size
                 w = self._get_hf_layer_weight_info(layer)
                 w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
                 layer_weights.append(w)
