@@ -266,7 +266,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
 }
 
 MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
-    if (!device_props_.enable_layer_micro_batch) {
+    if (!int(device_props_.enable_layer_micro_batch)) {
         FT_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
         return {false, {}};
     }
@@ -503,7 +503,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
 
     auto micro_batch_plan = planMicroBatches(inputs);
-    if (device_props_.enable_layer_micro_batch) {
+    if (int(device_props_.enable_layer_micro_batch)) {
         auto micro_batch_inputs = prepareMicroBatchInputs(
             inputs, hidden, pre_decoder_residual, attn_dtype,  micro_batch_plan);
         return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), hidden_dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
@@ -514,19 +514,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
 }
 
-GptLayerOutputs GptModel::forwardMicroBatchedLayers(
-        const GptLayerInputs& layer_inputs, const GptModelInputs& inputs)
-{
-    std::vector<GptLayerInputs> micro_batch_layer_inputs;
-    for (auto& micro_batch_input : layer_inputs.micro_batch_inputs) {
-        micro_batch_layer_inputs.push_back({
-            micro_batch_input.hidden,
-            micro_batch_input.pre_decoder_residual,
-            micro_batch_input.attention_common_inputs,
-            layer_inputs.dtype
-        });
-    }
-
+vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLayerInputs> micro_batch_layer_inputs) {
     std::vector<LastLayerDeferedParams> last_layer_defered_params(micro_batch_layer_inputs.size());
 
     for (int32_t i = 0; i < layer_num_; ++i) {
@@ -536,7 +524,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
         // dense layer does not need micro batching.
         if (!moe_layer) {
             for (auto& layer_input : micro_batch_layer_inputs) {
-                auto layer_outputs = forwardGptLayer(layer_input, i, inputs.lora_model_input);
+                auto layer_outputs = forwardGptLayer(layer_input, i, nullptr);
                 layer_input.hidden = move(layer_outputs.hidden);
             }
             continue;
@@ -651,6 +639,112 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
                 layer_input.hidden = move(batch_ep_output.hidden);
             }
         }
+    }
+    return micro_batch_layer_inputs;
+}
+
+vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayerInputs> micro_batch_layer_inputs) {
+
+    std::vector<LastLayerDeferedParams> last_layer_defered_params_vec(micro_batch_layer_inputs.size());
+    for (int32_t i = 0; i < layer_num_; ++i) {
+        const auto& layer = weights_.layers[i];
+        bool moe_layer = layer.ffn_weights.moe_gate_weight != nullptr;
+
+        // dense layer does not need micro batching.
+        if (!moe_layer) {
+            for (auto& layer_input : micro_batch_layer_inputs) {
+                auto layer_outputs = forwardGptLayer(layer_input, i, nullptr);
+                layer_input.hidden = move(layer_outputs.hidden);
+            }
+            continue;
+        }
+
+        for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+            auto& last_layer_defered_params = last_layer_defered_params_vec[micro_batch_idx];
+
+            auto last_layer_moe_ret = device_->stealMoEInsertionRet();
+            RUNTIME_ASSERT_OP_ARG(
+                bool(last_layer_defered_params.shared_expert_output) == bool(last_layer_moe_ret),
+                "moe insertion return should only be null if no previous layer.");
+            last_layer_defered_params.combine_output = last_layer_moe_ret
+                    ? std::optional<ft::MoeCombineOutput>(last_layer_moe_ret->combine_output)
+                    : nullopt;
+
+            auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i);
+
+            // set moe insertion params
+            device_->setMoEInsertion(MoEInsertionParams(
+                ep_input.dispatch_output,
+                ep_input.moe_ffn_params,
+                std::make_shared<MoeGateSelectOutput>(ep_input.gate_output),
+                ep_input.hidden->shape()[0]
+            ));
+            last_layer_defered_params.residual = ep_input.residual;
+            last_layer_defered_params.post_ffn_layernorm_weights = layer.post_ffn_layernorm;
+
+            // call shared
+            auto shared_expert_output = device_->moeSharedExpert(ep_input.moe_ffn_params).hidden_states;
+            last_layer_defered_params.shared_expert_output = shared_expert_output;
+        }
+    }
+
+    // deal with last layer
+    auto mb0_moe_insertion_ret = device_->stealMoEInsertionRet();
+    last_layer_defered_params_vec[0].combine_output = mb0_moe_insertion_ret->combine_output;
+
+    // last layer last micro batch
+    device_->computeInsertedMoE();
+    auto moe_insertion_ret = device_->stealMoEInsertionRet();
+    moe_insertion_ret->combine_output.comm_barrier_hook->hook_sync();
+    last_layer_defered_params_vec.back().combine_output = move(moe_insertion_ret->combine_output);
+
+    for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+        auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+        auto& last_layer_defered_params = last_layer_defered_params_vec[micro_batch_idx];
+
+        auto output = device_->gatherCombineOutput(last_layer_defered_params.combine_output.value()).hidden_states;
+
+        auto ffn_layernorm_output = device_->layernorm({
+            output,
+            nullptr,
+            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
+            ft::mayGetRef(last_layer_defered_params.residual),
+            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+            nullopt,
+            1.0f,
+            description_.layernorm_eps,
+            true,
+            description_.post_layernorm,
+            description_.norm_type,
+            QScheme::NoQuantize
+        });
+        layer_input.hidden = move(ffn_layernorm_output.output);
+        printBufferData(*layer_input.hidden, "mb_" + to_string(micro_batch_idx) + "_final_hidden");
+    }
+
+    return micro_batch_layer_inputs;
+}
+
+GptLayerOutputs GptModel::forwardMicroBatchedLayers(
+        const GptLayerInputs& layer_inputs, const GptModelInputs& inputs)
+{
+    std::vector<GptLayerInputs> micro_batch_layer_inputs;
+    for (auto& micro_batch_input : layer_inputs.micro_batch_inputs) {
+        micro_batch_layer_inputs.push_back({
+            micro_batch_input.hidden,
+            micro_batch_input.pre_decoder_residual,
+            micro_batch_input.attention_common_inputs,
+            layer_inputs.dtype
+        });
+    }
+
+    if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
+        micro_batch_layer_inputs = forwardPrefillMicroBatchedLayers(micro_batch_layer_inputs);
+    } else if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_DECODE) {
+        micro_batch_layer_inputs = forwardDecodeMicroBatchedLayers(micro_batch_layer_inputs);
+    } else {
+        RUNTIME_ASSERT_OP_ARG(false, "micro batch type %d is not supported", int(device_props_.enable_layer_micro_batch));
     }
 
     const auto& hidden = layer_inputs.hidden;
@@ -891,7 +985,6 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
 EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,
-
         const int32_t layer_id)
 {
     auto hidden = inputs.hidden;
@@ -946,10 +1039,23 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
-    if (last_comm_hook_) {
-        last_comm_hook_->hook_sync();
-        last_comm_hook_ = nullptr;
+    if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
+        if (last_comm_hook_) {
+            last_comm_hook_->hook_sync();
+            last_comm_hook_ = nullptr;
+        }
+    } else {
+        // call combine hook sync
+        const auto& previous_moe_ret = device_->getMoEInsertionRet();
+        // RUNTIME_ASSERT_OP_ARG(
+        //     bool(last_layer_defered_params.shared_expert_output) == bool(previous_moe_ret),
+        //     "moe insertion return should only be null if no previous layer.");
+
+        if (previous_moe_ret && previous_moe_ret->combine_output.comm_barrier_hook) {
+            previous_moe_ret->combine_output.comm_barrier_hook->hook_sync();
+        }
     }
+
     printBufferData(ffn_layer_params.input, "layer_" + to_string(layer_id) + "_ep_dispatch_input");
     printBufferData(*gate_output.expert_ids, "layer_" + to_string(layer_id) + "_expert_ids");
     if (gate_output.expert_scales) {
@@ -969,10 +1075,12 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
 
     auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
-    if (dispatched_output.comm_barrier_hook) {
-        last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
-    } else {
-        FT_LOG_INFO("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
+    if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
+        if (dispatched_output.comm_barrier_hook) {
+            last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
+        } else {
+            FT_LOG_INFO("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
+        }
     }
 
     return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};
@@ -1095,7 +1203,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     GptLayerOutputs layer_outputs;
 
-    if (device_props_.enable_layer_micro_batch) {
+    if (int(device_props_.enable_layer_micro_batch)) {
         RUNTIME_ASSERT_OP_ARG(layer_inputs.micro_batch_inputs.size(), "no micro batch inputs when enabled");
         layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs);
     } else {

@@ -716,6 +716,28 @@ struct MoeBalanceParams {
     const FfnLayerParams&  params;
 };
 
+// for deepseek decode micro batch
+struct MoEInsertionParams {
+    MoEInsertionParams(const MoeDispatchOutput& dispatched_output,
+                       const FfnLayerParams& ffn_params,
+                       std::shared_ptr<MoeGateSelectOutput> gate_output,
+                       size_t origin_token_num)
+        : dispatched_output(dispatched_output),
+          ffn_params(ffn_params),
+          gate_output(std::move(gate_output)),
+          origin_token_num(origin_token_num)
+          {}
+
+    MoeDispatchOutput dispatched_output;
+    FfnLayerParams ffn_params;
+    std::shared_ptr<MoeGateSelectOutput> gate_output;
+    size_t origin_token_num;
+};
+
+struct MoEInsertionReturns {
+    MoeCombineOutput combine_output;
+};
+
 struct GreedyParams {
     const Buffer& logits;                    // [batch_size, vocab_size_padded]
     const Buffer& input_lengths;             // [batch_size]

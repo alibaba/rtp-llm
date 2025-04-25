@@ -49,10 +49,12 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
                            params.weights,
                            params.configs,
                            params.qscheme});
-    
+
     if (params.is_prefill) {
         writeCacheStore(params);
     }
+
+    computeInsertedMoE();
 
     auto fused_q_input_t = Buffer2torchTensor(fused_q_input, false);
     QInputBatchMatmulWrapper(fused_q_input_t, params);
@@ -194,6 +196,8 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
                            params.qscheme});
     writeCacheStore(params);
 
+    computeInsertedMoE();
+
     auto split_result = split({fused_qkv, {(size_t)params.kv_offset, (size_t)params.configs.kv_lora_rank, (size_t)params.configs.rope_head_dim}, 1});
     auto kv_a = split_result.outputs[1];
     auto k_rope   = split_result.outputs[2];
@@ -236,7 +240,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
         nullptr,
         nullptr,
         nullptr,
-        nullptr);    
+        nullptr);
     auto qkv_output_reshaped = padded_qkv_output_t->reshape({token_num, params.configs.head_num, size_per_head});
     auto sliced_buffer = slice({qkv_output_reshaped, -1, 0, (int64_t)v_head_dim});
     copy({*params.qkv_output, *sliced_buffer});

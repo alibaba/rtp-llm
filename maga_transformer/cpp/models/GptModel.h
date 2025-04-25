@@ -223,6 +223,9 @@ protected:
 
     // These methods are dedicated for moe ep micro batching
     GptLayerOutputs forwardMicroBatchedLayers(const GptLayerInputs& layer_inputs, const GptModelInputs& inputs);
+    std::vector<GptLayerInputs> forwardPrefillMicroBatchedLayers(std::vector<GptLayerInputs> inputs);
+    std::vector<GptLayerInputs> forwardDecodeMicroBatchedLayers(std::vector<GptLayerInputs> inputs);
+
     EpFfnInputs forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,

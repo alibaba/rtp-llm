@@ -16,6 +16,12 @@ enum class DeviceType {
     Ppu = 5,
 };
 
+enum class MicroBatchType {
+    NONE = 0,
+    DS_PREFILL = 1,
+    DS_DECODE = 2,
+};
+
 struct DeviceInitParams {
     DeviceType device_type;
     size_t device_id       = 0;
@@ -49,7 +55,7 @@ struct DeviceInitParams {
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
     bool enable_comm_overlap = true;
-    bool enable_layer_micro_batch  = false;
+    MicroBatchType enable_layer_micro_batch  = MicroBatchType::NONE;
 
     bool enable_sp = false;
     size_t overlap_math_sm_count = 0;
@@ -95,7 +101,7 @@ struct DeviceProperties {
     bool sq_fuse_bias_activation = false;
 
     bool enable_comm_overlap = true;
-    bool enable_layer_micro_batch = false;
+    MicroBatchType enable_layer_micro_batch = MicroBatchType::NONE;
 
     bool use_deepep_moe = false;
     bool use_deepep_internode = false;

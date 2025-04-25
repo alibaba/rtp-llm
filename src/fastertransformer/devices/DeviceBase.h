@@ -58,6 +58,12 @@ public:
     virtual OverallExpertStats createMoeExpertStates(const ExpertStatsParams& params);
     virtual void cleanMoeExpertStates(const OverallExpertStats& stats);
 
+    // for deepseek micro batching
+    virtual void setMoEInsertion(const MoEInsertionParams& params);
+    virtual std::unique_ptr<MoEInsertionReturns> stealMoEInsertionRet();
+    virtual const std::unique_ptr<MoEInsertionReturns>& getMoEInsertionRet();
+    virtual void computeInsertedMoE();
+
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 
@@ -106,6 +112,9 @@ protected:
     DeviceInitParams init_params_;
     std::shared_ptr<rtp_llm::CacheStore> cache_store_;
     bool enable_device_perf_ = false;
+
+    std::unique_ptr<MoEInsertionParams> moe_insertion_params_;
+    std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
 
 private:
     std::unique_ptr<BufferManager> buffer_manager_;

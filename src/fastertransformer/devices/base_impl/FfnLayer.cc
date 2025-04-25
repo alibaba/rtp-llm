@@ -230,4 +230,66 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
     }
 }
 
+void DeviceBase::setMoEInsertion(const MoEInsertionParams& params) {
+    RUNTIME_ASSERT_OP_ARG(!moe_insertion_params_, "moe insertion params set twice!");
+    moe_insertion_params_ = std::make_unique<MoEInsertionParams>(params);
+}
+
+std::unique_ptr<MoEInsertionReturns> DeviceBase::stealMoEInsertionRet() {
+    auto ret = move(moe_insertion_ret_);
+    moe_insertion_ret_ = nullptr;
+    return ret;
+}
+
+const std::unique_ptr<MoEInsertionReturns>& DeviceBase::getMoEInsertionRet() {
+    return moe_insertion_ret_;
+}
+
+void DeviceBase::computeInsertedMoE() {
+    if (moe_insertion_params_) {
+        RUNTIME_ASSERT_OP_ARG(!moe_insertion_ret_, "moe insertion return not fetched!");
+        auto moe_insertion_params = move(moe_insertion_params_);
+        moe_insertion_params_ = nullptr;
+
+        const auto& dispatched_output = moe_insertion_params->dispatched_output;
+        if (dispatched_output.comm_barrier_hook) {
+            dispatched_output.comm_barrier_hook->hook_sync();
+        }
+
+        auto hidden = dispatched_output.hidden;
+        printBufferData(*hidden, "layer_combine_input");
+
+        const auto ffn_params = moe_insertion_params->ffn_params;
+        auto moe_ffn_params = FfnLayerParams({
+            *dispatched_output.hidden,
+            ffn_params.configs,
+            ffn_params.weights,
+            ffn_params.residual,
+            ffn_params.qscheme});
+
+        hidden = moeFfn(
+            moe_ffn_params,
+            {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
+        ).hidden_states;
+
+        auto combine_out = epCombine({
+            hidden,
+            dispatched_output.indices,
+            ffn_params.output,
+            dispatched_output.input_split_sizes,
+            dispatched_output.output_split_sizes,
+            ffn_params.configs.moe_configs.value(),
+            moe_insertion_params->origin_token_num,
+            init_params_.enable_comm_overlap,
+            dispatched_output.deep_ep_output,
+            dispatched_output.deep_ep_ll_output,
+            moe_insertion_params->gate_output,
+            dispatched_output.expert_ids,
+            dispatched_output.expert_scales,
+        });
+
+        moe_insertion_ret_ = std::unique_ptr<MoEInsertionReturns>(new MoEInsertionReturns({combine_out}));
+    }
+}
+
 }; // namespace fastertransformer
