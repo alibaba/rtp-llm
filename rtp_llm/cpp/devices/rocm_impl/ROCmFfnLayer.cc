@@ -421,6 +421,13 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         for (int i = 0; i < num_expert_per_rank; ++i) {
             local_expert_mask_host_ptr[moe_conf.ep_rank * num_expert_per_rank + i] = 1;
         }
+        BufferPtr local_expert_mask = clone({*local_expert_mask_host});
+        
+        torch::Tensor sorted_ids_tensor = Buffer2torchTensor(*sorted_ids, false);
+        torch::Tensor sorted_weights_tensor = Buffer2torchTensor(*sorted_weights, false);
+        torch::Tensor sorted_expert_ids_tensor = Buffer2torchTensor(*sorted_expert_ids, false);
+        torch::Tensor num_valid_ids_tensor = Buffer2torchTensor(*num_valid_ids, false);
+        torch::Tensor local_expert_mask_tensor = Buffer2torchTensor(*local_expert_mask, false);
 
         BufferPtr local_expert_mask = clone({*local_expert_mask_host, AllocationType::DEVICE, BufferHints(), false, false});
         
