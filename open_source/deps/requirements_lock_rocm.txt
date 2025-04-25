@@ -122,9 +122,9 @@ aliyun-python-sdk-kms==2.16.5 \
     --hash=sha256:24b6cdc4fd161d2942619479c8d050c63ea9cd22b044fe33b60bbb60153786f0 \
     --hash=sha256:f328a8a19d83ecbb965ffce0ec1e9930755216d104638cd95ecd362753b813b3
     # via oss2
-amdsmi==6.2.4 \
-    --hash=sha256:02429befc9f138c3a6bfd0359b44d5f31976804f9818c560f480dab05ac7937a \
-    --hash=sha256:5c1b34138038686c1e1b1c6b90708b858f8dc5d2d6af009fa5bd35fa3aa3bdfb
+# amdsmi==6.2.4 \
+#     --hash=sha256:02429befc9f138c3a6bfd0359b44d5f31976804f9818c560f480dab05ac7937a \
+#     --hash=sha256:5c1b34138038686c1e1b1c6b90708b858f8dc5d2d6af009fa5bd35fa3aa3bdfb
     # via -r open_source/deps/requirements_rocm.txt
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \

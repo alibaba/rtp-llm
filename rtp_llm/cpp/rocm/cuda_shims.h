@@ -105,6 +105,7 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaStreamQuery hipStreamQuery
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamDestroy hipStreamDestroy
+#define cudaStreamWaitEvent hipStreamWaitEvent
 
 #define CUDA_IPC_HANDLE_SIZE HIP_IPC_HANDLE_SIZE
 #define cudaIpcGetMemHandle hipIpcGetMemHandle

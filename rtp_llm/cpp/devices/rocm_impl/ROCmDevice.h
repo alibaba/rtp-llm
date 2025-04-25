@@ -105,6 +105,19 @@ private:
     hipStream_t stream_;
 };
 
+class ROCmCommHook : public DeviceHook {
+public:
+    ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream);
+    ~ROCmCommHook() override;
+
+    void hook_sync() const override;
+
+private:
+    hipEvent_t hook_event_;
+    hipStream_t main_stream_;
+    hipStream_t comm_stream_;
+};
+
 class ROCmDevice: public DeviceBase {
 public:
     ROCmDevice(const DeviceInitParams& params);
@@ -120,6 +133,9 @@ public:
     TransposeOutput transpose(const TransposeParams& params) override;
     void checkError() override;
     void syncAndCheck() override;
+    void overlappedCommBarrier() override;
+    DeviceHookPtr createCommHook() override;
+    void overlappedComputeBarrier() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     SelectOutput select(const SelectParams& params) override;
@@ -132,8 +148,11 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
-    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
-    FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
+    MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params) override;
+    FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
+    MoeCombineOutput epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput gatherCombineOutput(const MoeCombineOutput& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     GreedyOutput sampleGreedy(const GreedyParams& params) override;
     MemoryStatus getDeviceMemoryStatus() override;
@@ -143,6 +162,9 @@ public:
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
+    SplitOutput split(const SplitParams& params) override;
+    AllToAllOutput allToAll(const AllToAllParams& params) override;
+
     void preRun() override { ROCM_CHECK(hipSetDevice(device_id_)); }
     DeviceEventPtr createEvent() override;
 
@@ -162,10 +184,12 @@ public:
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params,
                             BufferPtr         output);
+    // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
-    hipStream_t getStream() {return stream_;}
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
+    hipStream_t getStream(DeviceStream stream);
+    hipStream_t getStream() {return stream_;}
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
@@ -178,6 +202,7 @@ private:
 
     hipStream_t     stream_ = nullptr;
     hipStream_t     no_block_copy_stream_;
+    hipStream_t     communication_stream_;
     hipStream_t     assist_stream_  = nullptr;
     hipStream_t     current_stream_ = nullptr;
     hipDeviceProp_t device_prop_;
@@ -197,13 +222,28 @@ private:
     std::unique_ptr<rocmFmhaWrapper>      fmha_runner_;
     bool use_openSource_fmha    = true;
 
-    NcclParam nccl_param_;
+    NcclParam tp_nccl_param_;
+    NcclParam dp_nccl_param_;
+    NcclParam dp_tp_nccl_param_;
+    NcclParam ffn_tp_nccl_param_;
 
+    void initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
+                       const std::string& tp_group_name, NcclParam& nccl_param);
+    NcclParam getNcclParam(ParallelMode mode);
     //moe
     std::unique_ptr<rocmMoeWrapper> moe_runner_;
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+    // BufferPtr will be error when multi stream, tmp hold
+    // std::vector<BufferPtr> overlap_hold_buffers_;
+    // std::unique_ptr<CommBuffer> attn_ag_comm_buffer_ = nullptr;
+    // std::unique_ptr<CommBuffer> attn_ag_scale_comm_buffer_ = nullptr;
+    // std::unique_ptr<CommBuffer> attn_rs_comm_buffer_ = nullptr;
+    // std::unique_ptr<CommBuffer> ffn_ag_comm_buffer_ = nullptr;
+    // std::unique_ptr<CommBuffer> ffn_ag_scale_comm_buffer_ = nullptr;
+    // std::unique_ptr<CommBuffer> ffn_rs_comm_buffer_ = nullptr;
 
     //CK gemm
     std::unique_ptr<rocmCKGemmWrapper> ck_gemm_runner_;

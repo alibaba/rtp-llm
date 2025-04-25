@@ -241,7 +241,8 @@ cc_library(
         "mla/mla_rotary_kvcache_test.cc",
         "mla/mla_decoder_attention.cc",
         "mla/mla_context_attention.cc",        
-        "gemm/gemm_op_test.cc"
+        "gemm/gemm_op_test.cc",
+        "ffn/rocm_ffn_moe_fp8_test.cc"
     ]) + select({
         "@//:using_cuda11": glob([
             "fp8_gemm/*.cc",
@@ -309,6 +310,24 @@ py_test(
     ],
 )
 
+py_test(
+    name = "rocm_ffn_moe_fp8_test",
+    srcs = [
+        "ffn/rocm_ffn_moe_fp8_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    exec_properties = {'gpu':'A10'},
+)
 
 py_test(
     name = "mla_rotary_kvcache_test",

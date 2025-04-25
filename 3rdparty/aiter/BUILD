@@ -11,7 +11,9 @@ genrule(
         # "aiter/jit/libmodule_cache.so",
         # "aiter/jit/libmodule_mha_fwd.so",
         "aiter/jit/libmodule_quant.so",
-        "aiter/jit/libmodule_gemm_a8w8_blockscale.so"
+        "aiter/jit/libmodule_gemm_a8w8_blockscale.so",
+        "aiter/jit/libmodule_moe_sorting.so",
+        "aiter/jit/libmodule_moe_asm.so",
     ],
     cmd = """
         awk '{gsub(/^#cmakedefine DTYPES \"@DTYPES@\"/, "/* #undef DTYPES*/");
@@ -46,6 +48,8 @@ genrule(
         cp external/aiter/aiter/jit/module_custom_all_reduce.so $(location aiter/jit/libmodule_custom_all_reduce.so);
         cp external/aiter/csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so $(location csrc/cpp_itfs/mla/libasm_mla_decode_fwd_torch.so)
         cp external/aiter/aiter/jit/module_quant.so $(location aiter/jit/libmodule_quant.so);
+        cp external/aiter/aiter/jit/module_moe_sorting.so $(location aiter/jit/libmodule_moe_sorting.so);
+        cp external/aiter/aiter/jit/module_moe_asm.so $(location aiter/jit/libmodule_moe_asm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location aiter/jit/libmodule_gemm_a8w8_blockscale.so);
     """,
     visibility = ["//visibility:public"]
@@ -106,6 +110,30 @@ cc_library(
     copts = [],
     linkopts = [],
     strip_include_prefix = "csrc/ck_gemm_a8w8_blockscale/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_moe_sorting",
+    srcs = ["aiter/jit/libmodule_moe_sorting.so"],
+    hdrs = ["csrc/include/moe_sorting.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_moe_asm",
+    srcs = ["aiter/jit/libmodule_moe_asm.so"],
+    hdrs = ["csrc/include/moe_op.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
 )

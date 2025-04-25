@@ -30,36 +30,45 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
-        const auto rank       = params.tp_rank;
-        const auto world_size = params.tp_size;
-
-        nccl_param_.rank_       = rank;
-        nccl_param_.world_size_ = world_size;
-        auto       tcpStore     = createTcpStore(params.master_ip, params.tp_master_port, world_size, rank);
-        const auto nccl_id      = &(nccl_param_.nccl_uid_);
-
-        const std::string tp_group_name = "RTP_LLM_TP_GROUP_";
-        if (rank == 0) {
-            RTP_LLM_LOG_INFO("rank %d creates nccl uid in group %s.", rank, tp_group_name.c_str());
-            NCCLCHECK(ncclGetUniqueId(nccl_id));
-            setUniqueId(nccl_id, tp_group_name, tcpStore);
-        } else {
-            RTP_LLM_LOG_INFO("rank %d get nccl uid in group %s.", rank, tp_group_name.c_str());
-            getUniqueId(nccl_id, tp_group_name, tcpStore);
+        auto master_ip = params.master_ip;
+        if (params.dp_size > 1) {
+            master_ip = "127.0.0.1";
         }
-
-        RTP_LLM_LOG_INFO("Initialize NCCL communicators rank %d of %d.", rank, world_size);
-        NCCLCHECK(ncclGroupStart());
-        NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
-        NCCLCHECK(ncclGroupEnd());
+        initNcclParam(
+            params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
+    }
+    if (params.ffn_tp_size > 1) {
+        if (params.ffn_tp_size != params.tp_size) {
+            initNcclParam(params.ffn_tp_rank, params.ffn_tp_size, params.master_ip,
+                        params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size, "RTP_LLM_FFN_TP_GROUP_", ffn_tp_nccl_param_);
+        } else {
+            ffn_tp_nccl_param_ = tp_nccl_param_;
+        }
+    }
+    if (params.dp_size > 1 && params.tp_rank == 0) {
+        initNcclParam(params.dp_rank,
+                      params.dp_size,
+                      params.master_ip,
+                      params.dp_master_port,
+                      "RTP_LLM_DP_GROUP_",
+                      dp_nccl_param_);
+    }
+    if (params.ep_size > 1) {
+        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
+                      params.dp_size * params.tp_size,
+                      params.master_ip,
+                      params.dp_tp_master_port,
+                      "RTP_LLM_DP_TP_GROUP_",
+                      dp_tp_nccl_param_);
     }
 
     // Initialize custom all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
-    if (nccl_param_.world_size_ > 1) {
-        RTP_LLM_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
-        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
-        // custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_, params.hw_kernel_config);
+    if (tp_nccl_param_.world_size_ > 1) {
+        auto& nccl_param = tp_nccl_param_;
+        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
+        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
+        // custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
@@ -146,8 +155,17 @@ ROCmDevice::~ROCmDevice() {
         ROCM_CHECK(hipStreamDestroy(stream_));
     }
 
-    if (nccl_param_.nccl_comm_) {
-        ncclCommDestroy(nccl_param_.nccl_comm_);
+    if (ffn_tp_nccl_param_ != tp_nccl_param_ && ffn_tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(ffn_tp_nccl_param_.nccl_comm_);
+    }
+    if (tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(tp_nccl_param_.nccl_comm_);
+    }
+    if (dp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(dp_nccl_param_.nccl_comm_);
+    }
+    if (dp_tp_nccl_param_.nccl_comm_) {
+        ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
     }
 }
 
@@ -159,12 +177,25 @@ void ROCmDevice::init() {
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
-    DeviceProperties props;
-    props.type = DeviceType::ROCm;
-    props.id   = device_id_;
-    props.tp_rank = nccl_param_.rank_;
-    props.tp_size = nccl_param_.world_size_;
-    return props;
+    static DeviceProperties* prop = nullptr;
+    if (prop == nullptr) {
+        prop          = new DeviceProperties();
+        prop->type    = DeviceType::ROCm;
+        prop->id      = device_id_;
+        prop->tp_rank = init_params_.tp_rank;
+        prop->tp_size = init_params_.tp_size;
+        prop->dp_rank = init_params_.dp_rank;
+        prop->dp_size = init_params_.dp_size;
+        prop->enable_comm_overlap = init_params_.enable_comm_overlap;
+        prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
+        prop->enable_sp = init_params_.enable_sp;
+        prop->overlap_math_sm_count = init_params_.overlap_math_sm_count;
+        prop->overlap_comm_type = init_params_.overlap_comm_type;
+        prop->ffn_tp_size = init_params_.ffn_tp_size;
+        prop->ffn_tp_rank = init_params_.ffn_tp_rank;
+        prop->m_split = init_params_.m_split;
+    }
+    return *prop;
 }
 
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
@@ -246,11 +277,19 @@ void ROCmDevice::noBlockCopy(const CopyParams& params) {
     ROCM_CHECK(hipStreamSynchronize(no_block_copy_stream_));
 }
 
+hipStream_t ROCmDevice::getStream(DeviceStream stream) {
+  switch (stream) {
+      default:
+          return stream_;
+  }
+}
+
 void ROCmDevice::bufMemset(Buffer& buf, int val, DeviceStream stream) {
     if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
         std::memset(buf.data(), val, buf.sizeBytes());
     } else {
-        ROCM_CHECK(hipMemsetAsync(buf.data(), val, buf.sizeBytes(), stream_));
+        hipStream_t cur_stream = getStream(stream);
+        ROCM_CHECK(hipMemsetAsync(buf.data(), val, buf.sizeBytes(), cur_stream));
     }
 }
 
@@ -278,6 +317,31 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 
 void  ROCmDevice::checkError() {
     ROCM_CHECK_ERROR();
+
+void ROCmDevice::initNcclParam(size_t             rank,
+                               size_t             world_size,
+                               const std::string& ip,
+                               size_t             port,
+                               const string&      group_name,
+                               NcclParam&         nccl_param) {
+    nccl_param.rank_       = rank;
+    nccl_param.world_size_ = world_size;
+    auto       tcpStore    = createTcpStore(ip, port, world_size, rank);
+    const auto nccl_id     = &(nccl_param.nccl_uid_);
+
+    if (rank == 0) {
+        FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
+        NCCLCHECK(ncclGetUniqueId(nccl_id));
+        setUniqueId(nccl_id, group_name, tcpStore);
+    } else {
+        FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, group_name.c_str());
+        getUniqueId(nccl_id, group_name, tcpStore);
+    }
+
+    FT_LOG_INFO("Initialize NCCL communicators [%s] rank %d of %d.", group_name.c_str(), rank, world_size);
+    NCCLCHECK(ncclGroupStart());
+    NCCLCHECK(ncclCommInitRank(&nccl_param.nccl_comm_, world_size, *nccl_id, rank));
+    NCCLCHECK(ncclGroupEnd());
 }
 
 void ROCmDevice::syncAndCheck() {
@@ -287,9 +351,53 @@ void ROCmDevice::syncAndCheck() {
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {
-    if (nccl_param_.world_size_ > 1) {
-        RTP_LLM_LOG_DEBUG("Synchronize NCCL communicators rank %d of %d.", nccl_param_.rank_, nccl_param_.world_size_);
-        ftNcclStreamSynchronize(nccl_param_, stream_, timeout);
+    if (tp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG(
+            "Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(tp_nccl_param_, stream_, timeout);
+    }
+    if (dp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG(
+            "Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(dp_nccl_param_, stream_, timeout);
+    }
+    if (dp_tp_nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
+                     dp_tp_nccl_param_.rank_,
+                     dp_tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
+    }
+    if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
+        FT_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
+    }
+}
+
+void ROCmDevice::overlappedCommBarrier() {
+    // NOTE: when all the overlapped communication and computation done,
+    // we need to ensure the communication has been finished before starting the next computation.
+    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
+        hipEvent_t event;
+        ROCM_CHECK(hipEventCreate(&event));
+        ROCM_CHECK(hipEventRecord(event, communication_stream_));
+        ROCM_CHECK(hipStreamWaitEvent(stream_, event, 0));
+        ROCM_CHECK(hipEventDestroy(event));
+    }
+}
+
+DeviceHookPtr ROCmDevice::createCommHook() {
+    return std::make_unique<ROCmCommHook>(stream_, communication_stream_);
+}
+
+void ROCmDevice::overlappedComputeBarrier() {
+    // NOTE: when all the overlapped communication and computation done,
+    // we need to ensure the communication has been finished before starting the next computation.
+    if (tp_nccl_param_.world_size_ * dp_nccl_param_.world_size_ * ffn_tp_nccl_param_.world_size_ > 1) {
+        hipEvent_t event;
+        ROCM_CHECK(hipEventCreate(&event));
+        ROCM_CHECK(hipEventRecord(event, stream_));
+        ROCM_CHECK(hipStreamWaitEvent(communication_stream_, event, 0));
+        ROCM_CHECK(hipEventDestroy(event));
     }
 }
 
@@ -300,22 +408,25 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
 
     RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
-
-    const auto& input         = params.input;
-    auto        output_shape  = input.shape();
-    output_shape[0]           = params.index.size();
+    const auto& input = params.input;
+    auto output_shape = input.shape();
+    output_shape[0] = params.index.size();
+    auto output = allocateBuffer({input.type(), output_shape});
+    if (output_shape[0] == 0 || input.shape()[0] ==0) {
+        return output;
+    }
     auto num_selected_element = input.size() / input.shape()[0];
-    auto output               = allocateBuffer({input.type(), output_shape});
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(),
-                                     invokeLookupHiddenStateOfLastToken,
-                                     output->data(),
-                                     input.data(),
-                                     (int*)params.index.data(),
-                                     (int)params.index.size(),
-                                     num_selected_element,
-                                     0,
-                                     stream_);
-    return std::move(output);
+    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
+        input.type(),
+        invokeLookupHiddenStateOfLastToken,
+        output->data(),
+        input.data(),
+        (int*)params.index.data(),
+        (int)params.index.size(),
+        num_selected_element,
+        0,
+        stream_);
+    return output;
 }
 
 BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
@@ -462,6 +573,67 @@ ROCmEvent::~ROCmEvent() {
 
 void ROCmEvent::synchronize() const {
     ROCM_CHECK(hipEventSynchronize(event_));
+    ROCM_CHECK(hipStreamSynchronize(stream_));
+    ROCM_SYNC_AND_CHECK();
+    hipDeviceSynchronize();
 }
 
-}  // namespace rtp_llm
+ROCmCommHook::ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream)
+    : main_stream_(main_stream), comm_stream_(comm_stream) {
+    ROCM_CHECK(hipEventCreate(&hook_event_));
+    ROCM_CHECK(hipEventRecord(hook_event_, comm_stream_));
+}
+
+ROCmCommHook::~ROCmCommHook() {
+    ROCM_CHECK(hipEventDestroy(hook_event_));
+}
+
+void ROCmCommHook::hook_sync() const {
+    ROCM_CHECK(hipStreamWaitEvent(main_stream_, hook_event_, 0));
+}
+
+// void ROCmDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
+//     if (attn_rs_comm_buffer_) {
+//         return;
+//     }
+
+//     FT_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
+//             params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden, params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale, params.enable_ffn_tp);
+
+//     size_t m = params.max_batch_seq_len * 1.1;
+//     std::vector<size_t> tp_ranks = fcNcclGatherRanks(tp_nccl_param_, stream_);
+
+//     FT_LOG_INFO("[PrepareCommBuffer] prepare attn_rs_comm_buffer_");
+//     std::vector<size_t> attn_rs_buffer_shape = {m, params.attn_rs_hidden};
+//     attn_rs_comm_buffer_ = initCommBuffer(attn_rs_buffer_shape, params.rs_output_type, tp_nccl_param_, tp_ranks, false, stream_);
+
+//     FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_comm_buffer_");
+//     std::vector<size_t> attn_ag_buffer_shape = {m, params.attn_ag_hidden};
+//     attn_ag_comm_buffer_ = initCommBuffer(attn_ag_buffer_shape, params.ag_input_type, tp_nccl_param_, tp_ranks, true, stream_);
+
+//     if (params.enable_per_token_scale) {
+//         FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_scale_comm_buffer_");
+//         std::vector<size_t> attn_ag_scale_shape = {m, 1};
+//         attn_ag_scale_comm_buffer_ = initCommBuffer(attn_ag_scale_shape, DataType::TYPE_FP32, tp_nccl_param_, tp_ranks, true, stream_);
+//     }
+
+//     if (params.enable_ffn_tp) {
+//         std::vector<size_t> ffn_tp_ranks = fcNcclGatherRanks(ffn_tp_nccl_param_, stream_);
+
+//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_rs_comm_buffer_");
+//         std::vector<size_t> ffn_rs_buffer_shape = {m, params.ffn_rs_hidden};
+//         ffn_rs_comm_buffer_ = initCommBuffer(ffn_rs_buffer_shape, params.rs_output_type, ffn_tp_nccl_param_, ffn_tp_ranks, false, stream_);
+
+//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
+//         std::vector<size_t> ffn_ag_buffer_shape = {m, params.ffn_ag_hidden};
+//         ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+
+//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
+//         if (params.enable_per_token_scale) {
+//             std::vector<size_t> ffn_ag_scale_shape = {m, 1};
+//             ffn_ag_scale_comm_buffer_ = initCommBuffer(ffn_ag_scale_shape, DataType::TYPE_FP32, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+//         }
+//     }
+// }
+
+}  // namespace fastertransformer
