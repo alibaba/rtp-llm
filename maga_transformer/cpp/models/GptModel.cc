@@ -667,6 +667,9 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
             RUNTIME_ASSERT_OP_ARG(
                 bool(last_layer_defered_params.shared_expert_output) == bool(last_layer_moe_ret),
                 "moe insertion return should only be null if no previous layer.");
+            if (last_layer_defered_params.combine_output) {
+                last_layer_defered_params.combine_output = nullopt;
+            }
             last_layer_defered_params.combine_output = last_layer_moe_ret
                     ? std::optional<ft::MoeCombineOutput>(last_layer_moe_ret->combine_output)
                     : nullopt;
@@ -691,12 +694,14 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
 
     // deal with last layer
     auto mb0_moe_insertion_ret = device_->stealMoEInsertionRet();
+    last_layer_defered_params_vec[0].combine_output = nullopt;
     last_layer_defered_params_vec[0].combine_output = mb0_moe_insertion_ret->combine_output;
 
     // last layer last micro batch
     device_->computeInsertedMoE();
     auto moe_insertion_ret = device_->stealMoEInsertionRet();
     moe_insertion_ret->combine_output.comm_barrier_hook->hook_sync();
+    last_layer_defered_params_vec.back().combine_output = nullopt;
     last_layer_defered_params_vec.back().combine_output = move(moe_insertion_ret->combine_output);
 
     for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
