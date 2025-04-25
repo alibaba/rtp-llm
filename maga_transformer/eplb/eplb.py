@@ -73,6 +73,10 @@ def replicate_experts(weight: torch.Tensor, num_phy: int) -> Tuple[torch.Tensor,
         logcnt[arangen, redundant_indices] += 1
     return phy2log, rank, logcnt
 
+def inverse(perm: torch.Tensor) -> torch.Tensor:
+    inv = torch.empty_like(perm)
+    inv.scatter_(1, perm, torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(perm.shape))
+    return inv
 
 def rebalance_experts_hierarchical(weight: torch.Tensor, num_physical_experts: int,
                       num_groups: int, num_nodes: int, num_gpus: int):
@@ -97,11 +101,6 @@ def rebalance_experts_hierarchical(weight: torch.Tensor, num_physical_experts: i
     assert num_gpus % num_nodes == 0
     assert num_physical_experts % num_gpus == 0
     phy_experts_per_gpu = num_physical_experts // num_gpus
-
-    def inverse(perm: torch.Tensor) -> torch.Tensor:
-        inv = torch.empty_like(perm)
-        inv.scatter_(1, perm, torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(perm.shape))
-        return inv
 
     # Step 1: pack groups to nodes
     tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
@@ -130,8 +129,30 @@ def rebalance_experts_hierarchical(weight: torch.Tensor, num_physical_experts: i
     logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
     return pphy2log, pphyrank, logcnt
 
+def repack_experts(weight: torch.Tensor, num_replicas: int, num_gpus: int, phy2log: torch.Tensor):
+    device = phy2log.device
+    num_log = weight.shape[-1]
+    assert weight.shape[0] == 1
+
+    redundant_weight = weight[0][phy2log[0]]
+    redundant_weight.unsqueeze_(0)
+    pack_index, rank_in_pack = balanced_packing(redundant_weight, num_gpus)
+    phy_experts_per_gpu = num_replicas // num_gpus
+    phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
+    pphy2phy = inverse(phy2pphy)
+    balanced_phy2log = phy2log[0][pphy2phy[0]]
+    logcnt = torch.zeros(1, num_log, dtype=torch.int64, device=device)
+    rank = torch.zeros(1, num_replicas, dtype=torch.int64, device=device)
+    for i in range(num_replicas):
+        expert_id = balanced_phy2log[i].item()
+        rank[:, i] = logcnt[0, expert_id]
+        logcnt[0, expert_id] += 1
+
+    balanced_phy2log = balanced_phy2log.unsqueeze(0)
+    return balanced_phy2log, rank, logcnt
+
 def rebalance_experts(weight: torch.Tensor, num_replicas: int, num_groups: int,
-                      num_nodes: int, num_gpus: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                      num_nodes: int, num_gpus: int, force_repack: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
 
@@ -156,6 +177,10 @@ def rebalance_experts(weight: torch.Tensor, num_replicas: int, num_groups: int,
     else:
         # use global load-balance policy
         phy2log, phyrank, logcnt = replicate_experts(weight, num_replicas)
+
+    if force_repack:
+        phy2log, phyrank, logcnt = repack_experts(weight, num_replicas, num_gpus, phy2log)
+
     maxlogcnt = logcnt.max().item()
     log2phy: torch.Tensor = torch.full((num_layers, num_logical_experts, maxlogcnt),
                                        -1, dtype=torch.int64, device=logcnt.device)

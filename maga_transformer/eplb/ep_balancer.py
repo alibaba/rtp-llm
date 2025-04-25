@@ -93,6 +93,8 @@ class ExpertBalancer:
         assert model_path is not None, "not found eplb model path"
         self.moe_ckpt_path = model_path
 
+        self.force_repack = os.environ.get("EPLB_FORCE_REPACK", "0") == "1"
+
     @torch.inference_mode()
     def get_balanced_layer(self, gpu_loads: torch.Tensor) -> int:
         if self.select_layer_method == SelectLayerMethod.ROUND:
@@ -154,6 +156,7 @@ class ExpertBalancer:
             self.num_groups,
             self.num_node,
             self.num_gpu,
+            self.force_repack
         )
 
         self.phy2log[layer_id] = phy2log.tolist()
