@@ -83,7 +83,6 @@ class ExpertBalancer:
 
         window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", 10))
         self.history_log_stats = HistoryStats(window_size=window_size, shape=(num_layers, num_experts))
-        self.history_gpu_loads = HistoryStats(window_size=window_size, shape=(num_layers, num_gpu))
 
         logging.info(f"Balance method: {self.select_layer_method}")
 
@@ -142,7 +141,6 @@ class ExpertBalancer:
     ):
         self.update_cnt += 1
         log_stats = self.history_log_stats.add_stats(log_stats)
-        gpu_loads = self.history_gpu_loads.add_stats(gpu_loads)
         logging.info(log_stats)
         self.log_exp_cnt.copy_(log_stats)
 
