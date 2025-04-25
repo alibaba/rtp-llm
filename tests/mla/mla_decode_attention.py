@@ -172,7 +172,12 @@ class TestMlaDecodeAttention(unittest.TestCase):
                 block_id_map[i, j] = i*block_id_map.size(1) + j
         
         if context_batch_size > 0:
-            context_flash_infer_params = self.mla_decode_attn_op.createContextFlashInferParams(prefix_length_t, sequence_length_minus_1_t, input_length_t, page_size, block_id_map)
+            context_flash_infer_params = self.mla_decode_attn_op.createContextFlashInferParams(
+                prefix_length_t,
+                sequence_length_minus_1_t,
+                input_length_t,
+                page_size,
+                block_id_map)
             # context        
             context_page_indptr = [0]
             context_page_indices = []
@@ -186,14 +191,19 @@ class TestMlaDecodeAttention(unittest.TestCase):
                 context_positions.extend(list(range(input_lengths[i])))
                 context_kv_last_page_len.append((input_lengths[i] - 1) % page_size + 1)
                 context_batch_indices.extend([i - decode_batch_size] * input_lengths[i])
+
             self.assertEqual(context_flash_infer_params.batch_indices.tolist(), context_batch_indices)
             self.assertEqual(context_flash_infer_params.positions.tolist(), context_positions)
             self.assertEqual(context_flash_infer_params.kv_last_page_len.tolist(), context_kv_last_page_len)
             self.assertEqual(context_flash_infer_params.page_indptr.tolist(), context_page_indptr)
-            self.assertEqual(context_flash_infer_params.page_indices.tolist(), context_page_indices)
+            self.assertEqual(context_flash_infer_params.page_indices.tolist()[:len(context_page_indices)], context_page_indices)
         
         if decode_batch_size > 0:
-            decode_flash_infer_params = self.mla_decode_attn_op.createDecodeFlashInferParams(sequence_length_minus_1_t, input_length_t, page_size, block_id_map)
+            decode_flash_infer_params = self.mla_decode_attn_op.createDecodeFlashInferParams(
+                sequence_length_minus_1_t,
+                input_length_t,
+                page_size,
+                block_id_map)
             decode_page_indptr = [0]
             decode_page_indices = []
             decode_positions = []
@@ -206,11 +216,12 @@ class TestMlaDecodeAttention(unittest.TestCase):
                 decode_kv_last_page_len.append((sequence_lengths[i] - 1) % page_size + 1)
                 decode_page_indptr.append(int(page_nums[i] + decode_page_indptr[-1]))
                 decode_page_indices.extend(block_id_map[i, :page_nums[i]])
+
             self.assertEqual(decode_flash_infer_params.batch_indices.tolist(), decode_batch_indices)
             self.assertEqual(decode_flash_infer_params.positions.tolist(), decode_positions)
             self.assertEqual(decode_flash_infer_params.kv_last_page_len.tolist(), decode_kv_last_page_len)
             self.assertEqual(decode_flash_infer_params.page_indptr.tolist(), decode_page_indptr)
-            self.assertEqual(decode_flash_infer_params.page_indices.tolist(), decode_page_indices)
+            self.assertEqual(decode_flash_infer_params.page_indices.tolist()[:len(decode_page_indices)], decode_page_indices)
 
     def test_prepare_flash_infer_params(self):
         self._test_prepare_flash_infer_params([25, 82], [26], 64)

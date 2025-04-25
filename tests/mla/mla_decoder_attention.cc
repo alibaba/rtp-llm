@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
@@ -6,6 +7,9 @@
 using namespace fastertransformer;
 
 namespace unittest {
+
+using Slice = torch::indexing::Slice;
+constexpr auto TNone = torch::indexing::None;
 
 class FlashInferParams: public torch::jit::CustomClassHolder {
 public:
@@ -140,21 +144,24 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                                               torch::Tensor sequence_length,
                                                                               torch::Tensor input_length,
                                                                               int64_t       page_size,
-                                                                              torch::Tensor block_id_map) {
+                                                                              torch::Tensor block_id_map)
+{
+    auto decode_batch_size = sequence_length.sizes()[0];
+    auto context_batch_size = input_length.sizes()[0] - decode_batch_size;
     attn_configs.tokens_per_block = page_size;
-    auto params                   = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
-                                                                    attn_configs,
-                                                                    torchTensor2Buffer(prefix_length),
-                                                                    torchTensor2Buffer(sequence_length),
-                                                                    torchTensor2Buffer(input_length),
-                                                                    torchTensor2Buffer(block_id_map),
-                                                                    DataType::TYPE_FP16);
+    auto params = FlashInferAttnParams::prepare(device_,
+                                                attn_configs,
+                                                torchTensor2Buffer(prefix_length),
+                                                nullptr,
+                                                torchTensor2Buffer(input_length)->slice(decode_batch_size, context_batch_size, false),
+                                                torchTensor2Buffer(block_id_map)->slice(decode_batch_size, context_batch_size, false),
+                                                DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
-    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_t,
-                                                 flash_infer_attn_params->positions_t,
-                                                 flash_infer_attn_params->paged_kv_last_page_len_1_t,
-                                                 flash_infer_attn_params->page_indptr_t,
-                                                 flash_infer_attn_params->page_indice_t);
+    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
+                                                 flash_infer_attn_params->positions_d,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_1_d,
+                                                 flash_infer_attn_params->page_indptr_d,
+                                                 flash_infer_attn_params->page_indice_d);
 }
 
 c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferParams(torch::Tensor sequence_length,
@@ -162,18 +169,20 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
                                                                               int64_t       page_size,
                                                                               torch::Tensor block_id_map) {
     attn_configs.tokens_per_block = page_size;
-    auto params                   = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
-                                                                    attn_configs,
-                                                                    torchTensor2Buffer(sequence_length),
-                                                                    torchTensor2Buffer(input_length),
-                                                                    torchTensor2Buffer(block_id_map),
-                                                                    DataType::TYPE_FP16);
+    auto decode_batch_size = sequence_length.sizes()[0];
+    auto params = FlashInferAttnParams::prepare(device_,
+                                                attn_configs,
+                                                nullptr,
+                                                torchTensor2Buffer(sequence_length)->slice(0, decode_batch_size, false),
+                                                torchTensor2Buffer(input_length)->slice(0, decode_batch_size, false),
+                                                torchTensor2Buffer(block_id_map)->slice(0, decode_batch_size, false),
+                                                DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
-    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_t,
-                                                 flash_infer_attn_params->positions_t,
-                                                 flash_infer_attn_params->paged_kv_last_page_len_1_t,
-                                                 flash_infer_attn_params->page_indptr_t,
-                                                 flash_infer_attn_params->page_indice_t);
+    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
+                                                 flash_infer_attn_params->positions_d,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_1_d,
+                                                 flash_infer_attn_params->page_indptr_d,
+                                                 flash_infer_attn_params->page_indice_d);
 }
 
 torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
@@ -191,12 +200,13 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         attn_configs.tokens_per_block     = page_size;
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
-        auto      flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
-                                                                                         attn_configs,
-                                                                                         sequence_lengths_host,
-                                                                                         sequence_lengths_host,
-                                                                                         kvcache_block_id_host,
-                                                                                         DataType::TYPE_BF16);
+        auto      flash_infer_attn_params = FlashInferAttnParams::prepare(device_,
+                                                                          attn_configs,
+                                                                          nullptr,
+                                                                          sequence_lengths_host,
+                                                                          sequence_lengths_host,
+                                                                          kvcache_block_id_host,
+                                                                          DataType::TYPE_BF16);
 
         size_t token_num     = q.size(0);
         auto   kc_weight_b   = torchTensor2Buffer(kc_t_weight);

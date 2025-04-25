@@ -25,7 +25,6 @@ def set_seed(seed: int):
 
 os.environ["ENABLE_TRTV1_FMHA"] = "OFF"
 os.environ["ENABLE_TRT_FMHA"] = "OFF"
-os.environ["DISABLE_FLASH_INFER"]="1"
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1):
     if scale <= 1:

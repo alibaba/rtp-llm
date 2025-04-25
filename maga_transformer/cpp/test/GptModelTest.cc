@@ -152,6 +152,12 @@ TEST_F(GptModelTest, testSimple) {
 TEST_F(GptModelTest, testAttentionInputs) {
     auto dtype = ft::DataType::TYPE_FP16;
     GptModelDescription description;
+    auto& attention_conf = description.attention_conf;
+    attention_conf.head_num = 16;
+    attention_conf.kv_head_num = 16;
+    attention_conf.size_per_head = 64;
+    attention_conf.tokens_per_block = 16;
+    
     Weights weights;
     auto model = createGptModel({device_, weights, description});
     GptModelInputs inputs;

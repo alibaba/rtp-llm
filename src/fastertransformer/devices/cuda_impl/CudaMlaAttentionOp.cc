@@ -2,6 +2,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/kernels/mla_kernels/mla_merge_transpose_kernel.h"
 #include "3rdparty/flashinfer/flashinfer.h"
@@ -95,18 +96,8 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
 
         FT_LOG_TRACE("kv_lora_rank = %zu", params.configs.kv_lora_rank);
 
-        printBufferData(*torchTensor2Buffer(flashinfer.kvlen_t), "kvlen_t");
-        torch::Tensor decode_kv_cache_block_id_t;
-        if (params.is_prefill) {
-            decode_kv_cache_block_id_t =
-                flashinfer.kv_cache_block_id_t.slice(0,
-                                                     c10::make_optional((int64_t)params.common.decoder_batch_size),
-                                                     c10::make_optional((int64_t)params.common.context_batch_size
-                                                                        + (int64_t)params.common.decoder_batch_size));
-        } else {
-            decode_kv_cache_block_id_t = flashinfer.kv_cache_block_id_t.slice(0, c10::nullopt, c10::make_optional((int64_t)params.common.decoder_batch_size));
-        }
-        printBufferData(*torchTensor2Buffer(decode_kv_cache_block_id_t), "decode_kv_cache_block_id_t");
+        printBufferData(*torchTensor2Buffer(flashinfer.kvlen_d), "kvlen");
+        printBufferData(*torchTensor2Buffer(flashinfer.kv_cache_block_id_d), "kv_cache_block_id");
 
         const float softmax_scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
         FT_LOG_TRACE("softmax_scale = %f", softmax_scale);
@@ -120,8 +111,8 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
             fused_q_input_t,
             ckv_cache_reshape_t,
             params.configs.kv_lora_rank,
-            flashinfer.kvlen_t,
-            decode_kv_cache_block_id_t,
+            flashinfer.kvlen_d,
+            flashinfer.kv_cache_block_id_d,
             softmax_scale,
             /* is_causal = */true,
             tile_scheduler_metadata,
@@ -151,14 +142,14 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
             params.configs.kv_lora_rank);
 
         BatchMLAPagedAttentionRun(
-            flashinfer.float_workspace_t,
-            flashinfer.int_workspace_t,
+            flashinfer.float_workspace_d,
+            flashinfer.int_workspace_d,
             flashinfer.plan,
             fused_q_input_t.slice(-1, 0, params.configs.kv_lora_rank),
             q_rope,
             ckv_nope_cache,
             k_rope_cache,
-            flashinfer.page_indice_t,
+            flashinfer.page_indice_d,
             attn_out_t,
             std::nullopt,
             1,
@@ -250,7 +241,7 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
     auto flash_infer_attn_params = (FlashInferAttnParams*)params.flash_infer_params.get();
     if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mlaRotaryWriteKVCachela");
+        throw std::runtime_error("flash_infer_attn_params must be setting when using mlaRotaryWriteKVCache");
     }
     const auto &flashinfer = *flash_infer_attn_params;
     // apply rotary embedding to qk
@@ -274,7 +265,7 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
         {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.rope_head_dim},
         params.kv_offset + params.configs.kv_lora_rank);
     auto cos_sin_cache_t = Buffer2torchTensor(params.weights.rope_cos_sin_cache, false);
-    apply_rope_pos_ids_cos_sin_cache(q_rope_t, k_rope_t.unsqueeze(1), dest_q, k_rope_t.unsqueeze(1), cos_sin_cache_t, flashinfer.positions_t, false, (int64_t)stream_);
+    apply_rope_pos_ids_cos_sin_cache(q_rope_t, k_rope_t.unsqueeze(1), dest_q, k_rope_t.unsqueeze(1), cos_sin_cache_t, flashinfer.positions_d, false, (int64_t)stream_);
     auto append_ckv_t
      = Buffer2torchTensorWithStride(params.fused_qkv, {(int64_t)params.fused_qkv.shape()[0], (int64_t)params.configs.kv_lora_rank}, params.kv_offset);
 
@@ -298,13 +289,13 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
             params.configs.kv_lora_rank);
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
-                                  flashinfer.batch_indice_t,
-                                  flashinfer.positions_t,
+                                  flashinfer.batch_indice_d,
+                                  flashinfer.positions_d,
                                   k_cache,
                                   v_cache,
-                                  flashinfer.page_indice_t,
-                                  flashinfer.page_indptr_t,
-                                  flashinfer.paged_kv_last_page_len_1_t,
+                                  flashinfer.page_indice_d,
+                                  flashinfer.page_indptr_d,
+                                  flashinfer.paged_kv_last_page_len_1_d,
                                   (int64_t)stream_);
     }
 }

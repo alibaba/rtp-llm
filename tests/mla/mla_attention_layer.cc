@@ -1,8 +1,10 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+
 using namespace fastertransformer;
 namespace unittest {
 class MlaAttnLayerOp: public torch::jit::CustomClassHolder {
@@ -75,20 +77,21 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
         auto      decode_flash_infer_attn_params =
-            FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
-                                                                    attn_configs,
-                                                                    sequence_lengths_host,
-                                                                    sequence_lengths_host,
-                                                                    kvcache_block_id_host,
-                                                                    DataType::TYPE_BF16);
+            FlashInferAttnParams::prepare(device_,
+                                          attn_configs,
+                                          nullptr,
+                                          sequence_lengths_host,
+                                          input_lengths_host,
+                                          kvcache_block_id_host,
+                                          DataType::TYPE_BF16);
         auto context_flash_infer_attn_params =
-            FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
-                                                                     attn_configs,
-                                                                     prefix_lengths_host,
-                                                                     sequence_lengths_host,
-                                                                     sequence_lengths_host,
-                                                                     kvcache_block_id_host,
-                                                                     DataType::TYPE_BF16);
+            FlashInferAttnParams::prepare(device_,
+                                          attn_configs,
+                                          prefix_lengths_host,
+                                          sequence_lengths_host,
+                                          input_lengths_host,
+                                          kvcache_block_id_host,
+                                          DataType::TYPE_BF16);
 
         size_t token_num     = hidden.size(0);
         auto   hidden_b      = torchTensor2Buffer(hidden);

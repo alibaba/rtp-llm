@@ -42,10 +42,11 @@ cc_library(
 
 cc_library(
     name = "gpu_base",
-    hdrs = glob([
+    hdrs = [
         "CudaDevice.h",
-    ]),
-    srcs = glob([
+        "CudaFlashInfer.h",
+    ],
+    srcs = [
         "CudaDevice.cc",
         "CudaWeights.cc",
         "CudaAttentionOp.cc",
@@ -59,7 +60,8 @@ cc_library(
         "CudaLoraLinear.cc",
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
-    ]),
+        "CudaFlashInfer.cc",
+    ],
     deps = [
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
@@ -91,9 +93,9 @@ cc_library(
 
 cc_library(
     name = "gpu_register",
-    srcs = glob([
+    srcs = [
         "CudaDeviceRegister.cc",
-    ]),
+    ],
     deps = [
         ":gpu_base",
     ],
@@ -104,7 +106,7 @@ cc_library(
 
 cc_library(
     name = "cuda_impl",
-    srcs = glob([
+    srcs = [
         "CudaActOp.cc",
         "CudaAddBiasOp.cc",
         "CudaEmbeddingLookup.cc",
@@ -117,7 +119,7 @@ cc_library(
         "CudaSoftmaxOp.cc",
         "CudaBeamSearchOp.cc",
         "CudaFP8Moe.cc",
-    ]),
+    ],
     deps = [
         ":cuda_register",
         "//src/fastertransformer/devices/torch_impl:torch_beam_search_op_impl",

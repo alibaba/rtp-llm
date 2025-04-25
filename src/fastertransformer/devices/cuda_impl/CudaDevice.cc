@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
 #include "src/fastertransformer/kernels/eplb/experts_stats_kernels.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
@@ -392,22 +393,22 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
 
-    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
+    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepare(
             this,
             params.configs,
-            params.sequence_lengths,
-            params.input_lengths,
-            params.kv_cache_block_id,
+            nullptr,
+            params.sequence_lengths->slice(0, params.decoder_batch_size, false),
+            params.input_lengths->slice(0, params.decoder_batch_size, false),
+            params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size, false) : nullptr,
             params.attn_dtype);
-    output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
+    output.prefill_flash_infer_attn_params = FlashInferAttnParams::prepare(
             this,
             params.configs,
             params.prefix_lengths,
-            params.sequence_lengths,
-            params.input_lengths,
-            params.kv_cache_block_id,
-            params.attn_dtype
-    );
+            nullptr,
+            params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size, false),
+            params.kv_cache_block_id ? params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size, false) : nullptr,
+            params.attn_dtype);
 
     return output;
 }
