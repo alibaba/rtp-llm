@@ -289,7 +289,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
 
     // disable micro batching if both context and decoder query exists.
     if (context_batch_size && decoder_batch_size) {
-        FT_LOG_INFO("split context in micro batch 0, decode in micro batch 1 disabled!");
+        FT_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
         return {false, {}};
     }
 
@@ -297,7 +297,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto micro_batch_0_size = (batch_size_to_split + 1) / 2;
     const auto micro_batch_1_size = batch_size_to_split - micro_batch_0_size;
 
-    FT_LOG_INFO("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
+    FT_LOG_DEBUG("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
     return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}}
                               : MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
 }
@@ -341,12 +341,12 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
             RUNTIME_ASSERT_OP_ARG(!(p_micro_batch_size && d_micro_batch_size),
                 "one micro batch can not contain both p and d tokens, but got %ld and %ld",
                 p_micro_batch_size, d_micro_batch_size);
-            FT_LOG_INFO("micro batch index %ld, prefill size %ld, decode size %ld",
+            FT_LOG_DEBUG("micro batch index %ld, prefill size %ld, decode size %ld",
                         i, p_micro_batch_size, d_micro_batch_size);
 
             if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
-                FT_LOG_INFO("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
+                FT_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, d_micro_batch_size);
                 micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(decode_batch_idx, d_micro_batch_size);
@@ -360,11 +360,11 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 sliced_token_idx += d_micro_batch_size;
                 sliced_batch_idx += d_micro_batch_size;
                 decode_batch_idx += d_micro_batch_size;
-                FT_LOG_INFO("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
+                FT_LOG_DEBUG("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
                             i, sliced_batch_idx, sliced_token_idx);
             } else {
                 GptModelInputs micro_model_inputs = inputs;
-                FT_LOG_INFO("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
+                FT_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(prefill_batch_idx, p_micro_batch_size);
@@ -387,7 +387,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 sliced_token_idx += slice_token_num;
                 sliced_batch_idx += p_micro_batch_size;
                 prefill_batch_idx += p_micro_batch_size;
-                FT_LOG_INFO("micro batch %ld sliced context, batch idx %ld, token idx %ld",
+                FT_LOG_DEBUG("micro batch %ld sliced context, batch idx %ld, token idx %ld",
                             i, sliced_batch_idx, sliced_token_idx);
             }
         }
@@ -1079,7 +1079,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         if (dispatched_output.comm_barrier_hook) {
             last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
         } else {
-            FT_LOG_INFO("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
+            FT_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
         }
     }
 
