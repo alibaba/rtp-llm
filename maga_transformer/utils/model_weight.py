@@ -16,6 +16,7 @@ from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInf
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
+from maga_transformer.utils.util import check_with_info
 
 def w_half1_t(ts: List[torch.Tensor], inter_size: int):
     return ts[0][:inter_size, ...].T.contiguous()
@@ -296,6 +297,27 @@ def sp_head_lora(t: torch.Tensor, hidden_size, **kwargs: Any) -> torch.Tensor:
 
 def sp_head_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return get_sp_tensor(t.reshape([t.shape[0], -1]).T, **kwargs).T
+
+def get_sp_tensor_blocked(t: torch.Tensor, head_num: int, head_num_kv: int, size_per_head: int,
+                  tp: int, tp_rank: int, **kwargs):
+    block_size = 128
+    check_with_info((head_num + head_num_kv * 2) * size_per_head % block_size == 0, "illegal head_num or size_per_head")
+    t = t.reshape([-1, (head_num + head_num_kv * 2) * size_per_head // block_size])
+    q_hidden = head_num * size_per_head // block_size
+    kv_hidden = head_num_kv * size_per_head // block_size
+    if len(t.shape) == 1:
+        t = t.unsqueeze(0)
+    qs = sp_neg1(t[:,:q_hidden], tp, tp_rank)
+    if head_num_kv == 1:
+        ks = t[:,q_hidden:q_hidden + kv_hidden]
+        vs = t[:,q_hidden + kv_hidden:]
+    else:
+        ks = sp_neg1(t[:,q_hidden:q_hidden + kv_hidden], tp, tp_rank)
+        vs = sp_neg1(t[:,q_hidden + kv_hidden:], tp, tp_rank)
+    return torch.concat([qs, ks, vs], dim=1).contiguous()
+
+def sp_head_s_gemm_a8_block(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return get_sp_tensor_blocked(t.T, **kwargs).T
 
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
@@ -960,6 +982,9 @@ class W:
         gemm_block_fp8_weight_tp_strategy: Dict[str, Any] = {
             W.attn_o_w: sp_neg1,
             W.attn_o_s: sp_neg1,
+            
+            W.attn_qkv_w: sp_head_gemm_a8,
+            W.attn_qkv_s: sp_head_s_gemm_a8_block,
 
             W.ffn_w1: sp_0,
             W.ffn_s1: sp_0,

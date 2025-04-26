@@ -18,12 +18,6 @@ sm90_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda(["-nvcc_
 def sub_lib(name, srcs):
     native.cc_library(
         name = name + '_cu',
-        hdrs = [
-            "deep_gemm_template.h",
-            "utils.h",
-        ] + native.glob([
-            "include/*.cuh"
-        ]),
         srcs = [srcs],
         deps = preloaded_deps,
         copts = sm90_cuda_copts,

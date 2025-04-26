@@ -128,23 +128,30 @@ QWEN_CASES = [
     ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
 
+    ("3072", "4096", "4", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "4", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "4", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "4", "DeepGemmType::GroupedMasked"),
+
     ("3072", "4096", "2", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "2", "DeepGemmType::GroupedContiguous"),
     ("3072", "4096", "2", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "2", "DeepGemmType::GroupedMasked"),
-
 ]
 
 template_header = """
-#include "src/fastertransformer/deep_gemm/deep_gemm_template.h"
 #include "src/fastertransformer/deep_gemm/utils.h"
+#ifdef ENABLE_FP8
+#include "src/fastertransformer/deep_gemm/deep_gemm_template.h"
 #include "src/fastertransformer/deep_gemm/include/fp8_gemm.cuh"
+#endif
 #include <cuda.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 namespace fastertransformer {
 """
 template = """
+#ifdef ENABLE_FP8
 template void dispatchBlockNK<{0}, {1}, {2}, {3}>(__nv_bfloat16*         output,
                      __nv_fp8_e4m3*         lhs,
                      float*                 lhs_scale,
@@ -160,6 +167,7 @@ template void dispatchBlockNK<{0}, {1}, {2}, {3}>(__nv_bfloat16*         output,
                      cudaStream_t           stream,
                      uint32_t               num_sms,
                      uint32_t               smem_size);
+#endif
 """
 template_tail = """
 }
@@ -175,11 +183,14 @@ gen_cpp_code("deepgemm_qwen", [QWEN_CASES],
 cc_library(
     name = "deepgemm_hdrs",
     hdrs = [
-        "deep_gemm_template.h",
         "utils.h",
-    ] + glob([
-        "include/*.cuh"
-    ]),
+    ] + select({
+        "@//:using_cuda12": glob([
+	    "deep_gemm_template.h",
+            "include/*.cuh"
+        ]),
+        "//conditions:default": [],
+    }),
     deps = [
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

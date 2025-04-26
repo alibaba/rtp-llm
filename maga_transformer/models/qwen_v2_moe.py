@@ -42,16 +42,18 @@ def merge_qkv_hf_fp8_with_scale_t(ts: List[torch.Tensor]):
 
 class QWenV2MoeWeight(QWenV2Weight):
     def _get_fp8_moe_layer_weight_info(self, layer_id: int):
+        selected_experts = self._get_selected_experts(layer_id)
+        
         return [
             WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight')], transpose),
-            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight') for expert_id in range(self.expert_num_)] + \
-                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight') for expert_id in range(self.expert_num_)], stack_moe_w1),
-            WeightInfo(W.moe_s1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight_scale_inv') for expert_id in range(self.expert_num_)] + \
-                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight_scale_inv') for expert_id in range(self.expert_num_)], stack_moe_w1),
+            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight') for expert_id in selected_experts] + \
+                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight') for expert_id in selected_experts], stack_moe_w1),
+            WeightInfo(W.moe_s1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight_scale_inv') for expert_id in selected_experts] + \
+                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight_scale_inv') for expert_id in selected_experts], stack_moe_w1),
             WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight') \
-                                  for expert_id in range(self.expert_num_)], stack_),
+                                  for expert_id in selected_experts], stack_),
             WeightInfo(W.moe_s2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight_scale_inv') \
-                        for expert_id in range(self.expert_num_)], stack_),
+                        for expert_id in selected_experts], stack_),
             # WeightInfo(W.shared_expert_gate, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert_gate.weight')], transpose),
         ]
 

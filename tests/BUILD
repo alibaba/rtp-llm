@@ -293,4 +293,15 @@ cc_test(
     ],
     data = [
     ],
+    linkopts = [
+        "-lpython3.10",
+        "-ltorch",
+        "-lc10",
+        "-ltorch_cpu",
+        "-ltorch_python",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
 )
