@@ -141,11 +141,16 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
             ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
             ffn_weights.shared_expert->gate_up_weight = move(ffn_weights.gate_up_weight);
             ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
-
-            // for qwen moe
-            ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
+        } else if (ffn_weights.up_weight) {
+            ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
+            ffn_weights.shared_expert->up_weight = move(ffn_weights.up_weight);
+            ffn_weights.shared_expert->gate_weight = move(ffn_weights.gate_weight);
+            ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
         }
-    }
+
+        // for qwen moe
+        ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
+    } 
 
     // eplb stats
     ffn_weights.logic_expert_cnt = mayFindBuffer(map, W::logic_expert_cnt);

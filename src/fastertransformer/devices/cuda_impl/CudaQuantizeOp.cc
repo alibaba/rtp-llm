@@ -47,7 +47,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
 
     vector<size_t> input_shape = params.input.shape();
     if (params.qscheme == QScheme::Qfp8PerTokenBlock && params.paddingSize) {
-        // padding to 128
+        // padding to 64
         input_shape[0] = (input_shape[0] + params.paddingSize - 1) / params.paddingSize * params.paddingSize;
     }
 

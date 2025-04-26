@@ -83,8 +83,8 @@ class ModelWeightsLoader:
         self._exported_device = get_current_device()
         self._is_ft_style_weight = weights_info.is_ft_style_weight
         self._vit_separation = weights_info.vit_separation
-        self._disable_merge_w13 = os.getenv('DISALBE_MERGE_W13', '0').lower() == '1'
-        logging.info(f"DISALBE_MERGE_W13 {self._disable_merge_w13}")
+        self._enable_merge_w13 = os.getenv('ENABLE_MERGE_W13', '0').lower() == '1'
+        logging.info(f"ENABLE_MERGE_W13 {self._enable_merge_w13}")
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -155,7 +155,7 @@ class ModelWeightsLoader:
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 global_weights[name] = tensor[0].to(device)
 
-        if not self._disable_merge_w13:
+        if self._enable_merge_w13:
             update_weights = [ {} for id in range(self._num_layers)]
             compaction_weights = []
             for layer_id, layer_weight_dict in enumerate(weights):
@@ -385,7 +385,7 @@ class ModelWeightsLoader:
         convert_weight(W.groupwise_attn_weights, self._exported_device.preprocess_groupwise_weight_params)
 
         if is_gated_activation:
-            ffn_weight_lists = W.groupwise_ffn_weights_3 if self._disable_merge_w13 else W.groupwise_ffn_weights
+            ffn_weight_lists = W.groupwise_ffn_weights_3 if not self._enable_merge_w13 else W.groupwise_ffn_weights
         else:
             ffn_weight_lists = W.groupwise_ffn_weights_2
 
@@ -441,13 +441,44 @@ class ModelWeightsLoader:
                     logging.error(f'load quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
                     raise e
 
+        def load_single_weight(quant_weight, datatype):
+            qweight = [weight for weight in layer_weights if weight.name == quant_weight]
+            assert len(qweight) == 1
+            try:
+                qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
+                qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).contiguous().clone().to(device)
+                return qweight_tensor
+            except Exception as e:
+                logging.error(f'load quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
+                raise e
+                    
         if self._weights_info._quant_algo.isFp8() and self._weights_info._quant_algo.isGroupwise():
-            weight_list = W.int8_attn_weights + W.int8_ffn_weights + W.int8_ffn_weights_2 + W.int8_partial_moe_weights_2 + W.int8_partial_moe_weights
-            weight_list = [[_[0],_[1]]for _ in set([(_[0],_[1]) for _ in weight_list ])]
-            logging.info(f"load weight: {weight_list}")
-            load_weight([_[0] for _ in weight_list], torch.float8_e4m3fn)
-            load_weight([_[1] for _ in weight_list], torch.float32)
-
+            if not self._enable_merge_w13:
+                weight_list = W.int8_attn_weights + W.int8_ffn_weights_3 + W.int8_partial_moe_weights
+                logging.info(f"load weight: {weight_list}")
+                load_weight([_[0] for _ in weight_list], torch.float8_e4m3fn)
+                load_weight([_[1] for _ in weight_list], torch.float32)
+            else:
+                weight_list = W.int8_attn_weights + W.int8_ffn_weights + W.int8_partial_moe_weights
+                for weight in weight_list:
+                    if not isinstance(weight[0], list):
+                        load_weight([weight[0]], torch.float8_e4m3fn)
+                        load_weight([weight[1]], torch.float32)
+                    else:
+                        # for int8_ffn_weights
+                        ffn_w1, ffn_s1 = weight[0]
+                        ffn_w3, ffn_s3 = weight[1]
+                        ffn_w13, ffn_s13 = weight[2]
+                        w1 = load_single_weight(ffn_w1, datatype=torch.float8_e4m3fn)
+                        w3 = load_single_weight(ffn_w3, datatype=torch.float8_e4m3fn)
+                        s1 = load_single_weight(ffn_s1, datatype=torch.float32)
+                        s3 = load_single_weight(ffn_s3, datatype=torch.float32)
+                        w13 = torch.concat([w1, w3], dim=0).contiguous()
+                        s13 = torch.concat([s1, s3], dim=0).contiguous()
+                        w13 = w13.reshape(w13.shape[-1], -1)
+                        s13 = s13.reshape(s13.shape[-1], -1)
+                        results.append((layer_id, ffn_w13, w13))
+                        results.append((layer_id, ffn_s13, s13))
             return results
         elif self._weights_info._quant_algo.isFp8():
             qkv_w_weight = [weight for weight in layer_weights if weight.name == W.attn_qkv_w][0]
@@ -548,12 +579,12 @@ class ModelWeightsLoader:
         if is_gated_activation:
             if is_moe:
                 ffn_weight_lists = W.int8_partial_moe_weights
-            elif self._disable_merge_w13:
+            elif not self._enable_merge_w13:
                 ffn_weight_lists = W.int8_ffn_weights_3
             else:
                 ffn_weight_lists = W.int8_ffn_weights
         else:
-            ffn_weight_lists = W.int8_ffn_weights_2 if is_moe == False else W.int8_partial_moe_weights_2
+            ffn_weight_lists = W.int8_ffn_weights_2 if is_moe == False else W.int8_partial_moe_weights
 
         if is_moe:
             convert_weight(ffn_weight_lists, self._exported_device.moe_apply_int8, self._data_type)
@@ -562,8 +593,8 @@ class ModelWeightsLoader:
             convert_weight(W.int8_vision_ffn_weights, self._exported_device.apply_int8, self._data_type)
 
         if self._weights_info.moe_style_ == 2:
-            if self._disable_merge_w13:
-                onvert_weight(W.int8_ffn_weights_3, self._exported_device.apply_int8, self._data_type)
+            if not self._enable_merge_w13:
+                convert_weight(W.int8_ffn_weights_3, self._exported_device.apply_int8, self._data_type)
             else:
                 convert_weight(W.int8_ffn_weights, self._exported_device.apply_int8, self._data_type)
 
@@ -658,7 +689,7 @@ class ModelWeightsLoader:
         elif quant_algo.isWeightOnlyPerCol():
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
         
-        if not self._disable_merge_w13:
+        if self._enable_merge_w13:
             update_results = []
             compaction_weights = []
             for (layer_id, weight_name, tensor) in results:

@@ -749,11 +749,6 @@ class W:
         [moe_w2, moe_s2]
     ]
 
-    int8_partial_moe_weights_2 = [
-        [moe_w1, moe_s1],
-        [moe_w2, moe_s2],
-    ]
-
     groupwise_attn_weights = [
         [attn_qkv_w, attn_qkv_z, attn_qkv_s],
         [attn_o_w, attn_o_z, attn_o_s],
