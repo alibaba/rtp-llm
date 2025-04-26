@@ -229,7 +229,8 @@ protected:
     EpFfnInputs forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,
-        const int32_t layer_id);
+        const int32_t layer_id,
+        const size_t micro_batch_idx);
     GptLayerOutputs forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id);
 
     GptModelOutputs forwardPostLayers(

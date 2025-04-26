@@ -534,7 +534,7 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
             auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
             auto batch_ep_input = forwardAttentionAndMoeGate(
-                layer_input, last_layer_defered_params[micro_batch_idx], i);
+                layer_input, last_layer_defered_params[micro_batch_idx], i, micro_batch_idx);
             ep_inputs.push_back(move(batch_ep_input));
         }
 
@@ -560,6 +560,12 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             if (last_comm_hook_) {
                 last_comm_hook_->hook_sync();
                 last_comm_hook_ = nullptr;
+            }
+
+            // shared experts to overlap combine
+            if (micro_batch_idx) {
+                auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
+                ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
             }
 
             printBufferData(*hidden_states, "layer_" + to_string(i) + "_combine_input");
@@ -674,7 +680,7 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
                     ? std::optional<ft::MoeCombineOutput>(last_layer_moe_ret->combine_output)
                     : nullopt;
 
-            auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i);
+            auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx);
 
             // set moe insertion params
             device_->setMoEInsertion(MoEInsertionParams(
@@ -990,7 +996,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
 EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,
-        const int32_t layer_id)
+        const int32_t layer_id,
+        const size_t micro_batch_idx)
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
@@ -1044,6 +1051,13 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
+    BufferPtr shared_expert_output = nullptr;
+    // shared expert when overlapping combine
+    if (micro_batch_idx == 0) {
+        shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
+        last_layer_defered_params.shared_expert_output = shared_expert_output;
+    }
+
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
         if (last_comm_hook_) {
             last_comm_hook_->hook_sync();
@@ -1077,8 +1091,6 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     });
     printBufferData(*dispatched_output.hidden, "layer_" + to_string(layer_id) + "_dispatch_output");
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
-
-    auto shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
 
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
         if (dispatched_output.comm_barrier_hook) {
