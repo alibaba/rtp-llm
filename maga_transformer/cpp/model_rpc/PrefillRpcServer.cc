@@ -101,14 +101,40 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
         // fake test
         char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
         FT_CHECK_WITH_INFO(remote_rpc_server_ip_env, "rpc server ip must be not empty");
-        string remote_ip = string(remote_rpc_server_ip_env);
-        uint32_t remote_port = maga_init_params_.gpt_init_parameter.remote_rpc_server_port_;
-        FT_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
+
+        vector<string> remote_addrs = split(string(remote_rpc_server_ip_env), ',');
+        FT_CHECK_WITH_INFO(!remote_addrs.empty(), "REMOTE_RPC_SERVER_IP contains no valid addresses");
 
         decode_cluster_name_ = "LOCAL";
-        LocalNodeJsonize node1(decode_cluster_name_, remote_ip, remote_port);
         LocalSubscribeServiceConfig local_config;
-        local_config.nodes.push_back(node1);
+
+        if (remote_addrs.size() > 1) {
+            for (const string& addr : remote_addrs) {
+                auto [ip, port_str] = split_ip_port(addr);
+                FT_CHECK_WITH_INFO(!ip.empty() && !port_str.empty(),
+                                   "Invalid address format in REMOTE_RPC_SERVER_IP_LIST: " + addr);
+                uint32_t port = parse_port(port_str);
+                FT_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
+
+                local_config.nodes.emplace_back(decode_cluster_name_, ip, port);
+            }
+        } else {
+            const auto& addr    = remote_addrs.front();
+            auto [ip, port_str] = split_ip_port(addr);
+            uint32_t port;
+
+            if (ip.empty() || port_str.empty()) {
+                FT_LOG_WARNING("Using Deprecated method to get remote rpc server addr");
+                ip   = remote_addrs.front();
+                port = maga_init_params_.gpt_init_parameter.remote_rpc_server_port_;
+            } else {
+                port = parse_port(port_str);
+            }
+
+            FT_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
+            local_config.nodes.emplace_back(decode_cluster_name_, ip, port);
+        }
+
         subscribe_config.local_configs.push_back(local_config);
     } else {
         char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
