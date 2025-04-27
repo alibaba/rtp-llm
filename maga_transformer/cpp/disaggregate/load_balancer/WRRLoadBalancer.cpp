@@ -96,7 +96,8 @@ double WRRLoadBalancer::calculateThreshold(std::vector<std::shared_ptr<const Hos
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_sum += iter->second.load_balance_info.available_kv_cache;
+        weight_sum += rank_factor_ == 0 ?
+            iter->second.load_balance_info.available_kv_cache : iter->second.load_balance_info.onflight_requests;
     }
     return weight_sum * generateRandomDouble();
 }

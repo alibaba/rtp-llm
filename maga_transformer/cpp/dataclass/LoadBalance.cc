@@ -104,7 +104,8 @@ void registerLoadBalanceInfo(const py::module& m) {
         .def_readwrite("step_per_minute", &LoadBalanceInfo::step_per_minute)
         .def_readwrite("iterate_count", &LoadBalanceInfo::iterate_count)
         .def_readwrite("available_kv_cache", &LoadBalanceInfo::available_kv_cache)
-        .def_readwrite("total_kv_cache", &LoadBalanceInfo::total_kv_cache);
+        .def_readwrite("total_kv_cache", &LoadBalanceInfo::total_kv_cache)
+        .def_readwrite("onflight_requests", &LoadBalanceInfo::onflight_requests);
 }
 
 }  // namespace rtp_llm
