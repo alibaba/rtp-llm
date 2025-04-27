@@ -246,7 +246,7 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
     if (params.weights.shared_expert) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
         const auto& moe_conf = params.configs.moe_configs.value();
-        auto shared_expert_output = allocateBufferLike({params.input}, AllocationType::DEVICE, {"shared_expert_buf"});
+        BufferPtr shared_expert_output = nullptr;
         shared_expert_output = prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
         auto ffn_params = FfnLayerParams({params.input,
                                             params.configs,
