@@ -1052,13 +1052,20 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     FT_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
     BufferPtr shared_expert_output = nullptr;
-    // shared expert when overlapping combine
-    if (micro_batch_idx == 0) {
-        shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
-        last_layer_defered_params.shared_expert_output = shared_expert_output;
+
+    printBufferData(ffn_layer_params.input, "layer_" + to_string(layer_id) + "_ep_dispatch_input");
+    printBufferData(*gate_output.expert_ids, "layer_" + to_string(layer_id) + "_expert_ids");
+    if (gate_output.expert_scales) {
+        printBufferData(*gate_output.expert_scales, "layer_" + to_string(layer_id) + "_expert_scales");
     }
 
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
+        // shared expert when overlapping combine
+        if (micro_batch_idx == 0) {
+            shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
+            last_layer_defered_params.shared_expert_output = shared_expert_output;
+        }
+
         if (last_comm_hook_) {
             last_comm_hook_->hook_sync();
             last_comm_hook_ = nullptr;
@@ -1066,20 +1073,11 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     } else {
         // call combine hook sync
         const auto& previous_moe_ret = device_->getMoEInsertionRet();
-        // RUNTIME_ASSERT_OP_ARG(
-        //     bool(last_layer_defered_params.shared_expert_output) == bool(previous_moe_ret),
-        //     "moe insertion return should only be null if no previous layer.");
-
         if (previous_moe_ret && previous_moe_ret->combine_output.comm_barrier_hook) {
             previous_moe_ret->combine_output.comm_barrier_hook->hook_sync();
         }
     }
 
-    printBufferData(ffn_layer_params.input, "layer_" + to_string(layer_id) + "_ep_dispatch_input");
-    printBufferData(*gate_output.expert_ids, "layer_" + to_string(layer_id) + "_expert_ids");
-    if (gate_output.expert_scales) {
-        printBufferData(*gate_output.expert_scales, "layer_" + to_string(layer_id) + "_expert_scales");
-    }
     MoeDispatchOutput dispatched_output = device_->epDispatch({
         ffn_layer_params.input,
         *gate_output.expert_ids,
