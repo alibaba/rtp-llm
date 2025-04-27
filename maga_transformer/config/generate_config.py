@@ -144,6 +144,8 @@ class GenerateConfig(BaseModel):
                     ids_list.append(token_id)
                 else:
                     ids_list.append(tokenizer.encode(word, add_special_tokens=True))
+            elif tokenizer is None:
+                return
             else:
                 ids_list.append(tokenizer.encode(word))
         
