@@ -23,7 +23,7 @@ bool RRLoadBalancer::init(const LoadBalancerInitParams& params) {
     return true;
 }
 
-std::shared_ptr<const Host> RRLoadBalancer::chooseHost(const std::string& biz) {
+std::shared_ptr<const Host> RRLoadBalancer::chooseHost(const std::string& biz, int32_t global_counter) {
     std::shared_lock<std::shared_mutex> lock(biz_hosts_mutex_);
     auto                                iter = biz_hosts_.find(biz);
     if (iter == biz_hosts_.end() || iter->second == nullptr) {

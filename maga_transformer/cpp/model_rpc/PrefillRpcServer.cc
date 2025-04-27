@@ -183,7 +183,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     FT_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
-    auto host = load_balancer_->chooseHost(decode_cluster_name_);
+    auto host = load_balancer_->chooseHost(decode_cluster_name_, prefill_context.rpc_context.request->generate_config().global_request_id());
     if (!host || host->ip.empty()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_HOST_FAILED,
                 "get host for decode cluster " + decode_cluster_name_ + " failed");

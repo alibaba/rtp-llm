@@ -27,7 +27,7 @@ public:
 
 public:
     virtual bool                        init(const LoadBalancerInitParams& params) = 0;
-    virtual std::shared_ptr<const Host> chooseHost(const std::string& biz)         = 0;
+    virtual std::shared_ptr<const Host> chooseHost(const std::string& biz, int32_t global_counter = -1) = 0;
     bool                                isReady(const std::string& biz);
 
 protected:

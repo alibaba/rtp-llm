@@ -12,7 +12,7 @@ public:
     virtual ~WRRLoadBalancer();
 
 public:
-    std::shared_ptr<const Host> chooseHost(const std::string& biz) override;    
+    std::shared_ptr<const Host> chooseHost(const std::string& biz, int32_t global_counter = -1) override;    
 
 private:
     std::shared_ptr<const Host> chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const;

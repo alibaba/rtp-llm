@@ -31,7 +31,7 @@ bool PrefillLoadBalancer::initWithEstimator(const LoadBalancerInitParams& params
     return estimator_ != nullptr;
 }
 
-std::shared_ptr<const Host> PrefillLoadBalancer::chooseHost(const std::string& biz) {
+std::shared_ptr<const Host> PrefillLoadBalancer::chooseHost(const std::string& biz, int32_t global_counter) {
     auto res = chooseHostWithTask(biz, createDummyTask());
     if (!res.ok()) {
         FT_LOG_WARNING("choose host failed with error: %s", res.status().message().data());

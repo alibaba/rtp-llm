@@ -24,6 +24,7 @@ namespace rtp_llm {
 
 class GenerateConfig : public autil::legacy::Jsonizable {
 public:
+    int global_request_id  = -1;
     int max_new_tokens     = 8192;
     int min_new_tokens     = 0;
     int num_validate_token = 0;  // for speculative decoding validation.

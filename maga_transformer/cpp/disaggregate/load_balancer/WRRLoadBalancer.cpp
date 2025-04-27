@@ -28,7 +28,7 @@ double generateRandomDouble() {
     return rand;
 }
 
-std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz) {
+std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz, int32_t global_counter) {
     std::shared_lock<std::shared_mutex> lock(biz_hosts_mutex_);
     auto                                iter = biz_hosts_.find(biz);
     if (iter == biz_hosts_.end() || iter->second == nullptr) {
@@ -39,6 +39,14 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz) 
     if (biz_hosts->hosts.empty()) {
         return nullptr;
     }
+
+    if (global_counter != -1) {
+        auto& host = biz_hosts->hosts[global_counter % biz_hosts->hosts.size()];
+        FT_LOG_DEBUG("global counter = %lu, min_spec = %s",
+            global_counter, ("tcp:" + ((host)->ip) + ":" + std::to_string((host)->http_port)).c_str());
+        return host;
+    }
+
     auto current_host = chooseHostByWeight(biz_hosts);
     if (current_host == nullptr) {
         FT_LOG_WARNING("choose host by concurrency failed");

@@ -26,7 +26,7 @@ bool HttpApiServer::start(const std::string& address) {
     // TODO: queueSize may interleave with controller :(
     http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr,
                                                    /*threadNum=*/controller_->get_available_concurrency(),
-                                                   /*queueSize=*/controller_->get_available_concurrency()));
+                                                   /*queueSize=*/controller_->get_available_concurrency() * 5));
     metric_reporter_.reset(new ApiServerMetricReporter());
     if (!metric_reporter_->init()) {
         FT_LOG_WARNING("HttpApiServer start init metric reporter failed.");

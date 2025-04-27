@@ -63,6 +63,7 @@ message GenerateConfigPB {
     int32 max_thinking_tokens = 33;
     repeated int32 end_think_token_ids = 34;
     bool gen_timeline = 35;
+    int32 global_request_id = 36;
 }
 
 message MMPreprocessConfigPB {

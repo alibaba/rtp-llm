@@ -14,6 +14,7 @@ namespace rtp_llm {
 
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
+    generate_config->global_request_id              = config_proto->global_request_id();
     generate_config->max_new_tokens                 = config_proto->max_new_tokens();
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();

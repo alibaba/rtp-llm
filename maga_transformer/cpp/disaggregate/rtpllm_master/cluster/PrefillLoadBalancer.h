@@ -22,7 +22,7 @@ public:
     PrefillLoadBalancer(int64_t pending_timeout_ms): pending_task_timeout_ms_(pending_timeout_ms) {}
     virtual ~PrefillLoadBalancer();
     bool                         init(const LoadBalancerInitParams& params) override;
-    std::shared_ptr<const Host>  chooseHost(const std::string& biz) override;
+    std::shared_ptr<const Host>  chooseHost(const std::string& biz, int32_t global_counter = -1) override;
     bool                         initWithEstimator(const LoadBalancerInitParams& params, const EstimatorConfig& config);
     absl::StatusOr<EstimateInfo> chooseHostWithTask(const std::string& biz, const TaskDescription& task);
     // for tokenize service

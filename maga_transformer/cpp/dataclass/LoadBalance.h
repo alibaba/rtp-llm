@@ -108,15 +108,33 @@ struct BizHosts {
                 std::vector<std::shared_ptr<const Host>> hosts_):
         biz(biz_), index(index_), hosts(hosts_) {}
 
-    void shuffle() {
+    void shuffleHost() {
         unsigned seed = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
         std::mt19937 g(seed);
         std::shuffle(hosts.begin(), hosts.end(), g);
+    }
 
+    void shuffleIndex() {
+        unsigned seed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+        std::mt19937 g(seed);
         std::uniform_int_distribution<uint32_t> dist(0, hosts.size() - 1);
         uint32_t random_number = dist(g);
         index->store(random_number);
+    }
+
+    void sortHosts() {
+        // 自定义的比较函数
+        auto compare = [](const std::shared_ptr<const Host>& h1, const std::shared_ptr<const Host>& h2) {
+            if (h1->ip != h2->ip) {
+                return h1->ip < h2->ip; // 按照 IP 进行排序
+            }
+            return h1->rpc_port < h2->rpc_port; // 如果 IP 相同，按 RPC 端口排序
+        };
+
+        // 使用 std::sort 进行排序
+        std::sort(hosts.begin(), hosts.end(), compare);
     }
 };
 
