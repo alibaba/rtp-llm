@@ -86,7 +86,7 @@ class GenerateConfigTest(TestCase):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken")
         generate_config = Pipeline.create_generate_config(tokenizer=tokenizer, vocab_size=100,
                                                           special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
-        self.assertEqual(generate_config.stop_words_list, [[8848], [1233, 19912], [1499], [12555, 594, 697, 829], [14398]])
+        self.assertEqual(generate_config.stop_words_list, [[8848], [1233, 19912], [14990], [12555, 594, 697, 829], [14398]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name", "gg"])
         
     def test_select_tokens_id(self):
