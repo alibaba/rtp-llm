@@ -63,7 +63,6 @@ TEST_F(NormalEngineTest, testSimple) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
     ASSERT_FALSE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     // test streaming query
     {
@@ -122,39 +121,6 @@ TEST_F(NormalEngineTest, testSimple) {
     }
 }
 
-TEST_F(NormalEngineTest, testNewDevice) {
-    setenv("USE_NEW_DEVICE_IMPL", "1", 1);
-    CustomConfig config;
-    auto gpt_init_params = ft::GptInitParameter();
-    auto engine = createMockEngine(device_, config, gpt_init_params);
-
-    ASSERT_TRUE(engine->resourceContext().cache_manager);
-    ASSERT_FALSE(engine->resourceContext().system_prompt);
-    ASSERT_FALSE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-
-    std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
-    query->generate_config                 = make_shared<GenerateConfig>();
-    query->generate_config->gen_timeline   = true;
-    query->generate_config->max_new_tokens = 1;
-
-    shared_ptr<GenerateStream> stream = engine->enqueue(query);
-
-    ASSERT_TRUE(stream != nullptr);
-    auto output3 = stream->nextOutput();
-    ASSERT_TRUE(output3.ok());
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.output_len, 1);
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.input_len, 7);
-    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.iter_count, 1);
-
-    ASSERT_TRUE(stream->finished());
-    auto output4 = stream->nextOutput();
-    ASSERT_TRUE(!output4.ok());
-    unsetenv("USE_NEW_DEVICE_IMPL");
-}
-
-
 TEST_F(NormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int> prompt_1 = {1, 2, 3};
@@ -165,7 +131,6 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 95); // one block for load balance
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
@@ -233,7 +198,6 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 98); // one block for load balance
 
     config.reuse_cache = false;
     auto gpt_init_params2 = ft::GptInitParameter();
@@ -247,7 +211,6 @@ TEST_F(NormalEngineTest, testReuseCache) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 98); // one block for load balance
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
         query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);

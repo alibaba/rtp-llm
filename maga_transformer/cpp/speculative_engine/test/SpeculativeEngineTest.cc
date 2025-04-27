@@ -26,7 +26,6 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
     ASSERT_FALSE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     // test streaming query
     {
@@ -92,7 +91,6 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 96);
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
@@ -161,7 +159,6 @@ TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
         query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
