@@ -219,7 +219,8 @@ protected:
     AttentionBlockOutputs forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
-        ft::lora::LoraModelInputPtr lora_model_input);
+        ft::lora::LoraModelInputPtr lora_model_input,
+        const LastLayerDeferedParams& last_layer_defered_params = {});
 
     // These methods are dedicated for moe ep micro batching
     GptLayerOutputs forwardMicroBatchedLayers(const GptLayerInputs& layer_inputs, const GptModelInputs& inputs);

@@ -152,6 +152,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                 input->data(),
                 params.bias ? params.bias.value().get().data() : nullptr,
                 params.residual1 ? params.residual1.value().get().data() : nullptr,
+                params.residual2 ? params.residual2.value().get().data() : nullptr,
                 gamma,
                 beta,
                 eps,

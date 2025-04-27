@@ -37,7 +37,7 @@ void invokeGeneralRmsNorm(T* out, const T* input, const T* gamma, const T* beta,
     QUANT_OUT_T* out_quant = nullptr);
 
 template <typename T, typename QUANT_OUT_T>
-void invokeAddBiasResidualRmsNorm(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
+void invokeAddBiasResidualRmsNorm(T* output, T* normed_output, const T* input, const T* bias, const T* residual, const T* residual2,
     const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream = 0,
     const float* scale = nullptr, float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr);
 

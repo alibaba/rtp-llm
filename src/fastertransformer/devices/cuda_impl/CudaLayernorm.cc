@@ -97,7 +97,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock)) {
         FT_LOG_DEBUG("allocate norm_output");
         if (params.attn_swap_comm_buffer && attn_ag_comm_buffer_) {
-            norm_output = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, 
+            norm_output = BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
                                     params.input->type(),
                                     {input->shape()},
                                     (char*)attn_ag_comm_buffer_->_ubuf + init_params_.tp_rank * params.input->sizeBytes()));
@@ -260,12 +260,15 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
 
     if (params.norm_type == NormType::rmsnorm) {
         if (params.residual1.has_value() || params.bias.has_value()) {
-           DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeAddBiasResidualRmsNorm,
+            RUNTIME_ASSERT_OP_ARG(params.before_norm_output != nullptr,
+                "before_norm_output should not be null when residual1 or bias is set");
+            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeAddBiasResidualRmsNorm,
                                             params.before_norm_output->data(),
                                             norm_output->data(),
                                             input->data(),
                                             params.bias ? params.bias.value().get().data() : nullptr,
                                             params.residual1 ? params.residual1.value().get().data() : nullptr,
+                                            params.residual2 ? params.residual2.value().get().data() : nullptr,
                                             gamma,
                                             beta,
                                             eps,

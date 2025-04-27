@@ -849,7 +849,8 @@ GptLayerOutputs GptModel::forwardGptLayer(
 AttentionBlockOutputs GptModel::forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
-        ft::lora::LoraModelInputPtr lora_model_input)
+        ft::lora::LoraModelInputPtr lora_model_input,
+        const LastLayerDeferedParams& last_layer_defered_params)
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
@@ -872,17 +873,17 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
     printBufferData(*residual, "in residual");
     BufferPtr residual2 = nullptr;
-    BufferPtr cloned_hidden = nullptr;
     if (layer.pre_layernorm) {
-        cloned_hidden = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
-        residual = cloned_hidden;
+        // TODO(wangyin.yx): fuse this clone branch into layernorm(rmsnorm)
+        residual = last_layer_defered_params.residual ? device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"})
+                                                      : device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
         int m_split = device_props_.m_split;
         size_t overlap_comm_type = device_props_.overlap_comm_type;
         auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
-                                                                        nullptr,
+                                                                        residual,
                                                                         *layer.pre_layernorm,
-                                                                        std::nullopt,
-                                                                        std::nullopt,
+                                                                        ft::mayGetRef(last_layer_defered_params.residual),
+                                                                        ft::mayGetRef(last_layer_defered_params.shared_expert_output),
                                                                         std::nullopt,
                                                                         0.f,
                                                                         description_.layernorm_eps,
@@ -892,7 +893,6 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         description_.act_qscheme,
                                                                         layer_id > 0 ? true: false,
                                                                         false));
-
 
         if (enable_sp && layer_id == 0) {
             if (overlap_comm_type == 1 && m_split > 0) {
@@ -918,6 +918,17 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         }
 
         hidden = std::move(pre_layernorm_output.output);
+    } else if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output) {
+        // NOTE(wangyin): this branch is not used for now, might be errornous
+        residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+        auto prev_ffn_layernorm_output = device_->layernorm({
+            hidden,
+            nullptr,
+            std::nullopt, // post_ffn_layernorm_weights
+            ft::mayGetRef(last_layer_defered_params.residual),
+            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+        });
+        hidden = std::move(prev_ffn_layernorm_output.output);
     }
 
     if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
@@ -1009,32 +1020,32 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         hidden = device_->gatherCombineOutput(last_layer_defered_params.combine_output.value()).hidden_states;
     }
 
-    if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
-        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
+    // if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output || last_layer_defered_params.post_ffn_layernorm_weights) {
+    //     printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_ffn_output_defered");
 
-        auto prev_ffn_layernorm_output = device_->layernorm({
-            hidden,
-            nullptr,
-            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
-            ft::mayGetRef(last_layer_defered_params.residual),
-            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
-            nullopt,
-            1.0f,
-            description_.layernorm_eps,
-            true,
-            description_.post_layernorm,
-            description_.norm_type,
-            layer.post_ffn_layernorm ? description_.act_qscheme : QScheme::NoQuantize
-        });
-        hidden = move(prev_ffn_layernorm_output.output);
-        printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
-    }
+    //     auto prev_ffn_layernorm_output = device_->layernorm({
+    //         hidden,
+    //         nullptr,
+    //         std::nullopt, // post_ffn_layernorm_weights
+    //         ft::mayGetRef(last_layer_defered_params.residual),
+    //         ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+    //         nullopt,
+    //         1.0f,
+    //         description_.layernorm_eps,
+    //         true,
+    //         description_.post_layernorm,
+    //         description_.norm_type,
+    //         layer.post_ffn_layernorm ? description_.act_qscheme : QScheme::NoQuantize
+    //     });
+    //     hidden = move(prev_ffn_layernorm_output.output);
+    //     printBufferData(*hidden, "layer_" + to_string(layer_id - 1) + "_final_hidden_defered");
+    // }
 
     DevicePerfWrapper wrapper(device_, "mb_forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
 
     GptLayerInputs real_layer_inputs = inputs;
     real_layer_inputs.hidden = hidden;
-    auto attention_block_output = forwardAttentionBlock(real_layer_inputs, layer_id, nullptr);
+    auto attention_block_output = forwardAttentionBlock(real_layer_inputs, layer_id, nullptr, last_layer_defered_params);
     hidden = move(attention_block_output.hidden);
     auto residual = move(attention_block_output.residual);
     auto residual2 = move(attention_block_output.residual2);
