@@ -40,8 +40,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (max_block_size) {
         model_input.kv_cache_block_id = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {total_batch_size, max_block_size}, rtp_llm::AllocationType::HOST}, {});
-        model_input.cache_keys = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, rtp_llm::AllocationType::HOST}, {});
+        if (pd_separation_) {
+            model_input.cache_keys = device_->allocateBuffer(
+                    {rtp_llm::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, rtp_llm::AllocationType::HOST}, {});
+        }
     }
     model_input.request_id = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT64, {total_context_batch_size}, rtp_llm::AllocationType::HOST}, {});
@@ -191,7 +193,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
                             kv_cache.batch_block_id[i].data(),
                             kv_cache.batch_block_id[i].size() * sizeof(int));
-                if (stream->hasCacheKeys()) {
+                if (pd_separation_ && stream->hasCacheKeys()) {
                     std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                         stream->cacheKeys(i).data(),
                         stream->cacheKeys(i).size() * sizeof(int64_t));

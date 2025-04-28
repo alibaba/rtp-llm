@@ -1321,8 +1321,10 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device)
             inputs.kv_cache_block_id = device->allocateBuffer(
                     {rtp_llm::DataType::TYPE_INT32,
                     {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, rtp_llm::AllocationType::HOST});
-            inputs.cache_keys = device->allocateBuffer(
-                    {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
+            if (inputs.pd_separation) {
+                inputs.cache_keys = device->allocateBuffer(
+                        {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
+            }
         }
         inputs.request_id = device->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});
@@ -1379,7 +1381,9 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device)
     buffers.emplace_back(inputs.prefix_lengths);
     if (max_blocks) {
         buffers.emplace_back(inputs.kv_cache_block_id);
-        buffers.emplace_back(inputs.cache_keys);
+        if (inputs.pd_separation) {
+            buffers.emplace_back(inputs.cache_keys);
+        }
     }
     buffers.emplace_back(inputs.request_id);
     buffers.emplace_back(inputs.request_pd_separation);
