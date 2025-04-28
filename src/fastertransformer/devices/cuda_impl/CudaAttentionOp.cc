@@ -171,6 +171,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         printBufferData(*v_output, "V after invoke transpose");
     }
 
+    computeInsertedMoE();
     prefillAttention(params, kv_block_array, q_output, k_output, v_output, qkv_buf_fp8);
 }
 
@@ -184,6 +185,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                           float* partial_max,
                           int* block_counter,
                           KVBlockArray kv_block_array,
+                          const std::function<void()>& moe_insertion_callback,
                           cudaStream_t stream,
                           CudaDevice *device)
 {
@@ -225,6 +227,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     if (params.weights.static_scale_reciprocal_weight) {
         attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
     }
+    moe_insertion_callback();
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
             qkv_buf_ptr,
             bias_ptr,
@@ -283,7 +286,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         if (use_fp8_fmha_) {
             f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
         }
-        flash_infer->run(params, f16_out, reinterpret_cast<int64_t>(stream_));
+        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_));
         return;
     }
 
@@ -342,6 +345,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                      partial_max_data,
                                      block_counter_data,
                                      kv_block_array,
+                                     [this]() {
+                                         computeInsertedMoE();
+                                     },
                                      stream_,
                                      this);
 }

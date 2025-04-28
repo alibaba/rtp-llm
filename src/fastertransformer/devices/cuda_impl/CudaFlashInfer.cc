@@ -410,6 +410,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
 void FlashInferAttnParams::run(
         const AttentionModuleParams& params,
         const BufferPtr &f16_out,
+        const std::function<void()>& moe_insertion_callback,
         int64_t stream)
 {
     const int local_head_num = params.configs.head_num;
@@ -464,6 +465,8 @@ void FlashInferAttnParams::run(
                           paged_kv_last_page_len_d,
                           1,
                           stream);
+
+    moe_insertion_callback();
 
     sync_check_cuda_error();
 
