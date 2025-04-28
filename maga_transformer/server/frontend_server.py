@@ -101,16 +101,19 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def inference(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
-        if isinstance(req, str):
-            req = json.loads(req)
-        assert isinstance(req, dict)
-        if 'master_info' in req:
-            request_id = req['master_info'].get("request_id")
-            check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
-            req[request_id_field_name] = request_id
-            self._global_controller.increment()
-        else:
-            req[request_id_field_name] = self._global_controller.increment()
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            assert isinstance(req, dict)
+            if 'master_info' in req:
+                request_id = req['master_info'].get("request_id")
+                check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
+                req[request_id_field_name] = request_id
+                self._global_controller.increment()
+            else:
+                req[request_id_field_name] = self._global_controller.increment()
+        except Exception as e:
+            return self._handle_exception(request, e)
 
         def generate_call():
             assert self._frontend_worker is not None
@@ -136,12 +139,15 @@ class FrontendServer(object):
         return rep
 
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
-        if request.master_info is not None:
-            request_id = request.master_info.get("request_id")
-            check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
-            self._global_controller.increment()
-        else:
-            request_id = self._global_controller.increment()
+        try:
+            if request.master_info is not None:
+                request_id = request.master_info.get("request_id")
+                check_with_info(request_id != None and isinstance(request_id, int), "request_id in master_info is None or not int")
+                self._global_controller.increment()
+            else:
+                request_id = self._global_controller.increment()
+        except Exception as e:
+            return self._handle_exception(request, e)
 
         def generate_call():
             assert (self._openai_endpoint != None)

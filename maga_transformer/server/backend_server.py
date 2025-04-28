@@ -107,11 +107,14 @@ class BackendServer(object):
         return self._embedding_endpoint is not None
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
-        start_time = time.time()
-        if isinstance(request, str):
-            request = json.loads(request)
-        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
-        request[request_id_field_name] = self._global_controller.increment()
+        try:
+            start_time = time.time()
+            if isinstance(request, str):
+                request = json.loads(request)
+            kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+            request[request_id_field_name] = self._global_controller.increment()
+        except Exception as e:
+            return self._handle_exception(request, e)
 
         try:
             assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
@@ -183,11 +186,14 @@ class BackendServer(object):
         return torch.ops.fastertransformer.set_log_level(req['log_level'])
 
     async def update(self, version_info: VersionInfo):
-        request = version_info.model_dump()
-        lora_infos: Dict[str, Any] = dict()
-        if version_info.peft_info != None:
-            lora_infos = version_info.peft_info.get("lora_info", {})
-        request[request_id_field_name] = self._global_controller.increment()
+        try:
+            request = version_info.model_dump()
+            lora_infos: Dict[str, Any] = dict()
+            if version_info.peft_info != None:
+                lora_infos = version_info.peft_info.get("lora_info", {})
+            request[request_id_field_name] = self._global_controller.increment()
+        except Exception as e:
+            return self._handle_exception(request, e)
 
         try:
             assert self._lora_manager

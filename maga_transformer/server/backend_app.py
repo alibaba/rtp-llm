@@ -149,6 +149,7 @@ class BackendApp(object):
             load_balance_info = self.backend_server.get_load_balance_info()
             engine_schedule_info = self.backend_server.get_engine_schedule_info()
             available_concurrency = self.backend_server._global_controller.get_available_concurrency()
+            backend_available_concurrency = available_concurrency
 
             if int(os.environ.get('LOAD_BALANCE', 0)) and load_balance_info.step_per_minute > 0 and load_balance_info.step_latency_us > 0:
                 available_concurrency = load_balance_info.step_per_minute
@@ -156,6 +157,7 @@ class BackendApp(object):
                 load_balance_version = 1
 
             return {
+                "backend_available_concurrency": backend_available_concurrency,
                 "available_concurrency": available_concurrency,
                 "available_kv_cache": load_balance_info.available_kv_cache,
                 "total_kv_cache": load_balance_info.total_kv_cache,
