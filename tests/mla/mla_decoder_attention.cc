@@ -140,11 +140,12 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t mla_ops_type,
     });
 }
 
-c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferParams(torch::Tensor prefix_length,
-                                                                              torch::Tensor sequence_length,
-                                                                              torch::Tensor input_length,
-                                                                              int64_t       page_size,
-                                                                              torch::Tensor block_id_map)
+c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferParams(
+        torch::Tensor prefix_length,
+        torch::Tensor sequence_length,
+        torch::Tensor input_length,
+        int64_t       page_size,
+        torch::Tensor block_id_map)
 {
     auto decode_batch_size = sequence_length.sizes()[0];
     auto context_batch_size = input_length.sizes()[0] - decode_batch_size;
@@ -155,6 +156,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                 nullptr,
                                                 torchTensor2Buffer(input_length)->slice(decode_batch_size, context_batch_size, false),
                                                 torchTensor2Buffer(block_id_map)->slice(decode_batch_size, context_batch_size, false),
+                                                torchTensor2Buffer(block_id_map.to("cuda"))->slice(decode_batch_size, context_batch_size, false),
                                                 DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
@@ -164,10 +166,12 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                  flash_infer_attn_params->page_indice_d);
 }
 
-c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferParams(torch::Tensor sequence_length,
-                                                                              torch::Tensor input_length,
-                                                                              int64_t       page_size,
-                                                                              torch::Tensor block_id_map) {
+c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferParams(
+        torch::Tensor sequence_length,
+        torch::Tensor input_length,
+        int64_t       page_size,
+        torch::Tensor block_id_map)
+{
     attn_configs.tokens_per_block = page_size;
     auto decode_batch_size = sequence_length.sizes()[0];
     auto params = FlashInferAttnParams::prepare(device_,
@@ -176,6 +180,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
                                                 torchTensor2Buffer(sequence_length)->slice(0, decode_batch_size, false),
                                                 torchTensor2Buffer(input_length)->slice(0, decode_batch_size, false),
                                                 torchTensor2Buffer(block_id_map)->slice(0, decode_batch_size, false),
+                                                torchTensor2Buffer(block_id_map.to("cuda"))->slice(0, decode_batch_size, false),
                                                 DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
@@ -200,12 +205,14 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         attn_configs.tokens_per_block     = page_size;
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
+        BufferPtr kvcache_block_id_device   = device_->clone({*kvcache_block_id_host});
         auto      flash_infer_attn_params = FlashInferAttnParams::prepare(device_,
                                                                           attn_configs,
                                                                           nullptr,
                                                                           sequence_lengths_host,
                                                                           sequence_lengths_host,
                                                                           kvcache_block_id_host,
+                                                                          kvcache_block_id_device,
                                                                           DataType::TYPE_BF16);
 
         size_t token_num     = q.size(0);

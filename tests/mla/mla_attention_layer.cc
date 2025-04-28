@@ -76,6 +76,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         BufferPtr input_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
+        BufferPtr kvcache_block_id_device   = device_->clone({*kvcache_block_id_host});
         auto      decode_flash_infer_attn_params =
             FlashInferAttnParams::prepare(device_,
                                           attn_configs,
@@ -83,6 +84,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           sequence_lengths_host,
                                           input_lengths_host,
                                           kvcache_block_id_host,
+                                          kvcache_block_id_device,
                                           DataType::TYPE_BF16);
         auto context_flash_infer_attn_params =
             FlashInferAttnParams::prepare(device_,
@@ -91,6 +93,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           sequence_lengths_host,
                                           input_lengths_host,
                                           kvcache_block_id_host,
+                                          kvcache_block_id_device,
                                           DataType::TYPE_BF16);
 
         size_t token_num     = hidden.size(0);

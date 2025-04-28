@@ -904,6 +904,7 @@ struct DevicePrepParams {
     const BufferPtr &sequence_lengths;
     const BufferPtr &input_lengths;
     const BufferPtr &kv_cache_block_id;
+    const BufferPtr &kv_cache_block_id_device;
 
     DataType attn_dtype = DataType::TYPE_INVALID;
     size_t context_batch_size = 0;

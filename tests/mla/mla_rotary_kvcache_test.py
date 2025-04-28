@@ -119,6 +119,7 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         for i in range(len(intput_lengths)):
             for j in range(max(batch_page_sizes)):
                 block_id_map[i, j] = i * max(batch_page_sizes) + j
+        block_id_map_device = block_id_map.to('cuda')
         token_num = len(sequence_lengths) + sum(intput_lengths[len(sequence_lengths):])
         q = torch.randn([token_num,
                          self.config.head_num,
@@ -139,7 +140,8 @@ class TestRotaryKVcacheTest(unittest.TestCase):
         cos_sin_cache = self.cos_sin_cache
         sequence_length_mins_one = torch.tensor([x - 1 for x in sequence_lengths], dtype=torch.int32)
         prefix_length_t = torch.zeros((len(intput_lengths) - len(sequence_lengths)), dtype=torch.int32)
-        self.mla_rotary_kvcache_op.init(prefix_length_t, sequence_length_mins_one, input_length_t, page_size, block_id_map)
+        self.mla_rotary_kvcache_op.init(prefix_length_t, sequence_length_mins_one, input_length_t, page_size,
+                                        block_id_map, block_id_map_device)
         
         kv_cache = torch.zeros([total_page_num, page_size, self.config.kv_lora + self.config.rope_head_size], dtype=torch.bfloat16, device=torch.device("cuda"))
         ckv_cache = kv_cache[:, :, :self.config.kv_lora]

@@ -400,6 +400,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             params.sequence_lengths->slice(0, params.decoder_batch_size, false),
             params.input_lengths->slice(0, params.decoder_batch_size, false),
             params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size, false) : nullptr,
+            params.kv_cache_block_id_device ? params.kv_cache_block_id_device->slice(0, params.decoder_batch_size, false) : nullptr,
             params.attn_dtype);
     output.prefill_flash_infer_attn_params = FlashInferAttnParams::prepare(
             this,
@@ -408,6 +409,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             nullptr,
             params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size, false),
             params.kv_cache_block_id ? params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size, false) : nullptr,
+            params.kv_cache_block_id_device ? params.kv_cache_block_id_device->slice(params.decoder_batch_size, params.context_batch_size, false) : nullptr,
             params.attn_dtype);
 
     return output;

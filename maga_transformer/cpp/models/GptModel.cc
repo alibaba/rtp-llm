@@ -233,6 +233,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
             inputs.sequence_lengths,
             inputs.input_lengths,
             inputs.kv_cache_block_id,
+            attention_inputs.kv_cache ? attention_inputs.kv_cache->kv_cache_block_id : nullptr,
             attn_dtype,
             context_batch_size,
             decoder_batch_size,

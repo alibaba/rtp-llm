@@ -33,7 +33,7 @@ void FlashInferAttnParamsDel(void* p) {
 
 tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer(
         CudaDevice *device,
-        const std::vector<std::vector<size_t>> &shapes, AllocationType atype)
+        const std::vector<std::vector<int64_t>> &shapes, AllocationType atype)
 {
     vector<torch::Tensor> tensors;
     vector<size_t> sizes;
@@ -43,13 +43,17 @@ tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer
         for (const auto dim : shape) {
             size *= dim;
         }
+        size = (size + 31) / 32 * 32;
         sizes.push_back(size);
         total_size += size;
     }
     auto buf = device->allocateBuffer({DataType::TYPE_INT32, {total_size}, atype}, {"flashinfer_buf"});
+    auto buf_ptr = buf->data<int>();
+    auto cuda_option = torch::dtype(torch::kInt).device(torch::DeviceType::CUDA).requires_grad(false);
+
     size_t offset = 0;
     for (size_t i = 0; i < sizes.size(); i++) {
-        tensors.push_back(Buffer2torchTensor(buf->view(offset, sizes[i], false).reshape(shapes[i]), false));
+        tensors.emplace_back(torch::from_blob(buf_ptr + offset, shapes[i], cuda_option));
         offset += sizes[i];
     }
     return {buf, tensors};
@@ -84,14 +88,14 @@ FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch
 #define ALLOC_BUFFER(suffix, type)                                      \
     do {                                                                \
         auto alloc_ret = allocateManyBuffer(device, {                   \
-                {size_t(batch_size) + 1}, /* page_indptr */             \
-                {size_t(batch_size) + 1}, /* qo_indptr */               \
-                {size_t(input_token_num)},     /* batch_indice */             \
-                {size_t(input_token_num)},     /* positions */                \
-                {size_t(batch_size)},     /* kv_len */                  \
-                {size_t(batch_size)},     /* paged_kv_last_page_len */  \
-                {size_t(batch_size)},     /* paged_kv_last_page_len_1 */ \
-                {size_t(page_num)}},      /* page_indice */             \
+                {batch_size + 1}, /* page_indptr */                     \
+                {batch_size + 1}, /* qo_indptr */                       \
+                {input_token_num},     /* batch_indice */               \
+                {input_token_num},     /* positions */                  \
+                {batch_size},     /* kv_len */                          \
+                {batch_size},     /* paged_kv_last_page_len */          \
+                {batch_size},     /* paged_kv_last_page_len_1 */        \
+                {page_num}},      /* page_indice */                     \
             type);                                                      \
                                                                         \
         params->buf_##suffix = get<0>(alloc_ret);                        \
@@ -122,47 +126,61 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
     const int max_batch_blocks = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
     FT_CHECK_WITH_INFO(batch_size <= this->batch_size, "batch_size exceed reserved %d > %d", batch_size, this->batch_size);
 
+    auto qo_indptr = qo_indptr_h.data_ptr<int>();
+    auto page_indptr = page_indptr_h.data_ptr<int>();
+    auto batch_indice = batch_indice_h.data_ptr<int>();
+    auto positions = positions_h.data_ptr<int>();
+    auto paged_kv_last_page_len = paged_kv_last_page_len_h.data_ptr<int>();
+    auto paged_kv_last_page_len_1 = paged_kv_last_page_len_1_h.data_ptr<int>();
+    auto kvlen = kvlen_h.data_ptr<int>();
+    auto page_indice = page_indice_h.data_ptr<int>();
+
+    auto input_lengths = input_lengths_host->data<int>();
+    auto sequence_lengths = sequence_lengths_host ? sequence_lengths_host->data<int>() : nullptr;
+    auto prefix_lengths = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
+    auto kv_cache_block_id = kv_cache_block_id_host ? kv_cache_block_id_host->data<int>() : nullptr;
+
     int qo_offset = 0;
     int offset = 0;
     int total_page_idx = 0;
-    qo_indptr_h.data_ptr<int>()[0] = 0;
-    page_indptr_h.data_ptr<int>()[0] = 0;
+    qo_indptr[0] = 0;
+    page_indptr[0] = 0;
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
-        if (prefix_lengths_host) {
-            int input_length = input_lengths_host->data<int>()[i];
-            int prefix_length = prefix_lengths_host->data<int>()[i];
+        if (prefix_lengths) {
+            int input_length = input_lengths[i];
+            int prefix_length = prefix_lengths[i];
             FT_CHECK_WITH_INFO(offset + input_length <= this->input_token_num, "token_num exceed reserved %d > %d",
                                offset + input_length, this->input_token_num);
             for (int j = 0; j < input_length; j++) {
-                batch_indice_h.data_ptr<int>()[offset] = i;
-                positions_h.data_ptr<int>()[offset] = j + prefix_length;
+                batch_indice[offset] = i;
+                positions[offset] = j + prefix_length;
                 offset += 1;
             }
             qo_offset += input_length;
             seq_len = input_length + prefix_length;
         } else {
-            batch_indice_h.data_ptr<int>()[i] = i;
-            positions_h.data_ptr<int>()[i] = sequence_lengths_host->data<int>()[i];
+            batch_indice[i] = i;
+            positions[i] = sequence_lengths[i];
             qo_offset += 1;
-            seq_len = sequence_lengths_host->data<int>()[i] + 1;
+            seq_len = sequence_lengths[i] + 1;
         }
 
-        paged_kv_last_page_len_h.data_ptr<int>()[i] = (seq_len - 1) %  tokens_per_block; // for append_kv_cache
-        paged_kv_last_page_len_1_h.data_ptr<int>()[i] = paged_kv_last_page_len_h.data_ptr<int>()[i] + 1; // for mha
-        kvlen_h.data_ptr<int>()[i] = seq_len;
+        paged_kv_last_page_len[i] = (seq_len - 1) %  tokens_per_block; // for append_kv_cache
+        paged_kv_last_page_len_1[i] = paged_kv_last_page_len[i] + 1; // for mha
+        kvlen[i] = seq_len;
 
         int page_num = (seq_len + tokens_per_block - 1) / tokens_per_block;
         FT_CHECK_WITH_INFO(total_page_idx + page_num <= this->page_num, "page_num exceed reserved %d > %d",
                            total_page_idx + page_num, this->page_num);
-        if (kv_cache_block_id_host) {
+        if (kv_cache_block_id) {
             for (int j = 0; j < page_num; j++) {
-                auto page_idx = kv_cache_block_id_host->data<int>()[i * max_batch_blocks + j];
-                page_indice_h.data_ptr<int>()[total_page_idx++] = page_idx;
+                auto page_idx = kv_cache_block_id[i * max_batch_blocks + j];
+                page_indice[total_page_idx++] = page_idx;
             }
         }
-        page_indptr_h.data_ptr<int>()[i + 1] = total_page_idx;
-        qo_indptr_h.data_ptr<int>()[i + 1] = qo_offset;
+        page_indptr[i + 1] = total_page_idx;
+        qo_indptr[i + 1] = qo_offset;
     }
 }
 
@@ -190,34 +208,11 @@ void FlashInferAttnParams::refreshFlashInferBuf(CudaDevice *device, int batch_si
     REFRESH_SHAPE(paged_kv_last_page_len_1);
 }
 
-void FlashInferAttnParams::fillFlashMLA(CudaDevice *device,
-                                        const BufferPtr &kv_cache_block_id_host)
-{
-    if (!kv_cache_block_id_host) {
-        return;
-    }
-
-    auto stream = device->getStream();
-
-    if (!kv_cache_block_id ||
-        kv_cache_block_id->size() < kv_cache_block_id_host->size())
-    {
-        kv_cache_block_id = device->allocateBuffer({DataType::TYPE_INT32, kv_cache_block_id_host->shape(),
-                AllocationType::DEVICE}, {"flashinfer_kv_cache_block_id"});
-    }
-    cudaMemcpyAsync(kv_cache_block_id->data(), kv_cache_block_id_host->data(), kv_cache_block_id_host->sizeBytes(),
-                    cudaMemcpyHostToDevice, stream);
-
-    auto option = torch::dtype(torch::kInt).device(torch::DeviceType::CUDA).requires_grad(false);
-    auto shape = vector<int64_t>{int64_t(kv_cache_block_id_host->shape()[0]), int64_t(kv_cache_block_id_host->shape()[1])};
-    kv_cache_block_id_d = torch::from_blob(kv_cache_block_id->data(),
-                                           shape, option);
-}
-
 bool FlashInferAttnParams::sameQLength(const BufferPtr &input_lengths_host, int batch_size) {
     int last_q_length = -1;
+    auto input_lengths = input_lengths_host->data<int>();
     for (int i = 0; i < batch_size; i++) {
-        int input_length = input_lengths_host->data<int>()[i];
+        int input_length = input_lengths[i];
         if (last_q_length > 0 && last_q_length != input_length) {
             return false;
         }
@@ -316,6 +311,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
         const BufferPtr &sequence_lengths_host,
         const BufferPtr &input_lengths_host,
         const BufferPtr &kv_cache_block_id_host,
+        const BufferPtr &kv_cache_block_id_device,
         fastertransformer::DataType dtype)
 {
     if (fastertransformer::get_sm() < 80) {
@@ -384,13 +380,11 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
                                                MIN_CACHE_PAGE_NUM);
     FlashInferAttnParamsPtr ret(params, FlashInferAttnParamsDel);
 
+    if (kv_cache_block_id_device) {
+        params->kv_cache_block_id_d = Buffer2torchTensor(kv_cache_block_id_device, false);
+    }
     params->mla_ops_type = mla_ops_type;
     params->dtype = dtype;
-
-    if (mla_ops_type == MlaOpsType::FLASH_MLA) {
-        params->fillFlashMLA(cuda_device, kv_cache_block_id_host);
-    }
-
     params->fillFlashInfer(prefix_lengths_host,
                            sequence_lengths_host,
                            input_lengths_host,

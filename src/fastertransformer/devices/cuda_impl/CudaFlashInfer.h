@@ -14,9 +14,6 @@ private:
     BufferPtr buf_h;
     BufferPtr buf_d;
 
-    // for flashmla only
-    BufferPtr kv_cache_block_id;
-
     int batch_size = 0;
     int input_token_num = 0;
     int page_num = 0;
@@ -60,12 +57,13 @@ public:
             const BufferPtr &sequence_lengths_host,
             const BufferPtr &input_lengths_host,
             const BufferPtr &kv_cache_block_id_host,
+            const BufferPtr &kv_cache_block_id_device,
             DataType dtype);
 
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(
             CudaDevice *device,
-            const std::vector<std::vector<size_t>> &shapes,
+            const std::vector<std::vector<int64_t>> &shapes,
             AllocationType atype);
 
     static FlashInferAttnParams *create(CudaDevice *device, int batch_size, int token_num, int page_num);
@@ -77,9 +75,6 @@ private:
                         const int batch_size,
                         const int tokens_per_block);
     void refreshFlashInferBuf(CudaDevice *device, int batch_size, int token_num);
-
-    void fillFlashMLA(CudaDevice *device,
-                      const BufferPtr &kv_cache_block_id_host);
 
     void genPlan(int batch_size,
                  int local_head_num,
