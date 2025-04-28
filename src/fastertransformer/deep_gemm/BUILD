@@ -124,6 +124,11 @@ QWEN_CASES = [
     ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
 
+    ("3072", "4096", "5", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "5", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "5", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "5", "DeepGemmType::GroupedMasked"),
+
     ("3072", "4096", "4", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "4", "DeepGemmType::GroupedContiguous"),
     ("3072", "4096", "4", "DeepGemmType::GroupedMasked"),

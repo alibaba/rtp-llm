@@ -67,10 +67,10 @@ class QWenV2Weight(ModelDeployWeightInfo):
         ]
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
-    
+
     def _get_fp8_hf_layer_weight_info(self, layer_id: int):
         raise NotImplementedError("fp8 weight info for qwen_v2 is not implemented")
-    
+
     def _get_hf_quant_weight_info(self, layer_id):
         layer_quant_weights =[
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.layers.{i}.input_layernorm.weight')], identity),
@@ -158,7 +158,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
-  
+
 class QWenV2(QWen):
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -210,6 +210,8 @@ class QWenV2(QWen):
         config.head_num = config_json["num_attention_heads"]
         config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
         config.size_per_head = int(config_json.get("head_dim")) if "head_dim" in config_json else config_json["hidden_size"] // config.head_num
+        if config_json.get("hidden_size") is not None:
+            config.hidden_size = config_json["hidden_size"]
         config.layer_num = config_json["num_hidden_layers"]
         config.rotary_embedding_base = config_json.get("rope_theta", config.rotary_embedding_base)
         config.vocab_size = config_json["vocab_size"]

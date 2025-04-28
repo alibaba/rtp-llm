@@ -22,7 +22,7 @@ def qkv_concat_fp8(ts: List[torch.Tensor]):
     return fp8_view([concat_0(ts)])
 
 def transpose_moe_down(ts: List[torch.Tensor]):
-    return stack_(ts).transpose(1, 2)    
+    return stack_(ts).transpose(1, 2)
 
 def merge_qkv_scale(ts: List[torch.Tensor]):
     check_with_info(len(ts) == 3, "qkv scale should have 3 tensors")
@@ -43,7 +43,7 @@ def merge_qkv_hf_fp8_with_scale_t(ts: List[torch.Tensor]):
 class QWenV2MoeWeight(QWenV2Weight):
     def _get_fp8_moe_layer_weight_info(self, layer_id: int):
         selected_experts = self._get_selected_experts(layer_id)
-        
+
         return [
             WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight')], transpose),
             WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight') for expert_id in selected_experts] + \
@@ -143,6 +143,13 @@ class Qwen2Moe(QWenV2):
         gate = CkptWeightInfo("model.layers.{}.mlp.experts.{}.gate_proj.weight", identity)
         up = CkptWeightInfo("model.layers.{}.mlp.experts.{}.up_proj.weight", identity)
         down = CkptWeightInfo("model.layers.{}.mlp.experts.{}.down_proj.weight", identity)
+
+        if self.config.quant_algo.isFp8():
+            gate_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.gate_proj.weight_scale_inv', identity)
+            up_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.up_proj.weight_scale_inv', identity)
+            down_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.down_proj.weight_scale_inv', identity)
+            return MoeWeightInfo(gate, up, down, True, gate_s, up_s, down_s)
+
         return MoeWeightInfo(gate, up, down)
 
 
