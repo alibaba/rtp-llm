@@ -304,4 +304,5 @@ cc_test(
         "-L/usr/local/cuda/extras/CUPTI/lib64",
         "-lcupti",
     ],
+    exec_properties = {'gpu':'A10'},
 )

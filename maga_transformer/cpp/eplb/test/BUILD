@@ -34,4 +34,5 @@ py_test(
     deps = [
         "//maga_transformer:torch"
     ],
+    exec_properties = {'gpu':'A10'},
 )
