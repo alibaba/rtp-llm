@@ -572,6 +572,8 @@ class GptInitModelParameters:
             if not self.load_balance_policy_name in policy_list:
                 raise Exception(f"load_balance_policy_name {self.load_balance_policy_name} " \
                     f"is not right, it must in {policy_list}")
+            self.sync_status_interval_ms = int(os.environ.get('SYNC_STATUS_INTERVAL_MS', 50))
+            logging.info(f'sync_status_interval_ms: {self.sync_status_interval_ms}')
 
         self.use_cache_store = bool(int(os.environ.get('USE_CACHE_STORE', 0)))
         logging.info(f'use_cache_store: {self.use_cache_store}')

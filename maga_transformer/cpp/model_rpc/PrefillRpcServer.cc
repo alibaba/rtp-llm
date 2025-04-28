@@ -158,7 +158,7 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
     LoadBalancerInitParams params;
     params.subscribe_config = subscribe_config;
     params.update_interval_ms = 100;
-    params.sync_status_interval_ms = 10;
+    params.sync_status_interval_ms = maga_init_params_.gpt_init_parameter.sync_status_interval_ms_;
     return params;
 }
 
