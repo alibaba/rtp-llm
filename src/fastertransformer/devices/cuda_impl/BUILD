@@ -111,7 +111,6 @@ cc_library(
         "CudaAddBiasOp.cc",
         "CudaEmbeddingLookup.cc",
         "CudaMlaQKVGemm.cc",
-        "CudaMlaContextAttention.cc",
         "CudaLayernorm.cc",
         "CudaOps.cc",
         "CudaQuantizeOp.cc",
