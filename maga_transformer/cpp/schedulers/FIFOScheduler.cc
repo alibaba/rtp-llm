@@ -11,6 +11,7 @@ namespace rtp_llm {
 FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&          params,
                              const std::shared_ptr<CacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
+    params_(params),
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
     max_context_batch_size_(params.max_context_batch_size_),
@@ -157,6 +158,12 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
+    if (params_.isDecodeRole()) {
+        if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
+            return true;
+        }
+    }
+
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
         return false;
     }

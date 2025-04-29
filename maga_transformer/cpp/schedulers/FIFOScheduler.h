@@ -45,6 +45,7 @@ private:
     bool waitPredicate();
 
 private:
+    rtp_llm::GptInitParameter     params_;
     std::list<GenerateStreamPtr>  waiting_streams_;
     std::list<GenerateStreamPtr>  running_streams_;
     std::list<GenerateStreamPtr>  remote_running_streams_;
@@ -64,6 +65,7 @@ private:
     std::mutex                    lock_;
     std::condition_variable       cond_;
     kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
+
     // TODO @wangyin support different beams run togather
 };
 
