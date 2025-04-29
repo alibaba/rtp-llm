@@ -161,6 +161,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         if (params.overlapped) {
             std::vector<BufferPtr> hold_buffers = {
                 hidden,
+                quantized_hidden,
                 expert_ids,
                 expert_scales,
             };
@@ -173,6 +174,10 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
                 dispatch_layout_output.num_tokens_per_rdma_rank.value_or(torch::Tensor()),
                 dispatch_layout_output.num_tokens_per_expert,
                 dispatch_layout_output.is_token_in_rank,
+                dispatch_output.recv_x,
+                dispatch_output.recv_x_scales.value_or(torch::Tensor()),
+                dispatch_output.recv_topk_idx.value_or(torch::Tensor()),
+                dispatch_output.recv_topk_weights.value_or(torch::Tensor()),
             };
             comm_hook = std::make_unique<DeepEPCudaEventHook>(*torch_default_stream_,
                                                               *(dispatch_output.event_overlap->event()),
