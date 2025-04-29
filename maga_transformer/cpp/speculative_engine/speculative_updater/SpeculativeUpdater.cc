@@ -41,8 +41,9 @@ absl::Status SpeculativeUpdater::dispatch(const GenerateStreamPtr& stream, const
     const ft::BufferPtr& logits = stream_output.logits;
     const ft::BufferPtr& hidden_states = stream_output.hidden_states;
     const ft::BufferPtr& loss = stream_output.loss;
+    const ft::BufferPtr& softmax_probs = stream_output.softmax_probs;
     stream->step();
-    StreamUpdateInfo update_info{accepted_tokens, (int)num_accepted_tokens, logits, nullptr, hidden_states, nullptr, nullptr, loss, hidden_states};
+    StreamUpdateInfo update_info{accepted_tokens, (int)num_accepted_tokens, logits, nullptr, softmax_probs, nullptr, nullptr, loss, hidden_states};
     stream->update(update_info);
     stream->setReuseLength(stream->seqLength() - 1);
     stream->setFallbackPrefixLength(stream->reuseLength());

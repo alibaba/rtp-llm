@@ -39,7 +39,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             } else {
                 stream->setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE, "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output");
                 sampler_output.outputs.emplace_back(
-                    propose_step, 0, nullptr, nullptr, nullptr, nullptr, false);
+                    propose_step, 0, nullptr, nullptr, nullptr, nullptr, nullptr, false);
                 continue;
             }
         }
@@ -59,6 +59,7 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
         ft::BufferPtr logits        = nullptr;
         ft::BufferPtr hidden_states = nullptr;
         ft::BufferPtr loss          = nullptr;
+        ft::BufferPtr softmax_probs = nullptr;
 
         // TODO(xyz): optimize deepclone
         if (stream->generateConfig()->return_logits) {
@@ -80,8 +81,11 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
         if (scorer_stream_output->loss) {
             loss = device_->clone({*scorer_stream_output->loss, ft::AllocationType::HOST, {"return_loss"}});
         }
+        if (scorer_stream_output->softmax_probs) {
+            softmax_probs = device_->clone({*scorer_stream_output->softmax_probs, ft::AllocationType::HOST, {"return_softmax_probs"}});
+        }
         sampler_output.outputs.emplace_back(
-            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), accepted_len > propose_step);
+            propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), std::move(softmax_probs), accepted_len > propose_step);
     }
     FT_LOG_DEBUG("speculative sample done");
     return sampler_output;

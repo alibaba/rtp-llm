@@ -50,6 +50,9 @@ public:
         if (generate_input_->generate_config->return_logits) {
             output_buffer->logits = device_->clone({*update_info.logits, ft::AllocationType::DEVICE, {"score_logits"}});
         }
+        if (generate_input_->generate_config->return_softmax_probs) {
+            output_buffer->softmax_probs = device_->clone({*update_info.softmax_probs, ft::AllocationType::DEVICE, {"softmax_probs"}});
+        }
 
         if (needReturnHiddenStates()) {
             FT_CHECK(update_info.all_hidden_states != nullptr);
