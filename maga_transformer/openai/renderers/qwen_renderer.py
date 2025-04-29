@@ -313,6 +313,12 @@ class QwenRenderer(CustomChatRenderer):
             assert query is not _TEXT_COMPLETION_CMD
             query = f'{instruction}\n\nQuestion: {query}'
         return query, history, system
+    
+    def in_think_mode(self, request: ChatCompletionRequest):        
+        chat_template_kwargs = request.chat_template_kwargs
+        if chat_template_kwargs is not None and chat_template_kwargs.get('enable_thinking', True) is False:
+            return False
+        return super().in_think_mode(request)
 
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         func_name, func_args = "", ""

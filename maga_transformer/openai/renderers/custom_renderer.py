@@ -26,9 +26,9 @@ from maga_transformer.utils.util import has_overlap, has_overlap_kmp
 from maga_transformer.utils.multimodal_util import MMUrlType, MultimodalInput, MMPreprocessConfig
 from maga_transformer.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 
-think_mode = bool(int(os.environ.get("THINK_MODE", 0)))
-think_start_tag = os.environ.get("THINK_START_TAG", "<think>\n").encode('utf-8').decode('unicode_escape')
-think_end_tag = os.environ.get("THINK_END_TAG", "</think>\n\n").encode('utf-8').decode('unicode_escape')
+THINK_MODE = bool(int(os.environ.get("THINK_MODE", 0)))
+THINK_START_TAG = os.environ.get("THINK_START_TAG", "<think>\n").encode('utf-8').decode('unicode_escape')
+THINK_END_TAG = os.environ.get("THINK_END_TAG", "</think>\n\n").encode('utf-8').decode('unicode_escape')
 
 class StreamStatus:
     index: int = 0
@@ -154,7 +154,8 @@ class OutputDelta():
 
 @dataclass
 class ThinkStatus():
-    in_think_mode: int = 0
+    enable_think_mode: bool = False
+    in_think_mode: bool = False
     think_buffer: str = ""
     think_tokens: int = 0
     is_streaming: bool = False
@@ -386,15 +387,15 @@ class CustomChatRenderer():
             while processing_index < output_len:
                 if think_status.in_think_mode:
                     think_status.think_buffer += item.output_str[processing_index]
-                    if think_status.think_buffer.startswith(think_start_tag):
-                        think_status.think_buffer = think_status.think_buffer[len(think_start_tag):]
+                    if think_status.think_buffer.startswith(THINK_START_TAG):
+                        think_status.think_buffer = think_status.think_buffer[len(THINK_START_TAG):]
                         
-                    if think_status.think_buffer.endswith(think_end_tag):
-                        reasoning_text = think_status.think_buffer[:-len(think_end_tag)]
+                    if think_status.think_buffer.endswith(THINK_END_TAG):
+                        reasoning_text = think_status.think_buffer[:-len(THINK_END_TAG)]
                         think_status.think_buffer = ""
                         think_status.in_think_mode = False
-                    elif has_overlap_kmp(think_status.think_buffer, think_end_tag) \
-                        or think_start_tag.startswith(think_status.think_buffer):
+                    elif has_overlap_kmp(think_status.think_buffer, THINK_END_TAG) \
+                        or THINK_START_TAG.startswith(think_status.think_buffer):
                         pass
                     else:
                         reasoning_text = think_status.think_buffer
@@ -404,13 +405,13 @@ class CustomChatRenderer():
                     processing_index = output_len
 
             if think_status.in_think_mode:
-                if has_overlap_kmp(think_status.think_buffer, think_end_tag) \
-                    or think_start_tag.startswith(think_status.think_buffer):
+                if has_overlap_kmp(think_status.think_buffer, THINK_END_TAG) \
+                    or THINK_START_TAG.startswith(think_status.think_buffer):
                     reasoning_text = ""
                 else:
                     think_status.think_buffer = ""
                     
-            if think_mode and update_think_tokens:
+            if think_status.enable_think_mode and update_think_tokens:
                 if not think_status.is_streaming:
                     think_status.think_tokens = item.output_length - len(self.tokenizer.tokenize(content or ""))
                 else:
@@ -448,7 +449,7 @@ class CustomChatRenderer():
                     prompt_tokens=input_lengths,
                     total_tokens=input_lengths + output_lengths,
                     completion_tokens=output_lengths,
-                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_status.enable_think_mode > 0 else None,
                     prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_lengths) if reuse_lengths > 0 else None
                 )
         )
@@ -502,7 +503,7 @@ class CustomChatRenderer():
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
-                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_mode > 0 else None,
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=think_status.think_tokens) if think_status.enable_think_mode else None,
                 prompt_tokens_details=PromptTokensDetails(cached_tokens=reuse_length) if reuse_length > 0 else None
             ),
             aux_info=aux_info
@@ -510,6 +511,10 @@ class CustomChatRenderer():
 
     async def _create_status_list(self, n: int, request: ChatCompletionRequest) -> List[StreamStatus]:
         return [StreamStatus(request) for _ in range(n)]
+    
+    def in_think_mode(self, request: ChatCompletionRequest):
+        global THINK_MODE
+        return THINK_MODE
 
     async def render_response_stream(
             self,
@@ -521,8 +526,8 @@ class CustomChatRenderer():
         num_return_sequences = request.n if request.n is not None else 1
         status_list = await self._create_status_list(num_return_sequences, request)
         index = 0
-        global think_mode
-        think_status = ThinkStatus(in_think_mode=think_mode, think_buffer="", think_tokens=0, is_streaming=generate_config.is_streaming)
+        enable_think_mode = self.in_think_mode(request)
+        think_status = ThinkStatus(enable_think_mode=enable_think_mode, in_think_mode=enable_think_mode, think_buffer="", think_tokens=0, is_streaming=generate_config.is_streaming)
         async for outputs in output_generator:
             if index == 0:
                 yield await self._generate_first(num_return_sequences)
@@ -541,7 +546,7 @@ class CustomChatRenderer():
             yield await self._flush_buffer(status_list, generate_config.stop_words_str, generate_config.is_streaming, think_status)
             yield await self._generate_final(status_list, request, think_status)
 
-    def _create_empty_delta_sync(self, input_len, output_len, reuse_len):
+    def _create_empty_delta_sync(self, input_len: int, output_len: int , reuse_len: int):
         return OutputDelta(
             output_str="",
             logprobs=None,
@@ -552,8 +557,8 @@ class CustomChatRenderer():
 
     def _generate_log_probs_sync(self,
                                  status: StreamStatusSync,
-                                 all_probs: torch.Tensor,
-                                 output_ids: torch.Tensor) -> Optional[ChatCompletionTokenLogprob]:
+                                 all_probs: Optional[torch.Tensor],
+                                 output_ids: Optional[torch.Tensor]) -> Optional[ChatCompletionTokenLogprob]:
         if not status.request.logprobs:
             return None
         prob_return_num = status.request.top_logprobs or 1
@@ -591,9 +596,9 @@ class CustomChatRenderer():
 
     def _update_single_status_sync(self,
                               status: StreamStatusSync,
-                              input_len, # output.aux_info
-                              output_len, # output.aux_info
-                              reuse_len, # output.aux_info
+                              input_len: int, # output.aux_info
+                              output_len: int, # output.aux_info
+                              reuse_len: int, # output.aux_info
                               all_probs: torch.Tensor,
                               output_ids: torch.Tensor,
                               max_new_tokens: int,

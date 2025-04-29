@@ -131,6 +131,7 @@ class ChatCompletionRequest(BaseModel):
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
     master_info: Optional[Dict[str, Any]] = None
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
