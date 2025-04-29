@@ -82,7 +82,10 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             loss = device_->clone({*scorer_stream_output->loss, rtp_llm::AllocationType::HOST, {"return_loss"}});
         }
         if (scorer_stream_output->softmax_probs) {
-            softmax_probs = device_->clone({*scorer_stream_output->softmax_probs, rtp_llm::AllocationType::HOST, {"return_softmax_probs"}});
+            softmax_probs =
+                device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {1, accepted_len}, rtp_llm::AllocationType::HOST}, {"return_softmax_probs"});
+            device_->copy(
+                {(*softmax_probs)[0].view(0, accepted_len), (*scorer_stream_output->softmax_probs)[0].view(0, accepted_len)});
         }
         sampler_output.outputs.emplace_back(
             propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), std::move(softmax_probs), accepted_len > propose_step);
