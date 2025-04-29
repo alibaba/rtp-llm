@@ -115,8 +115,8 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
                                    "Invalid address format in REMOTE_RPC_SERVER_IP_LIST: " + addr);
                 uint32_t port = parse_port(port_str);
                 RTP_LLM_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
-
-                local_config.nodes.emplace_back(decode_cluster_name_, ip, port);
+                // rpc port, http port
+                local_config.nodes.emplace_back(decode_cluster_name_, ip, port, port + 4);
             }
         } else {
             const auto& addr    = remote_addrs.front();
@@ -132,7 +132,8 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
             }
 
             RTP_LLM_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
-            local_config.nodes.emplace_back(decode_cluster_name_, ip, port);
+            // rpc port, http port
+            local_config.nodes.emplace_back(decode_cluster_name_, ip, port, port + 4);
         }
 
         subscribe_config.local_configs.push_back(local_config);
