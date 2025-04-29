@@ -19,7 +19,6 @@ using namespace rtp_llm;
 namespace fastertransformer {
 
 using Slice = torch::indexing::Slice;
-
 constexpr auto TNone = torch::indexing::None;
 
 static std::deque<FlashInferAttnParams*> PARAMS_CACHE;
@@ -409,6 +408,117 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
                     reinterpret_cast<int64_t>(cuda_device->getStream())); // cuda_stream
 
     return ret;
+}
+
+void FlashInferAttnParams::run(
+        const AttentionModuleParams& params,
+        const BufferPtr &f16_out,
+        int64_t stream)
+{
+    size_t local_head_num = params.configs.head_num;
+    size_t local_head_num_kv = params.configs.kv_head_num;
+    size_t size_per_head = params.configs.size_per_head;
+
+    at::Tensor qkv_input = Buffer2torchTensor(params.input, false);
+    if (params.weights.qkv_weight->bias) {
+        qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
+    }
+    qkv_input = qkv_input.reshape({-1, int(local_head_num + local_head_num_kv * 2), int(size_per_head)});
+    auto q = qkv_input.index({Slice(TNone), Slice(TNone, local_head_num), Slice(TNone)});
+    auto append_k = qkv_input.index({Slice(TNone), Slice(local_head_num, local_head_num + local_head_num_kv), Slice(TNone)});
+    auto append_v = qkv_input.index({Slice(TNone), Slice(local_head_num + local_head_num_kv, TNone), Slice(TNone)});
+    auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
+    auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
+    at::Tensor out;
+
+    if (params.output.type() == DataType::TYPE_FP8_E4M3) {
+        out = Buffer2torchTensor(f16_out, false);
+    } else {
+        out = Buffer2torchTensor(params.output, false);
+    }
+
+    auto sequence_lengths = Buffer2torchTensor(params.common.sequence_lengths, false);
+    apply_rope_pos_ids(q,
+                       append_k,
+                       q,
+                       append_k,
+                       sequence_lengths   ,
+                       params.configs.rope_config.dim,
+                       false,
+                       params.configs.rope_config.scale,
+                       params.configs.rope_config.base,
+                       stream);
+    sync_check_cuda_error();
+
+    append_paged_kv_cache(append_k.to(k_cache.type()),
+                          append_v.to(v_cache.type()),
+                          batch_indice_d,
+                          positions_d,
+                          k_cache,
+                          v_cache,
+                          page_indice_d,
+                          page_indptr_d,
+                          paged_kv_last_page_len_d,
+                          1,
+                          stream);
+
+    sync_check_cuda_error();
+
+    auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
+    if (decode) {
+        BatchDecodeWithPagedKVCacheRun(
+                float_workspace_d, // float_workspace_buffer
+                int_workspace_d, // int_workspace_buffer
+                plan, // plan_info_vec
+                q, // q
+                k_cache, // paged_k_cache
+                v_cache, // paged_v_cache
+                page_indptr_d, // paged_kv_indptr
+                page_indice_d, // paged_kv_indices
+                paged_kv_last_page_len_1_d, // paged_kv_last_page_len
+                out,
+                std::nullopt, // maybe_lse
+                1, // kv_layout_code
+                -1, // window_left
+                std::nullopt, // maybe_alibi_slopes
+                0, // logits_soft_cap
+                softmax_scale,
+                0,
+                0,
+                stream);
+    } else {
+        BatchPrefillWithPagedKVCacheRun(
+                float_workspace_d, // float_workspace_buffer
+                int_workspace_d,  // int_workspace_buffer
+                plan, // plan_info_vec
+                q, // q
+                k_cache, // paged_k_cache
+                v_cache, // paged_v_cache
+                qo_indptr_d, // qo_indptr
+                page_indptr_d, // paged_kv_indptr
+                page_indice_d, // paged_kv_indices
+                paged_kv_last_page_len_1_d, // paged_kv_last_page_len
+                out,
+                std::nullopt, // maybe_lse
+                1, // mask_mode_code,
+                1, // layout
+                -1, // window_left
+                std::nullopt, // maybe_custom_mask
+                std::nullopt, // maybe_mask_indptr
+                std::nullopt, // maybe_alibi_slopes
+                0, // logits_soft_cap
+                softmax_scale,
+                params.configs.rope_config.scale,
+                params.configs.rope_config.base,
+                stream);
+    }
+
+    const auto &scale = params.weights.static_scale_reciprocal_weight;
+    if (scale) {
+        auto scale_t = Buffer2torchTensor(scale->kernel, false);
+        auto fp8_out = Buffer2torchTensor(params.output, false);
+        fp8_out.copy_((scale_t * out).to(torch::kFloat8_e4m3fn));
+    }
 }
 
 }

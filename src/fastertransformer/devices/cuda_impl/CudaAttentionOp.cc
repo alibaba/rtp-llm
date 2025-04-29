@@ -16,16 +16,11 @@
 #include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/utils/RpcErrorCode.h"
-#include "3rdparty/flashinfer/flashinfer.h"
-#include "flashmla/flashmla.h"
 
 using namespace std;
 using namespace rtp_llm;
 
 namespace fastertransformer {
-
-using Slice = torch::indexing::Slice;
-constexpr auto TNone = torch::indexing::None;
 
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
@@ -240,102 +235,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (flash_infer_attn_params && flash_infer_attn_params->plan.numel() > 0) {
-        const auto &flashinfer = *flash_infer_attn_params;
-
-        at::Tensor qkv_input = Buffer2torchTensor(params.input, false);
-        if (params.weights.qkv_weight->bias) {
-             qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
-        }
-        qkv_input = qkv_input.reshape({-1, int(local_head_num + local_head_num_kv * 2), int(size_per_head)});
-        auto q = qkv_input.index({Slice(TNone), Slice(TNone, local_head_num), Slice(TNone)});
-        auto append_k = qkv_input.index({Slice(TNone), Slice(local_head_num, local_head_num + local_head_num_kv), Slice(TNone)});
-        auto append_v = qkv_input.index({Slice(TNone), Slice(local_head_num + local_head_num_kv, TNone), Slice(TNone)});
-        auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
-        auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
-	at::Tensor out;
-
-	if (params.output.type() == DataType::TYPE_FP8_E4M3) {
-	    out = Buffer2torchTensor(f16_out, false);
-	} else {
-	    out = Buffer2torchTensor(params.output, false);
-	}
-
-        apply_rope_pos_ids(q,
-                           append_k,
-                           q,
-                           append_k,
-                           Buffer2torchTensor(params.common.sequence_lengths, false),
-                           params.configs.rope_config.dim,
-                           false,
-                           params.configs.rope_config.scale,
-                           params.configs.rope_config.base,
-                           reinterpret_cast<int64_t>(stream));
-        sync_check_cuda_error();
-
-        append_paged_kv_cache(append_k.to(k_cache.type()),
-                              append_v.to(v_cache.type()),
-                              flashinfer.batch_indice_d,
-                              flashinfer.positions_d,
-                              k_cache,
-                              v_cache,
-                              flashinfer.page_indice_d,
-                              flashinfer.page_indptr_d,
-                              flashinfer.paged_kv_last_page_len_d,
-                              1, reinterpret_cast<int64_t>(stream));
-
-        sync_check_cuda_error();
-        if (flashinfer.decode) {
-            BatchDecodeWithPagedKVCacheRun(
-                    flashinfer.float_workspace_d, // float_workspace_buffer
-                    flashinfer.int_workspace_d, // int_workspace_buffer
-                    flashinfer.plan, // plan_info_vec
-                    q, // q
-                    k_cache, // paged_k_cache
-                    v_cache, // paged_v_cache
-                    flashinfer.page_indptr_d, // paged_kv_indptr
-                    flashinfer.page_indice_d, // paged_kv_indices
-                    flashinfer.paged_kv_last_page_len_1_d, // paged_kv_last_page_len
-                    out,
-                    std::nullopt, // maybe_lse
-                    1, // kv_layout_code
-                    -1, // window_left
-                    std::nullopt, // maybe_alibi_slopes
-                    0, // logits_soft_cap
-                    (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale,
-                    0,
-                    0,
-                    reinterpret_cast<int64_t>(stream));
-        } else {
-            BatchPrefillWithPagedKVCacheRun(
-                    flashinfer.float_workspace_d, // float_workspace_buffer
-                    flashinfer.int_workspace_d,  // int_workspace_buffer
-                    flashinfer.plan, // plan_info_vec
-                    q, // q
-                    k_cache, // paged_k_cache
-                    v_cache, // paged_v_cache
-                    flashinfer.qo_indptr_d, // qo_indptr
-                    flashinfer.page_indptr_d, // paged_kv_indptr
-                    flashinfer.page_indice_d, // paged_kv_indices
-                    flashinfer.paged_kv_last_page_len_1_d, // paged_kv_last_page_len
-                    out,
-                    std::nullopt, // maybe_lse
-                    1, // mask_mode_code,
-                    1, // layout
-                    -1, // window_left
-                    std::nullopt, // maybe_custom_mask
-                    std::nullopt, // maybe_mask_indptr
-                    std::nullopt, // maybe_alibi_slopes
-                    0, // logits_soft_cap
-                    (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale,
-                    params.configs.rope_config.scale,
-                    params.configs.rope_config.base,
-                    reinterpret_cast<int64_t>(stream));
-        }
-        if (params.weights.static_scale_reciprocal_weight) {
-            auto scale = Buffer2torchTensor(params.weights.static_scale_reciprocal_weight->kernel, false);
-            auto fp8_out = Buffer2torchTensor(params.output, false);
-            fp8_out.copy_((scale * out).to(torch::kFloat8_e4m3fn));
-        }
+        flash_infer_attn_params->run(
+                params, f16_out,
+                reinterpret_cast<int64_t>(stream));
     } else {
         const float* attention_output_orig_quant_scale = nullptr;
 

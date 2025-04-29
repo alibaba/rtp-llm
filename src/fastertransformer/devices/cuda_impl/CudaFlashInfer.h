@@ -5,6 +5,8 @@
 
 namespace fastertransformer {
 
+class AttentionConfigs;
+
 struct FlashInferAttnParams {
 private:
     BufferPtr float_workspace;
@@ -59,6 +61,10 @@ public:
             const BufferPtr &kv_cache_block_id_host,
             const BufferPtr &kv_cache_block_id_device,
             DataType dtype);
+
+    void run(const AttentionModuleParams& params,
+             const BufferPtr &fp16_out,
+             int64_t stream);
 
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(
