@@ -133,6 +133,12 @@ QWEN_CASES = [
     ("2304", "4096", "1", "DeepGemmType::Normal"),
     ("4096", "2048", "1", "DeepGemmType::Normal"),
 
+    # qwen3-30b-a3b tp=1/2 
+    ("5120", "2048", "1", "DeepGemmType::Normal"),
+    ("2048", "4096", "1", "DeepGemmType::Normal"),
+    ("2560", "2048", "1", "DeepGemmType::Normal"),
+    ("2048", "2048", "1", "DeepGemmType::Normal"),    
+    
     ("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
     ("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
@@ -167,6 +173,22 @@ QWEN_CASES = [
     ("4096", "1536", "2", "DeepGemmType::GroupedContiguous"),
     ("3072", "4096", "2", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "2", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "16", "DeepGemmType::GroupedContiguous"),
+    ("4096", "1536", "16", "DeepGemmType::GroupedContiguous"),
+    ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),   
+
+    # qwen3-30b-a3b ep=1/2 
+    ("1536", "2048", "128", "DeepGemmType::GroupedContiguous"),
+    ("2048", "768", "128", "DeepGemmType::GroupedContiguous"),
+    ("1536", "2048", "128", "DeepGemmType::GroupedMasked"),
+    ("2048", "768", "128", "DeepGemmType::GroupedMasked"),
+    
+    ("1536", "2048", "64", "DeepGemmType::GroupedContiguous"),
+    ("2048", "768", "64", "DeepGemmType::GroupedContiguous"),
+    ("1536", "2048", "64", "DeepGemmType::GroupedMasked"),
+    ("2048", "768", "64", "DeepGemmType::GroupedMasked"),
 ]
 
 template_header = """

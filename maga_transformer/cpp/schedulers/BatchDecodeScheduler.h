@@ -106,9 +106,6 @@ public:
             std::advance(it, batch_size_);
             running_streams_.insert(running_streams_.end(), waiting_streams_.begin(), it);
             waiting_streams_.erase(waiting_streams_.begin(), it);
-            auto unused_buffer = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1,1}, rtp_llm::AllocationType::DEVICE}, {});
-            device_->allReduce({unused_buffer, rtp_llm::ReduceOp::Sum, false, rtp_llm::ParallelMode::DP});
-            device_->syncCommunication(false);
             initRunningStreams();
             RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run", running_streams_.size());
         } else {

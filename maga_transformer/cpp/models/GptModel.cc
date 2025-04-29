@@ -783,6 +783,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     const int32_t layer_id,
     rtp_llm::lora::LoraModelInputPtr lora_model_input)
 {
+    DevicePerfWrapper wrapper(device_, "forwardGptLayer_token_num_%d", inputs.hidden ? inputs.hidden->shape()[0]: 0);
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     auto attention_block_output = forwardAttentionBlock(inputs, layer_id, lora_model_input);
 
@@ -1204,6 +1205,7 @@ GptModelOutputs GptModel::forwardPostLayers(
 }
 
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
+    DevicePerfWrapper wrapper(device_, "forward [tp=%d, dp=%d]", device_props_.tp_size, device_props_.dp_size);
     cleanExpertStats();
     auto layer_inputs = forwardPreLayers(inputs);
 

@@ -405,8 +405,6 @@ RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_st
     // moe ep8
     DISPATCH_DEEP_GEMM_MOE(3072, 4096, 16)
     DISPATCH_DEEP_GEMM_MOE(4096, 1536, 16)
-    DISPATCH_DEEP_GEMM_MOE(3072, 4096, 16)
-    DISPATCH_DEEP_GEMM_MOE(4096, 1536, 16)
 
     // moe ep 32
     DISPATCH_DEEP_GEMM_MOE(3072, 4096, 5)
@@ -418,6 +416,16 @@ RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_st
     // moe ep 64
     DISPATCH_DEEP_GEMM_MOE(3072, 4096, 2)
     DISPATCH_DEEP_GEMM_MOE(4096, 1536, 2)
+
+    // qwen3-30b-a3
+    DISPATCH_DEEP_GEMM_NORMAL(5120, 2048, 1)
+    DISPATCH_DEEP_GEMM_NORMAL(2048, 4096, 1)
+
+    DISPATCH_DEEP_GEMM_MOE(1536, 2048, 128)
+    DISPATCH_DEEP_GEMM_MOE(2048, 768, 128)
+    DISPATCH_DEEP_GEMM_MOE(1536, 2048, 64)
+    DISPATCH_DEEP_GEMM_MOE(2048, 768, 64)
+
 
     RTP_LLM_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
 }
