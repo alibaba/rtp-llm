@@ -558,11 +558,11 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                 {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
             ).hidden_states;
 
-            // shared experts to overlap combine
-            if (micro_batch_idx) {
-                auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
-                ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
-            }
+                // shared experts to overlap combine
+                if (micro_batch_idx) {
+                    auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
+                    ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
+                }
 
             if (last_comm_hook_) {
                 last_comm_hook_->hook_sync();
@@ -878,6 +878,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
     printBufferData(*residual, "in residual");
     BufferPtr residual2 = nullptr;
+    BufferPtr hidden_to_slice = nullptr; // for sp and overlap comm type 2
     if (layer.pre_layernorm) {
         // TODO(wangyin.yx): fuse this clone branch into layernorm(rmsnorm)
         residual = last_layer_defered_params.residual ? device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"})
@@ -918,6 +919,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                 // printBufferData(*vector2Buffer(selected_indices), "selected_indices");
                 residual = device_->select({*residual, *device_->clone({*vector2Buffer(selected_indices)})});
             } else {
+                hidden_to_slice = residual;
                 residual = residual->slice(rank_pad_token_num * device_props_.tp_rank, rank_pad_token_num);
             }
         }
