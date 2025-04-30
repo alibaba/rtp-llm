@@ -341,6 +341,8 @@ struct GemmParams {
     const float beta  = 0.0f;
     mutable int math_sm_count = 0;
     void* stream = nullptr;
+    // tmp param, should use qscheme instead of this bool
+    bool do_fp8_quant = true;
 
     void check() const;
     GemmType dispatch() const;
@@ -861,6 +863,7 @@ struct ActivationParams {
     const OptionalConstBufferRef act_scale = std::nullopt;
     BufferPtr output_buffer = nullptr;
     bool fuse_gate_up = false;
+    QScheme qscheme = QScheme::NoQuantize;
 
     ActivationParams(ActivationType               atype,
                      BufferPtr                    states,
@@ -869,8 +872,9 @@ struct ActivationParams {
                      const OptionalConstBufferRef gate_bias,
                      const OptionalConstBufferRef act_scale,
                      BufferPtr                    output_buffer = nullptr,
-                     bool fuse_gate_up = false):
-        atype(atype), states(states), bias(bias), gate(gate), gate_bias(gate_bias), act_scale(act_scale), output_buffer(output_buffer), fuse_gate_up(fuse_gate_up) {}
+                     bool                         fuse_gate_up = false,
+                     QScheme                      qscheme = QScheme::NoQuantize):
+        atype(atype), states(states), bias(bias), gate(gate), gate_bias(gate_bias), act_scale(act_scale), output_buffer(output_buffer), fuse_gate_up(fuse_gate_up), qscheme(qscheme) {}
 
     ActivationParams(ActivationType atype, BufferPtr states): atype(atype), states(states), bias(std::nullopt), gate(std::nullopt), gate_bias(std::nullopt), act_scale(std::nullopt) {};
 };

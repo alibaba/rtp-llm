@@ -87,7 +87,7 @@ struct CudaGemmArguments {
             CDtype = params.C.value().get().type();
         }
         DDtype = (params.compute_type == DataType::TYPE_INVALID) ?
-                  params.A.type() : params.compute_type;\
+                  params.A.type() : params.compute_type;
         // int8 gemm
         if (ADtype == DataType::TYPE_QINT8 && BDtype == DataType::TYPE_QINT8) {
             DDtype = DataType::TYPE_FP16;
@@ -95,6 +95,10 @@ struct CudaGemmArguments {
         // fp8 gemm
         if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
             DDtype = DataType::TYPE_FP16;
+        }
+        // fp8 block wise with fused activation
+        if (!params.do_fp8_quant && ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
+            DDtype = DataType::TYPE_BF16;
         }
 
         dim =  params.A.dim();
@@ -331,7 +335,6 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
     RTP_LLM_LOG_DEBUG("use deep gemm.");
     RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
-            // padding to 128 # hack block size
     BufferPtr      quanted_input;
     BufferPtr      gemm_output;
     if (params.A.type() != DataType::TYPE_QFP8_E4M3) {
@@ -340,8 +343,14 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
         quanted_input = params.A.slice(0, params.A.shape()[0]);
     }
     gemm_output = output;
+
+    if (params.do_fp8_quant) {
+        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, 64));
+        DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
+    } else {
+        DeepGemmPlugin::gemmFp8(params.A, params.B, *gemm_output, stream_);
+    }
  
-    DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
     output = gemm_output->slice(0, params.A.shape()[0], false);
     output->updateParent(gemm_output);
 }
@@ -368,9 +377,9 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
         InvokeSmoothQaunt(params, arguments, output);
-    } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
+    } else if (((params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3) || (!params.do_fp8_quant)) && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
         auto dshape = arguments.Dshape;
-        dshape[0] = (dshape[0] + 127) / 128 * 128;
+        dshape[0] = (dshape[0] + 63) / 64 * 64;
         auto padded_output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
         InvokeDeepGemm(params, arguments, padded_output);
         if (params.D) {

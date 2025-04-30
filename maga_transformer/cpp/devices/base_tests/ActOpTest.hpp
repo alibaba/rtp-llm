@@ -1,6 +1,7 @@
 #pragma once
 #include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include <torch/torch.h>
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace rtp_llm;
 
@@ -22,8 +23,8 @@ public:
                                      DataType dtype)
     {
         auto type = dataTypeToTorchType(dtype);
-        auto input = torch::rand({(int)m, (int)n}, torch::Device(torch::kCPU)).to(type);
-        auto gate = torch::rand({(int)m, (int)n}, torch::Device(torch::kCPU)).to(type);
+        auto input = torch::randn({(int)m, (int)n}, torch::Device(torch::kCPU)).to(type);
+        auto gate = torch::randn({(int)m, (int)n}, torch::Device(torch::kCPU)).to(type);
         auto gate_bias = torch::zeros({(int)m}, torch::Device(torch::kCPU)).to(type);
         return ActOpTestInput({input, gate, gate_bias});
     }
@@ -77,7 +78,7 @@ public:
                                        ActivationType atype)
     {
         if (atype == ActivationType::Silu) {
-            return ActOpTestOutput({torch::silu(params.gate) * params.input});
+            return ActOpTestOutput({torch::silu(params.gate.to(torch::kBFloat16)) * params.input.to(torch::kBFloat16)});
         } else if (atype == ActivationType::Gelu) {
             return ActOpTestOutput({torch::gelu(params.gate) * params.input});
         } else {
@@ -105,6 +106,37 @@ public:
         auto result = GateActOpRun(input, atype);
         auto result_ref = GateActTorchRefRun(input, atype);
         assertTensorClose(result.output.to(result_ref.output.type()), result_ref.output);
+
+    }
+
+    void FuseGateActOpTest(ActivationType atype,
+                           size_t m,
+                           size_t n,
+                           DataType dtype) 
+    {
+        auto input = PrepareActOpInput(m, n, dtype);
+        auto result_ref = GateActTorchRefRun(input, atype);
+        auto fused_input = torch::cat({input.gate, input.input}, 1).contiguous();
+        auto act_output = device_->allocateBuffer({DataType::TYPE_FP16, {m, n}, AllocationType::DEVICE});
+        auto out_ = device_->activation({atype,
+                             tensorToBuffer(fused_input),
+                             std::nullopt,
+                             std::nullopt,
+                             std::nullopt,
+                             std::nullopt,
+                             act_output,
+                             true,
+                             QScheme::Qfp8PerTokenBlock});
+        auto output_kernel = bufferToTensor(reinterpret_cast<const QBuffer&>(*out_).kernel());
+        auto output_scale = bufferToTensor(reinterpret_cast<const QBuffer&>(*out_).scales()).transpose(0,1);
+
+        auto ref_output = result_ref.output.view({(int)m, -1, 128});//.to(torch::kFloat8_e4m3fn);
+        auto ref_scale = ref_output.abs().to(torch::kFloat32).amax(2).view({(int)m, (int)n / 128}).clamp(1e-4);
+        auto scale = 448.0 / ref_scale.unsqueeze(2);
+        auto ref_quant = ref_output.to(torch::kFloat32).mul(scale).to(torch::kFloat8_e4m3fn).view({(int)m, (int)n});
+        ref_scale = (1.0 / scale.to(torch::kFloat32)).view({(int)m, (int)n / 128});
+        //assertTensorClose(ref_scale, output_scale);
+        assertTensorClose(ref_quant.to(torch::kFloat32) * ref_scale, output_kernel.to(torch::kFloat32) * output_scale);
 
     }
 

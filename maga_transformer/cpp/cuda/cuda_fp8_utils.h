@@ -243,6 +243,13 @@ void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
                                  bool                 col_major_scale,
                                  cudaStream_t         stream);
 
+void computeFP8ActivationAndQuantize(__nv_fp8_e4m3*       fp8_output,
+                                     float*               quant_ptr,
+                                     const __nv_bfloat16* weights,
+                                     const int64_t        dim0,
+                                     const int64_t        dim1,
+                                     cudaStream_t         stream);
+
 } // namespace common
 } // namespace tensorrt_llm
 #endif // ENABLE_FP8

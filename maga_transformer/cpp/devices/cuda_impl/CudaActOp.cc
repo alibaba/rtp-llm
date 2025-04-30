@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/cuda/Dispatch.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 
 
 using namespace std;
@@ -86,19 +87,35 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     auto gate = params.gate ? params.gate.value().get().data() : nullptr;
     auto gate_bias = params.gate_bias ? params.gate_bias.value().get().data() : nullptr;
     auto act_scale = params.act_scale ? params.act_scale.value().get().data() : nullptr;
-
     if (params.fuse_gate_up) {
-        torch::Tensor gate_up_tensor = Buffer2torchTensor(*params.states, false);
-        torch::Tensor output_tensor = Buffer2torchTensor(*params.output_buffer, false);
-        if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
-            silu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
-        } else if (params.atype == ActivationType::Gelu) {
-            gelu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
+        FT_CHECK_WITH_INFO(params.output_buffer != nullptr, "when fuse gate and up, output buffer must not be nullptr");
+        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            auto padded_shape_m = (params.output_buffer->shape()[0] + 63) / 64 * 64;
+            auto act_output = allocateBuffer({DataType::TYPE_FP8_E4M3, {padded_shape_m, params.output_buffer->shape()[1]}, AllocationType::DEVICE});
+            auto act_scale = allocateBuffer({DataType::TYPE_FP32, {params.output_buffer->shape()[1] / 128, padded_shape_m}, AllocationType::DEVICE});
+            auto act_zeros = BufferPtr(new Buffer(act_scale->where(), DataType::TYPE_INVALID, {0}, nullptr));
+            if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
+                tensorrt_llm::common::computeFP8ActivationAndQuantize(act_output->data<__nv_fp8_e4m3>(), act_scale->data<float>(),
+                    params.states->data<__nv_bfloat16>(), params.output_buffer->shape()[0], params.output_buffer->shape()[1], stream_);
+            } else {
+                throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            }
+            sync_check_cuda_error();
+            auto out_qbuffer = std::make_shared<QBuffer>(std::move(act_output), std::move(act_scale), std::move(act_zeros));
+            return std::move(out_qbuffer);
         } else {
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            torch::Tensor gate_up_tensor = Buffer2torchTensor(*params.states, false);
+            torch::Tensor output_tensor = Buffer2torchTensor(*params.output_buffer, false);
+            if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
+                silu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
+            } else if (params.atype == ActivationType::Gelu) {
+                gelu_and_mul(output_tensor, gate_up_tensor, (int64_t)stream_);
+            } else {
+                throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            }
+            sync_check_cuda_error();
+            return params.output_buffer;
         }
-        sync_check_cuda_error();
-        return params.output_buffer;
     } else {
         DTYPE_DISPATCH(
             states->type(), params.atype,

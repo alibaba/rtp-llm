@@ -117,15 +117,15 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                         params.configs.activation_type == ActivationType::Silu ||
                         params.configs.activation_type == ActivationType::Gelu)) {
                     auto act_output = allocateBuffer({up_output->type(), {up_output->shape()[0], up_output->shape()[1] / 2}, AllocationType::DEVICE});
-                    activation({params.configs.activation_type,
-                            up_output,
-                            std::nullopt,
-                            std::nullopt,
-                            std::nullopt,
-                            std::nullopt,
-                            act_output,
-                            true});
-                    up_output = std::move(act_output);
+                    up_output = activation({params.configs.activation_type,
+                                            up_output,
+                                            std::nullopt,
+                                            std::nullopt,
+                                            std::nullopt,
+                                            std::nullopt,
+                                            act_output,
+                                            true,
+                                            params.qscheme});
                 } else {
                     torch::Tensor gate_up_output_torch_tensor = Buffer2torchTensor(up_output, false);
                     std::vector<torch::Tensor> split_tensors = torch::chunk(gate_up_output_torch_tensor, 2, -1);
@@ -190,8 +190,15 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             printBufferData(*gemm_output, "ffn_rs_inter_output");
             printBufferData(*output, "ffn_rs_final_output");
         } else {
-            auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
+            auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, nullptr);
+            down_gemm_params.do_fp8_quant = !fuse_gate_up_weight;
             output = loraLinear(LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input)).output;
+            // for fp8 block wise
+            if (output->shape()[0] != params.input.shape()[0]) {
+                auto origin_output = output;
+                output = origin_output->slice(0, params.input.shape()[0], false);
+                output->updateParent(origin_output);
+            }
         }
     }
 
