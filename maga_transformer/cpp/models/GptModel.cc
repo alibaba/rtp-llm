@@ -558,15 +558,15 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                 {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
             ).hidden_states;
 
-            if (last_comm_hook_) {
-                last_comm_hook_->hook_sync();
-                last_comm_hook_ = nullptr;
-            }
-
             // shared experts to overlap combine
             if (micro_batch_idx) {
                 auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
                 ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
+            }
+
+            if (last_comm_hook_) {
+                last_comm_hook_->hook_sync();
+                last_comm_hook_ = nullptr;
             }
 
             printBufferData(*hidden_states, "layer_" + to_string(i) + "_combine_input");
