@@ -208,18 +208,11 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                         nullptr :
                         params.weights.qkv_weight->bias->data<T>();
 
-    // TODO(lidongjin) support relative attention
-    const T* relative_attention_bias_ptr = nullptr;
-
-    // prefix prompt
-
     const auto* input_lengths = params.common.input_lengths->data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
 
     float q_scaling = params.configs.q_scaling;
-    int relative_attention_bias_stride = 0;
     const float* linear_bias_slopes = params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
-    const bool* masked_tokens = nullptr;
 
     tensorrt_llm::common::QuantMode kv_cache_quant_mode = trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
     if (params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
@@ -228,70 +221,72 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
     }
 
+    const float* attention_output_orig_quant_scale = nullptr;
+    if (params.weights.static_scale_reciprocal_weight) {
+        attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
+    }
+    fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
+            qkv_buf_ptr,
+            bias_ptr,
+            nullptr, // relative_attention_bias
+            nullptr, // cache_indir
+            reinterpret_cast<T*>(attn_out_ptr),
+            nullptr, // finished
+            sequence_lengths,
+            batch_size,
+            1, // beam_width
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            params.configs.rope_config,
+            params.configs.use_logn_attn,
+            params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
+            step,
+            nullptr, // prefix_prompt_lengths
+            0, // max_prefix_prompt_length
+            true, // count_prefix_length
+            input_lengths,
+            step,
+            q_scaling,
+            0, // relative_attention_bias_stride,
+            linear_bias_slopes,
+            nullptr, // masked_tokens,
+            nullptr, // query_weight_scale_out
+            attention_output_orig_quant_scale,
+            0, // int8_mode,
+            kv_cache_quant_mode,
+            use_multi_block_mode,
+            (int)max_seq_len_tile,
+            reinterpret_cast<T*>(partial_out),
+            partial_sum,
+            partial_max,
+            block_counter,
+            params.configs.softmax_extra_scale,
+            kv_block_array,
+            stream);
+    sync_check_cuda_error();
+    if (f16_out) {
+        cudaMemcpyAsync(output.data(), f16_out->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
+    }
+    sync_check_cuda_error();
+}
+
+AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
+
     // TODO: refactor QBuffer to suppport view and return QBuffer
     if (params.output.isQBuffer()) {
         params.output.updateTypeAndShape(DataType::TYPE_FP8_E4M3, params.output.shape());
     }
-
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
-    if (flash_infer_attn_params && flash_infer_attn_params->plan.numel() > 0) {
-        flash_infer_attn_params->run(
-                params, f16_out,
-                reinterpret_cast<int64_t>(stream));
-    } else {
-        const float* attention_output_orig_quant_scale = nullptr;
-
-        if (params.weights.static_scale_reciprocal_weight) {
-            attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
+    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
+    if (flash_infer && flash_infer->plan.numel() > 0) {
+        BufferPtr f16_out;
+        if (use_fp8_fmha_) {
+            f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
         }
-        fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
-                qkv_buf_ptr,
-                bias_ptr,
-                relative_attention_bias_ptr,
-                nullptr, // cache_indir
-                reinterpret_cast<T*>(attn_out_ptr),
-                nullptr, // finished
-                sequence_lengths,
-                batch_size,
-                1, // beam_width
-                local_head_num,
-                local_head_num_kv,
-                size_per_head,
-                params.configs.rope_config,
-                params.configs.use_logn_attn,
-                params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
-                step,
-                nullptr, // prefix_prompt_lengths
-                0, // max_prefix_prompt_length
-                true, // count_prefix_length
-                input_lengths,
-                step,
-                q_scaling,
-                relative_attention_bias_stride,
-                linear_bias_slopes,
-                masked_tokens,
-                nullptr, // query_weight_scale_out
-                attention_output_orig_quant_scale,
-                0, // int8_mode,
-                kv_cache_quant_mode,
-                use_multi_block_mode,
-                (int)max_seq_len_tile,
-                reinterpret_cast<T*>(partial_out),
-                partial_sum,
-                partial_max,
-                block_counter,
-                params.configs.softmax_extra_scale,
-                kv_block_array,
-                stream);
-        sync_check_cuda_error();
-        if (f16_out) {
-            cudaMemcpyAsync(output.data(), f16_out->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
-        }
-        sync_check_cuda_error();
+        flash_infer->run(params, f16_out, reinterpret_cast<int64_t>(stream_));
+        return;
     }
-}
 
-AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     auto datatype = params.input.type();
     size_t max_seq_len_tile = 0;
     BufferPtr partial_out = nullptr;
