@@ -33,7 +33,7 @@ void printBuffer1d(const std::string&  hint,
     print_func(column_start, column_end);
     ss << " ...... ";
     print_func(std::max((size_t)0, dim1 - (column_end - column_start)), dim1);
-    
+
     ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
     FT_LOG(log_level, ss.str());
 }
@@ -259,20 +259,15 @@ void printBuffer6d(const std::string&  hint,
     }
 }
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print, bool show_stats_only) {
-    const auto log_level = force_print ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_TRACE1;
-    if (!force_print) {
-        if (!rtp_llm::Logger::getEngineLogger().isTraceMode()) {
-            return;
-        }
-    }
+void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool show_stats_only) {
+    const auto log_level = alog::LOG_LEVEL_INFO;
 
     if (buffer.isQBuffer()) {
         const QBuffer* q_buffer = &(reinterpret_cast<const QBuffer&>(buffer));
-        printBufferData(q_buffer->kernel(), hint + "_kernel");
-        printBufferData(q_buffer->scales(), hint + "_scales");
+        printBufferData_(q_buffer->kernel(), hint + "_kernel");
+        printBufferData_(q_buffer->scales(), hint + "_scales");
         if (q_buffer->zeros().type()) {
-            printBufferData(q_buffer->zeros(), hint + "_zeros");
+            printBufferData_(q_buffer->zeros(), hint + "_zeros");
         }
         return;
     }
@@ -313,9 +308,9 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     }
 }
 
-void printTorchTensorData(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device, bool force_print, bool show_stats_only) {
+void printTorchTensorData_(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device, bool show_stats_only) {
     auto buffer = torchTensor2Buffer(tensor);
-    printBufferData(*buffer, hint, device, force_print, show_stats_only);
+    printBufferData_(*buffer, hint, device, show_stats_only);
 }
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {

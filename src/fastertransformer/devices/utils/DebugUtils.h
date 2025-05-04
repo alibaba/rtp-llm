@@ -6,9 +6,23 @@
 
 namespace fastertransformer {
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false, bool show_stats_only = false);
+#define printBufferData(buffer, hint)                           \
+    do {                                                        \
+        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) { \
+            printBufferData_(buffer, hint);                     \
+        }                                                       \
+    } while(0)
 
-void printTorchTensorData(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false, bool show_stats_only = false);
+void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool show_stats_only = false);
+
+#define printTorchTensorData(buffer, hint)                      \
+    do {                                                        \
+        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) { \
+            printTorchTensorData_(buffer, hint);                \
+        }                                                       \
+    } while(0)
+
+void printTorchTensorData_(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device = nullptr, bool show_stats_only = false);
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName);
 
