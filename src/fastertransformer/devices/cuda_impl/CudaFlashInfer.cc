@@ -187,12 +187,12 @@ void FlashInferAttnParams::refreshFlashInferBuf(CudaDevice *device, int batch_si
     auto stream = device->getStream();
     cudaMemcpyAsync(buf_d->data(), buf_h->data(), buf_h->sizeBytes(), cudaMemcpyHostToDevice, stream);
 
-    auto cuda_option = torch::dtype(torch::kInt).device(torch::DeviceType::CUDA).requires_grad(false);
-    auto host_option = torch::dtype(torch::kInt).device(torch::DeviceType::CPU).requires_grad(false);
     vector<int64_t> shape = {batch_size + 1};
 #define REFRESH_SHAPE(t)                                                \
-    t##_d = torch::from_blob(t##_d.data_ptr(), shape, cuda_option);     \
-    t##_h = torch::from_blob(t##_h.data_ptr(), shape, host_option);     \
+    do {                                                                \
+        t##_d.unsafeGetTensorImpl()->set_sizes_contiguous(shape);        \
+        t##_h.unsafeGetTensorImpl()->set_sizes_contiguous(shape);       \
+    } while (0)
 
     REFRESH_SHAPE(page_indptr);
     REFRESH_SHAPE(qo_indptr);
