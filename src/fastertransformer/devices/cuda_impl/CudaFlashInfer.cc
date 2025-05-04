@@ -75,8 +75,8 @@ FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch
     params->input_token_num = input_token_num;
     params->page_num = page_num;
 
-    // batch_prefill_tmp_v may use 128M buffer
-    params->float_workspace = device->allocateBuffer({DataType::TYPE_INT8, {(128 + 16) * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
+    // batch_prefill_tmp_v may use 256M buffer
+    params->float_workspace = device->allocateBuffer({DataType::TYPE_INT8, {(256 + 16) * 1024 * 1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 *1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 * 1024}, AllocationType::HOST}, {"int_host_workspace"});
 
@@ -207,21 +207,21 @@ void FlashInferAttnParams::refreshFlashInferBuf(CudaDevice *device, int batch_si
     REFRESH_SHAPE(paged_kv_last_page_len_1);
 }
 
-bool FlashInferAttnParams::sameQLength(const BufferPtr &input_lengths_host, int batch_size) {
-    int last_q_length = -1;
+bool FlashInferAttnParams::sameQLength(const BufferPtr &input_lengths_host, int batch_size, int &q_length) {
     auto input_lengths = input_lengths_host->data<int>();
     for (int i = 0; i < batch_size; i++) {
         int input_length = input_lengths[i];
-        if (last_q_length > 0 && last_q_length != input_length) {
+        if (q_length > 0 && q_length != input_length) {
             return false;
         }
-        last_q_length = input_length;
+        q_length = input_length;
     }
     return true;
 }
 
 
 void FlashInferAttnParams::genPlan(int batch_size,
+                                   int q_length,
                                    int local_head_num,
                                    int local_head_num_kv,
                                    int size_per_head,
@@ -258,7 +258,7 @@ void FlashInferAttnParams::genPlan(int batch_size,
         } else if (mla_ops_type == MlaOpsType::FLASH_MLA) {
             FT_LOG_TRACE("batch_size = %zu", batch_size);
             FT_LOG_TRACE("local_head_num = %zu", local_head_num);
-            flash_mla_plan = get_mla_metadata(kvlen_d, local_head_num, 1);
+            flash_mla_plan = get_mla_metadata(kvlen_d, local_head_num * q_length, 1);
         } else {
             FT_FAIL("unexpected mla ops type: %d", int(mla_ops_type));
         }
@@ -328,7 +328,9 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
     }
 
     MlaOpsType mla_ops_type = device->mla_ops_type;
-    if (mla_ops_type == MlaOpsType::FLASH_MLA && !sameQLength(input_lengths_host, batch_size)) {
+    int q_length = -1;
+    if (mla_ops_type == MlaOpsType::FLASH_MLA &&
+        (!sameQLength(input_lengths_host, batch_size, q_length) || q_length == -1 || q_length > 32)) {
         mla_ops_type = MlaOpsType::FLASH_INFER;
     }
 
@@ -399,6 +401,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
     }
 
     params->genPlan(batch_size,
+                    q_length,
                     local_head_num,
                     local_head_num_kv,
                     size_per_head,

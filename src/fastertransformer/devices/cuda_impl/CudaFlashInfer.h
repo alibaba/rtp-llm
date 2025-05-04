@@ -83,6 +83,7 @@ private:
     void refreshFlashInferBuf(CudaDevice *device, int batch_size, int token_num);
 
     void genPlan(int batch_size,
+                 int q_length,
                  int local_head_num,
                  int local_head_num_kv,
                  int size_per_head,
@@ -91,7 +92,7 @@ private:
                  bool use_mla,
                  int64_t stream);
 
-    static bool sameQLength(const BufferPtr &input_lengths_host, int context_batch_size);
+    static bool sameQLength(const BufferPtr &input_lengths_host, int context_batch_size, int &q_length);
 };
 
 }
