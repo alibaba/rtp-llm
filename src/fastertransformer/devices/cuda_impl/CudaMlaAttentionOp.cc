@@ -295,7 +295,7 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                   v_cache,
                                   flashinfer.page_indice_d,
                                   flashinfer.page_indptr_d,
-                                  flashinfer.paged_kv_last_page_len_1_d,
+                                  flashinfer.paged_kv_last_page_len_d,
                                   (int64_t)stream_);
     }
 }

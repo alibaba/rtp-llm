@@ -84,29 +84,27 @@ FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch
     params->int_workspace_d = Buffer2torchTensor(params->int_workspace, false);
     params->int_workspace_h = Buffer2torchTensor(params->int_host_workspace, false);
 
-#define ALLOC_BUFFER(suffix, type)                                      \
-    do {                                                                \
-        auto alloc_ret = allocateManyBuffer(device, {                   \
-                {batch_size + 1}, /* page_indptr */                     \
-                {batch_size + 1}, /* qo_indptr */                       \
-                {input_token_num},     /* batch_indice */               \
-                {input_token_num},     /* positions */                  \
-                {batch_size},     /* kv_len */                          \
-                {batch_size},     /* paged_kv_last_page_len */          \
-                {batch_size},     /* paged_kv_last_page_len_1 */        \
-                {page_num}},      /* page_indice */                     \
-            type);                                                      \
-                                                                        \
-        params->buf_##suffix = get<0>(alloc_ret);                        \
-        auto &tensors = get<1>(alloc_ret);                              \
-        params->page_indptr_##suffix = tensors[0];                       \
-        params->qo_indptr_##suffix = tensors[1];                         \
-        params->batch_indice_##suffix = tensors[2];                      \
-        params->positions_##suffix = tensors[3];                         \
-        params->kvlen_##suffix = tensors[4];                             \
-        params->paged_kv_last_page_len_##suffix = tensors[5];            \
-        params->paged_kv_last_page_len_1_##suffix = tensors[6];          \
-        params->page_indice_##suffix = tensors[7];                      \
+#define ALLOC_BUFFER(suffix, type)                              \
+    do {                                                        \
+        auto alloc_ret = allocateManyBuffer(device, {           \
+                {batch_size + 1}, /* page_indptr */             \
+                {batch_size + 1}, /* qo_indptr */               \
+                {input_token_num},     /* batch_indice */       \
+                {input_token_num},     /* positions */          \
+                {batch_size},     /* kv_len */                  \
+                {batch_size},     /* paged_kv_last_page_len */  \
+                {page_num}},      /* page_indice */             \
+            type);                                              \
+                                                                \
+        params->buf_##suffix = get<0>(alloc_ret);               \
+        auto &tensors = get<1>(alloc_ret);                      \
+        params->page_indptr_##suffix = tensors[0];              \
+        params->qo_indptr_##suffix = tensors[1];                \
+        params->batch_indice_##suffix = tensors[2];             \
+        params->positions_##suffix = tensors[3];                \
+        params->kvlen_##suffix = tensors[4];                    \
+        params->paged_kv_last_page_len_##suffix = tensors[5];   \
+        params->page_indice_##suffix = tensors[6];              \
     } while (0)
 
     ALLOC_BUFFER(h, AllocationType::HOST);
@@ -130,7 +128,6 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
     auto batch_indice = batch_indice_h.data_ptr<int>();
     auto positions = positions_h.data_ptr<int>();
     auto paged_kv_last_page_len = paged_kv_last_page_len_h.data_ptr<int>();
-    auto paged_kv_last_page_len_1 = paged_kv_last_page_len_1_h.data_ptr<int>();
     auto kvlen = kvlen_h.data_ptr<int>();
     auto page_indice = page_indice_h.data_ptr<int>();
 
@@ -165,8 +162,7 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
             seq_len = sequence_lengths[i] + 1;
         }
 
-        paged_kv_last_page_len[i] = (seq_len - 1) %  tokens_per_block; // for append_kv_cache
-        paged_kv_last_page_len_1[i] = paged_kv_last_page_len[i] + 1; // for mha
+        paged_kv_last_page_len[i] = (seq_len - 1) %  tokens_per_block + 1;
         kvlen[i] = seq_len;
 
         int page_num = (seq_len + tokens_per_block - 1) / tokens_per_block;
@@ -204,7 +200,6 @@ void FlashInferAttnParams::refreshFlashInferBuf(CudaDevice *device, int batch_si
     shape[0] = batch_size;
     REFRESH_SHAPE(kvlen);
     REFRESH_SHAPE(paged_kv_last_page_len);
-    REFRESH_SHAPE(paged_kv_last_page_len_1);
 }
 
 bool FlashInferAttnParams::sameQLength(const BufferPtr &input_lengths_host, int batch_size, int &q_length) {
@@ -238,7 +233,6 @@ void FlashInferAttnParams::genPlan(int batch_size,
     //           << "positions: " << positions_d
     //           << "kvlen: " << kvlen_d
     //           << "paged_kv_last_page_len: " << paged_kv_last_page_len_d
-    //           << "paged_kv_last_page_len_1: " << paged_kv_last_page_len_1_d
     //           << "page_indice: " << page_indice_d.index({torch::indexing::Slice(0, 32)})
     //           << "kv_cache_block_id: " << kv_cache_block_id_d << std::endl;
 
@@ -437,12 +431,11 @@ void FlashInferAttnParams::run(
     auto append_k = torch::from_blob(params.input.dataWithOffset(local_head_num * size_per_head),
                                      {bs, local_head_num_kv, size_per_head},
                                      strides, cuda_option);
-    auto sequence_lengths = Buffer2torchTensor(params.common.sequence_lengths, false);
     apply_rope_pos_ids(q,
                        append_k,
                        q,
                        append_k,
-                       sequence_lengths,
+                       positions_d,
                        params.configs.rope_config.dim,
                        false,
                        params.configs.rope_config.scale,
@@ -491,7 +484,7 @@ void FlashInferAttnParams::run(
                 v_cache, // paged_v_cache
                 page_indptr_d, // paged_kv_indptr
                 page_indice_d, // paged_kv_indices
-                paged_kv_last_page_len_1_d, // paged_kv_last_page_len
+                paged_kv_last_page_len_d, // paged_kv_last_page_len
                 out,
                 std::nullopt, // maybe_lse
                 1, // kv_layout_code
@@ -513,7 +506,7 @@ void FlashInferAttnParams::run(
                 qo_indptr_d, // qo_indptr
                 page_indptr_d, // paged_kv_indptr
                 page_indice_d, // paged_kv_indices
-                paged_kv_last_page_len_1_d, // paged_kv_last_page_len
+                paged_kv_last_page_len_d, // paged_kv_last_page_len
                 out,
                 std::nullopt, // maybe_lse
                 1, // mask_mode_code,

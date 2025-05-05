@@ -31,7 +31,6 @@ public:
     torch::Tensor positions_h;
     torch::Tensor kvlen_h;
     torch::Tensor paged_kv_last_page_len_h;
-    torch::Tensor paged_kv_last_page_len_1_h;
     torch::Tensor page_indice_h;
 
     torch::Tensor page_indptr_d;
@@ -40,7 +39,6 @@ public:
     torch::Tensor positions_d;
     torch::Tensor kvlen_d;
     torch::Tensor paged_kv_last_page_len_d;
-    torch::Tensor paged_kv_last_page_len_1_d;
     torch::Tensor page_indice_d;
 
     torch::Tensor kv_cache_block_id_d;

@@ -161,7 +161,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
                                                  flash_infer_attn_params->positions_d,
-                                                 flash_infer_attn_params->paged_kv_last_page_len_1_d,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_d,
                                                  flash_infer_attn_params->page_indptr_d,
                                                  flash_infer_attn_params->page_indice_d);
 }
@@ -185,7 +185,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
                                                  flash_infer_attn_params->positions_d,
-                                                 flash_infer_attn_params->paged_kv_last_page_len_1_d,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_d,
                                                  flash_infer_attn_params->page_indptr_d,
                                                  flash_infer_attn_params->page_indice_d);
 }
