@@ -1587,13 +1587,13 @@ __global__ void scatter_add_stable_kernel(T const* src, int N, int K, int32_t co
     // 在输出位置上并行,每个线程负责一个输出位置的累加
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     out_idx *= ELEM_PER_THREAD;
-    
+
     // 计算当前输出元素对应的维度
     const int k = out_idx % K;
     const int out_n = out_idx / K;
-    
+
     if(out_n >= N) return;
-    
+
     // 对每个输入位置检查,如果它们映射到当前输出位置则累加
     #pragma unroll
     for(int i = 0; i < ELEM_PER_THREAD; i++) {
@@ -1616,11 +1616,11 @@ void invokeScatterAddStable(T const* src, int N, int K, int32_t const* index, T*
     const int elem_per_thread = 4;
     const dim3 block(num_threads);
     RTP_LLM_CHECK(K % (elem_per_thread * 2) == 0);
-    
+
     auto h_index = std::shared_ptr<int32_t[]>(new int32_t[N], std::default_delete<int32_t[]>());
-    
+
     cudaMemcpy(h_index.get(), index, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
-    
+
     int32_t max_out_n = h_index[0];
     for(int i = 1; i < N; i++) {
         max_out_n = max(max_out_n, h_index[i]);
@@ -1783,7 +1783,8 @@ INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_bfloat16);
 INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(__nv_fp8_e4m3);
 #endif
 
-__global__ void fakeBalanceExpertKernel(int* expert, float* expert_scales, int start, int expert_num, int size) {
+template <typename T>
+__global__ void fakeBalanceExpertKernel(T* expert, float* expert_scales, int start, int expert_num, int size) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < size) {
         expert[index] = (start + index) % expert_num;
@@ -1792,7 +1793,12 @@ __global__ void fakeBalanceExpertKernel(int* expert, float* expert_scales, int s
 }
 
 void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
-    fakeBalanceExpertKernel<<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+    fakeBalanceExpertKernel<int><<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
 }
+
+void fake_balance_expert(int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
+    fakeBalanceExpertKernel<int64_t><<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+}
+
 
 }  // namespace rtp_llm

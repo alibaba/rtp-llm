@@ -307,6 +307,9 @@ void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, 
 template<typename T>
 void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream);
 
+// template <typename T>
 void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
+
+void fake_balance_expert(int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
 
 }  // namespace rtp_llm

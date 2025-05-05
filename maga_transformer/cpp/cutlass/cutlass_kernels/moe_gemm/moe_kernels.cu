@@ -130,9 +130,9 @@ __launch_bounds__(TPB) __global__
     }
 }
 
-template <int TPB>
+template <int TPB, typename TOPK_T>
 __launch_bounds__(TPB) __global__ void moeTopK(float const* inputs_after_softmax, bool const* finished, float* output,
-    int* indices, int* source_rows, int const num_experts, int const k, int const startk, int const endk,
+    TOPK_T* indices, int* source_rows, int const num_experts, int const k, int const startk, int const endk,
     int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode)
 {
 
@@ -321,9 +321,9 @@ void moeTopK(float const*                    inputs_after_softmax,
   2) This implementation assumes k is small, but will work for any k.
 */
 
-template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
+template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, typename TOPK_T>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__ void topkGatingSoftmax(float const* input, bool const* finished,
-    float* output, int64_t const num_rows, int* indices, int* source_rows, int const k, int const startk,
+    float* output, int64_t const num_rows, TOPK_T* indices, int* source_rows, int const k, int const startk,
     int const endk, int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode)
 {
     // We begin by enforcing compile time assertions and setting up compile time constants.
@@ -553,8 +553,8 @@ struct TopkConstants
 };
 } // namespace detail
 
-template <int EXPERTS, int WARPS_PER_TB>
-void topkGatingSoftmaxLauncherHelper(float const* input, bool const* finished, float* output, int* indices,
+template <int EXPERTS, int WARPS_PER_TB, typename TOPK_T>
+void topkGatingSoftmaxLauncherHelper(float const* input, bool const* finished, float* output, TOPK_T* indices,
     int* source_row, int64_t const num_rows, int const k, int const startk, int const endk, int const start_expert,
     int const end_expert, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
 {
@@ -572,7 +572,8 @@ void topkGatingSoftmaxLauncherHelper(float const* input, bool const* finished, f
         input, finished, output, num_rows, indices, source_row, k, startk, endk, start_expert, end_expert, norm_mode);
 }
 
-void topkGatingSoftmaxKernelLauncher(float const* input, float* output, float* softmax_temp_output, int* indices,
+template <typename TOPK_T>
+void topkGatingSoftmaxKernelLauncher(float const* input, float* output, float* softmax_temp_output, TOPK_T* indices,
     int* source_row, int64_t const num_rows, int const num_experts, int const k, int const startk, int const endk,
     int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
 {
@@ -654,7 +655,8 @@ void topkKernelLauncherHelper(float const* input, float const* input_with_bias, 
                     num_experts, k, startk, endk, start_expert, end_expert, norm_mode);
 }
 
-void topkKernelLauncher(float const* input, float const* input_with_bias, float* output, float* softmax_temp_output, int* indices,
+template <typename TOPK_T>
+void topkKernelLauncher(float const* input, float const* input_with_bias, float* output, float* softmax_temp_output, TOPK_T* indices,
     int* source_row, int64_t const num_rows, int const num_experts, int const k, int const startk, int const endk,
     int const start_expert, int const end_expert, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
 {
@@ -782,15 +784,16 @@ void sparseMixerTopkSoftmax(float const* input, float* output, float* mixer_temp
     }
 }
 
+template <typename TOPK_T>
 void invokeSelectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
-    int* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
+    TOPK_T* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
     int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream)
 {
     if (input == input_with_bias) {
         if (norm_mode == MOEExpertScaleNormalizationMode::SPARSE_MIXER)
         {
             TLLM_CHECK_WITH_INFO(mixer_temp_output, "Sparse mixer output is null when running sparse mixer");
-            sparseMixerTopkSoftmax(input, output, mixer_temp_output, softmax_temp_output, indices, source_row, num_rows,
+            sparseMixerTopkSoftmax(input, output, mixer_temp_output, softmax_temp_output, (int *)indices, source_row, num_rows,
                 num_experts, k, start_expert, end_expert, mixer_epsilon, stream);
         }
         else
@@ -801,11 +804,21 @@ void invokeSelectExpertsForTokens(float const* input, float const* input_with_bi
     }
     else
     {
-        topkKernelLauncher(input, input_with_bias, output, softmax_temp_output, indices, source_row, num_rows, num_experts, k, 0, k,
+        topkKernelLauncher(input, input_with_bias, output, softmax_temp_output, (int *)indices, source_row, num_rows, num_experts, k, 0, k,
             start_expert, end_expert, norm_mode, stream);
     }
     sync_check_cuda_error();
 }
+
+template
+void invokeSelectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
+    int* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
+                                  int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream);
+
+template
+void invokeSelectExpertsForTokens(float const* input, float const* input_with_bias, float* output, float* mixer_temp_output, float* softmax_temp_output,
+    int64_t* indices, int* source_row, int64_t const num_rows, int const num_experts, int const k, int const start_expert,
+                                  int const end_expert, float mixer_epsilon, MOEExpertScaleNormalizationMode norm_mode, cudaStream_t stream);
 
 // ========================== CUB Sorting things ====================================
 CubKeyValueSorter::CubKeyValueSorter()

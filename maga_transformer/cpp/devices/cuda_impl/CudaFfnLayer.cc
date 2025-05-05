@@ -277,8 +277,8 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
 
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
-    const auto expert_for_source_row =
-        allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expert_for_src"});
+    DataType topk_t = init_params_.use_deepep_moe && init_params_.use_deepep_low_latency ? DataType::TYPE_INT64 : DataType::TYPE_INT32;
+    const auto expert_for_source_row = allocateBuffer({topk_t, {token_num, top_k}}, {"moe_expert_for_src"});
     const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
     const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
 
@@ -291,24 +291,46 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     if (params.weights.e_score_correction_bias) {
         moeGateSelectWithBias(params, gate, expert_scales, expert_for_source_row, (int)normalization_mode);
     } else {
-        moe_plugin_->selectExpertsForTokens(gate->data<float>(),
-                                            gate->data<float>(),
-                                            expert_scales->data<float>(),
-                                            nullptr, // sparse_mixer_out
-                                            softmax_out->data<float>(),
-                                            expert_for_source_row->data<int>(),
-                                            source_rows->data<int>(),
-                                            token_num,
-                                            num_expert,
-                                            top_k,
-                                            0,
-                                            num_expert,
-                                            0,
-                                            normalization_mode,
-                                            stream_);
+        if (topk_t == DataType::TYPE_INT64) {
+            moe_plugin_->selectExpertsForTokens<int64_t>(gate->data<float>(),
+                                                gate->data<float>(),
+                                                expert_scales->data<float>(),
+                                                nullptr, // sparse_mixer_out
+                                                softmax_out->data<float>(),
+                                                expert_for_source_row->data<int64_t>(),
+                                                source_rows->data<int>(),
+                                                token_num,
+                                                num_expert,
+                                                top_k,
+                                                0,
+                                                num_expert,
+                                                0,
+                                                normalization_mode,
+                                                stream_);
+        } else {
+            moe_plugin_->selectExpertsForTokens<int>(gate->data<float>(),
+                                                gate->data<float>(),
+                                                expert_scales->data<float>(),
+                                                nullptr, // sparse_mixer_out
+                                                softmax_out->data<float>(),
+                                                expert_for_source_row->data<int>(),
+                                                source_rows->data<int>(),
+                                                token_num,
+                                                num_expert,
+                                                top_k,
+                                                0,
+                                                num_expert,
+                                                0,
+                                                normalization_mode,
+                                                stream_);
+        }
     }
     if (autil::EnvUtil::getEnv("FAKE_BALANCE_EXPERT", 0L)) {
-        fake_balance_expert(expert_for_source_row->data<int>(),  expert_scales->data<float>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
+        if (topk_t == DataType::TYPE_INT64) {
+            fake_balance_expert(expert_for_source_row->data<int64_t>(),  expert_scales->data<float>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
+        } else {
+            fake_balance_expert(expert_for_source_row->data<int>(),  expert_scales->data<float>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
+        }
     }
 
     // EPLB

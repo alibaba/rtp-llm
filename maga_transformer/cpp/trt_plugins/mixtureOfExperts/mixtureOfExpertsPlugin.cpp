@@ -141,13 +141,14 @@ int MixtureOfExpertsPlugin::enqueue(void const* input, float const* moe_gates, f
     return 0;
 }
 
+template <typename TOPK_T>
 void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                    input,
                                                     float const*                    input_with_bias,
                                                     float*                          output,
                                                     float*                          mixer_temp_output,
                                                     float*                          softmax_temp_output,
-                                                    int*                            indices,
-                                                    int*                            source_row,
+                                                    TOPK_T*                            indices,
+                                                    int*                         source_row,
                                                     int64_t const                   num_rows,
                                                     int const                       num_experts,
                                                     int const                       k,
@@ -156,7 +157,7 @@ void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                
                                                     float                           mixer_epsilon,
                                                     MOEExpertScaleNormalizationMode norm_mode,
                                                     cudaStream_t                    stream) {
-    invokeSelectExpertsForTokens(input,
+    invokeSelectExpertsForTokens<TOPK_T>(input,
                                  input_with_bias,
                                  output,
                                  mixer_temp_output,
@@ -172,3 +173,37 @@ void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                
                                  norm_mode,
                                  stream);
 }
+
+template
+void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                    input,
+                                                    float const*                    input_with_bias,
+                                                    float*                          output,
+                                                    float*                          mixer_temp_output,
+                                                    float*                          softmax_temp_output,
+                                                    int*                            indices,
+                                                    int*                            source_row,
+                                                    int64_t const                   num_rows,
+                                                    int const                       num_experts,
+                                                    int const                       k,
+                                                    int const                       start_expert,
+                                                    int const                       end_expert,
+                                                    float                           mixer_epsilon,
+                                                    MOEExpertScaleNormalizationMode norm_mode,
+                                                    cudaStream_t                    stream);
+
+template
+void MixtureOfExpertsPlugin::selectExpertsForTokens(float const*                    input,
+                                                    float const*                    input_with_bias,
+                                                    float*                          output,
+                                                    float*                          mixer_temp_output,
+                                                    float*                          softmax_temp_output,
+                                                    int64_t*                            indices,
+                                                    int*                        source_row,
+                                                    int64_t const                   num_rows,
+                                                    int const                       num_experts,
+                                                    int const                       k,
+                                                    int const                       start_expert,
+                                                    int const                       end_expert,
+                                                    float                           mixer_epsilon,
+                                                    MOEExpertScaleNormalizationMode norm_mode,
+                                                    cudaStream_t                    stream);

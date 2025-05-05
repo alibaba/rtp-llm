@@ -689,15 +689,27 @@ void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
 
         switch (moe_conf.balance_method) {
             case EplbBalanceMethod::EQUAL:
-                launch_equal_expert_balance(expert_ids->data<int>(),
-                                            expert_stats_v.getLayerLogStats(),
-                                            log2phy,
-                                            logic_expert_cnt,
-                                            expert_stats_v.log_exp_num,
-                                            expert_stats_v.phy_exp_num,
-                                            expert_ids->size(),
-                                            moe_conf.ep_rank,
-                                            stream_);
+                if (expert_ids->type() == DataType::TYPE_INT64) {
+                    launch_equal_expert_balance(expert_ids->data<int64_t>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.ep_rank,
+                                                stream_);
+                } else {
+                    launch_equal_expert_balance(expert_ids->data<int>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.ep_rank,
+                                                stream_);
+                }
                 break;
             default:
                 throw std::runtime_error("Unsupported balance method");

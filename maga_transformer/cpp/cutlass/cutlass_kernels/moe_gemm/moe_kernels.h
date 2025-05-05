@@ -589,12 +589,13 @@ public:
     bool mUseLora{};
 };
 
+template <typename TOPK_T>
 void invokeSelectExpertsForTokens(float const*                    input,
                                   float const*                    input_with_bias,
                                   float*                          output,
                                   float*                          mixer_temp_output,
                                   float*                          softmax_temp_output,
-                                  int*                            indices,
+                                  TOPK_T*                         indices,
                                   int*                            source_row,
                                   int64_t const                   num_rows,
                                   int const                       num_experts,

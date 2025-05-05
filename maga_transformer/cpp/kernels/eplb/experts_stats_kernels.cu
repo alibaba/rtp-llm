@@ -1,7 +1,8 @@
 #include "maga_transformer/cpp/kernels/eplb/experts_stats_kernels.h"
 
 namespace rtp_llm {
-__global__ void euqal_expert_balance_kernel(int*       experts_ids,
+template <typename T>
+__global__ void euqal_expert_balance_kernel(T*         experts_ids,
                                             int*       log_stats,
                                             const int* log2phy,
                                             const int* logic_expert_cnt,
@@ -101,7 +102,8 @@ update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, in
     atomicAdd(&gpu_loads[ep_rank], experts_cnts[i]);
 }
 
-void launch_equal_expert_balance(int*         experts_ids,
+template <typename T>
+void launch_equal_expert_balance(T*         experts_ids,
                                  int*         log_stats,
                                  const int*   log2phy,
                                  const int*   logic_expert_cnt,
@@ -114,9 +116,31 @@ void launch_equal_expert_balance(int*         experts_ids,
     int block_size  = 256;
     int grid_size   = (total_tokens + block_size - 1) / block_size;
 
-    euqal_expert_balance_kernel<<<grid_size, block_size, 0, stream>>>(
+    euqal_expert_balance_kernel<T><<<grid_size, block_size, 0, stream>>>(
         experts_ids, log_stats, log2phy, logic_expert_cnt, max_exp_num, total_tokens, ep_rank);
 }
+
+template void launch_equal_expert_balance(int64_t*     experts_ids,
+                                          int*         log_stats,
+                                          const int*   log2phy,
+                                          const int*   logic_expert_cnt,
+                                          int          log_exp_num,
+                                          int          phy_exp_num,
+                                          int          total_tokens,
+                                          int          ep_rank,
+                                          cudaStream_t stream);
+
+template
+void launch_equal_expert_balance(int*     experts_ids,
+                                 int*         log_stats,
+                                 const int*   log2phy,
+                                 const int*   logic_expert_cnt,
+                                 int          log_exp_num,
+                                 int          phy_exp_num,
+                                 int          total_tokens,
+                                 int          ep_rank,
+                                 cudaStream_t stream);
+
 
 void launch_update_gpu_loads(int*         experts_ids,
                              int*         gpu_loads,

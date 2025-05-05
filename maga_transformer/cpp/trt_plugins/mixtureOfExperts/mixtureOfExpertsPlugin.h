@@ -62,13 +62,14 @@ public:
         void const* fc2_quant_scale, void const* fc2_quant_zero, void const* fc2_expert_bias, int const num_rows,
         void* workspace, void* final_output, void* fc2_result, bool const* finished, void* expert_scale,
         int* src_row_to_dst_row, int* export_for_src_row, cudaStream_t stream);
+    template <typename TOPK_T>
     static void selectExpertsForTokens(float const*                    input,
                                        float const*                    input_with_bias,
                                        float*                          output,
                                        float*                          mixer_temp_output,
                                        float*                          softmax_temp_output,
-                                       int*                            indices,
-                                       int*                            source_row,
+                                       TOPK_T*                            indices,
+                                       int*                         source_row,
                                        int64_t const                   num_rows,
                                        int const                       num_experts,
                                        int const                       k,
