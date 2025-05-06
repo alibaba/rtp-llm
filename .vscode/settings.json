@@ -98,6 +98,13 @@
         "__nullptr": "cpp",
         "__locale": "cpp",
         "ios": "cpp",
-        "*.ipp": "cpp"
+        "*.ipp": "cpp",
+        "__bit_reference": "cpp",
+        "__node_handle": "cpp",
+        "__threading_support": "cpp",
+        "__verbose_abort": "cpp",
+        "execution": "cpp",
+        "locale": "cpp",
+        "print": "cpp"
     }
 }

@@ -28,7 +28,8 @@ enum class FMHAType {
     TRT_V2,
     PAGED_OPEN_SOURCE,
     OPEN_SOURCE,
-    TRT_V1
+    TRT_V1,
+    XQA
 };
 
 nvinfer1::DataType nvinfer1DtypeConvert(rtp_llm::DataType dtype);
@@ -90,6 +91,7 @@ private:
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
+    void checkUseXQA();
     void checkSupportTrtFp8FMHA();
     void checkUseFlashinferSampleKernel();
     bool useFp8Fmha(const DevicePrepParams& params) const;
@@ -284,6 +286,7 @@ protected:
     bool use_trtv2_fmha_paged       = false;
     bool use_open_source_fmha       = false;
     bool use_open_source_fmha_paged = false;
+    bool use_xqa                    = false;
     bool use_group_gemm             = false;
     bool support_trt_fp8_fmha       = false;
     bool use_fp8_fmha_              = false;

@@ -274,6 +274,43 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     sync_check_cuda_error();
 }
 
+void xqaAttentionWrapper(const cudaDeviceProp& prop,
+                        size_t head_num,
+                        size_t kv_head_num,
+                        float q_scale,
+                        void* output,
+                        void* qkv,
+                        void* kv_cache,
+                        int* kv_cache_page_list,
+                        size_t max_seq_len,
+                        void* sequence_lengths,
+                        size_t batch_size,
+                        float* kv_cache_scale,
+                        uint32_t* semaphores,
+                        void* scratch,
+                        cudaStream_t stream,
+                        uint32_t beam_width = beamWidth)
+{
+    size_t group_size = head_num / kv_head_num;
+    // 8 is sufficient for qgmma kernel.
+    auto real_scratch = reinterpret_cast<void*>(round_up<uintptr_t>(reinterpret_cast<uintptr_t>(scratch), ioHeadBytes * group_size * beam_width));
+    launchHopperF8MHA(prop,
+                      kv_head_num,
+                      q_scale,
+                      reinterpret_cast<OutputHead*>(output),
+                      reinterpret_cast<InputHead*>(qkv),
+                      reinterpret_cast<GMemCacheHead*>(kv_cache),
+                      kv_cache_page_list,
+                      max_seq_len,
+                      reinterpret_cast<uint32_t*>(sequence_lengths),
+                      batch_size,
+                      kv_cache_scale,
+                      semaphores,
+                      real_scratch,
+                      stream);
+    sync_check_cuda_error();
+}
+
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
 
     // TODO: refactor QBuffer to suppport view and return QBuffer
@@ -299,6 +336,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
 
     size_t batch_size           = params.common.decoder_batch_size;
     size_t local_head_num       = params.configs.head_num;
+    size_t local_kv_head_num    = params.configs.kv_head_num;
     size_t size_per_head        = params.configs.size_per_head;
 
     if (use_multi_block_mode) {
@@ -334,6 +372,51 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto       kv_cache_block_id      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_block_id"});
     KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, use_fp8_fmha_);
+    if (use_xqa) {
+        FT_LOG_WARNING("enter xqa");
+        size_t max_seq_len = round_up(params.common.decoder_max_seq_len, params.configs.tokens_per_block);
+        float one = 1.;
+        BufferPtr kv_cache_scale = allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});
+        cudaMemcpyAsync(kv_cache_scale->data(), &one, sizeof(float), cudaMemcpyHostToDevice, stream_);
+        size_t sem_size = local_kv_head_num * batch_size;
+        size_t real_sem_size = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
+        BufferPtr semaphores = allocateBuffer({DataType::TYPE_UINT32, {real_sem_size}, AllocationType::DEVICE}, {"semaphores"});
+        bufMemset(*semaphores, 0);
+        size_t scratch_size = (256u << 20);
+        BufferPtr scratch = allocateBuffer({DataType::TYPE_BYTES, {scratch_size}, AllocationType::DEVICE}, {"scratch"});
+        // std::fill_n(reinterpret_cast<std::byte*>(scratch->data()), scratch_size, std::byte(0));
+        bufMemset(*scratch, 0);
+        // cufmha_runner_->runXqa(device_prop_,
+        //                        local_head_num,
+        //                        local_kv_head_num,
+        //                        params.configs.q_scaling,
+        //                        params.output.data(),
+        //                        params.input.data(),
+        //                        kv_block_array.mPrimaryPoolPtr,
+        //                        reinterpret_cast<int*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+        //                        max_seq_len,
+        //                        params.common.sequence_lengths->data(),
+        //                        batch_size,
+        //                        kv_cache_scale->data<float>(),
+        //                        semaphores->data<uint32_t>(),
+        //                        scratch->data());
+        xqaAttentionWrapper(device_prop_,
+                            local_head_num,
+                            local_kv_head_num,
+                            params.configs.q_scaling,
+                            params.output.data(),
+                            params.input.data(),
+                            kv_block_array.mPrimaryPoolPtr,
+                            reinterpret_cast<int*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+                            max_seq_len,
+                            params.common.sequence_lengths->data(),
+                            batch_size,
+                            kv_cache_scale->data<float>(),
+                            semaphores->data<uint32_t>(),
+                            scratch->data(),
+                            stream_);
+        return;
+    }
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,

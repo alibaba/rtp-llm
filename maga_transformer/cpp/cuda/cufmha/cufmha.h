@@ -5,6 +5,7 @@
 #include "3rdparty/contextFusedMultiHeadAttentionSm70/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
+#include "3rdparty/xqa/mha.h"
 #include "maga_transformer/cpp/core/Types.h"
 
 namespace rtp_llm{
@@ -24,6 +25,7 @@ public:
            bool              can_use_trtv2_fmha_paged,
            bool              can_use_open_source_fmha,
            bool              can_use_open_source_fmha_paged,
+           bool              can_use_xqa,
            cudaStream_t      stream);
 
     ~cufmha() = default;
@@ -42,6 +44,10 @@ public:
 
     bool openSourceFmhaSupport() {
         return support_open_source_fmha_;
+    }
+
+    bool xqaSupport() {
+        return support_xqa_;
     }
 
     void runTrtV1Fmha(void* input,
@@ -112,6 +118,22 @@ public:
                                       size_t max_seq_len_kv = 0,
                                       bool   paged = false);
 
+    void runXqa(const cudaDeviceProp& prop,
+                size_t head_num,
+                size_t kv_head_num,
+                float q_scale,
+                void* output,
+                void* qkv,
+                void* kv_cache,
+                int* kv_cache_page_list,
+                size_t max_seq_len,
+                void* sequence_lengths,
+                size_t batch_size,
+                float* kv_cache_scale,
+                uint32_t* semaphores,
+                void* scratch,
+                uint32_t beam_width = beamWidth);
+
     bool checkSignature(DataType dtype,
                         AttentionMaskType mtype,
                         size_t head_num,
@@ -127,6 +149,8 @@ private:
     bool initTrtV2FmhaPagedAndCheckSupport();
 
     bool initOpenSourceFmhaAndCheckSupport();
+
+    bool initXqaAndCheckSupport();
 
     static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
@@ -168,6 +192,7 @@ private:
     bool support_trt_v2_fhma_;
     bool support_trt_v2_paged_fmha_;
     bool support_open_source_fmha_;
+    bool support_xqa_;
 
     cudaStream_t stream_;
 };

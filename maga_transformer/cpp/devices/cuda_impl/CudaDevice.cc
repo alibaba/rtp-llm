@@ -92,6 +92,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
         checkUseTrtV1FMHA();
         checkUseTrtV2FMHA();
         checkUseOpenSourceFMHA();
+        checkUseXQA();
         checkSupportTrtFp8FMHA();
     }
     checkUseMultiBlockMode();
@@ -358,6 +359,7 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                        use_trtv2_fmha_paged,
                        use_open_source_fmha,
                        use_open_source_fmha_paged,
+                       use_xqa,
                        stream_));
         cufmha_runner_ = cufmha_runner_pool_.back();
     }
@@ -388,6 +390,8 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && mla_ops_type == MlaOpsType::MHA) {
                 fmha_type_ = FMHAType::TRT_V1;
             }
+        } else if (use_xqa) {
+            fmha_type_ = FMHAType::XQA;
         } else {
             fmha_type_ = FMHAType::NONE;
         }
@@ -505,6 +509,21 @@ void CudaDevice::checkUseTrtV2FMHA() {
     }
     RTP_LLM_LOG_INFO("use TRTV2 fmha paged");
     use_trtv2_fmha_paged = true;
+}
+
+void CudaDevice::checkUseXQA() {
+    int sm = get_sm();
+    if (sm < 89) {
+        FT_LOG_WARNING("XQA is disabled for sm %d", sm);
+        return;
+    }
+    char* xqa_env = std::getenv("ENABLE_XQA");
+    if (xqa_env && std::string(xqa_env) == "OFF") {
+        FT_LOG_WARNING("XQA is disabled for by env");
+        return;
+    }
+    FT_LOG_INFO("use xqa");
+    use_xqa = true;
 }
 
 void CudaDevice::checkSupportTrtFp8FMHA() {
