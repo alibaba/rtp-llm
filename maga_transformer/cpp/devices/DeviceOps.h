@@ -25,6 +25,7 @@ public:
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);
     virtual LayernormOutput layernormWithStride(const LayernormWithStrideParams& params);
+    virtual QkRmsNormOutput qkRmsNorm(const QkRmsNormParams& params);
     virtual AddBiasOutput addbias(const AddBiasParams& params);
     virtual BufferPtr gemm(const GemmParams& params);
     virtual GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);

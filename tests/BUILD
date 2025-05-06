@@ -306,3 +306,19 @@ cc_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "fused_qk_rmsnorm",
+    srcs = [
+        "layernorm/fused_qk_rmsnorm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)

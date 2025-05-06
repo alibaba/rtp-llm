@@ -202,6 +202,18 @@ struct AddBiasOutput {
     BufferPtr output;
 };
 
+struct QkRmsNormParams {
+    BufferPtr input;
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> q_norm_weight;
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> k_norm_weight;
+    double eps;
+    size_t q_group_num;
+    size_t k_group_num;
+    size_t norm_size;
+};
+
+using QkRmsNormOutput = BufferPtr;
+
 struct LayernormWithStrideParams {
     BufferPtr input;
     const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight;

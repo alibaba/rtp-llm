@@ -122,6 +122,7 @@ public:
     SliceOutput slice(const SliceParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
+    QkRmsNormOutput qkRmsNorm(const QkRmsNormParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     MultiplyOutput multiply(const MultiplyParams& params) override;

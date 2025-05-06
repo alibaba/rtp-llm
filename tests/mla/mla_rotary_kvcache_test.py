@@ -1,4 +1,3 @@
-import sys; sys.path.append("/hio_disk/baowending.bwd/FasterTransformer/")
 import logging
 import math
 import os

@@ -323,19 +323,23 @@ template <typename T, typename QUANT_OUT_T>
 void invokeGeneralRmsNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
     const int hidden_dim, cudaStream_t stream, const float* scale, float* dynamic_scale, QUANT_OUT_T* normed_output_quant)
 {
-    dim3 grid(tokens);
-    dim3 block(min(hidden_dim, 1024));
-    // Make sure block.x is multiple of 32 for warp shuffle to work
-    block.x = 32 * ((block.x + 31) / 32);
-
     constexpr size_t vec_size = 2;
-    const size_t shmem_size = hidden_dim * sizeof(T);
     const bool use_vec_type = (hidden_dim % vec_size == 0)
         && (std::is_same<T, half>::value
 #ifdef ENABLE_BF16
             || std::is_same<T, __nv_bfloat16>::value
 #endif
         );
+
+    dim3 grid(tokens);
+    dim3 block(min((int)hidden_dim, (int)1024));
+    if (use_vec_type) {
+        block.x = min((int)(hidden_dim / vec_size), (int)1024);
+    }
+    // Make sure block.x is multiple of 32 for warp shuffle to work
+    block.x = 32 * ((block.x + 31) / 32);
+
+    const size_t shmem_size = hidden_dim * sizeof(T);
 
     if (use_vec_type)
     {

@@ -43,6 +43,10 @@ LayernormOutput DeviceOps::layernormWithStride(const LayernormWithStrideParams& 
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+QkRmsNormOutput DeviceOps::qkRmsNorm(const QkRmsNormParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 SliceOutput DeviceOps::slice(const SliceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
