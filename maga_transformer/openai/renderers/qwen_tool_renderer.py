@@ -101,7 +101,7 @@ class QwenToolRenderer(CustomChatRenderer):
 
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        if not tokenizer.chat_template:
+        if not tokenizer.chat_template or 'tool' not in tokenizer.chat_template:
             self.chat_template = JINJA_TEMPLATE
         else:
             self.chat_template = tokenizer.chat_template
