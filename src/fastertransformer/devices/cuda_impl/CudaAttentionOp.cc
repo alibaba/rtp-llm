@@ -185,7 +185,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                           float* partial_max,
                           int* block_counter,
                           KVBlockArray kv_block_array,
-                          const std::function<void()>& moe_insertion_callback,
+                          std::function<void()> moe_insertion_callback,
                           cudaStream_t stream,
                           CudaDevice *device)
 {

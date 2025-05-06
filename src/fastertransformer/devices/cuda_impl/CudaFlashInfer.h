@@ -62,7 +62,7 @@ public:
 
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
-             const std::function<void()>& moe_insertion_callback,
+             std::function<void()> moe_insertion_callback,
              int64_t stream);
 
 private:
