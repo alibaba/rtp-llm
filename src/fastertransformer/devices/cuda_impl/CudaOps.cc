@@ -404,7 +404,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
 }
 
 PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams& params) {
-    NcclParam nccl_param = getNcclParam(params.mode);;
+    NcclParam nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return PrepareAllReduceOutput{params.buffer};
     }

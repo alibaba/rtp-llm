@@ -113,8 +113,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             } else {
                 printBufferData(*up_output, "ffn_up_gate");
                 bool is_cuda = init_params_.device_type == DeviceType::Cuda;
-                if (is_cuda && (params.configs.activation_type == ActivationType::Swiglu || 
-                        params.configs.activation_type == ActivationType::Silu || 
+                if (is_cuda && (params.configs.activation_type == ActivationType::Swiglu ||
+                        params.configs.activation_type == ActivationType::Silu ||
                         params.configs.activation_type == ActivationType::Gelu)) {
                     auto act_output = allocateBuffer({up_output->type(), {up_output->shape()[0], up_output->shape()[1] / 2}, AllocationType::DEVICE});
                     activation({params.configs.activation_type,
@@ -246,7 +246,9 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
     if (params.weights.shared_expert) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
         const auto& moe_conf = params.configs.moe_configs.value();
-        BufferPtr shared_expert_output = nullptr;
+        BufferPtr shared_expert_output = (moe_conf.tp_size > 1)
+                                       ? allocateBufferLike({params.input}, AllocationType::DEVICE, {"shared_expert_buf"})
+                                       : nullptr;
         shared_expert_output = prepareAllReduce({std::move(shared_expert_output), ReduceOp::Sum}).buffer;
         auto ffn_params = FfnLayerParams({params.input,
                                             params.configs,
