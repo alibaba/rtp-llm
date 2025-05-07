@@ -116,8 +116,8 @@ def trt_plugins():
     native.alias(
         name = "trt_plugins",
         actual = select({
-            "@//:using_cuda12": "//src/fastertransformer/trt_plugins:trt_plugins",
-            "//conditions:default": "//src/fastertransformer/trt_plugins:trt_plugins",
+            "@//:using_cuda12": "//maga_transformer/cpp/trt_plugins:trt_plugins",
+            "//conditions:default": "//maga_transformer/cpp/trt_plugins:trt_plugins",
         })
     )
 
@@ -125,7 +125,7 @@ def cuda_register():
     native.alias(
         name = "cuda_register",
         actual = select({
-            "//conditions:default": "//src/fastertransformer/devices/cuda_impl:gpu_register",
+            "//conditions:default": "//maga_transformer/cpp/devices/cuda_impl:gpu_register",
         })
     )
 
