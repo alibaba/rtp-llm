@@ -158,10 +158,11 @@ class WeightConverter:
         logging.info(f"begin convert model rank:{paralle_info}")
         config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
         model = self.model_cls(config)
+        loader = model.create_model_loader(paralle_info)
         max_retry_times = 3
         for i in range(max_retry_times):
             try:
-                model.dump_weights(paralle_info, output_dir_base)
+                loader.dump_weight_as_ft_style(paralle_info.device, output_dir_base)
                 logging.info(f"dump rank:[{world_rank}] done")
                 break
             except Exception as e:
@@ -217,7 +218,8 @@ class WeightConverter:
                 "total_size": total_size
             },
             "weight_map": weight_map,
-            "is_ft_style_weight": True
+            "is_ft_style_weight": True,
+            "__env__params__": self.env_params
         }
 
         # 将索引数据写入 JSON 文件

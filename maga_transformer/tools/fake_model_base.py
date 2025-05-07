@@ -75,7 +75,6 @@ def fake_model_impl(model_type: str,
                         num_heads=head_num, num_heads_kv=head_kv_num, tp_size=1,
                         int8_mode=0, num_layers=layer_num)
     
-    model_weight_info._megatron = True
     model_weight_info._lm_head = False
     model_weight_info._transformer_prefix = False
     weight_info = model_weight_info.get_weight_info()

@@ -1,5 +1,5 @@
 from typing import Any, Dict
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters

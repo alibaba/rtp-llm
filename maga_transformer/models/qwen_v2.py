@@ -1,19 +1,22 @@
+import logging
 import os
 import functools
 import json
 from typing import List, Any, Dict
 
-from maga_transformer.utils.model_weight import (W, Fp8WeightStyle, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo,
-                                                 CkptWeightInfo, identity, zeros, transpose, transpose_pad,
-                                                 merge_qkv_b, merge_qkv_hf)
+from maga_transformer.utils.model_weight import (W, WeightStyle,
+                                                 CkptWeightInfo, identity, sp_0, sp_head_lora, sp_id, sp_neg1, zeros, transpose, transpose_pad,
+                                                 merge_qkv_b, merge_qkv_hf, merge_qkv_lora_A, merge_qkv_lora_B)
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
-from maga_transformer.models.base_model import BaseModel
 from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
-from maga_transformer.utils.per_tensor_fp8_weight_util import get_layer_per_tensor_fp8_scale_weight_info, get_trt_engine_layer_weight_info
-
+from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from maga_transformer.model_loader.ffn_weight import FfnWeight, FfnAtomicWeight, FfnConfig
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
 def scale_reshape(ts):
     return ts[0].reshape(-1)
 
@@ -22,141 +25,117 @@ class QWenV2Weight(ModelDeployWeightInfo):
         self.prefix: str = kwargs.pop('prefix', "")
         super().__init__(*args, **kwargs)
 
+    @property
+    def support_lora(self):
+        return True
 
     def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
         # compat for qwen_v2_video
         if self._contains(weight_keys, 'language_model.'):
             self.prefix = 'language_model.'
-        if self._quant_algo.isFp8() and self.prefix + 'transformer.layers.0.attention.dense.weight' in meta_dicts[0]:
-            self.fp8_weight_stype = Fp8WeightStyle.TRT_ENGINE
+        if self.prefix + 'transformer.layers.0.attention.dense.weight' in meta_dicts[0]:
+            self.weight_style = WeightStyle.TRT_ENGINE
+        logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
         return self._get_hf_weight_info()
 
-    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
+    def _get_hf_ffn_layer_weight_info(self, layer_id: int) -> List[WeightModule]:
+        ffn_config = FfnConfig(
+            is_gated_activation=self._is_gated_activation,
+            inter_padding_size=self._inter_padding_size,
+            is_moe=False
+        )
+
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        return [WeightInfo(W.ffn_w1, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.gate_proj.weight', identity)],
-            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-        WeightInfo(W.ffn_w3, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.up_proj.weight', identity)],
-            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-        WeightInfo(W.ffn_w2, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.down_proj.weight', identity)],
-            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1))]
+        return [FfnWeight(sub_weights=[
+            FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.gate_proj.weight', identity)],
+                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                config=ffn_config,
+                lora_a_process_func=transpose,
+                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
+            FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.up_proj.weight', identity)],
+                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                config=ffn_config,
+                lora_a_process_func=transpose,
+                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
+            FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.down_proj.weight', identity)],
+                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1),
+                config=ffn_config,
+                lora_a_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1),
+                lora_b_process_func=transpose,
+                lora_a_split_func=sp_0, lora_b_split_func=sp_id)
+            ], config=ffn_config)
+        ]
 
     def _get_hf_layer_weight_info(self, layer_id: int):
+        attn_config = AttnConfig(
+            hidden_size=self._hidden_size,
+            size_per_head=self._size_per_head,
+            head_num=self._head_num,
+            head_num_kv=self._head_num_kv)
+
         layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight', identity)],
+            AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight', identity)],
                        identity),
-            WeightInfo(W.attn_qkv_b, [
+            AttnAtomicWeight(W.attn_qkv_b, [
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.bias', identity),
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.bias', identity),
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.bias', identity)
                 ],
-                functools.partial(merge_qkv_b)),
-            WeightInfo(W.attn_qkv_w, [
+                functools.partial(merge_qkv_b), config=attn_config),
+            AttnAtomicWeight(W.attn_qkv_w, [
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight', identity),
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight', identity),
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.weight', identity)
                 ],
-                functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
-                       transpose),
-            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')]),
-            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')]),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
-                       identity),
+                functools.partial(merge_qkv_hf), config=attn_config,
+                lora_a_process_func=functools.partial(merge_qkv_lora_A, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
+                lora_b_process_func=functools.partial(merge_qkv_lora_B, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
+                lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora
+                ),
+            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
+                       transpose, config=attn_config, 
+                       lora_a_process_func=transpose, lora_b_process_func=transpose,
+                       lora_a_split_func=sp_0, lora_b_split_func=sp_id),
+
+            AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
+                       identity, config=attn_config),
         ]
+
+        if self._use_qk_norm:
+            layer_weights.extend([
+                 AttnAtomicWeight(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')], config=attn_config),
+                 AttnAtomicWeight(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')], config=attn_config)]
+            )
+
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
 
-    def _get_fp8_hf_layer_weight_info(self, layer_id: int):
-        raise NotImplementedError("fp8 weight info for qwen_v2 is not implemented")
-
-    def _get_hf_quant_weight_info(self, layer_id):
-        layer_quant_weights =[
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.layers.{i}.input_layernorm.weight')], identity),
-            WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.layers.{i}.attention.qkv.per_channel_scale')], scale_reshape),
-            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.layers.{i}.attention.qkv.bias')], identity),
-            WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.layers.{i}.attention.dense.per_channel_scale')], scale_reshape),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.layers.{i}.post_layernorm.weight')], identity),
-        ]
-        if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
-            layer_quant_weights.extend([
-                WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.layers.{i}.attention.dense.weight', identity)],
-                           identity),
-                WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.layers.{i}.mlp.fc.weight', identity)],
-                           identity),
-                WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.layers.{i}.mlp.fc.per_channel_scale', identity)],
-                           scale_reshape),
-                WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.layers.{i}.mlp.gate.weight', identity)],
-                           identity),
-                WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.layers.{i}.mlp.gate.per_channel_scale', identity)],
-                           scale_reshape),
-                WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.layers.{i}.mlp.proj.weight', identity)],
-                           identity),
-                WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.layers.{i}.mlp.proj.per_channel_scale', identity)],
-                           scale_reshape),
-                WeightInfo(W.attn_o_smoother, [CkptWeightInfo('transformer.layers.{i}.attention.dense.smoother')], scale_reshape),
-            ])
-
-        if self._quant_algo.isSmoothQuant():
-            layer_quant_weights.extend([
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.layers.{i}.attention.qkv.weight',
-                            identity)], identity),
-                WeightInfo(W.ffn_smoother, [CkptWeightInfo('transformer.layers.{i}.mlp.proj.smoother')], scale_reshape),
-            ])
-        if self._quant_algo.isOmniQuant():
-            layer_quant_weights.extend([
-                WeightInfo(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_1.bias')], identity),
-                WeightInfo(W.attn_o_b, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.bias')], identity),
-                WeightInfo(W.post_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_2.bias')], identity),
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight')], transpose),
-                WeightInfo(W.ffn_b1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.bias')], identity),
-                WeightInfo(W.ffn_b3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.bias')], identity),
-                WeightInfo(W.attn_o_shift, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.shift')], identity),
-                WeightInfo(W.ffn_smoother, [], functools.partial(ones, shape=self._inter_padding_size)),
-            ])
-        return layer_quant_weights
-
     def _get_hf_weight_info(self):
-        if self._quant_algo.isSmoothQuant() or self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
+        if self.weight_style == WeightStyle.TRT_ENGINE:
             weights = [
-                WeightInfo(W.embedding, [CkptWeightInfo('transformer.vocab_embedding.weight', identity)], identity),
-                WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-                WeightInfo(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
-                WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                AtomicWeight(W.embedding, [CkptWeightInfo('transformer.vocab_embedding.weight', identity)], identity),
+                AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
+                AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
+                AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             ]
         else:
             weights = [
-                WeightInfo(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
-                WeightInfo(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
-                WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self.prefix + 'model.norm.weight', identity)], identity),
-                WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                AtomicWeight(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
+                AtomicWeight(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
+                AtomicWeight(W.final_ln_gamma, [CkptWeightInfo(self.prefix + 'model.norm.weight', identity)], identity),
+                AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             ]
 
-        layer_weights: List[List[WeightInfo]] = []
+        layer_weights: List[List[WeightModule]] = []
         for layer in range(self._num_layers):
-            if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
-                w = self._get_hf_quant_weight_info(layer)
-                layer_weights.append(w)
-            elif self._quant_algo.isFp8():
-                if self.fp8_weight_stype == Fp8WeightStyle.TRT_ENGINE:
-                    hf_w = self._get_hf_layer_weight_info(layer)
-                    w = get_trt_engine_layer_weight_info(hf_w, True)
-                    scale_w = get_layer_per_tensor_fp8_scale_weight_info(w)
-                    w.extend(scale_w)
-                    layer_weights.append(w)
-                else:
-                    layer_weights.append(self._get_fp8_hf_layer_weight_info(layer))
-            elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
-                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size
-                w = self._get_hf_layer_weight_info(layer)
-                w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
-                layer_weights.append(w)
-            else:
-                w = self._get_hf_layer_weight_info(layer)
-                layer_weights.append(w)
+            w = self._get_hf_layer_weight_info(layer)
+            layer_weights.append(w)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class QWenV2(QWen):

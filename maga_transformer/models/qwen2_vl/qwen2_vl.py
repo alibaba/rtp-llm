@@ -1,34 +1,24 @@
 
-import torch
 import os
 import json
 import functools
 from typing import List, Any, Tuple, Dict, Union
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.qwen import QWen
-from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
-from maga_transformer.models.qwen_vl import QWen_VL, QWen_VL_ViT
+from maga_transformer.models.qwen_vl import QWen_VL
 from maga_transformer.models.base_model import BaseModel, MultimodalInput
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.utils.util import to_torch_dtype
 
-from maga_transformer.models.qwen import QWenWeight
 from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 
-from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo,
-                                                 ModelDeployWeightInfo, CkptWeightInfo, concat_1,
-                                                 concat_0, identity, zeros, transpose, merge_qkv_lora_A,
-                                                 merge_qkv_lora_B, shift_one, pad, merge_qkv_b, merge_qkv_hf)
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
-    ModelDeployWeightInfo, CkptWeightInfo, \
-    concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad, ones
-from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
-
+from maga_transformer.utils.model_weight import (W, CkptWeightInfo, identity, zeros, transpose, merge_qkv_b, merge_qkv_hf, transpose_pad)
+from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
 
 class QwenVL2VitWeight(BaseVitWeights):
     def _set_weight_prefix(self):
@@ -39,55 +29,52 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         ModelDeployWeightInfo.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
-    
+
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
         weights = self._get_vit_info(weights)
         return weights
-    
+
     def _get_hf_weight_info(self):
         inter_padding_size = self._inter_padding_size
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo('model.embed_tokens.weight', identity)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.final_ln_gamma, [CkptWeightInfo('model.norm.weight', identity)], identity),
-            WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+            AtomicWeight(W.embedding, [CkptWeightInfo('model.embed_tokens.weight', identity)], identity),
+            AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('model.norm.weight', identity)], identity),
+            AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
 
-        layer_weights: List[List[WeightInfo]] = []
+        layer_weights: List[List[WeightModule]] = []
         for layer in range(self._num_layers):
-            if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
-                w = self._get_hf_quant_weight_info(layer)
-                layer_weights.append(w)
-            elif self._quant_algo.isGptq() or self._quant_algo.isAwq():
-                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size
-                w = self._get_hf_layer_weight_info(layer)
-                w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
-                layer_weights.append(w)
-            else:
-                w = self._get_hf_layer_weight_info(layer)
-                layer_weights.append(w)
+            w = self._get_hf_layer_weight_info(layer)
+            layer_weights.append(w)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
-                               tp_strategy=self._get_gpt_style_tp_strategy())
-    
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
     def _get_hf_layer_weight_info(self, layer_id):
-        inter_padding_size = self._inter_padding_size
+        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+        attn_config: AttnConfig=self.attn_config
+        ffn_config: FfnConfig=self.ffn_config
         layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
-            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
+            AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
+            AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.k_proj.weight', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.v_proj.weight', identity)],
-                                      functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
+                                      functools.partial(merge_qkv_hf), config=attn_config),
+            AttnAtomicWeight(W.attn_qkv_b, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)],
-                                      functools.partial(merge_qkv_b)),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity)   
+                                      functools.partial(merge_qkv_b), config=attn_config),
+            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)], transpose, config=attn_config),
+            FfnWeight(sub_weights=[
+                FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], 
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config),
+                FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], 
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config),
+                FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], 
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1), config=ffn_config)
+            ], config=ffn_config),
+            AtomicWeight(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity)
         ]
         return layer_weights
 
@@ -118,7 +105,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        
+
         QWen2_VL._from_hf(config, config_json)
         QWen2_VL._load_vit_param(config, config_json)
         config.mm_related_params.config["ckpt_path"] = ckpt_path

@@ -8,14 +8,15 @@ from maga_transformer.models.multimodal.multimodal_mixin import (
 )
 from maga_transformer.utils.model_weight import (
     CkptWeightInfo,
-    ModelDeployWeightInfo,
-    ModelWeightInfo,
     W,
-    WeightInfo,
     identity,
     transpose,
     zeros,
 )
+from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
 
 from ..config.gpt_init_model_parameters import GptInitModelParameters
 
@@ -25,13 +26,15 @@ class CogVLM2Weight(ModelDeployWeightInfo):
         return self._get_hf_weight_info()
 
     def _get_hf_layer_weight_info(self):
+        attn_config = self.attn_config
+        ffn_config = self.ffn_config
         layer_weights = [
-            WeightInfo(
+            AtomicWeight(
                 W.pre_ln_gamma,
                 [CkptWeightInfo("model.layers.{i}.input_layernorm.weight", identity)],
                 identity,
             ),
-            WeightInfo(
+            AttnAtomicWeight(
                 W.attn_qkv_w,
                 [
                     CkptWeightInfo(
@@ -40,8 +43,9 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                     )
                 ],
                 transpose,
+                config=attn_config
             ),
-            WeightInfo(
+            AttnAtomicWeight(
                 W.attn_o_w,
                 [
                     CkptWeightInfo(
@@ -50,8 +54,9 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                     )
                 ],
                 transpose,
+                config=attn_config
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.vision_attn_qkv_w,
                 [
                     CkptWeightInfo(
@@ -61,7 +66,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 transpose,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.vision_attn_qkv_b,
                 [
                     CkptWeightInfo(
@@ -71,7 +76,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 identity,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.vision_attn_o_w,
                 [
                     CkptWeightInfo(
@@ -81,7 +86,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 transpose,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.post_ln_gamma,
                 [
                     CkptWeightInfo(
@@ -90,34 +95,38 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 identity,
             ),
-            WeightInfo(
-                W.ffn_w2,
-                [
-                    CkptWeightInfo(
-                        "model.layers.{i}.mlp.language_mlp.down_proj.weight", identity
-                    )
-                ],
-                transpose,
-            ),
-            WeightInfo(
-                W.ffn_w1,
-                [
-                    CkptWeightInfo(
-                        "model.layers.{i}.mlp.language_mlp.gate_proj.weight", identity
-                    )
-                ],
-                transpose,
-            ),
-            WeightInfo(
-                W.ffn_w3,
-                [
-                    CkptWeightInfo(
-                        "model.layers.{i}.mlp.language_mlp.up_proj.weight", identity
-                    )
-                ],
-                transpose,
-            ),
-            WeightInfo(
+            FfnWeight(sub_weights=[
+                FfnAtomicWeight(
+                    W.ffn_w2,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.language_mlp.down_proj.weight", identity
+                        )
+                    ],
+                    transpose,
+                    config=ffn_config
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w1,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.language_mlp.gate_proj.weight", identity
+                        )
+                    ],
+                    transpose,
+                    config=ffn_config
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w3,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.language_mlp.up_proj.weight", identity
+                        )
+                    ],
+                    transpose,
+                    config=ffn_config
+                )], config=ffn_config),
+            AtomicWeight(
                 W.vision_ffn_w2,
                 [
                     CkptWeightInfo(
@@ -126,7 +135,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 transpose,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.vision_ffn_w1,
                 [
                     CkptWeightInfo(
@@ -135,7 +144,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 transpose,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.vision_ffn_w3,
                 [
                     CkptWeightInfo(
@@ -149,33 +158,29 @@ class CogVLM2Weight(ModelDeployWeightInfo):
 
     def _get_hf_weight_info(self):
         weights = [
-            WeightInfo(
+            AtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("model.embed_tokens.weight", identity)],
                 identity,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.lm_head, [CkptWeightInfo("lm_head.weight", identity)], identity
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.final_ln_gamma,
                 [CkptWeightInfo("model.norm.weight", identity)],
                 identity,
             ),
-            WeightInfo(
+            AtomicWeight(
                 W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])
             ),
         ]
 
-        layer_weights: List[List[WeightInfo]] = [
+        layer_weights: List[List[WeightModule]] = [
             self._get_hf_layer_weight_info() for _ in range(self._num_layers)
         ]
 
-        return ModelWeightInfo(
-            layer_weights=layer_weights,
-            weights=weights,
-            tp_strategy=self._get_gpt_style_tp_strategy(),
-        )
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class CogVLM2VitWeights(BaseVitWeights):

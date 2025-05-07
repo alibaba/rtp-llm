@@ -4,7 +4,11 @@ import json
 import functools
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, zeros, ones, transpose, qkv_gather
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, qkv_gather
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from maga_transformer.model_loader.weight_module import AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
@@ -16,40 +20,41 @@ class FalconWeightInfo(ModelDeployWeightInfo):
             self.falcon_40b = False
 
     def _get_weight_info(self):
+        attn_config = self.attn_config
+        ffn_config = self.ffn_config
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo('transformer.word_embeddings.weight', identity)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
-            WeightInfo(W.final_ln_beta, [CkptWeightInfo('transformer.ln_f.bias', identity)], identity),
+            AtomicWeight(W.embedding, [CkptWeightInfo('transformer.word_embeddings.weight', identity)], identity),
+            AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
+            AtomicWeight(W.final_ln_beta, [CkptWeightInfo('transformer.ln_f.bias', identity)], identity),
         ]
 
         layer_weights = [
-
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.self_attention.dense.weight', identity)], transpose),
-
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.dense_h_to_4h.weight', identity)], transpose),
-
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.dense_4h_to_h.weight', identity)], transpose),
+            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.self_attention.dense.weight', identity)], transpose, config=attn_config),
+            FfnWeight(sub_weights=[
+                FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.dense_h_to_4h.weight', identity)], transpose, config=ffn_config),
+                FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.dense_4h_to_h.weight', identity)], transpose, config=ffn_config)],
+                      config=ffn_config)
         ]
 
         if self.falcon_40b:
             layer_weights.extend([
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.self_attention.query_key_value.weight', identity)],
-                           functools.partial(qkv_gather, dim0=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv)),
-                WeightInfo(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_mlp.bias', identity)], identity),
-                WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_mlp.weight', identity)], identity),
-                WeightInfo(W.pre_attn_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_attn.bias', identity)], identity),
-                WeightInfo(W.pre_attn_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_attn.weight', identity)], identity),
+                AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.self_attention.query_key_value.weight', identity)],
+                           functools.partial(qkv_gather, dim0=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv), config=attn_config),
+                AtomicWeight(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_mlp.bias', identity)], identity),
+                AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_mlp.weight', identity)], identity),
+                AtomicWeight(W.pre_attn_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_attn.bias', identity)], identity),
+                AtomicWeight(W.pre_attn_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_attn.weight', identity)], identity),
             ])
 
         else:
             layer_weights.extend([
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.self_attention.query_key_value.weight', identity)], transpose),
-                WeightInfo(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.input_layernorm.bias', identity)], identity),
-                WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.input_layernorm.weight', identity)], identity),
+                AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.self_attention.query_key_value.weight', identity)], transpose, config=attn_config),
+                AtomicWeight(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.input_layernorm.bias', identity)], identity),
+                AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.input_layernorm.weight', identity)], identity),
             ])
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 class Falcon(BaseModel):
     @staticmethod

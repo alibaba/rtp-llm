@@ -1,20 +1,17 @@
 import os
-import random
+
 import torch
 import json
 import logging
 import math
-import gc
 
 
 import torch.nn.functional as F
-from dataclasses import dataclass, field
 from pydantic import BaseModel as PyBaseModel
-from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
+from typing import Any, Dict, List, Optional, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
-import safetensors.torch
 
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode, MlaOpsType, EplbMode
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ConfigMode
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.distribute.gang_info import get_gang_info
@@ -24,15 +21,15 @@ from maga_transformer.models.downstream_modules.utils import create_custom_modul
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.utils.fuser import fetch_remote_file_to_local
 from maga_transformer.utils.util import to_torch_dtype
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, ModelWeights
-from maga_transformer.utils.model_weights_loader import get_model_weights_loader, ModelWeightsLoader
+from maga_transformer.utils.model_weight import W
+from maga_transformer.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
+from maga_transformer.model_loader.load_config import LoadConfig
+from maga_transformer.model_loader.loader import ModelLoader, get_model_loader
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.time_util import Timer
-from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
-from maga_transformer.eplb.ep_balancer import ExpertBalancer, MoeWeightInfo
-from collections import OrderedDict
+from maga_transformer.eplb.ep_balancer import ExpertBalancer
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -244,6 +241,7 @@ class BaseModel(object):
             ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict,
             parallel_info=parallel_info,
+            gang_info=get_gang_info(),
             config_mode=config_mode
         )
         cls._update_config(config)
@@ -320,7 +318,7 @@ class BaseModel(object):
     def init_misc(self):
         self.task_type = self.config.task_type
         self.custom_module = self.load_custom_module()
-        self.compute_dtype = to_torch_dtype(self.config.data_type)
+        self.compute_dtype: torch.dtype = to_torch_dtype(self.config.data_type)
 
     def split_slopes_tp(self, slopes: torch.Tensor):
         local_head_num = 1 if self.config.head_num == 1 else self.config.head_num // self.parallel_info.tp_size
@@ -370,14 +368,9 @@ class BaseModel(object):
 
     def load_model_weight(self):
         weights_info = self.get_weight_cls()(self.config, self.parallel_info.tp_size, self.parallel_info.tp_rank)
-        self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        self.weight: ModelWeights = self.model_weights_loader.load_weights_from_scratch(device=self.device)
+        self.model_weights_loader = ModelLoader(weights_info, self.compute_dtype, self.database)
+        self.weight: ModelWeights = self.model_weights_loader.load_weights(device=self.device)
         self._load_custom_module_weights(self.model_weights_loader)
-        if self.static_lora:
-            lora_name = list(self.config.lora_infos.keys())[0]
-            self.model_weights_loader.show_warns(lora_name=lora_name)
-        else:
-            self.model_weights_loader.show_warns()
 
     def _load_weights(self,
                       ref_dict: Dict[str, torch.Tensor] = {}):
@@ -390,15 +383,12 @@ class BaseModel(object):
     def load_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.task_type, self.config, self.tokenizer)
 
-    def _load_custom_module_weights(self, model_weights_loader: ModelWeightsLoader):
+    def _load_custom_module_weights(self, model_weights_loader: ModelLoader):
         if self.custom_module is not None:
             tensor_names = self.custom_module.handler.tensor_info()
             tensor_map: Dict[str, torch.Tensor] = {}
             for name in tensor_names:
-                tensors = model_weights_loader.load_tensor(name)
-                if len(tensors) != 1:
-                    raise Exception(f"load tensor {name} failed, get len=={len(tensors)}")
-                loaded_tensor = tensors[0].to(self.device)
+                loaded_tensor = model_weights_loader.load_raw_tensor(name, device=self.device)
                 tensor_map[name] = loaded_tensor
                 self.weight.set_global_weight(name, loaded_tensor)
             self.custom_module.handler.init(tensor_map)
@@ -447,57 +437,25 @@ class BaseModel(object):
                 raise Exception("pre_decoder_ln_static_quant and pre_decoder_ln_static_quant_reciprocal \
                                     are quired for per tensor quantization")
 
-        ModelWeightsLoader.force_clean_cuda_memory()
+        ModelLoader.force_clean_cuda_memory()
 
     def _initialize_rope(self):
         pass
 
-    def create_moe_weight_info(self) -> MoeWeightInfo:
-        raise NotImplementedError()
-
-    def init_redundant_expert(self, num_node: int):
+    def init_redundant_expert(self):
         if self.config.expert_num == 0:
             return
 
         expert_num = self.config.expert_num
-        redundant_expert = self.config.phy_exp_num - expert_num
         ep_size = self.parallel_info.ep_size
-        expert_num_per_ep = expert_num // ep_size
-        rank_per_node = ep_size // num_node
-
-        assert redundant_expert <= expert_num, "redundant_expert must less or equal than expert_num"
-        assert self.config.phy_exp_num % ep_size == 0, "phy_exp_num must be divisible by ep_size"
-
         layer_num = self.config.layer_num
+        phy_exp_num = self.config.phy_exp_num
 
-        phy2log: List[List[int]] = []
-        phy2log_path = fetch_remote_file_to_local(os.environ.get("PHY2LOG_PATH", ""))
-
-        if phy2log_path:
-            with open(phy2log_path, "r") as f:
-                phy2log = json.load(f)
-                assert len(phy2log) == layer_num, f"phy2log len {len(phy2log)} != layer_num {layer_num}"
-                assert len(phy2log[0]) == self.config.phy_exp_num, f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {self.config.phy_exp_num}"
-        elif redundant_expert % ep_size == 0:
-            redundant_expert_per_ep = redundant_expert // ep_size
-            for _ in range(layer_num):
-                layer_phy2log: List[int] = []
-                for ep_rank in range(ep_size):
-                    node_id = ep_rank // rank_per_node
-                    layer_phy2log.extend(range(ep_rank * expert_num_per_ep, (ep_rank + 1) * expert_num_per_ep))
-                    for i in range(redundant_expert_per_ep):
-                        redundant_ep_id = (ep_rank + 1) % rank_per_node + node_id * rank_per_node
-                        expert_id = redundant_ep_id * expert_num_per_ep + i
-                        layer_phy2log.append(expert_id)
-                phy2log.append(layer_phy2log)
-        else:
-            for _ in range(layer_num):
-                layer_phy2log: List[int] = list(range(expert_num))
-                layer_phy2log.extend(list(range(redundant_expert)))
-                phy2log.append(layer_phy2log)
-
-        logging.info(f"phy2log: {phy2log}")
-
+        phy2log = LoadConfig.create_redundant_expert(layer_num=layer_num, 
+                                                           expert_num=expert_num, 
+                                                           phy_exp_num=phy_exp_num, 
+                                                           ep_size=ep_size, 
+                                                           num_nodes=self.config.num_nodes)
         self.config.phy2log = phy2log
 
     def init_eplb_weight(self, weight: ModelWeights):
@@ -523,22 +481,9 @@ class BaseModel(object):
             weight.weights[layer_id][W.logic_expert_cnt] = logic_expert_cnt.contiguous().to(self.device)
             weight.weights[layer_id][W.log2phy] = log2phy.contiguous().to(self.device)
 
-    def init_eplb_config(self):
-        enable_eplb = self.config.eplb_mode != EplbMode.NONE
-        phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.config.expert_num
-
-        self.config.phy_exp_num = phy_exp_num
-        self.config.enable_eplb = enable_eplb
-
-        try:
-            num_nodes = get_gang_info().num_nodes
-        except:
-            num_nodes = 1
-
-        self.init_redundant_expert(num_nodes)
-
-        if enable_eplb:
-            moe_weight_info = self.create_moe_weight_info()
+    def init_eplb_config(self, compute_dtype: torch.dtype):
+        self.init_redundant_expert()
+        if self.config.enable_eplb:
             model_path = None
             if self.config.is_mtp:
                 model_path = self.config.ckpt_path
@@ -548,22 +493,18 @@ class BaseModel(object):
                         "ORIGINAL_CHECKPOINT_PATH", self.config.ckpt_path
                     )
                 )
+            weights_info: ModelDeployWeightInfo = self.get_weight_cls()(self.config, self.parallel_info.tp_size, self.parallel_info.tp_rank)
+
+            ep_lb_database = CkptDatabase(model_path)
             self.ep_balancer = ExpertBalancer(
-                self.config.expert_num,
-                self.config.phy_exp_num,
-                self.config.num_layers,
-                self.config.moe_n_group,
-                num_nodes,
-                self.config.ep_size,
-                self.config.moe_layer_index,
-                moe_weight_info,
-                self.config.phy2log,
-                model_path,
+                weights_info=weights_info,
+                compute_dtype=compute_dtype,
+                database=ep_lb_database
             )
             self.config.py_eplb = self.ep_balancer
 
     def load(self, device: str):
-        self.init_eplb_config()
+        self.init_eplb_config(compute_dtype=self.compute_dtype)
         self._load_weights()
         self.init_eplb_weight(self.weight)
         self._initialize_rope()
@@ -596,8 +537,7 @@ class BaseModel(object):
                 attention_mask[b, :, input_length: ]= 0
         return attention_mask
 
-    def dump_weights(self, parallel_info: ParallelInfo, output_dir: str):
-        # dump with out load
+    def create_model_loader(self, parallel_info: ParallelInfo) -> ModelLoader:
         self.parallel_info = parallel_info
         self.device = self.parallel_info.device
 
@@ -605,55 +545,13 @@ class BaseModel(object):
         self.init_misc()
         self.init_database()
         self.load_static_lora()
-        self.init_eplb_config()
+        self.init_eplb_config(compute_dtype=self.compute_dtype)
 
         tp_rank = self.parallel_info.tp_rank
-        ep_rank = self.parallel_info.ep_rank
-        dp_rank = self.parallel_info.dp_rank
-        ep_size = self.parallel_info.ep_size
         tp_size = self.parallel_info.tp_size
 
-        weights_info = self.get_weight_cls()(self.config, tp_size, tp_rank)
-        self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        weights = self.model_weights_loader.create_model_weights(self.device)
-
-        filename_prefix = f"{output_dir}/model-{tp_rank:02d}-{dp_rank:02d}-"
-        os.makedirs(output_dir, exist_ok=True)
-
-        max_size = 6 * 1024**3  # 6GB
-        part_idx = 0
-        current_size = 0
-        current_dict = OrderedDict()
-
-        def maybe_save():
-            nonlocal current_size, part_idx, current_dict
-            if current_size >= max_size:
-                filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
-                safetensors.torch.save_file(current_dict, filename)
-                logging.info(f"Saved partition {part_idx} ({current_size/1024**3:.2f}GB)")
-                # 显式释放内存
-                del current_dict
-                current_dict = OrderedDict()
-                part_idx += 1
-                current_size = 0
-
-        for (layer_id, name, tensor) in self.model_weights_loader.prepare_weights_from_scratch(self.device):
-            if layer_id is not None:
-                tensor_name = f"{weights.layer_weight_prefix(tp_rank, dp_rank, ep_rank)}{layer_id}.{name}"
-            else:
-                tensor_name = f"{weights.global_weight_prefix(tp_rank,dp_rank, ep_rank)}{name}"
-            tensor_size = tensor.numel() * tensor.element_size()
-            current_dict[tensor_name] = tensor.cpu().contiguous()
-            current_size += tensor_size
-            maybe_save()
-            self.model_weights_loader.force_clean_cuda_memory()
-
-        # 保存最后剩余部分
-        if current_dict:
-            filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
-            safetensors.torch.save_file(current_dict, filename)
-            logging.info(f"Saved final partition {part_idx} ({current_size/1024**3:.2f}GB)")
-            del current_dict
+        weights_info: ModelDeployWeightInfo = self.get_weight_cls()(self.config, tp_size, tp_rank)
+        return get_model_loader(weights_info, self.compute_dtype, self.database)
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):

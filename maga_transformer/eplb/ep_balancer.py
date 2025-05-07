@@ -8,26 +8,15 @@ import logging
 from queue import Queue
 from enum import Enum
 from collections import deque
-from typing import Dict, List, Optional, Deque, Sequence
-from dataclasses import dataclass
-from safetensors import safe_open
+from typing import Deque, Sequence
 
+from maga_transformer.utils.database import BaseDatabase
+from maga_transformer.utils.model_weight import W
 from maga_transformer.eplb.eplb import rebalance_experts
-from maga_transformer.utils.fuser import fetch_remote_file_to_local
-from maga_transformer.utils.model_weight import CkptWeightInfo
+from maga_transformer.device import get_current_device
+from maga_transformer.model_loader.load_config import LoadConfig
+from maga_transformer.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeightInfo
 
-
-@dataclass
-class MoeWeightInfo:
-    gate: CkptWeightInfo
-    up: CkptWeightInfo
-    down: CkptWeightInfo
-
-    # note: only support deepseek2 fp8
-    use_fp8: bool = False
-    gate_s: Optional[CkptWeightInfo] = None
-    up_s: Optional[CkptWeightInfo] = None
-    down_s: Optional[CkptWeightInfo] = None
 
 class HistoryStats:
     update_time: int
@@ -55,25 +44,27 @@ class SelectLayerMethod(Enum):
 class ExpertBalancer:
     def __init__(
         self,
-        num_experts: int,
-        num_replicas: int,
-        num_layers: int,
-        num_groups: int,
-        num_node: int,
-        num_gpu: int,
-        moe_layer_index: List[int],
-        moe_weight_info: MoeWeightInfo,
-        phy2log: List[List[int]],
-        model_path: Optional[str] = None,
+        weights_info: ModelDeployWeightInfo, 
+        compute_dtype: torch.dtype, 
+        database: BaseDatabase, 
     ):
-        self.num_experts = num_experts
-        self.num_replicas = num_replicas
-        self.num_layers = num_layers
-        self.num_groups = num_groups
-        self.num_node = num_node
-        self.num_gpu = num_gpu
-        self.moe_layer_index = moe_layer_index
-        self.moe_weight_info = moe_weight_info
+        self.database: BaseDatabase = database
+        self._weights_info: ModelDeployWeightInfo = weights_info
+        self._model_weight_info: ModelWeightInfo = self._weights_info.create_model_weight_info(database)
+        use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
+        if use_fp32:
+            compute_dtype = torch.float32
+            
+        self._load_config: LoadConfig = self._weights_info.create_load_config(compute_dtype, database, get_current_device())
+        self.num_layers = self._load_config.num_layers
+        self.num_replicas = self._load_config.phy_exp_num
+        self.num_groups = self._load_config.moe_n_group
+        self.num_nodes = self._load_config.num_nodes
+        self.num_gpu = self._load_config.ep_size
+        self.moe_layer_index = self._load_config.moe_layer_index
+        self.num_experts = self._load_config.expert_num
+        
+        
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
         select_layer_method = os.environ.get("BALANCE_METHOD", "mix")
@@ -82,15 +73,13 @@ class ExpertBalancer:
         self.update_cnt = 0
 
         window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", 10))
-        self.history_log_stats = HistoryStats(window_size=window_size, shape=(num_layers, num_experts))
+        self.history_log_stats = HistoryStats(window_size=window_size, shape=(self._load_config.num_layers, self._load_config.expert_num))
 
         logging.info(f"Balance method: {self.select_layer_method}")
 
         # record the expert count, used for dump stats
-        self.log_exp_cnt = torch.zeros((num_layers, num_experts), dtype=torch.int32)
+        self.log_exp_cnt = torch.zeros((self._load_config.num_layers, self._load_config.expert_num), dtype=torch.int32)
 
-        assert model_path is not None, "not found eplb model path"
-        self.moe_ckpt_path = model_path
 
         self.force_repack = os.environ.get("EPLB_FORCE_REPACK", "0") == "1"
 
@@ -152,7 +141,7 @@ class ExpertBalancer:
             log_stats[layer_id : layer_id + 1],
             self.num_replicas,
             self.num_groups,
-            self.num_node,
+            self.num_nodes,
             self.num_gpu,
             self.force_repack
         )
@@ -190,20 +179,6 @@ class ExpertBalancer:
         )
 
     @torch.inference_mode()
-    def load_single_moe_weight(
-        self,
-        weight_info: CkptWeightInfo,
-        weight_map: Dict[str, str],
-        layer_id: int,
-        expert_id: int,
-    ):
-        tensor_name = weight_info.name.format(layer_id, expert_id)
-        tensor_path = os.path.join(self.moe_ckpt_path, weight_map[tensor_name])
-        with safe_open(tensor_path, framework="pt") as f:
-            tensor = weight_info.merge_fun([f.get_tensor(tensor_name)])
-        return tensor
-
-    @torch.inference_mode()
     def load_moe_weight(
         self,
         layer_id_tensor: torch.Tensor,
@@ -212,68 +187,17 @@ class ExpertBalancer:
         phy2log: torch.Tensor,
     ):
         layer_id = int(layer_id_tensor.item())
-        expert_per_ep = self.num_replicas // ep_size
-        choose_expert_id: List[int] = phy2log[
-            expert_per_ep * ep_rank : expert_per_ep * (ep_rank + 1)
-        ].tolist()
+        # Notice now that the phy2log is updated in load_config, not support multi thread
+        self._load_config.udpate_layer_experts(layer_id, phy2log)
+        choose_expert_id = self._load_config.get_selected_experts(layer_id)
+        moe_weight = self._model_weight_info.get_layer_weight_info(layer_id, W.moe)
+        assert moe_weight is not None
+        logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}")
 
-        logging.info(f"[EPLB_py][RANK {ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}")
+        res = moe_weight.load(self.database, layer_id, "cpu", self._load_config)
 
-        moe_w1_tensors: List[torch.Tensor] = []
-        moe_w2_tensors: List[torch.Tensor] = []
-        moe_s1_tensors: List[torch.Tensor] = []
-        moe_s2_tensors: List[torch.Tensor] = []
-
-        use_fp8 = self.moe_weight_info.use_fp8
-
-        index_path = os.path.join(self.moe_ckpt_path, "model.safetensors.index.json")
-        with open(index_path, "r") as f:
-            weight_map: Dict[str, str] = json.loads(f.read())["weight_map"]
-
-        for expert_id in choose_expert_id:
-            moe_gate = self.load_single_moe_weight(
-                self.moe_weight_info.gate, weight_map, layer_id, expert_id
-            )
-            moe_up = self.load_single_moe_weight(
-                self.moe_weight_info.up, weight_map, layer_id, expert_id
-            )
-            moe_down = self.load_single_moe_weight(
-                self.moe_weight_info.down, weight_map, layer_id, expert_id
-            )
-
-            if use_fp8:
-                assert self.moe_weight_info.gate_s is not None
-                assert self.moe_weight_info.up_s is not None
-                assert self.moe_weight_info.down_s is not None
-
-                moe_gate_s = self.load_single_moe_weight(
-                    self.moe_weight_info.gate_s, weight_map, layer_id, expert_id
-                )
-                moe_up_s = self.load_single_moe_weight(
-                    self.moe_weight_info.up_s, weight_map, layer_id, expert_id
-                )
-                moe_down_s = self.load_single_moe_weight(
-                    self.moe_weight_info.down_s, weight_map, layer_id, expert_id
-                )
-                moe_s1_tensors.append(torch.concat([moe_up_s, moe_gate_s], dim=0))
-                moe_s2_tensors.append(moe_down_s)
-
-            moe_w1_tensors.append(torch.concat([moe_up, moe_gate], dim=0))
-            moe_w2_tensors.append(moe_down)
-
-        moe_w1 = torch.stack(moe_w1_tensors, dim=0).contiguous()
-        moe_w2 = torch.stack(moe_w2_tensors, dim=0).contiguous()
-
-        if use_fp8:
-            moe_w1_s = torch.stack(moe_s1_tensors, dim=0).contiguous()
-            moe_w2_s = torch.stack(moe_s2_tensors, dim=0).contiguous()
-        else:
-            moe_w1_s = torch.empty(0, dtype=torch.float32)
-            moe_w2_s = torch.empty(0, dtype=torch.float32)
-
-        logging.info(f"[EPLB_py][RANK {ep_rank}] Load MOE weight layer {layer_id} done")
-
-        return layer_id, moe_w1, moe_w2, moe_w1_s, moe_w2_s
+        logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done")
+        return layer_id, res.get(W.moe_w1), res.get(W.moe_w2), res.get(W.moe_w1_s), res.get(W.moe_w2_s)
 
     @torch.inference_mode()
     def dump_stats(self):
@@ -293,7 +217,7 @@ class ExpertBalancer:
             log_exp_cnt,
             self.num_replicas,
             self.num_groups,
-            self.num_node,
+            self.num_nodes,
             self.num_gpu,
         )
 

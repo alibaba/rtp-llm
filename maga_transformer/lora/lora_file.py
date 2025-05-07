@@ -6,7 +6,7 @@ import logging
 import re
 import torch
 
-from maga_transformer.utils.ckpt_file_info import CkptFileInfo, FinetuneType, TrainType
+from maga_transformer.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 from maga_transformer.utils.dump_config_utils import dump_lora_infos_to_table
 
 class LoraConfig:

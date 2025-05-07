@@ -10,14 +10,16 @@ from maga_transformer.config.exceptions import (ExceptionType,
                                                 FtRuntimeException)
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
+from maga_transformer.model_loader.loader import get_model_loader
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from maga_transformer.model_loader.weight_module import AtomicWeight, MMAtomicWeight
+from maga_transformer.model_loader.loader import ModelLoader
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
-from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 from maga_transformer.utils.database import CkptDatabase
-from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity, ModelWeightInfo
-from maga_transformer.utils.model_weights_loader import get_model_weights_loader
+from maga_transformer.utils.model_weight import CkptWeightInfo, sp_id, identity
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
 
 from maga_transformer.ops.comm.nccl_op import NcclOp
 
@@ -65,7 +67,7 @@ class BaseMultiModalWeightInfo:
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
         # After supporting TP mm network, we will remove the check here.
         if self.vit_separation == 1:
-            llm_weights = ModelWeightInfo(layer_weights=[], weights=[], tp_strategy=self._get_gpt_style_tp_strategy())
+            llm_weights = ModelWeightInfo(layer_weights=[], weights=[])
 
         if self.vit_separation != 2:
             if self.vit_weights is not None and g_parallel_info.tp_rank == 0:
@@ -74,15 +76,14 @@ class BaseMultiModalWeightInfo:
 
                 for w in weight_names:
                     w_name = ckpt_prefix + w
-                    llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
-                    llm_weights.tp_strategy[w_name] = sp_id
+                    llm_weights.weights.append(MMAtomicWeight(w_name, [CkptWeightInfo(w_name, identity)], identity, split_func=sp_id))
 
         return llm_weights
 
 # 继承MultiModalMixin时，需要把声明写在GPT前以正确顺序构造，详情看super().__init__含义
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
-    
+
     @property
     def vit_data_type(self):
         return get_vit_compute_dtype(self.config.data_type)
@@ -152,7 +153,7 @@ class MultiModalMixin:
         # Load weight only for self.mm_part
 
         database = CkptDatabase(ckpt_path)
-        weight_loader = get_model_weights_loader(weights_info, database, compute_dtype=dtype)
+        weight_loader: ModelLoader = get_model_loader(weights_info, database, compute_dtype=dtype)
         vit_weight = vit_params.vit_weights
         ckpt_prefix= vit_weight.ckpt_prefix
         ft_prefix = vit_weight.ft_prefix
@@ -162,7 +163,7 @@ class MultiModalMixin:
             ckpt_weight_name = ckpt_prefix + vit_weight_name
             param_name = ft_prefix + vit_weight_name
             param_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', param_name)
-            tensor = weight_loader.load_tensor(ckpt_weight_name)[0]
+            tensor = weight_loader.load_raw_tensor(ckpt_weight_name, device, dtype)
             param = eval(param_name)
             param.data = tensor.reshape(param.data.shape).to(dtype).to(device)
 
@@ -233,7 +234,7 @@ class MultiModalMixin:
         torch.cuda.empty_cache()
 
     def load_mm_weight(self, ctype: str, device: str):
-        # wait rank0 finish loading weight, otherwise gang_server will die        
+        # wait rank0 finish loading weight, otherwise gang_server will die
         if g_parallel_info.tp_size > 1:
             nccl_op_ = NcclOp()
             nccl_op_.barrier(torch.device(device))

@@ -6,7 +6,9 @@ import torch.serialization
 from typing import Any, NamedTuple, List, Dict, Optional
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
-from maga_transformer.utils.model_weight import WeightInfo
+from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 
 
 class LoRAWeights:

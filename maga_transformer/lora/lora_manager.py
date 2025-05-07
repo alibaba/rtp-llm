@@ -4,7 +4,7 @@ import os
 import logging
 from maga_transformer.async_decoder_engine.rpc_engine import RPCEngine
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.utils.model_weights_loader import ModelWeightsLoader
+from maga_transformer.model_loader.loader import ModelLoader
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.time_util import Timer
 
@@ -23,7 +23,7 @@ class LoraManager:
     model_: AsyncModel
     lora_cpp_wrapper_:Any
     database_: CkptDatabase
-    weights_loader_: ModelWeightsLoader
+    weights_loader_: ModelLoader
 
     def __init__(self, model: AsyncModel) -> None:
         self.model_ = model
@@ -34,7 +34,7 @@ class LoraManager:
         self.lora_cpp_wrapper_ = self.model_.decoder_engine_.rtp_llm_op_.ft_op
         assert(isinstance(self.model_.model.database, CkptDatabase))
         self.database_ = self.model_.model.database
-        assert(isinstance(self.model_.model.model_weights_loader, ModelWeightsLoader))
+        assert(isinstance(self.model_.model.model_weights_loader, ModelLoader))
         self.weights_loader_ = self.model_.model.model_weights_loader
         with Timer() as timer:
             model_lora_infos = self.model_.model.config.lora_infos
@@ -71,7 +71,7 @@ class LoraManager:
         with self.thread_lock_:
             assert adapter_name not in self.lora_infos_.keys()
             self.lora_infos_[adapter_name] = lora_path
-            weights = self.weights_loader_.load_lora_weights_from_scratch(adapter_name, lora_path, 'cpu')
+            weights = self.weights_loader_.load_lora_weights(adapter_name, lora_path, 'cpu')
             self.lora_cpp_wrapper_.add_lora(adapter_name, weights.lora_a_weights, weights.lora_b_weights)
 
     def remove_lora(self, adapter_name: str) -> Optional[LoraException]:

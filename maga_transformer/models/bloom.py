@@ -3,9 +3,13 @@ import functools
 from typing import Any, Dict
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from ..model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.utils.util import get_config_from_path
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
-    ModelDeployWeightInfo, CkptWeightInfo, identity, transpose, trans_qkv, trans_qkv_b
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, trans_qkv, trans_qkv_b
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from maga_transformer.model_loader.weight_module import AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 
@@ -23,50 +27,55 @@ class BloomWeightInfo(ModelDeployWeightInfo):
 
     def _get_weight_info(self):
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo('word_embeddings.weight', identity)], identity),
-            WeightInfo(W.pre_decoder_ln_gamma, [CkptWeightInfo('word_embeddings_layernorm.weight', identity)], identity),
-            WeightInfo(W.pre_decoder_ln_beta, [CkptWeightInfo('word_embeddings_layernorm.bias', identity)], identity),
-            WeightInfo(W.final_ln_gamma, [CkptWeightInfo('ln_f.weight', identity)], identity),
-            WeightInfo(W.final_ln_beta, [CkptWeightInfo('ln_f.bias', identity)], identity),
+            AtomicWeight(W.embedding, [CkptWeightInfo('word_embeddings.weight', identity)], identity),
+            AtomicWeight(W.pre_decoder_ln_gamma, [CkptWeightInfo('word_embeddings_layernorm.weight', identity)], identity),
+            AtomicWeight(W.pre_decoder_ln_beta, [CkptWeightInfo('word_embeddings_layernorm.bias', identity)], identity),
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('ln_f.weight', identity)], identity),
+            AtomicWeight(W.final_ln_beta, [CkptWeightInfo('ln_f.bias', identity)], identity),
         ]
+        attn_config=self.attn_config
+        ffn_config=self.ffn_config
 
-        layer_weights = [
-            WeightInfo(W.pre_ln_beta, [CkptWeightInfo('h.{i}.input_layernorm.bias', identity)],
-                       identity),
+        layer_weights = []
+        for _ in range(self._num_layers):
+            layer_weight = [
+                AtomicWeight(W.pre_ln_beta, [CkptWeightInfo('h.{i}.input_layernorm.bias', identity)],
+                        identity),
 
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('h.{i}.input_layernorm.weight', identity)],
-                       identity),
+                AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo('h.{i}.input_layernorm.weight', identity)],
+                        identity),
 
-            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('h.{i}.self_attention.query_key_value.weight', identity)],
-                       functools.partial(trans_qkv, hidden_size=self._hidden_size, head_num=self._head_num)),
+                AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('h.{i}.self_attention.query_key_value.weight', identity)],
+                        functools.partial(trans_qkv, hidden_size=self._hidden_size, head_num=self._head_num), config=attn_config),
 
-            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('h.{i}.self_attention.query_key_value.bias', identity)],
-                       functools.partial(trans_qkv_b, hidden_size=self._hidden_size, head_num=self._head_num)),
+                AttnAtomicWeight(W.attn_qkv_b, [CkptWeightInfo('h.{i}.self_attention.query_key_value.bias', identity)],
+                        functools.partial(trans_qkv_b, hidden_size=self._hidden_size, head_num=self._head_num), config=attn_config),
 
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('h.{i}.self_attention.dense.weight', identity)],
-                       transpose),
+                AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo('h.{i}.self_attention.dense.weight', identity)],
+                        transpose, config=attn_config),
 
-            WeightInfo(W.attn_o_b, [CkptWeightInfo('h.{i}.self_attention.dense.bias', identity)],
-                       identity),
+                AttnAtomicWeight(W.attn_o_b, [CkptWeightInfo('h.{i}.self_attention.dense.bias', identity)],
+                        identity, config=attn_config),
 
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.weight', identity)],
-                       transpose),
+                FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.weight', identity)],
+                        transpose, config=ffn_config),
 
-            WeightInfo(W.ffn_b3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.bias', identity)],
-                       identity),
+                FfnAtomicWeight(W.ffn_b3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.bias', identity)],
+                        identity, config=ffn_config),
 
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('h.{i}.mlp.dense_4h_to_h.weight', identity)],
-                       transpose),
+                FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo('h.{i}.mlp.dense_4h_to_h.weight', identity)],
+                        transpose, config=ffn_config),
 
-            WeightInfo(W.ffn_b2, [CkptWeightInfo('h.{i}.mlp.dense_4h_to_h.bias', identity)],
-                       identity),
+                FfnAtomicWeight(W.ffn_b2, [CkptWeightInfo('h.{i}.mlp.dense_4h_to_h.bias', identity)],
+                        identity, config=ffn_config),
 
-            WeightInfo(W.post_ln_beta, [CkptWeightInfo('h.{i}.post_attention_layernorm.bias', identity)],
-                       identity),
+                AtomicWeight(W.post_ln_beta, [CkptWeightInfo('h.{i}.post_attention_layernorm.bias', identity)],
+                        identity),
 
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('h.{i}.post_attention_layernorm.weight', identity)],
-                       identity),
-        ]
+                AtomicWeight(W.post_ln_gamma, [CkptWeightInfo('h.{i}.post_attention_layernorm.weight', identity)],
+                        identity),
+            ]
+            layer_weights.append(layer_weight)
 
         if self._transformer_prefix:
             for w in layer_weights:
@@ -75,7 +84,7 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 w.weights[0].name = 'transformer.' + w.weights[0].name
 
         if self._lm_head:
-            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity))
+            weights.append(AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity))
 
         return ModelWeightInfo(weights, layer_weights)
 

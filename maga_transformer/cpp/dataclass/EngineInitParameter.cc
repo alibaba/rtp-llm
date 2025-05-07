@@ -306,7 +306,6 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 
     for (auto& layer_weights : layers_weights) {
         rtp_llm::LayerWeights layer_ws;
-        layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);
         layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                W::pre_ln_gamma,
                                                                W::pre_ln_beta,

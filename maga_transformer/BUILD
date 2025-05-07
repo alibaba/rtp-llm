@@ -194,6 +194,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":av",
+        "//maga_transformer/model_loader:loader",
     ] + arch_dep + select({
         "@//:using_cuda12": tensorrt,
         "//conditions:default": []

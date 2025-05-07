@@ -6,8 +6,7 @@ import logging
 import re
 import torch
 
-from maga_transformer.utils.ckpt_file_info import CkptFileInfo, FinetuneType, TrainType
-from maga_transformer.utils.megatron_util import MegatronUtil
+from maga_transformer.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 from maga_transformer.lora.lora_file import LoraCkpt, LoraConfig
 
 class BaseDatabase:
@@ -35,7 +34,6 @@ class CkptDatabase(BaseDatabase):
     LoraCkpt: LoraCkpt
 
     finetune_type : FinetuneType
-    tranin_type : TrainType
 
     def __init__(self, path: Optional[str], ptuning_path: Optional[str] = None) -> None:
 
@@ -49,29 +47,11 @@ class CkptDatabase(BaseDatabase):
         if os.path.isfile(path):
             raise Exception(f"CkptDatabase needs directory contains checkpoint files")
 
-        if MegatronUtil.is_megatron_ckpt(Path(path)):
-            self.load_megatron_meta(path)
-        else:
-            self.load_hf_meta(path)
+        self.load_hf_meta(path)
 
         self.load_ptuning_meta(ptuning_path)
 
         logging.debug(f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}")
-
-    def load_megatron_meta(self, path: str):
-        self.PretrainFileList = self.get_megatron_ckpt_files(Path(path))
-        self.finetune_type = FinetuneType.pretrain
-        self.tranin_type = TrainType.megatron
-
-    def get_megatron_ckpt_files(self, ckpt_path: Path) -> List[CkptFileInfo]:
-        root_path, tp_size, pp_size = MegatronUtil.get_megatron_info(ckpt_path)
-        ckpt_files: List[CkptFileInfo] = []
-        for pp_rank in range(pp_size):
-            for tp_rank in range(tp_size):
-                ckpt_file: Path = MegatronUtil.detect_ckpt_file(root_path, pp_rank, tp_rank, pp_size, tp_size)
-                ckpt_files.append(CkptFileInfo(
-                    file_name=str(ckpt_file.resolve()), tp_size=tp_size, tp_rank=tp_rank, pp_size=pp_size, pp_rank=pp_rank, train_type=TrainType.megatron))
-        return ckpt_files
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
@@ -128,8 +108,10 @@ class CkptDatabase(BaseDatabase):
         for ckpt_file in self.PretrainFileList:
             if name in ckpt_file.get_tensor_names():
                 tensors.append(ckpt_file.load_tensor(name, datatype))
+        logging.debug(f"self.FinetuneFileList: {self.FinetuneFileList}, PretrainFileList: {self.PretrainFileList}")
 
         for ckpt_file in self.FinetuneFileList:
+            logging.debug(f"load tensor {name} from {ckpt_file.file_name}")
             if name in ckpt_file.get_tensor_names():
                 tensors.append(ckpt_file.load_tensor(name, datatype))
 
@@ -163,13 +145,6 @@ class CkptDatabase(BaseDatabase):
                     else:
                         res[k].append(v)
         return res
-
-    @property
-    def pretrain_pp_tp(self):
-        for pretrainfile in self.PretrainFileList:
-            if pretrainfile.finetune_type == FinetuneType.pretrain:
-                return (pretrainfile.pp_size, pretrainfile.tp_size)
-        return (1,1)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.LoraCkpt.get_lora_tensor_names(config_name)

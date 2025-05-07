@@ -20,9 +20,6 @@ class FinetuneType(enum.Enum):
     lora = "lora"
     ptuning = "ptuning"
 
-class TrainType(enum.Enum):
-    deepspeed = "deepspeed"
-    megatron = "megatron"
 
 class CkptFileInfo:
 
@@ -33,19 +30,11 @@ class CkptFileInfo:
     file_name: str
     metadata: Dict[str, Any]
 
-    tp_size: int
-    tp_rank: int
-    pp_size: int
-    pp_rank: int
-
     ckpt_type: CkptType
     finetune_type: FinetuneType
-    train_type: TrainType
     
 
-    def __init__(self, file_name: str, finetune_type: FinetuneType = FinetuneType.pretrain, 
-                 train_type: TrainType = TrainType.deepspeed,
-                 tp_size: int = 1, tp_rank: int = 1, pp_size: int = 1, pp_rank: int = 1) -> None:
+    def __init__(self, file_name: str, finetune_type: FinetuneType = FinetuneType.pretrain) -> None:
 
         if file_name.endswith(('.safetensors')):
             self.ckpt_type = CkptType.safetensors
@@ -56,11 +45,6 @@ class CkptFileInfo:
 
         self.file_name = file_name
         self.finetune_type = finetune_type
-        self.train_type = train_type
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-        self.pp_size = pp_size
-        self.pp_rank = pp_rank
         self._load_meta(self.file_name)
     
     def get_tensor_names(self) -> List[str]:
@@ -69,12 +53,6 @@ class CkptFileInfo:
     @property
     def tensor_num(self) -> int:
         return len(self.metadata.keys())
-
-    @property
-    def pretrain_pp_tp(self):
-        if self.finetune_type == FinetuneType.pretrain:
-            return (self.pp_size, self.tp_size)
-        return (1,1)
     
     def is_safetensor(self) -> bool:
         if self.ckpt_type == CkptType.safetensors:
@@ -222,10 +200,6 @@ class CkptFileInfo:
     def __lt__(self, other):
         if not isinstance(other, CkptFileInfo):
             raise NotImplemented(f"other's type : {type(other)} is not CkptFileInfo")
-        if self.pp_size < other.pp_size:
-            return True
-        if self.tp_size < other.tp_size:
-            return True
         if self.finetune_type == FinetuneType.PRETRAIN and other.finetune_type != FinetuneType.PRETRAIN:
             return True
         if self.finetune_type != FinetuneType.PRETRAIN and other.finetune_type == FinetuneType.PRETRAIN:

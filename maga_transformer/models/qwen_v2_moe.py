@@ -1,106 +1,47 @@
-import torch
-import unicodedata
-import types
-import functools
-import itertools
 import os
 import json
-from typing import List, Any
 
-from maga_transformer.eplb.ep_balancer import MoeWeightInfo
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
-from maga_transformer.utils.model_weight import W, WeightInfo, CkptWeightInfo, identity, transpose, stack_, stack_moe_w1, concat_0
-from maga_transformer.utils.util import check_with_info
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, stack_, stack_moe_w1
+from maga_transformer.model_loader.ffn_weight import FfnConfig, MoeConfig, FfnAtomicWeight, MoeAtomicWeight, MoeWithSharedWeight
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 
-def fp8_view(ts: List[torch.Tensor]):
-    m, n = ts[0].shape
-    return ts[0].reshape(n, m)
-
-def qkv_concat_fp8(ts: List[torch.Tensor]):
-    return fp8_view([concat_0(ts)])
-
-def transpose_moe_down(ts: List[torch.Tensor]):
-    return stack_(ts).transpose(1, 2)
-
-def merge_qkv_scale(ts: List[torch.Tensor]):
-    check_with_info(len(ts) == 3, "qkv scale should have 3 tensors")
-    out_scale = torch.concat(ts, dim=0)
-    return torch.max(out_scale, dim=0).unsqueeze(0)
-
-def merge_qkv_hf_fp8_with_scale_t(ts: List[torch.Tensor]):
-    check_with_info(len(ts) == 6, "qkv weight+scale should have 6 tensors")
-    origin_scales = ts[3:]
-    max_scale = merge_qkv_scale(origin_scales)
-    q, k, v, q_scale_inv, k_scale_inv, v_scale_inv = ts
-    q = q * q_scale_inv
-    k = k * k_scale_inv
-    v = v * v_scale_inv
-    quanted_qkv = (torch.cat([q, k, v], dim=0) / max_scale).transpose(0, 1).to(torch.float8_e4m3fn)
-    return quanted_qkv
-
 class QWenV2MoeWeight(QWenV2Weight):
-    def _get_fp8_moe_layer_weight_info(self, layer_id: int):
-        selected_experts = self._get_selected_experts(layer_id)
-
-        return [
-            WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight')], transpose),
-            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight') for expert_id in selected_experts] + \
-                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight') for expert_id in selected_experts], stack_moe_w1),
-            WeightInfo(W.moe_s1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight_scale_inv') for expert_id in selected_experts] + \
-                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight_scale_inv') for expert_id in selected_experts], stack_moe_w1),
-            WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight') \
-                                  for expert_id in selected_experts], stack_),
-            WeightInfo(W.moe_s2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight_scale_inv') \
-                        for expert_id in selected_experts], stack_),
-            # WeightInfo(W.shared_expert_gate, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert_gate.weight')], transpose),
-        ]
-
-    def _get_fp8_hf_layer_weight_info(self, layer_id: int):
-        layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight')]),
-            WeightInfo(W.attn_qkv_w, [
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight'),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight'),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.weight'),
-                ],
-                concat_0),
-            WeightInfo(W.attn_qkv_s, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight_scale_inv'),
-                                           CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight_scale_inv'),
-                                           CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.weight_scale_inv')],
-                                           concat_0),
-            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')]),
-            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')]),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight')]),
-            WeightInfo(W.attn_o_s, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight_scale_inv')]),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight')]),
-        ]
-        layer_weights.extend(self._get_fp8_moe_layer_weight_info(layer_id))
-        return layer_weights
-
-
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_layer_weight_info(layer_id)
 
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        # TODO: fix me
-        # inter_padding_size: int = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        # trans_pad = functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)
-        # inter_padding_size: int = self._inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        selected_experts = self._get_selected_experts(layer_id)
+
+        moe_config = MoeConfig(
+            expert_num=self.expert_num_,
+            inter_padding_size=self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size,
+            routed_scaling_factor=1.0
+        )
+        ffn_config= FfnConfig(
+            is_gated_activation=self._is_gated_activation,
+            inter_padding_size=self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size,
+        )
         return [
-            WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], transpose),
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.gate_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.down_proj.weight', identity)], transpose),
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.up_proj.weight', identity)], transpose),
-            WeightInfo(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.up_proj.weight', identity) for expert_id in selected_experts] + \
-                       [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.gate_proj.weight', identity) for expert_id in selected_experts], stack_moe_w1),
-            WeightInfo(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.' + str(expert_id) + '.down_proj.weight', identity) \
-                                  for expert_id in selected_experts], stack_),
-            WeightInfo(W.shared_expert_gate, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert_gate.weight', identity)], transpose),
+            MoeWithSharedWeight(sub_weights = [
+                MoeAtomicWeight(W.moe_gate, [CkptWeightInfo('model.layers.{i}.mlp.gate.weight', identity)], 
+                                transpose, config=moe_config),
+                FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.gate_proj.weight', identity)], 
+                                transpose, config=ffn_config),
+                FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.down_proj.weight', identity)], 
+                                transpose, config=ffn_config),
+                FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert.up_proj.weight', identity)], 
+                                transpose, config=ffn_config),
+                MoeAtomicWeight(W.moe_w1, [CkptWeightInfo('model.layers.{i}.mlp.experts.{expert_id}.up_proj.weight', identity)] + \
+                        [CkptWeightInfo('model.layers.{i}.mlp.experts.{expert_id}.gate_proj.weight', identity)], 
+                        stack_moe_w1, config=moe_config),
+                MoeAtomicWeight(W.moe_w2, [CkptWeightInfo('model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight', identity)], 
+                                stack_, config=moe_config),
+                MoeAtomicWeight(W.shared_expert_gate, [CkptWeightInfo('model.layers.{i}.mlp.shared_expert_gate.weight', identity)], 
+                                transpose, config=moe_config)],
+                config=moe_config)
         ]
 
 class Qwen2Moe(QWenV2):
@@ -139,19 +80,5 @@ class Qwen2Moe(QWenV2):
     def get_weight_cls():
         return QWenV2MoeWeight
 
-    def create_moe_weight_info(self):
-        gate = CkptWeightInfo("model.layers.{}.mlp.experts.{}.gate_proj.weight", identity)
-        up = CkptWeightInfo("model.layers.{}.mlp.experts.{}.up_proj.weight", identity)
-        down = CkptWeightInfo("model.layers.{}.mlp.experts.{}.down_proj.weight", identity)
-
-        if self.config.quant_algo.isFp8():
-            gate_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.gate_proj.weight_scale_inv', identity)
-            up_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.up_proj.weight_scale_inv', identity)
-            down_s = CkptWeightInfo('model.layers.{}.mlp.experts.{}.down_proj.weight_scale_inv', identity)
-            return MoeWeightInfo(gate, up, down, True, gate_s, up_s, down_s)
-
-        return MoeWeightInfo(gate, up, down)
-
 
 register_model('qwen_2_moe', Qwen2Moe, ["Qwen2MoeForCausalLM"])
-

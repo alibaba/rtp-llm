@@ -1,8 +1,11 @@
 from typing import Any, Dict, List
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.model_weight import W, WeightInfo, \
-    ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, transpose
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose
+from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from maga_transformer.models.base_model import BaseModel
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 from maga_transformer.model_factory_register import register_model
@@ -26,80 +29,85 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
 
     def _get_weight_info(self):
         weights = [
-            WeightInfo(W.embedding,
+            AtomicWeight(W.embedding,
                        [CkptWeightInfo('model.embed_tokens.weight', identity)],
                        identity),
-            # WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.final_ln_gamma,
+            # AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
+            AtomicWeight(W.final_ln_gamma,
                        [CkptWeightInfo('model.norm.weight', identity)],
                        identity),
-            WeightInfo(W.final_ln_beta,
+            AtomicWeight(W.final_ln_beta,
                        [CkptWeightInfo('model.norm.bias', identity)],
                        identity),
         ]
+        
+        attn_config = self.attn_config
+        ffn_config = self.ffn_config
+        layer_weights = []
+        for _ in range(self._num_layers):
+            layer_weight = [
+                AtomicWeight(W.pre_ln_beta, [
+                    CkptWeightInfo('model.layers.{i}.input_layernorm.bias',
+                                identity)
+                ], identity),
+                AtomicWeight(W.pre_ln_gamma, [
+                    CkptWeightInfo('model.layers.{i}.input_layernorm.weight',
+                                identity)
+                ], identity),
+                AttnAtomicWeight(W.attn_qkv_w, [
+                    CkptWeightInfo("model.layers.{i}.self_attn.q_proj.weight",
+                                identity),
+                    CkptWeightInfo("model.layers.{i}.self_attn.k_proj.weight",
+                                identity),
+                    CkptWeightInfo("model.layers.{i}.self_attn.v_proj.weight",
+                                identity)
+                ], functools.partial(merge_qkv_hf), config=attn_config),
+                AttnAtomicWeight(W.attn_qkv_b, [
+                    CkptWeightInfo("model.layers.{i}.self_attn.q_proj.bias",
+                                identity),
+                    CkptWeightInfo("model.layers.{i}.self_attn.k_proj.bias",
+                                identity),
+                    CkptWeightInfo("model.layers.{i}.self_attn.v_proj.bias",
+                                identity)
+                ], functools.partial(merge_qkv_b), config=attn_config),
+                AttnAtomicWeight(W.attn_o_w, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight',
+                                identity)
+                ], transpose, config=attn_config),
+                AttnAtomicWeight(W.attn_o_b, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.o_proj.bias',
+                                identity)
+                ], identity, config=attn_config),
+                FfnWeight(sub_weights=[
+                    FfnAtomicWeight(
+                        W.ffn_w3,
+                        [CkptWeightInfo('model.layers.{i}.mlp.c_fc.weight', identity)],
+                        transpose, config=ffn_config),
+                    FfnAtomicWeight(
+                        W.ffn_b3,
+                        [CkptWeightInfo('model.layers.{i}.mlp.c_fc.bias', identity)],
+                        identity, config=ffn_config),
+                    FfnAtomicWeight(W.ffn_w2, [
+                        CkptWeightInfo('model.layers.{i}.mlp.c_proj.weight', identity)
+                    ], transpose, config=ffn_config),
+                    FfnAtomicWeight(
+                        W.ffn_b2,
+                        [CkptWeightInfo('model.layers.{i}.mlp.c_proj.bias', identity)],
+                        identity, config=ffn_config)], 
+                          config=ffn_config),
+                AtomicWeight(W.post_ln_beta, [
+                    CkptWeightInfo(
+                        'model.layers.{i}.post_attention_layernorm.bias', identity)
+                ], identity),
+                AtomicWeight(W.post_ln_gamma, [
+                    CkptWeightInfo(
+                        'model.layers.{i}.post_attention_layernorm.weight',
+                        identity)
+                ], identity),
+            ]
+            layer_weights.append(layer_weight)
 
-        layer_weights = [
-            WeightInfo(W.pre_ln_beta, [
-                CkptWeightInfo('model.layers.{i}.input_layernorm.bias',
-                               identity)
-            ], identity),
-            WeightInfo(W.pre_ln_gamma, [
-                CkptWeightInfo('model.layers.{i}.input_layernorm.weight',
-                               identity)
-            ], identity),
-            WeightInfo(W.attn_qkv_w, [
-                CkptWeightInfo("model.layers.{i}.self_attn.q_proj.weight",
-                               identity),
-                CkptWeightInfo("model.layers.{i}.self_attn.k_proj.weight",
-                               identity),
-                CkptWeightInfo("model.layers.{i}.self_attn.v_proj.weight",
-                               identity)
-            ], functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_qkv_b, [
-                CkptWeightInfo("model.layers.{i}.self_attn.q_proj.bias",
-                               identity),
-                CkptWeightInfo("model.layers.{i}.self_attn.k_proj.bias",
-                               identity),
-                CkptWeightInfo("model.layers.{i}.self_attn.v_proj.bias",
-                               identity)
-            ], functools.partial(merge_qkv_b)),
-            WeightInfo(W.attn_o_w, [
-                CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight',
-                               identity)
-            ], transpose),
-            WeightInfo(W.attn_o_b, [
-                CkptWeightInfo('model.layers.{i}.self_attn.o_proj.bias',
-                               identity)
-            ], identity),
-            WeightInfo(
-                W.ffn_w3,
-                [CkptWeightInfo('model.layers.{i}.mlp.c_fc.weight', identity)],
-                transpose),
-            WeightInfo(
-                W.ffn_b3,
-                [CkptWeightInfo('model.layers.{i}.mlp.c_fc.bias', identity)],
-                identity),
-            WeightInfo(W.ffn_w2, [
-                CkptWeightInfo('model.layers.{i}.mlp.c_proj.weight', identity)
-            ], transpose),
-            WeightInfo(
-                W.ffn_b2,
-                [CkptWeightInfo('model.layers.{i}.mlp.c_proj.bias', identity)],
-                identity),
-            WeightInfo(W.post_ln_beta, [
-                CkptWeightInfo(
-                    'model.layers.{i}.post_attention_layernorm.bias', identity)
-            ], identity),
-            WeightInfo(W.post_ln_gamma, [
-                CkptWeightInfo(
-                    'model.layers.{i}.post_attention_layernorm.weight',
-                    identity)
-            ], identity),
-        ]
-
-        return ModelWeightInfo(layer_weights=layer_weights,
-                               weights=weights,
-                               tp_strategy=self._get_gpt_style_tp_strategy())
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 StarcoderTokenizer = GPT2TokenizerFast

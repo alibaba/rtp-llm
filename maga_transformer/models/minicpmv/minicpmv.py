@@ -1,13 +1,13 @@
 import json
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List
 
 import torch
 from PIL import Image
 from transformers import AutoTokenizer, AutoProcessor
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
@@ -17,7 +17,6 @@ from maga_transformer.models.minicpmv.modeling_navit_siglip import SiglipVisionT
 from maga_transformer.models.minicpmv.resampler import Resampler
 from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 from maga_transformer.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_bytes_io_from_url
-from maga_transformer.utils.model_weight import ModelWeightInfo
 
 try:
     from decord import VideoReader, cpu

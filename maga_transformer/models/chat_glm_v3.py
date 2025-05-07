@@ -1,5 +1,3 @@
-from typing import List, Any, Dict
-import torch
 
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.models.chat_glm_v2 import ChatGlmV2

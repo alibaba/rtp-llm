@@ -1,5 +1,4 @@
 import os
-from typing import List, Tuple, Union
 
 import torch
 
@@ -13,7 +12,6 @@ from maga_transformer.models.chat_glm_v4_vision_weight import (
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
-from maga_transformer.utils.multimodal_util import MMUrlType
 
 
 class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):

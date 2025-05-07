@@ -1,14 +1,10 @@
-import torch
 from typing import List, Any, Tuple
-from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
-from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
+from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights, BaseMultiModalWeightInfo
 from maga_transformer.models.qwen_v2_audio.processor import Processor
-from maga_transformer.utils.model_weight import ModelWeightInfo
 
 class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):

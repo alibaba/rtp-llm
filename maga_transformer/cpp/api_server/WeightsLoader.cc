@@ -12,7 +12,7 @@ WeightsLoader::loadLoraWeights(const std::string& adapter_name, const std::strin
     std::unique_ptr<rtp_llm::lora::loraLayerWeightsMap> lora_a_weights, lora_b_weights;
     {
         py::gil_scoped_acquire acquire;
-        auto res = model_weights_loader_.attr("load_lora_weights_from_scratch")(
+        auto res = model_weights_loader_.attr("load_lora_weights")(
             py::str(adapter_name), py::str(lora_path), py::str("cpu"));
         auto py_lora_a_weights = res.attr("lora_a_weights");
         auto py_lora_b_weights = res.attr("lora_b_weights");

@@ -112,7 +112,10 @@ class GptInitModelParameters:
         "is_ft_style_weight",
         "vit_run_batch",
         "phy2log",
-        "is_mtp"
+        "is_mtp",
+        "num_nodes",
+        "use_qk_norm",
+        "enable_merge_w13"
     }
 
     # copy from maga_transformer/ops/libth_transformer.pyi for python intelligence
@@ -245,6 +248,7 @@ class GptInitModelParameters:
     special_tokens: SpecialTokens
     tokenizer_path: str
     tp_nccl_port: int
+    num_nodes: int
     tp_rank: int
     tp_size: int
     type_vocab_size: int
@@ -329,12 +333,16 @@ class GptInitModelParameters:
 
         self.world_size = g_parallel_info.world_size
         self.phy2log: List[List[int]] = []
-        self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
-        self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]
+
+        self.enable_eplb = self.eplb_mode != EplbMode.NONE
+        
         self.is_mtp = False
+        self.use_qk_norm = False
+        self.enable_merge_w13 = False
 
         for k, v in kwargs.items():
             setattr(self, k, v)
+
 
     # read and write directly through GptInitModelParameters.k
     def __getattr__(self, k: str):
@@ -458,7 +466,7 @@ class GptInitModelParameters:
             logging.info(f"read weight style from: {meta_file}")
             with open(meta_file, 'r') as reader:
                 meta_json = json.loads(reader.read())
-                self.is_ft_style_weight = meta_json.get("is_ft_style_weight", None)
+                self.is_ft_style_weight = meta_json.get("is_ft_style_weight", False)
 
     def update_common(self,
                       ckpt_path: str,
@@ -473,7 +481,8 @@ class GptInitModelParameters:
                       ref_module: Optional[torch.nn.Module] = None,
                       ref_dict: Dict[str, torch.Tensor] = {},
                       parallel_info: ParallelInfo=g_parallel_info,
-                      config_mode: ConfigMode = ConfigMode.ComplexMode):
+                      config_mode: ConfigMode = ConfigMode.ComplexMode,
+                      gang_info: Optional[GangInfo] = None):
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
         self.ep_size = parallel_info.ep_size
@@ -484,6 +493,22 @@ class GptInitModelParameters:
         self.ffn_tp_size = parallel_info.ffn_tp_size
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
+
+        self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
+        self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]
+
+        self.phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.expert_num
+        self.enable_merge_w13 = os.getenv('ENABLE_MERGE_W13', '0').lower() == '1'
+        logging.info(f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}")
+        
+        if gang_info is not None:
+            self.num_nodes = gang_info.num_nodes
+        else:
+            try:
+                self.num_nodes = get_gang_info().num_nodes
+            except:
+                self.num_nodes = 1
+            
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos

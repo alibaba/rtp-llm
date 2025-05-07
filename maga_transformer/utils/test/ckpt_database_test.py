@@ -1,7 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from maga_transformer.utils.database import CkptDatabase, MegatronUtil
+from maga_transformer.utils.database import CkptDatabase
 
 
 class CkptDataBaseTest(unittest.TestCase):
@@ -54,51 +54,6 @@ class CkptDataBaseTest(unittest.TestCase):
         self.assertEqual(path + '/test.safetensors', database.PretrainFileList[0].file_name)
         self.assertEqual(28, len(database.PretrainFileList[0].get_tensor_names()))
 
-class MegatronCheckpointingTest(unittest.TestCase):
-
-    @staticmethod
-    def _testdata_path():
-        return os.path.join(os.getcwd(), 'maga_transformer/utils/test/testdata/megatron_checkpointing_test/')
-
-    def test_is_megatron_ckpt(self):    
-        ckpt_path = os.path.join(self._testdata_path(), "hf_bin")
-        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
-        ckpt_path = os.path.join(self._testdata_path(), "hf_pt")
-        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
-        ckpt_path = os.path.join(self._testdata_path(), "hf_pt")
-        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
-        ckpt_path = os.path.join(self._testdata_path(), "deep_m6")
-        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path))) 
-        ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx")
-        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))         
-        ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx_xx")
-        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))    
-        ckpt_path = os.path.join(self._testdata_path(), "m6")
-        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path))) 
-        
-
-    def test_get_megatron_ckpt_files(self):    
-        ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx")
-        CkptLoader = CkptDatabase(None)
-        ckpts = CkptLoader.get_megatron_ckpt_files(Path(ckpt_path))
-        expect_files = ['dm_rank_xx/iter_0008000/mp_rank_00/model_rng.pt', 'dm_rank_xx/iter_0008000/mp_rank_01/model_rng.pt']
-        expect_files: list[str] = [str(Path(os.path.join(self._testdata_path(), x)).resolve()) for x in expect_files]
-        self.assertEqual(expect_files, [f.file_name for f in ckpts], f"{expect_files}, {[f.file_name for f in ckpts]}" )
-
-        ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx_xx")
-        ckpts = CkptLoader.get_megatron_ckpt_files(Path(ckpt_path))
-        expect_files = ['dm_rank_xx_xx/iter_0008000/mp_rank_00_000/model_rng.pt', 
-                                   'dm_rank_xx_xx/iter_0008000/mp_rank_01_000/model_rng.pt', 
-                                   'dm_rank_xx_xx/iter_0008000/mp_rank_00_001/model_rng.pt', 
-                                   'dm_rank_xx_xx/iter_0008000/mp_rank_01_001/model_rng.pt']
-        expect_files = [str(Path(os.path.join(self._testdata_path(), x)).resolve()) for x in expect_files]
-        self.assertEqual(expect_files, [f.file_name for f in ckpts], f"{expect_files} vs {[f.file_name for f in ckpts]}" )
-
-        ckpt_path = os.path.join(self._testdata_path(), "m6")
-        ckpts = CkptLoader.get_megatron_ckpt_files(Path(ckpt_path))
-        expect_files = ['m6/global_step200/global_step200/mp_rank_00_model_states.pt']
-        expect_files = [str(Path(os.path.join(self._testdata_path(), x)).resolve()) for x in expect_files]
-        self.assertEqual(expect_files, [f.file_name for f in ckpts], f"{expect_files} vs {[f.file_name for f in ckpts]}" )
 
 class LoraTest(unittest.TestCase):
 
