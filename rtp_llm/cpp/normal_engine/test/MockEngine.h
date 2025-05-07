@@ -40,6 +40,7 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
     params.kv_cache_data_type_ = config.kv_cache_data_type;
+    params.special_tokens_.eos_token_id_ = -1; // never eos
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;
@@ -50,14 +51,15 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     const rtp_llm::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;
-    
+
     const auto tensor = torch::ones({inter_size * inter_size}, torch::kHalf) * 0.001;
     auto buf_host = torchTensor2Buffer(tensor);
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
     device->copy({*data, *buf_host});
-    
+
     auto word_embeddings =
-        make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
+        make_unique<const Buffer>(mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data(),
+                                  [data](Buffer *){});
     auto lm_head =
         make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
     std::unordered_map<std::string, rtp_llm::ConstBufferPtr> global_weights;
@@ -118,9 +120,9 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
         layer_weights.push_back(std::move(weights));
     }
     auto convert = rtp_llm::WeightsConverter(false);
-    rtp_llm::EngineInitParams rtp_llm_params(params,
-                                             std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
-                                                                                 std::make_unique<ConstBufferPtrMap>(global_weights))));
+    auto weights = convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
+                                            std::make_unique<ConstBufferPtrMap>(global_weights));
+    rtp_llm::EngineInitParams rtp_llm_params(params, std::move(*weights));
     return rtp_llm_params;
 }
 

@@ -47,7 +47,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 1);
 
         auto output2 = stream->nextOutput();
-        ASSERT_TRUE(output2.ok());
+        ASSERT_TRUE(output2.ok()) << output2.status().ToString();
         ASSERT_EQ(output2.value().generate_outputs[0].aux_info.output_len, 3);
         ASSERT_EQ(output2.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output2.value().generate_outputs[0].aux_info.iter_count, 2);
@@ -70,7 +70,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output = stream->nextOutput();
-        ASSERT_TRUE(output.ok());
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 3);

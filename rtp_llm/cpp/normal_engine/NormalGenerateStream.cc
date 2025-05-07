@@ -16,7 +16,7 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
     }
     if (generate_outputs_queue_.isEmpty()) {
         if (finished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "");
+            return ErrorInfo(ErrorCode::FINISHED, "finished");
         } else {
             return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
         }
