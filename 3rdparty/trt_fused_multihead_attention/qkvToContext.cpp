@@ -23,7 +23,7 @@
 #include <cassert>
 #include <cstring>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 union __half2_uint32_t_union {
     half2    fp162;
@@ -458,6 +458,6 @@ int FusedMHARunnerFP16v2::getSFromMaxSeqLen(const int max_seq_len, const bool wi
     return pimpl->getSFromMaxSeqLen(max_seq_len, withRelativePositionBias);
 }
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm
 
 #endif

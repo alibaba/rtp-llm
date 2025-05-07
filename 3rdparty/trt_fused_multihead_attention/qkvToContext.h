@@ -26,9 +26,9 @@
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
 
-namespace fastertransformer
+namespace rtp_llm
 {
 
 class MHARunner
@@ -145,6 +145,6 @@ private:
     mhaImpl* pimpl;
 };
 
-} // namespace fastertransformer
+} // namespace rtp_llm
 
 #endif

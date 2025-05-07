@@ -13,7 +13,7 @@ cc_library(
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//src/fastertransformer/cuda:cuda_utils",
+        "//maga_transformer/cpp/cuda:cuda_utils",
         "//3rdparty:cuda_driver",
     ],
     copts = copts(),

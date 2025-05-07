@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-namespace fastertransformer
+namespace rtp_llm
 {
 unsigned char fused_multihead_attention_v2_int8_192_64_kernel_cubin[] = {
   0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x33, 0x07, 0x00, 0x00, 0x00,

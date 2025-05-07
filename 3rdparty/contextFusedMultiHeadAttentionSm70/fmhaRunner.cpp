@@ -81,9 +81,9 @@ public:
         , mHeadSize(headSize)
         , mQScaling(qScaling)
     {
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             (sm == kSM_70), "Unsupported architecture");
-        FT_CHECK_WITH_INFO((mDataType == DATA_TYPE_FP16 || mDataType == DATA_TYPE_BF16), "Unsupported data type");
+        RTP_LLM_CHECK_WITH_INFO((mDataType == DATA_TYPE_FP16 || mDataType == DATA_TYPE_BF16), "Unsupported data type");
 
         xmmaKernel = getXMMAKernelsV2(mDataType, sm);
 
@@ -148,7 +148,7 @@ public:
         mLaunchParams.set_default_kernel_selection_params();
 
         // Next power of 2 head size.
-        FT_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
+        RTP_LLM_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
         mLaunchParams.padded_d = (mHeadSize & (mHeadSize - 1)) == 0 ? mHeadSize : pow(2, int(log2(mHeadSize)) + 1);
 
         const bool isSm70 = (sm == kSM_70);
@@ -173,7 +173,7 @@ public:
         // Sliding_window_causal mask.
         if (s > sliding_window_size && mLaunchParams.attention_mask_type == ContextAttentionMaskTypeSm70::CAUSAL)
         {
-            FT_CHECK_WITH_INFO(!isSm70, "Sliding window attention is not supported for FMHA on Volta");
+            RTP_LLM_CHECK_WITH_INFO(!isSm70, "Sliding window attention is not supported for FMHA on Volta");
             mLaunchParams.attention_mask_type = ContextAttentionMaskTypeSm70::SLIDING_WINDOW_CAUSAL;
         }
 
@@ -354,7 +354,7 @@ private:
 
 FusedMHARunnerV2Sm70::FusedMHARunnerV2Sm70(
     const Data_type data_type, const int numHeads, const int headSize, const float qScaling)
-    : pimpl(new mhaImpl(data_type, numHeads, headSize, qScaling, fastertransformer::get_sm()))
+    : pimpl(new mhaImpl(data_type, numHeads, headSize, qScaling, rtp_llm::get_sm()))
 {
 }
 

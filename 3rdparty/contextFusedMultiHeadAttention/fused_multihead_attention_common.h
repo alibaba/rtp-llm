@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "src/fastertransformer/kernels/kv_cache/kv_cache_utils.h"
+#include "maga_transformer/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "tmaDescriptor.h"
 #include <limits.h>
 #include <stdint.h>
@@ -186,7 +186,7 @@ struct Fused_multihead_attention_paged_kv_params_v2
     // The Q matrices.
     void const* q_ptr;
     // Paged KV Cache buffer.
-    fastertransformer::KVBlockArrayForContextFMHA paged_kv_cache;
+    rtp_llm::KVBlockArrayForContextFMHA paged_kv_cache;
     // The O matrix (output).
     void* o_ptr;
     // The packed mask for random mask.

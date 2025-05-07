@@ -262,7 +262,7 @@ public:
         bool forceUnroll = useForceUnroll(params, launch_params);
         auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
         // Add debug info when kernels are not found.
-        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
+        RTP_LLM_CHECK_WITH_INFO(findIter != mFunctions.end(),
             "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d %d %d) !",
             launch_params.kernel_s, params.d, launch_params.interleaved, forceUnroll, launch_params.force_fp32_acc,
             launch_params.flash_attention, launch_params.warp_specialization, !launch_params.useKernelWithoutAlibi,
@@ -334,7 +334,7 @@ public:
         else
         { // forceunroll = true for flash attention kernels
             int unroll = kernelMeta.mS / kernelMeta.mUnrollStep;
-            FT_CHECK_WITH_INFO(kernelMeta.mS == kernelMeta.mUnrollStep * unroll, "Wrong launching sequence length");
+            RTP_LLM_CHECK_WITH_INFO(kernelMeta.mS == kernelMeta.mUnrollStep * unroll, "Wrong launching sequence length");
             // flash attention supports any sequence length, so we runtime s here
             if (launch_params.flash_attention)
             {
@@ -401,7 +401,7 @@ private:
         Launch_params const& launch_params) const
     {
         auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
-        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
+        RTP_LLM_CHECK_WITH_INFO(findIter != mFunctions.end(),
             "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d) !", launch_params.kernel_s,
             params.d, launch_params.interleaved, launch_params.force_fp32_acc, launch_params.flash_attention,
             launch_params.warp_specialization, !launch_params.useKernelWithoutAlibi,

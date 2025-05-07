@@ -35,5 +35,5 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    visibility = ["//src:__subpackages__"],
+    visibility = ["//visibility:public"],
 )

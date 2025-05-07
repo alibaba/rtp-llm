@@ -20,9 +20,9 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
-#include "src/fastertransformer/cuda/reduce_kernel_utils.cuh"
+#include "maga_transformer/cpp/cuda/reduce_kernel_utils.cuh"
 #include "beamSearchKernels.h"
-using namespace fastertransformer;
+using namespace rtp_llm;
 namespace tensorrt_llm
 {
 namespace kernels
@@ -435,7 +435,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     // One ThreadBlock must at least have share memory of `sizeof(T) * nV / nMaxVocabPartForStage1FastKernel` bytes
     int const static_smem = attr.sharedSizeBytes;
     int const max_dyn_smem_per_block = max_smem_per_block - static_smem;
-    FT_CHECK_WITH_INFO(sizeof(T) * nV <= max_dyn_smem_per_block * nMaxVocabPartForStage1FastKernel,
+    RTP_LLM_CHECK_WITH_INFO(sizeof(T) * nV <= max_dyn_smem_per_block * nMaxVocabPartForStage1FastKernel,
         "Vocab size is too large for split-k TopK beam search fast path.");
     // Find the maximum of ThreadBlock (maximum of nVPart, minimum of smem),
     // satisfying nVPart <= nMaxVocabPartForStage1FastKernel && dyn_smem_size * nVPart >= sizeof(T) * nV

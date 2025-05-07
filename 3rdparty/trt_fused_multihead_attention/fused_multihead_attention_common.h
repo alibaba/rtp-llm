@@ -17,7 +17,7 @@
 #pragma once
 
 #include <stdint.h>
-namespace fastertransformer
+namespace rtp_llm
 {
 enum Data_type
 {
@@ -41,4 +41,4 @@ constexpr int32_t kSM_80 = 80;
 constexpr int32_t kSM_86 = 86;
 constexpr int32_t kSM_89 = 89;
 constexpr int32_t kSM_90 = 90;
-} // namespace fastertransformer
+} // namespace rtp_llm

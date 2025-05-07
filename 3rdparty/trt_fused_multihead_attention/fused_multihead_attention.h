@@ -25,7 +25,7 @@
 #include <stdint.h>
 #include <unordered_map>
 #include <vector>
-namespace fastertransformer {
+namespace rtp_llm {
 static inline size_t get_size_in_bytes(size_t n, Data_type dtype)
 {
     switch (dtype) {
@@ -464,4 +464,4 @@ inline const FusedMultiHeadAttentionXMMAKernel* getXMMAKernels(Data_type type, u
         sMhaKernelMetaInfos, sizeof(sMhaKernelMetaInfos) / sizeof(sMhaKernelMetaInfos[0]), type, sm);
 }
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm

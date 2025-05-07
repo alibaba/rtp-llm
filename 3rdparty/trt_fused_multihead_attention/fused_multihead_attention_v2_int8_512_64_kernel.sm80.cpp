@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 */
-namespace fastertransformer
+namespace rtp_llm
 {
 unsigned char cubin_fmha_v2_int8_512_64_sm80_cu_cubin[] = {
   0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x33, 0x07, 0x00, 0x00, 0x00,

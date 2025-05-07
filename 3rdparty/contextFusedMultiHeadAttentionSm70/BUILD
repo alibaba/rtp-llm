@@ -15,7 +15,7 @@ cc_library(
         ":trt_sm70_fmha_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_common_define_header",
         "//3rdparty:cuda_driver",
-        "//src/fastertransformer/kernels:kernels",
+        "//maga_transformer/cpp/kernels:kernels",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

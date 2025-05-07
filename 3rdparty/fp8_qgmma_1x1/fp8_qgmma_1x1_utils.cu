@@ -38,7 +38,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
 #include "fp8_qgmma_1x1_utils.h"
 
 
-namespace fastertransformer
+namespace rtp_llm
 {
     void invokeSwizzleQgmmaWeights(int C, int K, uint8_t *h_B, uint8_t *d_B, uint16_t *h_bias, uint16_t *d_bias)
     {
@@ -152,4 +152,4 @@ namespace fastertransformer
 
     template void qgmma1x1Launcher::getWorkSpaceSize<true, true>(int n,
                                                                  size_t &workspace_size);
-} // namespace fastertransformer
+} // namespace rtp_llm

@@ -16,7 +16,7 @@
 
 #include "fmhaRunner.h"
 #include "fused_multihead_attention_v2.h"
-#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
 
 #include <cassert>
 #include <cstring>
@@ -91,12 +91,12 @@ public:
         , mQKTanhScale(qkTanhScale)
         , sm(sm_)
     {
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             (sm == kSM_70 || sm == kSM_80 || sm == kSM_86 || sm == kSM_89 || sm == kSM_90), "Unsupported architecture");
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             (mDataType == DATA_TYPE_FP16 || mDataType == DATA_TYPE_BF16 || mDataType == DATA_TYPE_E4M3),
             "Unsupported data type");
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             mHeadSize == 128 || !mQKTanhScale, "FMHA only supports head_size = 128 with QK Tanh Scale currently.");
 
         xmmaKernel = getXMMAKernelsV2(mDataType, sm);
@@ -109,7 +109,7 @@ public:
         cudaGetDevice(&device_id);
         cudaDeviceGetAttribute(&mLaunchParams.multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
         cudaDeviceGetAttribute(&mLaunchParams.device_l2_cache_size, cudaDevAttrL2CacheSize, device_id);
-        auto const [free_memory, total_memory] = fastertransformer::getDeviceMemoryInfo(false);
+        auto const [free_memory, total_memory] = rtp_llm::getDeviceMemoryInfo(false);
         mLaunchParams.total_device_memory = total_memory;
     }
 
@@ -185,7 +185,7 @@ public:
         mLaunchParams.enableQKTanhScale = mQKTanhScale > 0.f;
 
         // Next power of 2 head size.
-        FT_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
+        RTP_LLM_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
         mLaunchParams.padded_d = (mHeadSize & (mHeadSize - 1)) == 0 ? mHeadSize : pow(2, int(log2(mHeadSize)) + 1);
 
         bool const isSm70 = (sm == kSM_70);
@@ -280,13 +280,13 @@ public:
         // Grok tanh scale.
         // FIXME: mQKTanhScale value (30.f) is fixed in fmha kernels.
         mLaunchParams.enableQKTanhScale = mQKTanhScale > 0.f;
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             !mLaunchParams.enableQKTanhScale, "Paged KV FMHA doesn't support qk_tanh_scale operation.");
 
         // Needed by TMA descriptors.
         mLaunchParams.blocks_per_context_sequence = blocks_per_context_sequence;
         // Next power of 2 head size.
-        FT_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
+        RTP_LLM_CHECK_WITH_INFO(mHeadSize > 0, "Head size should be greater than 0.");
         mLaunchParams.padded_d = (mHeadSize & (mHeadSize - 1)) == 0 ? mHeadSize : pow(2, int(log2(mHeadSize)) + 1);
 
         // Hopper: fallback to original fmha_v2 when head_size <= 64 and seq_len <= 256
@@ -565,7 +565,7 @@ public:
         box_size_kv[1] = std::min(tokens_per_block, kv_step);
         box_size_kv[0] = mLaunchParams.padded_d / d_groups;
 
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             tokens_per_block % 2 == 0, "FMHA with paged kv cache needs tokens_per_block to be power of 2 !");
         mPagedKVParams.blocks_per_tma_load = std::max(1, int32_t(kv_step / tokens_per_block));
         mPagedKVParams.blocks_per_tma_load_log2 = log2(mPagedKVParams.blocks_per_tma_load);
@@ -577,7 +577,7 @@ public:
         tensor_stride_kv[2] = tensor_size_kv[2] * tensor_stride_kv[1];
 
         // 2 stands for k, and v blocks.
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             mPagedKVParams.paged_kv_cache.mMaxBlocksPerSeq == mLaunchParams.blocks_per_context_sequence,
             "Mismatching blocks_per_sequence for the paged kv FMHA.");
 
@@ -597,7 +597,7 @@ public:
 
         // Paged KV Cache.
         mPagedKVParams.h_kv = num_kv_heads;
-        FT_CHECK_WITH_INFO(mNumHeads % num_kv_heads == 0, "number of Query heads should be multiple of KV heads !");
+        RTP_LLM_CHECK_WITH_INFO(mNumHeads % num_kv_heads == 0, "number of Query heads should be multiple of KV heads !");
         mPagedKVParams.h_q_per_kv = mNumHeads / num_kv_heads;
         mPagedKVParams.is_s_padded = is_s_padded;
 
@@ -631,7 +631,7 @@ public:
         xmmaKernel->run(mParams, mLaunchParams, stream);
     }
 
-    void run_paged_kv(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
+    void run_paged_kv(void const* qPtr, rtp_llm::KVBlockArray const& pagedKVCache,
         void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
         void* outputPtr, cudaStream_t stream)
     {
@@ -716,7 +716,7 @@ private:
 FusedMHARunnerV2::FusedMHARunnerV2(const Data_type data_type, bool const pagedKVFMHA, int const numHeads,
     int const headSize, float const qScaling, float const qkTanhScale)
     : pimpl(new mhaImpl(
-        data_type, pagedKVFMHA, numHeads, headSize, qScaling, qkTanhScale, fastertransformer::get_sm()))
+        data_type, pagedKVFMHA, numHeads, headSize, qScaling, qkTanhScale, rtp_llm::get_sm()))
 {
 }
 
@@ -748,7 +748,7 @@ void FusedMHARunnerV2::setup_flags(
     pimpl->setup_flags(force_fp32_acc, is_s_padded, causal_mask, num_kv_heads);
 }
 
-void FusedMHARunnerV2::run(void const* qPtr, fastertransformer::KVBlockArray const& pagedKVCache,
+void FusedMHARunnerV2::run(void const* qPtr, rtp_llm::KVBlockArray const& pagedKVCache,
     void const* cuQSeqlenPtr, void const* cuKVSeqlenPtr, uint32_t* tileCounterPtr, float const* scaleBmm2Ptr,
     void* outputPtr, cudaStream_t stream)
 {

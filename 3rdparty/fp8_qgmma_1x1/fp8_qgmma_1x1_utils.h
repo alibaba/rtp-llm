@@ -19,7 +19,7 @@
 #include <unordered_map>
 #include <memory>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 void invokeSwizzleQgmmaWeights(int C, int K, uint8_t* h_B, uint8_t* d_B, uint16_t* h_bias, uint16_t* d_bias);
 
@@ -79,4 +79,4 @@ private:
     std::unordered_map<qgmmaDimsKey, std::unique_ptr<Conv1x1Interface>, hashQgmmaDimsKey> launcher_map_;
 };
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm

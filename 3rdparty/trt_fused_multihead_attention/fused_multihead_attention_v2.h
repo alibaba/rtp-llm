@@ -20,7 +20,7 @@
 #include <assert.h>
 #include <stdint.h>
 
-namespace fastertransformer {
+namespace rtp_llm {
 struct Fused_multihead_attention_params_v2 {
     // The QKV matrices.
     void* qkv_ptr;
@@ -5282,7 +5282,7 @@ public:
     {
         // assert(params.d == 64 || params.d == 32);
         if (params.interleaved) {
-            assert(mDataType == fastertransformer::DATA_TYPE_INT8);
+            assert(mDataType == rtp_llm::DATA_TYPE_INT8);
         }
 
         bool forceUnroll = params.force_unroll;
@@ -5294,28 +5294,28 @@ public:
                 int          mD;
                 int          mMaxBatch;
             } unrollList[] = {
-                {kSM_75, fastertransformer::DATA_TYPE_FP16, 128, 32, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_FP16, 128, 40, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_FP16, 128, 64, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_FP16, 256, 64, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_FP16, 384, 64, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_INT8, 128, 64, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_INT8, 192, 64, 2},
-                {kSM_75, fastertransformer::DATA_TYPE_INT8, 256, 64, 1},
-                {kSM_75, fastertransformer::DATA_TYPE_INT8, 384, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_FP16, 128, 32, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_FP16, 128, 40, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_FP16, 128, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_FP16, 256, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_FP16, 384, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_INT8, 128, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_INT8, 192, 64, 2},
+                {kSM_75, rtp_llm::DATA_TYPE_INT8, 256, 64, 1},
+                {kSM_75, rtp_llm::DATA_TYPE_INT8, 384, 64, 1},
 #if CUDA_VERSION >= 11000
-                {kSM_80, fastertransformer::DATA_TYPE_INT8, 192, 64, 16},
-                {kSM_80, fastertransformer::DATA_TYPE_INT8, 256, 64, 8},
-                {kSM_80, fastertransformer::DATA_TYPE_INT8, 384, 64, 8},
+                {kSM_80, rtp_llm::DATA_TYPE_INT8, 192, 64, 16},
+                {kSM_80, rtp_llm::DATA_TYPE_INT8, 256, 64, 8},
+                {kSM_80, rtp_llm::DATA_TYPE_INT8, 384, 64, 8},
 
-                {kSM_86, fastertransformer::DATA_TYPE_FP16, 128, 32, 4},
-                {kSM_86, fastertransformer::DATA_TYPE_FP16, 128, 40, 4},
-                {kSM_86, fastertransformer::DATA_TYPE_FP16, 128, 64, 4},
-                {kSM_86, fastertransformer::DATA_TYPE_FP16, 256, 64, 4},
-                {kSM_86, fastertransformer::DATA_TYPE_INT8, 128, 64, 4},
-                {kSM_86, fastertransformer::DATA_TYPE_INT8, 192, 64, 16},
-                {kSM_86, fastertransformer::DATA_TYPE_INT8, 256, 64, 8},
-                {kSM_86, fastertransformer::DATA_TYPE_INT8, 384, 64, 8},
+                {kSM_86, rtp_llm::DATA_TYPE_FP16, 128, 32, 4},
+                {kSM_86, rtp_llm::DATA_TYPE_FP16, 128, 40, 4},
+                {kSM_86, rtp_llm::DATA_TYPE_FP16, 128, 64, 4},
+                {kSM_86, rtp_llm::DATA_TYPE_FP16, 256, 64, 4},
+                {kSM_86, rtp_llm::DATA_TYPE_INT8, 128, 64, 4},
+                {kSM_86, rtp_llm::DATA_TYPE_INT8, 192, 64, 16},
+                {kSM_86, rtp_llm::DATA_TYPE_INT8, 256, 64, 8},
+                {kSM_86, rtp_llm::DATA_TYPE_INT8, 384, 64, 8},
 #endif
             };
             for (unsigned int i = 0u; i < sizeof(unrollList) / sizeof(unrollList[0]); ++i) {
@@ -5379,10 +5379,10 @@ public:
 
 using FusedMHAKernelFactoryV2 = TFusedMHAKernelFactory<FusedMultiHeadAttentionXMMAKernelV2>;
 
-inline const FusedMultiHeadAttentionXMMAKernelV2* getXMMAKernelsV2(Data_type type, unsigned int sm)
+inline const FusedMultiHeadAttentionXMMAKernelV2* getXMMAKernelsV2(rtp_llm::Data_type type, unsigned int sm)
 {
     return FusedMHAKernelFactoryV2::Get().getXMMAKernels(
         sMhaKernelMetaInfosV2, sizeof(sMhaKernelMetaInfosV2) / sizeof(sMhaKernelMetaInfosV2[0]), type, sm);
 }
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm
