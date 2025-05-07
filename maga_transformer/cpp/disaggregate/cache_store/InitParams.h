@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
 
@@ -20,7 +20,7 @@ public:
 
     bool enable_metric{true};
 
-    fastertransformer::DeviceBase* device{nullptr};
+    rtp_llm::DeviceBase* device{nullptr};
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;

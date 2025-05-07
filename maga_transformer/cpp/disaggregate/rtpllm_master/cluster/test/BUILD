@@ -21,7 +21,7 @@ cc_test(
         "//maga_transformer/cpp/http_server:http_server",
         "@havenask//aios/autil:net",
         ":fake_server",
-        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
     ],
     copts = ["-fno-access-control",],
     exec_properties = {'gpu':'A10'},

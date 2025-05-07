@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include <cstdint>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -14,7 +14,7 @@ public:
     }
 
     NormalGenerateStream(const std::shared_ptr<GenerateInput>& query,
-                         const ft::GptInitParameter&           params,
+                         const rtp_llm::GptInitParameter&           params,
                          const ResourceContext&                resource_context,
                          kmonitor::MetricsReporterPtr          metrics_reporter):
         GenerateStream(query, params, resource_context, metrics_reporter), request_id_(query->request_id) {

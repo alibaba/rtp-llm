@@ -8,7 +8,7 @@ namespace rtp_llm {
 bool CacheStoreMetricsReporter::init() {
     auto kMonitor = kmonitor::KMonitorFactory::GetKMonitor("cache_store");
     if (kMonitor == nullptr) {
-        FT_LOG_WARNING("arpc kmonitor client metric reporter init failed");
+        RTP_LLM_LOG_WARNING("arpc kmonitor client metric reporter init failed");
         return false;
     }
     kMonitor->SetServiceName("rtp_llm.cache_store");
@@ -18,7 +18,7 @@ bool CacheStoreMetricsReporter::init() {
         std::string metricName = (name);                                                                               \
         target.reset(kMonitor->RegisterMetric(metricName, (metricType), (level)));                                     \
         if (nullptr == target) {                                                                                       \
-            FT_LOG_ERROR("failed to register metric:[%s]", metricName.c_str());                                    \
+            RTP_LLM_LOG_ERROR("failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \
         }                                                                                                              \
     } while (0)
@@ -135,7 +135,7 @@ void CacheStoreMetricsReporter::reportClientLoad(CacheStoreClientLoadMetricsColl
     client_load_local_load_cost_us_->Report(collector->localLoadCostUs());
     client_load_remote_load_cost_us_->Report(collector->remoteLoadCostUs());
     response_receive_cost_us_->Report(collector->responseReceiveCostUs());
-    FT_ACCESS_LOG_DEBUG(
+    RTP_LLM_ACCESS_LOG_DEBUG(
         "cache client load metrics: success: %d; load count: %d, remote load count: %d, total cost: %ldus, remote load cost %ldus",
         collector->success(),
         collector->blockCount(),

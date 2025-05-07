@@ -20,7 +20,7 @@ public:
         address_("tcp:127.0.0.1:" + std::to_string(port_)),
         biz_name_(biz_name) {
         request_id_counter_.store(autil::TimeUtility::currentTimeInMilliSeconds());
-        FT_LOG_INFO("set request_id_counter_ init value to %ld", request_id_counter_.load());
+        RTP_LLM_LOG_INFO("set request_id_counter_ init value to %ld", request_id_counter_.load());
     }
     ~MasterHttpServer();
     bool start();

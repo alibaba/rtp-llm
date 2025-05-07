@@ -168,17 +168,17 @@ private:
 
 } // namespace rtp_llm
 
-#define FT_INTERVAL_LOG(logInterval, level, format, args...)                                                           \
+#define RTP_LLM_INTERVAL_LOG(logInterval, level, format, args...)                                                           \
     do {                                                                                                               \
         static int64_t logTimestamp;                                                                                   \
         int64_t now = autil::TimeUtility::currentTimeInSeconds();                                                      \
         if (now - logTimestamp > logInterval) {                                                                        \
-            FT_LOG(alog::LOG_LEVEL_##level, format, ##args);                                                                             \
+            RTP_LLM_LOG(alog::LOG_LEVEL_##level, format, ##args);                                                                             \
             logTimestamp = now;                                                                                        \
         }                                                                                                              \
     } while (0)
 
-#define FT_LOG(level, ...)                                                                                             \
+#define RTP_LLM_LOG(level, ...)                                                                                             \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getEngineLogger();                                                   \
         if (!logger.isLevelEnabled(level)) {                                                                           \
@@ -187,14 +187,14 @@ private:
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 
-#define FT_LOG_TRACE(...) FT_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
-#define FT_LOG_DEBUG(...) FT_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define FT_LOG_INFO(...) FT_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
-#define FT_LOG_WARNING(...) FT_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
-#define FT_LOG_ERROR(...) FT_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_LOG_TRACE(...) RTP_LLM_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define RTP_LLM_LOG_DEBUG(...) RTP_LLM_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define RTP_LLM_LOG_INFO(...) RTP_LLM_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define RTP_LLM_LOG_WARNING(...) RTP_LLM_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define RTP_LLM_LOG_ERROR(...) RTP_LLM_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define RTP_LLM_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
 
-#define FT_ACCESS_LOG(level, ...)                                                                                      \
+#define RTP_LLM_ACCESS_LOG(level, ...)                                                                                      \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getAccessLogger();                                                             \
         if (!logger.isLevelEnabled(level)) {                                                                           \
@@ -203,26 +203,26 @@ private:
         logger.log_access(level, __VA_ARGS__);                                                                         \
     } while (0)
 
-#define FT_ACCESS_LOG_TRACE(...) FT_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
-#define FT_ACCESS_LOG_DEBUG(...) FT_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define FT_ACCESS_LOG_INFO(...) FT_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
-#define FT_ACCESS_LOG_WARNING(...) FT_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
-#define FT_ACCESS_LOG_ERROR(...) FT_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_TRACE(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_DEBUG(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_INFO(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_WARNING(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_ERROR(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define RTP_LLM_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
 
-#define FT_QUERY_ACCESS_LOG(level, ...)                                                                                \
+#define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                                \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getQueryAccessLogger();                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
-#define FT_QUERY_ACCESS_LOG_TRACE(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
-#define FT_QUERY_ACCESS_LOG_DEBUG(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define FT_QUERY_ACCESS_LOG_INFO(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
-#define FT_QUERY_ACCESS_LOG_WARNING(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
-#define FT_QUERY_ACCESS_LOG_ERROR(...) FT_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryAccessLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_TRACE(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_DEBUG(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_INFO(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_WARNING(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_ERROR(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryAccessLogger().log(ex, ##__VA_ARGS__)
 
-#define FT_STACKTRACE_LOG(level, ...)                                                                                  \
+#define RTP_LLM_STACKTRACE_LOG(level, ...)                                                                                  \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getStackTraceLogger();                                               \
         if (!logger.isLevelEnabled(level)) {                                                                           \
@@ -231,9 +231,9 @@ private:
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 
-#define FT_STACKTRACE_LOG_TRACE(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_DEBUG(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_INFO(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_WARNING(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_ERROR(...) FT_STACKTRACE_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define FT_STACKTRACE_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getStackTraceLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_TRACE(...) RTP_LLM_STACKTRACE_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_DEBUG(...) RTP_LLM_STACKTRACE_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_INFO(...) RTP_LLM_STACKTRACE_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_WARNING(...) RTP_LLM_STACKTRACE_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_ERROR(...) RTP_LLM_STACKTRACE_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define RTP_LLM_STACKTRACE_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getStackTraceLogger().log(ex, ##__VA_ARGS__)

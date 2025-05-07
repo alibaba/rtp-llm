@@ -1,16 +1,16 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
-#include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/core/Types.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include <memory>
 
 #define private public
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 

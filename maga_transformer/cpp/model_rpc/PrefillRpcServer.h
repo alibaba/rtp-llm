@@ -7,7 +7,7 @@
 #include "maga_transformer/cpp/model_rpc/RemoteRpcServer.h"
 #include "maga_transformer/cpp/model_rpc/PrefillGenerateContext.h"
 
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 

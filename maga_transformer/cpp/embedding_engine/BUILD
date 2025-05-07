@@ -54,7 +54,6 @@ cc_library(
         "//maga_transformer/cpp:models",
         "//:th_op_hdrs",
         "//maga_transformer/cpp:utils",
-        "//src/fastertransformer/utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"]

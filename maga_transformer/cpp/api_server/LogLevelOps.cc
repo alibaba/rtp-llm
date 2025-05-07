@@ -15,7 +15,7 @@ bool setLogLevel(const std::string& log_level_str) {
     } else if (log_level_str == "TRACE" || log_level_str == "trace") {
         log_level = alog::LOG_LEVEL_TRACE1;
     } else {
-        FT_LOG_WARNING("set log level failed, unknown log level: %s", log_level_str.c_str());
+        RTP_LLM_LOG_WARNING("set log level failed, unknown log level: %s", log_level_str.c_str());
         return false;
     }
     auto& logger = rtp_llm::Logger::getEngineLogger();
@@ -24,6 +24,6 @@ bool setLogLevel(const std::string& log_level_str) {
 }
 
 // maybe faster than torch copy
-static auto log_level_func = torch::RegisterOperators("fastertransformer::set_log_level", &torch_ext::setLogLevel);
+static auto log_level_func = torch::RegisterOperators("rtp_llm::set_log_level", &torch_ext::setLogLevel);
 
 }  // namespace torch_ext

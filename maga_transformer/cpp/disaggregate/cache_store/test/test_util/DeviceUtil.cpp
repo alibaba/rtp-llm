@@ -2,12 +2,12 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
 DeviceUtil::DeviceUtil() {
-    ft::DeviceFactory::initDevices(GptInitParameter());
+    rtp_llm::DeviceFactory::initDevices(GptInitParameter());
     device_ = DeviceFactory::getDefaultDevice();
 }
 
@@ -26,7 +26,7 @@ void  DeviceUtil::freeCPU(void* ptr) {
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
     } else {
-        FT_LOG_ERROR("freeCPU failed, ptr not found");
+        RTP_LLM_LOG_ERROR("freeCPU failed, ptr not found");
     }
 }
 
@@ -43,7 +43,7 @@ void  DeviceUtil::freeGPU(void* ptr) {
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
     } else {
-        FT_LOG_ERROR("freeGPU failed, ptr not found");
+        RTP_LLM_LOG_ERROR("freeGPU failed, ptr not found");
     }
 }
 
@@ -52,7 +52,7 @@ void DeviceUtil::memsetCPU(void* ptr, int value, size_t len) {
 }
 
 bool DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
-    auto buffer = ft::Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {len}, ptr);
+    auto buffer = rtp_llm::Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_UINT8, {len}, ptr);
     device_->bufMemset(buffer, value);
     return true;
 }
@@ -60,8 +60,8 @@ bool DeviceUtil::memsetGPU(void* ptr, int value, size_t len) {
 bool DeviceUtil::memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size) {
     const auto dst_memory_type = dst_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
     const auto src_memory_type = src_gpu ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
-    auto       dst_buffer      = ft::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
-    auto       src_buffer      = ft::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
+    auto       dst_buffer      = rtp_llm::Buffer(dst_memory_type, DataType::TYPE_UINT8, {size}, dst);
+    auto       src_buffer      = rtp_llm::Buffer(src_memory_type, DataType::TYPE_UINT8, {size}, src);
     device_->copy({dst_buffer, src_buffer});
     device_->syncAndCheck();
     return true;

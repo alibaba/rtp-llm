@@ -1,13 +1,13 @@
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
-#include "src/fastertransformer/devices/utils/DebugUtils.h"
-#include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
+#include "maga_transformer/cpp/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/devices/torch_impl/GptModel.hpp"
 
 using namespace std;
 using namespace rtp_llm;
-using namespace fastertransformer;
+
 
 class GptModelTest: public DeviceTestBase {
 };
@@ -15,9 +15,9 @@ class GptModelTest: public DeviceTestBase {
 TEST_F(GptModelTest, testSimple) {
     const auto path = test_data_path_ + "../../test/model_test/fake_test/testdata/qwen_0.5b";
     auto weights = loadWeightsFromDir(path);
-    FT_CHECK(weights->lm_head->kernel != nullptr);
-    FT_CHECK(weights->embedding != nullptr);
-    FT_CHECK(weights->layers.size() == 24);
+    RTP_LLM_CHECK(weights->lm_head->kernel != nullptr);
+    RTP_LLM_CHECK(weights->embedding != nullptr);
+    RTP_LLM_CHECK(weights->layers.size() == 24);
 
     GptModelDescription description;
     description.ffn_conf.activation_type = ActivationType::Swiglu;
@@ -150,7 +150,7 @@ TEST_F(GptModelTest, testSimple) {
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {
-    auto dtype = ft::DataType::TYPE_FP16;
+    auto dtype = rtp_llm::DataType::TYPE_FP16;
     GptModelDescription description;
     auto& attention_conf = description.attention_conf;
     attention_conf.head_num = 16;

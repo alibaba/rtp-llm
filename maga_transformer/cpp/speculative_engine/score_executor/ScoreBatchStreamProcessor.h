@@ -3,7 +3,7 @@
 namespace rtp_llm {
 class ScoreBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
-    ScoreBatchStreamProcessor(const ft::GptInitParameter& params,
+    ScoreBatchStreamProcessor(const rtp_llm::GptInitParameter& params,
                               const CacheConfig& cache_config, bool warm_up)
             : NormalBatchStreamProcessor(params, cache_config, warm_up) {}
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const override;

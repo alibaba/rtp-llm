@@ -2,13 +2,13 @@
 
 #include <cmath>
 #include <vector>
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -43,17 +43,17 @@ std::vector<float> get_slopes(int n) {
     }
 }
 
-ft::BufferPtr splitSlopesTP(const ft::GptInitParameter& gpt_init_params, std::vector<float> slopes, ft::DeviceBase* device) {
+rtp_llm::BufferPtr splitSlopesTP(const rtp_llm::GptInitParameter& gpt_init_params, std::vector<float> slopes, rtp_llm::DeviceBase* device) {
     int local_head_num = (gpt_init_params.head_num_ == 1) ? 1 : gpt_init_params.head_num_ / gpt_init_params.tp_size_;
     int start_pos = local_head_num * gpt_init_params.tp_rank_;
     auto tp_slopes = std::vector<float>(slopes.begin() + start_pos, slopes.begin() + start_pos + local_head_num);
-    auto tp_slopes_buffer = ft::vector2Buffer(tp_slopes);
-    auto convert_slopes = tp_slopes_buffer ? device->convert({tp_slopes_buffer, ft::getDataType(gpt_init_params.data_type_)}) : nullptr;
-    auto linear_bias_slopes = convert_slopes ? device->clone({*convert_slopes, ft::AllocationType::DEVICE}) : nullptr;
+    auto tp_slopes_buffer = rtp_llm::vector2Buffer(tp_slopes);
+    auto convert_slopes = tp_slopes_buffer ? device->convert({tp_slopes_buffer, rtp_llm::getDataType(gpt_init_params.data_type_)}) : nullptr;
+    auto linear_bias_slopes = convert_slopes ? device->clone({*convert_slopes, rtp_llm::AllocationType::DEVICE}) : nullptr;
     return linear_bias_slopes;
 }
 
-ft::BufferPtr createLinearBias(const ft::GptInitParameter& gpt_init_params, ft::DeviceBase* device) {
+rtp_llm::BufferPtr createLinearBias(const rtp_llm::GptInitParameter& gpt_init_params, rtp_llm::DeviceBase* device) {
     if (gpt_init_params.use_attention_linear_bias_) {
         auto vec = get_slopes(gpt_init_params.head_num_);
         return splitSlopesTP(gpt_init_params, vec, device);

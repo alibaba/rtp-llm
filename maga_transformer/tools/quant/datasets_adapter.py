@@ -13,8 +13,8 @@ class DatasetParams(NamedTuple):
     load_args: Dict[str, Any] = {}
 
 class DatasetType(Enum):
-    FT_ACCESS_LOG = 1
-    FT_ACCESS_LOG_JSON_STR = 2
+    RTP_LLM_ACCESS_LOG = 1
+    RTP_LLM_ACCESS_LOG_JSON_STR = 2
     TEXT = 3
     CHAT_PROMPT = 4
 
@@ -69,7 +69,7 @@ class DatasetsAdapter:
     @staticmethod
     def parse_dataset_type(dataset: datasets.Dataset, dataset_params: DatasetParams) -> Optional[DatasetType]:
         if set(['log_time', 'request.request_json', 'response.responses']).issubset(set(dataset.column_names)):
-            return DatasetType.FT_ACCESS_LOG
+            return DatasetType.RTP_LLM_ACCESS_LOG
         elif 'prompt' in dataset.column_names:
             return DatasetType.CHAT_PROMPT
         elif 'text' in dataset.column_names:
@@ -93,6 +93,6 @@ class DatasetsAdapter:
             assert len(os.listdir(local_path)) == 1
             local_path = os.listdir(local_path)[0]
         if local_path.endswith('access.log') or local_path.split("/")[-1].startswith("access.log-"):
-            return DatasetType.FT_ACCESS_LOG_JSON_STR
+            return DatasetType.RTP_LLM_ACCESS_LOG_JSON_STR
 
         

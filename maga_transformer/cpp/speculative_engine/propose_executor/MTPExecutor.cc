@@ -8,12 +8,12 @@
 namespace rtp_llm {
 
 absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     std::list<GenerateStreamPtr> propose_streams;
     ProposeOutput propose_output;
 
     for (auto& stream: streams) {
-        FT_LOG_DEBUG("before create mtp stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before create mtp stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (auto& stream : streams) {
@@ -25,7 +25,7 @@ absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStrea
     }
 
     for (auto& stream: propose_streams) {
-        FT_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
 
@@ -39,10 +39,10 @@ absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStrea
     }
 
     for (auto& stream: propose_streams) {
-        FT_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    FT_LOG_DEBUG("propose done");
+    RTP_LLM_LOG_DEBUG("propose done");
 
     return propose_output;
 }

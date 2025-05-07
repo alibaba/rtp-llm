@@ -19,7 +19,7 @@ void SysCmdService::setLogLevel(const std::unique_ptr<http_server::HttpResponseW
         auto body_map = AnyCast<JsonMap>(ParseJson(body));
         auto it       = body_map.find("log_level");
         if (it == body_map.end()) {
-            FT_LOG_WARNING("set log level failed, request has no log level info, request body: %s", body.c_str());
+            RTP_LLM_LOG_WARNING("set log level failed, request has no log level info, request body: %s", body.c_str());
             writer->Write(R"({"error":"set log level failed, request has no log level info"})");
             return;
         }
@@ -27,12 +27,12 @@ void SysCmdService::setLogLevel(const std::unique_ptr<http_server::HttpResponseW
         if (torch_ext::setLogLevel(value)) {
             writer->Write(R"({"status":"ok"})");
         } else {
-            FT_LOG_WARNING("set log level failed, invalid log level: %s", value.c_str());
+            RTP_LLM_LOG_WARNING("set log level failed, invalid log level: %s", value.c_str());
             writer->Write(R"({"error":"set debug log level failed, invalid log level"})");
         }
         return;
     } catch (const std::exception& e) {
-        FT_LOG_WARNING(
+        RTP_LLM_LOG_WARNING(
             "set debug log level failed, found exception. request body: %s, exception: [%s]", body.c_str(), e.what());
         writer->Write(R"({"error":"set debug log level failed, exception occurred when parse request"})");
         return;

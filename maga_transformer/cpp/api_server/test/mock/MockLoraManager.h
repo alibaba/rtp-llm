@@ -14,8 +14,8 @@ public:
 
 public:
     MOCK_METHOD3(addLora, void(const std::string& adapter_name,
-                               const ft::lora::loraLayerWeightsMap& lora_a_weights,
-                               const ft::lora::loraLayerWeightsMap& lora_b_weights));
+                               const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
+                               const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights));
     MOCK_METHOD1(removeLora, void(const std::string&));
 };
 

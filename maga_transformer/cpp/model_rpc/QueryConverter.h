@@ -6,8 +6,8 @@
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 class QueryConverter {
@@ -27,7 +27,7 @@ private:
 
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
 
-    static void transTensorPB(TensorPB* t, const fastertransformer::Buffer* buffer);
+    static void transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer);
 
     static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config);
 };

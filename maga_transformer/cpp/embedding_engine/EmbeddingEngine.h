@@ -37,7 +37,7 @@ private:
     absl::Status    trySaveStepError() const;
     void            loop();
 private:
-    const fastertransformer::GptInitParameter params_;
+    const rtp_llm::GptInitParameter params_;
     std::thread                           loop_thread_;
     std::atomic<bool>                     running_{false};
     std::unique_ptr<EmbeddingExecutor>    executor_;

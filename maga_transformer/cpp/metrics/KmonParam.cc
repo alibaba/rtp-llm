@@ -41,7 +41,7 @@ bool KmonParam::parseKMonitorTags(const string &tagsStr, map<string, string> &ta
     for (const auto &tags : tagVec) {
         auto kvVec = StringUtil::split(tags, KMONITOR_KEYVALUE_SEP);
         if (kvVec.size() != 2) {
-            FT_LOG_ERROR("parse kmonitor tags [%s] failed.", tags.c_str());
+            RTP_LLM_LOG_ERROR("parse kmonitor tags [%s] failed.", tags.c_str());
             return false;
         }
         StringUtil::trim(kvVec[0]);

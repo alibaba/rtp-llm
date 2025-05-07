@@ -1,7 +1,7 @@
 #pragma once
 
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Event.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Event.h"
 
 #include <shared_mutex>
 #include <unordered_map>
@@ -20,7 +20,7 @@ public:
     BlockBuffer(const BlockBuffer& rhs):
         key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
 
-    fastertransformer::Buffer toDeviceBuffer();
+    rtp_llm::Buffer toDeviceBuffer();
 
     std::string           key;
     std::shared_ptr<void> addr;
@@ -33,14 +33,14 @@ public:
 class RequestBlockBuffer {
 public:
     RequestBlockBuffer(const std::string& requestid, const std::string& request_key = "");
-    RequestBlockBuffer(const std::string& requestid, fastertransformer::DeviceEventPtr event);
+    RequestBlockBuffer(const std::string& requestid, rtp_llm::DeviceEventPtr event);
 
     ~RequestBlockBuffer();
 
 public:
     const std::string&                    getRequestId() const;
     const std::string&                    getRequestKey() const;
-    const fastertransformer::DeviceEvent* getEvent() const;
+    const rtp_llm::DeviceEvent* getEvent() const;
 
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> getBlocks() const;
     std::shared_ptr<BlockBuffer>                                  getBlock(const std::string& id) const;
@@ -65,7 +65,7 @@ private:
     std::string                       requestid_;
     std::string                       request_key_;
 
-    fastertransformer::DeviceEventPtr event_;
+    rtp_llm::DeviceEventPtr event_;
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;

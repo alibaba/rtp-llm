@@ -81,7 +81,7 @@ public:
     }
 
 private:
-    void init_controller(const ft::GptInitParameter& params);
+    void init_controller(const rtp_llm::GptInitParameter& params);
 
 private:
     bool registerServices();
@@ -106,7 +106,7 @@ private:
     std::string                            addr_;
 
     const EngineInitParams&                engine_init_param_;
-    const ft::GptInitParameter&            params_;
+    const rtp_llm::GptInitParameter&            params_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 

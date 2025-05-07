@@ -14,24 +14,24 @@ void WorkerAwaredLoadBalancer::stop() {
         service_discovery_thread_->stop();
         service_discovery_thread_.reset();
 
-        FT_LOG_INFO("destroy WorkerAwaredLoadBalancer done");
+        RTP_LLM_LOG_INFO("destroy WorkerAwaredLoadBalancer done");
     }
 }
 
 bool WorkerAwaredLoadBalancer::init(const LoadBalancerInitParams& params) {
     if (!sync_worker_status_stop_) {
-        FT_LOG_WARNING("WorkerAwaredLoadBalancer should init multi times");
+        RTP_LLM_LOG_WARNING("WorkerAwaredLoadBalancer should init multi times");
         return false;
     }
     sync_worker_status_stop_ = false;
     subscribe_service_manager_.reset(new SubscribeServiceManager);
     heartbeat_synchronizer_.reset(new HeartbeatSynchronizer);
     if (!subscribe_service_manager_->init(params.subscribe_config)) {
-        FT_LOG_WARNING("subscribe service manager init failed, WorkerAwaredLoadBalancer init failed");
+        RTP_LLM_LOG_WARNING("subscribe service manager init failed, WorkerAwaredLoadBalancer init failed");
         return false;
     }
     if (!heartbeat_synchronizer_->init()) {
-        FT_LOG_WARNING("heartbeat synchronizer init failed, WorkerAwaredLoadBalancer init failed");
+        RTP_LLM_LOG_WARNING("heartbeat synchronizer init failed, WorkerAwaredLoadBalancer init failed");
         return false;
     }
 
@@ -42,7 +42,7 @@ bool WorkerAwaredLoadBalancer::init(const LoadBalancerInitParams& params) {
     sync_worker_status_thread_ =
         autil::Thread::createThread(std::bind(&WRRLoadBalancer::syncWorkerThread, this), "sync_worker_status");
 
-    FT_LOG_INFO("WorkerAwaredLoadBalancer init done");
+    RTP_LLM_LOG_INFO("WorkerAwaredLoadBalancer init done");
     return true;
 }
 

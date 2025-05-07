@@ -23,25 +23,25 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     params_(params.gpt_init_parameter),
     metrics_reporter_(params.metrics_reporter)
 {
-    FT_LOG_INFO(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
     if (params_.warm_up_ && (!params_.is_multimodal_)) {
         // warm up
-        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
+        RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                 params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
         warm_up_result = warmUp(params);
-        FT_LOG_INFO("warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
+        RTP_LLM_LOG_INFO("warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
                     warm_up_result->max_used_memory,
                     warm_up_result->max_used_memory / 1024 / 1024,
                     warm_up_result->device_reserved_bytes,
                     warm_up_result->device_reserved_bytes / 1024 / 1024);
     } else {
-        FT_LOG_INFO("skip warm up.");
+        RTP_LLM_LOG_INFO("skip warm up.");
     }
     initCacheManager(warm_up_result);
-    FT_LOG_INFO("create cache manager done");
+    RTP_LLM_LOG_INFO("create cache manager done");
     executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
-    FT_LOG_INFO("create normal executor done");
+    RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
     if (device_->getDeviceProperties().tp_rank == 0 && scheduler_->canLoadBalance()) {
@@ -52,15 +52,15 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
 void NormalEngine::initScheduler() {
     if (getenv("USE_BATCH_DECODE_SCHEDULER") && std::string(getenv("USE_BATCH_DECODE_SCHEDULER")) == "1") {
         scheduler_.reset(new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
-        FT_LOG_INFO("create batch decode scheduler done");
+        RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));            
-        FT_LOG_INFO("create fifo scheduler done");
+        RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
 
 NormalEngine::~NormalEngine() {
-    FT_LOG_INFO("destory normal engine");
+    RTP_LLM_LOG_INFO("destory normal engine");
     (void)stop();
 }
 
@@ -96,7 +96,7 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->input_ids                     = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {seq_len}, ft::AllocationType::HOST});
+        {rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
     
     std::default_random_engine generator;
     size_t token_size = params_.embedding_size_ ? std::min(params_.embedding_size_, params_.vocab_size_) : params_.vocab_size_;
@@ -146,7 +146,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
-    FT_LOG_DEBUG("enqueue min fake query");
+    RTP_LLM_LOG_DEBUG("enqueue min fake query");
     auto fake_input = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->generate_config->top_k = 1;
@@ -159,19 +159,19 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
 }
 
 void NormalEngine::initLoadBalance() {
-    FT_LOG_INFO("init load balance start");
+    RTP_LLM_LOG_INFO("init load balance start");
     auto stream = enqueueMinFakeQuery(3);
     while(!stream->finished() && !stream->stopped()) {
-        FT_LOG_INFO("wait load balance init run over for 1s");
+        RTP_LLM_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
-    FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
+    RTP_LLM_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
             step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
-    FT_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
+    RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                 result.block_nums, result.block_size / 1024);
     resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_);
 }
@@ -203,17 +203,17 @@ LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
 }
 
 absl::Status NormalEngine::startLoop() {
-    FT_LOG_INFO("start init system prompt");
+    RTP_LLM_LOG_INFO("start init system prompt");
     THROW_IF_STATUS_ERROR(initSystemPrompt());
-    FT_LOG_INFO("init system prompt done");
-    FT_LOG_INFO("start normal engine loop");
+    RTP_LLM_LOG_INFO("init system prompt done");
+    RTP_LLM_LOG_INFO("start normal engine loop");
     running_ = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
-    FT_LOG_INFO("stop normal engine");
+    RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
@@ -221,12 +221,12 @@ absl::Status NormalEngine::stop() {
 }
 
 void NormalEngine::loop() {
-    FT_LOG_INFO("loop begin");
+    RTP_LLM_LOG_INFO("loop begin");
     device_->preRun();
     while (running_) {
         auto status = step();
         if (!status.ok()) {
-            FT_LOG_ERROR("step running error: %s", status.ToString().c_str());
+            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
@@ -273,7 +273,7 @@ absl::Status NormalEngine::step() {
             }
         }
     }
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status;
     if (params_.world_size_ > 1) {
@@ -282,7 +282,7 @@ absl::Status NormalEngine::step() {
         try {
             status = executor_->process(streams);
         } catch (const std::exception& e) {
-            FT_LOG_ERROR("step running error: %s", e.what());
+            RTP_LLM_LOG_ERROR("step running error: %s", e.what());
             for (auto& stream: streams) {
                 stream->stopAndRelease(ErrorCode::EXECUTION_EXCEPTION, e.what());
             }
@@ -304,7 +304,7 @@ absl::Status NormalEngine::step() {
     return status;
 }
 
-const ft::GptInitParameter NormalEngine::gptInitParameter() const {
+const rtp_llm::GptInitParameter NormalEngine::gptInitParameter() const {
     return params_;
 }
 

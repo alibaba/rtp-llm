@@ -13,10 +13,10 @@ cc_library(
 )
 
 test_deps = [
-    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//maga_transformer/cpp/devices/testing:device_test_utils",
     "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
     "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
-    "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
     "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:schedulers",
     "//maga_transformer/cpp/test:test_utils",

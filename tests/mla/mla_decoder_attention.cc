@@ -1,10 +1,11 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-using namespace fastertransformer;
+#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "maga_transformer/cpp/devices/OpData.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+
+using namespace rtp_llm;
 
 namespace unittest {
 
@@ -116,8 +117,8 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t mla_ops_type,
     
     auto gpt_params = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_ops_type);
-    fastertransformer::DeviceFactory::initDevices(gpt_params);
-    device_      = fastertransformer::DeviceFactory::getDefaultDevice();
+    rtp_llm::DeviceFactory::initDevices(gpt_params);
+    device_      = rtp_llm::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
         static_cast<size_t>(head_num),

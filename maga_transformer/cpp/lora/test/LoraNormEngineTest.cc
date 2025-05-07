@@ -5,7 +5,7 @@
 #include "gtest/gtest.h"
 
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 using namespace std;
 
@@ -34,52 +34,52 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
-    const ft::DataType   data_type    = getTensorType<T>();
-    auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
+    const rtp_llm::DataType   data_type    = getTensorType<T>();
+    auto                 mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
     auto word_embeddings =
-        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
+        make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
     auto lm_head =
-        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
-    std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
+        make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
+    std::unordered_map<std::string, rtp_llm::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
-    std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights;
+    std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
     for (int i = 0; i < params.num_layers_; ++i) {
         auto pre_layernorm_weights =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto pre_layernorm_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto post_layernorm_weights =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto post_layernorm_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
-        auto qkv_weights = make_unique<const ft::Buffer>(
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+        auto qkv_weights = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, 3 * hidden_units}, data->data());
-        auto qkv_weights_b = make_unique<const ft::Buffer>(
+        auto qkv_weights_b = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, 3, hidden_units}, data->data());
         auto attention_layernorm =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto attention_layernorm_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
-        auto attention_output_weight = make_unique<const ft::Buffer>(
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
+        auto attention_output_weight = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, hidden_units}, data->data());
-        auto attention_output_weight_beta = make_unique<const ft::Buffer>(
+        auto attention_output_weight_beta = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, hidden_units}, data->data());
         auto ffn_weight =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
         auto ffn_weight_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
         auto ffn_output_weight =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
         auto ffn_output_weight_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
         auto ffn_layer_norm =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
         auto ffn_layer_norm_beta =
-            make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
-        std::unordered_map<std::string, ft::ConstBufferPtr> weights;
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
+        std::unordered_map<std::string, rtp_llm::ConstBufferPtr> weights;
         weights.emplace(W::pre_ln_gamma, std::move(pre_layernorm_weights));
         weights.emplace(W::pre_ln_beta, std::move(pre_layernorm_beta));
         weights.emplace(W::attn_qkv_w, std::move(qkv_weights));

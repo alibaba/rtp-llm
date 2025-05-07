@@ -19,11 +19,11 @@ namespace rtp_llm {
 
 struct InferenceParsedRequest {
     static InferenceParsedRequest extractRequest(const std::string& body,
-            const ft::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor);
+            const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor);
     static void extractRequestTexts(const RawRequest& req, InferenceParsedRequest& pr);
     static void extractRequestUrls(const RawRequest& req, InferenceParsedRequest& pr);
     static void extractRequestGenerateConfigs(RawRequest& req, InferenceParsedRequest& pr,
-            const ft::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor);
+            const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor);
 
     bool batch_infer;
     bool is_streaming;
@@ -41,7 +41,7 @@ public:
                      const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                      const std::shared_ptr<TokenProcessor>&          token_processor,
                      const std::shared_ptr<ConcurrencyController>&   controller,
-                     const ft::GptInitParameter&                     params,
+                     const rtp_llm::GptInitParameter&                     params,
                      const std::shared_ptr<ApiServerMetricReporter>& metric_reporter);
     ~InferenceService() = default;
 
@@ -85,7 +85,7 @@ private:
     std::shared_ptr<TokenProcessor>          token_processor_;
     std::shared_ptr<autil::AtomicCounter>    request_counter_;
     std::shared_ptr<ConcurrencyController>   controller_;
-    ft::GptInitParameter                     params_;
+    rtp_llm::GptInitParameter                     params_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
 };
 

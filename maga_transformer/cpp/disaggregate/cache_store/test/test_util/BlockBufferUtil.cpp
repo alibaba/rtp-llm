@@ -20,7 +20,7 @@ std::shared_ptr<BlockBuffer>
 BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val, bool gpu) {
     void* buffer = gpu ? device_util_->mallocGPU(len) : device_util_->mallocCPU(len);
     if (buffer == nullptr) {
-        FT_LOG_WARNING("block buffer util malloc failed");
+        RTP_LLM_LOG_WARNING("block buffer util malloc failed");
         return nullptr;
     }
 
@@ -34,13 +34,13 @@ BlockBufferUtil::makeBlockBuffer(const std::string& key, uint32_t len, char val,
     });
 
     if (!memory_util_->regUserMr(buffer, len, true)) {
-        FT_LOG_WARNING("block buffer reg user mr failed");
+        RTP_LLM_LOG_WARNING("block buffer reg user mr failed");
         return nullptr;
     }
 
     if (gpu) {
         if (!device_util_->memsetGPU(buffer, val, len)) {
-            FT_LOG_WARNING("block buffer memset gpu failed");
+            RTP_LLM_LOG_WARNING("block buffer memset gpu failed");
             return nullptr;
         }
         // memsetGPU sync
@@ -59,12 +59,12 @@ std::vector<std::shared_ptr<RequestBlockBuffer>> BlockBufferUtil::makeRequestBlo
     void* mem;
     auto  ret = cudaMalloc(&mem, mem_len);
     if (ret != cudaSuccess) {
-        FT_LOG_WARNING("block buffer util malloc gpu failed, len is %lu, ret is %d", mem_len, ret);
+        RTP_LLM_LOG_WARNING("block buffer util malloc gpu failed, len is %lu, ret is %d", mem_len, ret);
         return {};
     }
 
     if (!memory_util_->regUserMr(mem, mem_len, true)) {
-        FT_LOG_WARNING("block buffer util reg user mr failed, len is %lu", mem_len);
+        RTP_LLM_LOG_WARNING("block buffer util reg user mr failed, len is %lu", mem_len);
         return {};
     }
 

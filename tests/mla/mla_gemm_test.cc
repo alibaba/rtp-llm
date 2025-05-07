@@ -1,9 +1,9 @@
 
-// #include "src/fastertransformer/devices/DeviceFactory.h"
-// #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-// #include "src/fastertransformer/devices/OpData.h"
+// #include "maga_transformer/cpp/devices/DeviceFactory.h"
+// #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+// #include "maga_transformer/cpp/devices/OpData.h"
 
-// using namespace fastertransformer;
+// 
 
 // namespace unittest {
 

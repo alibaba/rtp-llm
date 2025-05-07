@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStreamOutput.h"
 
 namespace rtp_llm {

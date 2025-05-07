@@ -5,9 +5,9 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cutlass/interface.h"
-#include "src/fastertransformer/th_op/th_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/cutlass/interface.h"
+#include "maga_transformer/cpp/th_op/th_utils.h"
 
 #include "cutlass/numeric_types.h"
 
@@ -18,7 +18,7 @@ namespace torch_ext
 
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 namespace tc = tensorrt_llm::cutlass_extensions;
-namespace ft = fastertransformer;
+
 
 template <typename T>
 Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, torch::optional<Tensor> bias,
@@ -69,7 +69,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
                 runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tkc::CutlassActivationType::IDENTITY, m,
                     n, k, configs[i], ws_ptr, ws_bytes, stream);
             };
-            float cur_avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+            float cur_avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
 
             if (cur_avg_time < min_time)
             {
@@ -90,7 +90,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
             runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tkc::CutlassActivationType::IDENTITY, m, n, k,
                 config, ws_ptr, ws_bytes, stream);
         };
-        avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+        avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
     }
 
     return output_tensor;

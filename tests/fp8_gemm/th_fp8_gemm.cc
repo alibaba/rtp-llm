@@ -5,15 +5,15 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
-#include "src/fastertransformer/cutlass/interface.h"
-#include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/cuda/cublas/cublasAlgoMap.h"
-#include "src/fastertransformer/cuda/cublas/cublasMMWrapper.h"
-#include "src/fastertransformer/cuda/allocator_torch.h"
-#include "src/fastertransformer/core/allocator.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/cuda/memory_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
+#include "maga_transformer/cpp/cutlass/interface.h"
+#include "maga_transformer/cpp/th_op/th_utils.h"
+#include "maga_transformer/cpp/cuda/cublas/cublasAlgoMap.h"
+#include "maga_transformer/cpp/cuda/cublas/cublasMMWrapper.h"
+#include "maga_transformer/cpp/cuda/allocator_torch.h"
+#include "maga_transformer/cpp/core/allocator.h"
 
 #include "cutlass/numeric_types.h"
 
@@ -23,7 +23,6 @@ namespace torch_ext {
 
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 namespace tc  = tensorrt_llm::cutlass_extensions;
-namespace ft  = fastertransformer;
 
 template<typename T>
 Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scale) {
@@ -32,12 +31,12 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
     cublasSetStream(cublas_handle, stream);
     cublasLtHandle_t cublaslt_handle;
     cublasLtCreate(&cublaslt_handle);
-    ft::Allocator<ft::AllocatorType::TH>* allocator = new ft::Allocator<ft::AllocatorType::TH>();
+    rtp_llm::Allocator<rtp_llm::AllocatorType::TH>* allocator = new rtp_llm::Allocator<rtp_llm::AllocatorType::TH>();
     allocator->setStream(stream);
 
-    ft::cublasAlgoMap*   cublas_algo_map = new ft::cublasAlgoMap(GEMM_CONFIG);
-    ft::cublasMMWrapper* cublas_wrapper =
-        new ft::cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, new std::mutex(), allocator);
+    rtp_llm::cublasAlgoMap*   cublas_algo_map = new rtp_llm::cublasAlgoMap(GEMM_CONFIG);
+    rtp_llm::cublasMMWrapper* cublas_wrapper =
+        new rtp_llm::cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, new std::mutex(), allocator);
     cublas_wrapper->setFP8GemmConfig(CUDA_R_32F);
 
     int m = A.size(0);
@@ -48,10 +47,10 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
     __nv_fp8_e4m3* weight_tensor = get_ptr<__nv_fp8_e4m3>(B);
     float*         a_scale       = get_ptr<float>(act_scale);
     float*         b_scale       = get_ptr<float>(w_scale);
-    ft::print_bsd(0, "input", input_tensor, 1, m, k);
+    rtp_llm::print_bsd(0, "input", input_tensor, 1, m, k);
 
-    float input_scale  = ft::getCudaValue<float>(a_scale, 0);
-    float weight_scale = ft::getCudaValue<float>(b_scale, 0);
+    float input_scale  = rtp_llm::getCudaValue<float>(a_scale, 0);
+    float weight_scale = rtp_llm::getCudaValue<float>(b_scale, 0);
     float alpha        = input_scale * weight_scale;
 
     auto output_tensor = torch::empty({m, n}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
@@ -77,7 +76,7 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
 template<typename T>
 Tensor fp8_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scale) {
     auto                                  stream    = at::cuda::getCurrentCUDAStream().stream();
-    ft::Allocator<ft::AllocatorType::TH>* allocator = new ft::Allocator<ft::AllocatorType::TH>();
+    rtp_llm::Allocator<rtp_llm::AllocatorType::TH>* allocator = new rtp_llm::Allocator<rtp_llm::AllocatorType::TH>();
     allocator->setStream(stream);
 
     int m = A.size(0);
@@ -89,8 +88,8 @@ Tensor fp8_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scale) {
         torch::empty({m, k}, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
     __nv_fp8_e4m3* quanted_input_fp8 = get_ptr<__nv_fp8_e4m3>(quanted_input_tensor);
     float*         a_scale           = get_ptr<float>(act_scale);
-    ft::print_bsd(0, "input", input_tensor, 1, m, k);
-    ft::print_bsd(0, "quanted_input_fp8", reinterpret_cast<const __nv_fp8_e4m3*>(quanted_input_fp8), 1, m, k);
+    rtp_llm::print_bsd(0, "input", input_tensor, 1, m, k);
+    rtp_llm::print_bsd(0, "quanted_input_fp8", reinterpret_cast<const __nv_fp8_e4m3*>(quanted_input_fp8), 1, m, k);
     tensorrt_llm::common::invokeQuantizeMatrix(
         quanted_input_fp8, a_scale, input_tensor, m * k, m, tensorrt_llm::common::QuantizeMode::PER_TENSOR, stream);
     return fp8_quant_gemm_helper<T>(quanted_input_tensor, B, act_scale, w_scale);

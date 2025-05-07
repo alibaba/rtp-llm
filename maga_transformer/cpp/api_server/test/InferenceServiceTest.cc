@@ -33,7 +33,7 @@ protected:
         mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
         auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
 
-        ft::GptInitParameter params;
+        rtp_llm::GptInitParameter params;
         auto                 request_counter = std::make_shared<autil::AtomicCounter>();
         auto                 controller      = std::make_shared<ConcurrencyController>(1, false);
 
@@ -63,9 +63,9 @@ protected:
         std::vector<size_t> shape = {data_.size()};
         // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
         input->input_ids =
-            std::make_shared<ft::Buffer>(ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, shape, data_.data());
+            std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
-        ft::GptInitParameter param;
+        rtp_llm::GptInitParameter param;
         param.max_seq_len_ = data_.size();
 
         auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
@@ -348,7 +348,7 @@ TEST_F(InferenceServiceTest, fillGenerateInput) {
     auto now = autil::TimeUtility::currentTimeInMicroSeconds();
     EXPECT_NEAR(input->begin_time_us, now, 5000);
 
-    EXPECT_EQ(input->input_ids->type(), ft::DataType::TYPE_INT32);
+    EXPECT_EQ(input->input_ids->type(), rtp_llm::DataType::TYPE_INT32);
     EXPECT_EQ(input->input_ids->size(), token_ids.size());
     EXPECT_EQ(input->input_ids->sizeBytes(), token_ids.size() * sizeof(int));
     EXPECT_TRUE(std::memcmp(input->input_ids->data(), token_ids.data(), input->input_ids->sizeBytes()) == 0);

@@ -34,7 +34,7 @@ bool PrefillLoadBalancer::initWithEstimator(const LoadBalancerInitParams& params
 std::shared_ptr<const Host> PrefillLoadBalancer::chooseHost(const std::string& biz, int32_t global_counter) {
     auto res = chooseHostWithTask(biz, createDummyTask());
     if (!res.ok()) {
-        FT_LOG_WARNING("choose host failed with error: %s", res.status().message().data());
+        RTP_LLM_LOG_WARNING("choose host failed with error: %s", res.status().message().data());
         return nullptr;
     }
     return res.value().host;
@@ -86,7 +86,7 @@ absl::StatusOr<EstimateInfo> PrefillLoadBalancer::chooseHostWithTask(const std::
         auto  cost_time = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!cost_time.ok()) {
             last_error_msg = autil::StringUtil::formatString("failed to get task cost time with error %s", cost_time.status().message().data());
-            FT_LOG_WARNING("%s", last_error_msg.c_str());
+            RTP_LLM_LOG_WARNING("%s", last_error_msg.c_str());
             continue;
         }
         auto expect_wait_time = worker.expect_wait_time();
@@ -113,7 +113,7 @@ bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker
     for (auto& task : worker.running_task_list()) {
         auto stat = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!stat.ok()) {
-            FT_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
+            RTP_LLM_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
                            worker.machine_info().c_str(),
                            task.prefix_length,
                            task.input_length,
@@ -127,7 +127,7 @@ bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker
     for (auto& task : worker.pending_task_list()) {
         auto stat = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!stat.ok()) {
-            FT_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
+            RTP_LLM_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
                            worker.machine_info().c_str(),
                            task.prefix_length,
                            task.input_length,
@@ -148,7 +148,7 @@ void PrefillLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchroniz
         if (response.find(it->first) == response.end()) {
             it->second.addUpdateFailedTimes();
             if (it->second.getUpdateFailedTimes() >= max_update_failed_times_) {
-                FT_LOG_WARNING("worker [%s] update failed times: %d, do remove", it->first.c_str(), max_update_failed_times_);
+                RTP_LLM_LOG_WARNING("worker [%s] update failed times: %d, do remove", it->first.c_str(), max_update_failed_times_);
                 it = worker_map_.erase(it);
             }
         } else {

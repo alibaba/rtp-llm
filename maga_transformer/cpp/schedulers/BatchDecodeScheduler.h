@@ -2,7 +2,7 @@
 
 #include "autil/legacy/jsonizable.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -18,10 +18,10 @@ struct BatchDecodeSchedulerConfig: public autil::legacy::Jsonizable {
 
 class BatchDecodeScheduler : public SchedulerBase {
 public:
-    BatchDecodeScheduler(const ft::GptInitParameter&          params,
+    BatchDecodeScheduler(const rtp_llm::GptInitParameter&          params,
                          const std::shared_ptr<CacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr   metrics_reporter,
-                         ft::DeviceBase*  device) {
+                         rtp_llm::DeviceBase*  device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
@@ -38,7 +38,7 @@ public:
             std::lock_guard<std::mutex> lock(lock_);
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
-                FT_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d", waiting_streams_.size());
+                RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d", waiting_streams_.size());
             }
         }
         cond_.notify_all();
@@ -51,7 +51,7 @@ public:
             if ((*it)->stopped() || (*it)->finished()) {
                 // Immediately free resources to run more streams
                 (*it)->releaseResource();
-                FT_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
+                RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
                 it = running_streams_.erase(it);
             } else {
                 ++it;
@@ -63,7 +63,7 @@ public:
         BatchDecodeSchedulerConfig config;
         autil::legacy::FromJsonString(config, scheduler_info);
         batch_size_ = config.batch_size_;        
-        FT_LOG_INFO("BatchDecodeScheduler update batch size to %d", batch_size_);
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d", batch_size_);
     }
 
     void initRunningStreams() {
@@ -88,7 +88,7 @@ public:
             auto result = (*it)->incrKVBlock(0, 0);
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
-                FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
+                RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
                 it = running_streams_.erase(it);
             } else {
                 it++;
@@ -106,11 +106,11 @@ public:
             std::advance(it, batch_size_);
             running_streams_.insert(running_streams_.end(), waiting_streams_.begin(), it);
             waiting_streams_.erase(waiting_streams_.begin(), it);
-            auto unused_buffer = device_->allocateBuffer({ft::DataType::TYPE_INT32, {1,1}, ft::AllocationType::DEVICE}, {});
-            device_->allReduce({unused_buffer, ft::ReduceOp::Sum, false, ft::ParallelMode::DP});
+            auto unused_buffer = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1,1}, rtp_llm::AllocationType::DEVICE}, {});
+            device_->allReduce({unused_buffer, rtp_llm::ReduceOp::Sum, false, rtp_llm::ParallelMode::DP});
             device_->syncCommunication(false);
             initRunningStreams();
-            FT_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run", running_streams_.size());
+            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run", running_streams_.size());
         } else {
             incrRunningStream();
         }
@@ -153,7 +153,7 @@ private:
 
     std::shared_ptr<CacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
 };
 
 

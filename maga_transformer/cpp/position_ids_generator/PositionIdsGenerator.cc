@@ -1,19 +1,19 @@
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 namespace rtp_llm {
 
 BufferPtr PositionIdsGenerator::generatePositionIds(
     DeviceBase* device, int32_t input_len, PositionIdsStyle style, 
     optional<BufferPtr> mm_locs, optional<vector<BufferPtr>> mm_position_ids) 
 {
-    ft::BufferPtr res;
+    rtp_llm::BufferPtr res;
     int32_t* position_ids;
     switch (style) {
         case PositionIdsStyle::DEFAULT:
         {
-            res = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)input_len}, ft::AllocationType::HOST}, {});
+            res = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)input_len}, rtp_llm::AllocationType::HOST}, {});
             position_ids = (int32_t*)res->data();
             for (int32_t i = 0;i < input_len;++i) {
                 position_ids[i] = i;
@@ -22,7 +22,7 @@ BufferPtr PositionIdsGenerator::generatePositionIds(
         }
         case PositionIdsStyle::MMWITHTAG:
         {
-            res = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)input_len}, ft::AllocationType::HOST}, {});
+            res = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)input_len}, rtp_llm::AllocationType::HOST}, {});
             position_ids = (int32_t*)res->data();
             int32_t now_pos = 0, now_id = 0, mm_idx = 0;
             if (!mm_locs && !mm_position_ids) {
@@ -49,7 +49,7 @@ BufferPtr PositionIdsGenerator::generatePositionIds(
         }
         case PositionIdsStyle::MROPE:
         {
-            res = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)input_len, (size_t)3}, ft::AllocationType::HOST}, {});
+            res = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)input_len, (size_t)3}, rtp_llm::AllocationType::HOST}, {});
             position_ids = (int32_t*)res->data();
             int32_t now_pos = 0, now_id = 0, mm_idx = 0;
 

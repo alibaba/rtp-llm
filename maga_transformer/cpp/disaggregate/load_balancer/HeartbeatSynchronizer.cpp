@@ -6,7 +6,7 @@ namespace rtp_llm {
 bool HeartbeatSynchronizer::init() {
     http_client_ = std::make_shared<http_server::SimpleHttpClient>();
     if (!http_client_) {
-        FT_LOG_WARNING("sync concurrency failed, http client is null");
+        RTP_LLM_LOG_WARNING("sync concurrency failed, http client is null");
         return false;
     }
     return true;
@@ -29,7 +29,7 @@ void HeartbeatSynchronizer::getStatusFromHost(
     http_server::HttpCallBack http_call_back =
         [this, spec, success_cnt, total_count, mutex, result](bool ok, const std::string& response_body) {
             if (!ok) {
-                FT_LOG_WARNING("http get request failed in callback, address:%s", spec.c_str());
+                RTP_LLM_LOG_WARNING("http get request failed in callback, address:%s", spec.c_str());
                 return;
             }
             processWorkerStatusResponse(spec, response_body, mutex, result);
@@ -38,7 +38,7 @@ void HeartbeatSynchronizer::getStatusFromHost(
             }
         };
     if (!http_client_->get(spec, "/worker_status", "", std::move(http_call_back))) {
-        FT_LOG_WARNING("http get request failed, host address:%s", spec.c_str());
+        RTP_LLM_LOG_WARNING("http get request failed, host address:%s", spec.c_str());
     }
 }
 
@@ -72,7 +72,7 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
     if (!waitDone(success_cnt, total_host_cnt, timeout_ms)) {
         auto success_cnt_value = success_cnt->load();
         if (total_host_cnt > 0 && success_cnt_value * 1.0 / total_host_cnt < 0.9) {
-            FT_LOG_WARNING("sync work status timeout, sync_worker_status_interval_ms:%d, success_cnt:%d, total_cnt:%d",
+            RTP_LLM_LOG_WARNING("sync work status timeout, sync_worker_status_interval_ms:%d, success_cnt:%d, total_cnt:%d",
                            timeout_ms,
                            success_cnt_value,
                            total_host_cnt);
@@ -110,12 +110,12 @@ void HeartbeatSynchronizer::processWorkerStatusResponse(
             (*sync_result_map)[spec] = worker_status_response;
         }
     } catch (const std::exception& e) {
-        FT_LOG_WARNING("response deserialize failed, address:%s, response: %s, error: %s",
+        RTP_LLM_LOG_WARNING("response deserialize failed, address:%s, response: %s, error: %s",
                        spec.c_str(),
                        response_body.c_str(),
                        e.what());
     } catch (...) {
-        FT_LOG_WARNING("response deserialize failed, address:%s, response: %s", spec.c_str(), response_body.c_str());
+        RTP_LLM_LOG_WARNING("response deserialize failed, address:%s, response: %s", spec.c_str(), response_body.c_str());
     }
 }
 

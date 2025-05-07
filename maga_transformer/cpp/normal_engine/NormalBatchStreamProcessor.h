@@ -1,7 +1,7 @@
 #pragma once
 
-#include "src/fastertransformer/devices/DeviceBase.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/stream/StreamGroups.h"
 #include "absl/status/statusor.h"
@@ -9,23 +9,14 @@
 
 namespace rtp_llm {
 
-struct MaskParams {
-public:
-    const ft::Buffer& input_lengths;
-    const ft::Buffer& prefix_lengths;
-    ft::DataType      dtype;
-    bool              is_causal;
-    ft::DeviceBase*   device;
-};
-
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ft::GptInitParameter& params,
+    NormalBatchStreamProcessor(const rtp_llm::GptInitParameter& params,
                                const CacheConfig& cache_config, bool warm_up):
         num_layers_(params.num_layers_),
         vocab_size_(params.vocab_size_),
         input_vocab_size_(params.input_vocab_size_),
-        use_int8_kv_cache_(params.kv_cache_data_type_ == ft::DataType::TYPE_INT8),
+        use_int8_kv_cache_(params.kv_cache_data_type_ == rtp_llm::DataType::TYPE_INT8),
         has_positional_encoding_(params.has_positional_encoding_),
         is_multimodal_(params.is_multimodal_),
         mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),
@@ -36,7 +27,7 @@ public:
         scale_block_size_(cache_config.kv_scale_block_stride),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
-        device_(ft::DeviceFactory::getDefaultDevice()) {}
+        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
     virtual absl::Status                   dispatch(const StreamGroups& stream_groups,
                                                     const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
@@ -46,7 +37,7 @@ public:
 
 
 protected:
-    SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const ft::BufferPtr& sequence_length) const;
+    SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const rtp_llm::BufferPtr& sequence_length) const;
     void    setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch = false) const;
     void    setThinkModeLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch = false) const;
 
@@ -66,7 +57,7 @@ protected:
     size_t           scale_block_size_;
     size_t           seq_size_per_block_;
     bool             warm_up_;
-    ft::DeviceBase*  device_;
+    rtp_llm::DeviceBase*  device_;
 };
 
 }  // namespace rtp_llm

@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 class MockGenerateStream: public GenerateStream {
 public:
-    MockGenerateStream(const std::shared_ptr<GenerateInput>& input, const ft::GptInitParameter& param):
+    MockGenerateStream(const std::shared_ptr<GenerateInput>& input, const rtp_llm::GptInitParameter& param):
         GenerateStream(input, param, ResourceContext{}, nullptr) {}
     ~MockGenerateStream() override = default;
 

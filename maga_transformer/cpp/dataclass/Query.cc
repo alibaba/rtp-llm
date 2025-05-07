@@ -1,8 +1,8 @@
 #include <atomic>
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
 using namespace std;
 

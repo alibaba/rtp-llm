@@ -10,14 +10,14 @@
 
 namespace rtp_llm {
 
-void HttpApiServer::init_controller(const ft::GptInitParameter& params) {
+void HttpApiServer::init_controller(const rtp_llm::GptInitParameter& params) {
     bool block = autil::EnvUtil::getEnv("CONCURRENCY_WITH_BLOCK", false);
     if (params.tp_rank_ == 0) {
         int limit = autil::EnvUtil::getEnv("CONCURRENCY_LIMIT", 32);
-        FT_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
+        RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
         controller_ = std::make_shared<ConcurrencyController>(limit, block);
     } else /* if (params.tp_size_ != 1) */ {
-        FT_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
+        RTP_LLM_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
         controller_ = std::make_shared<ConcurrencyController>(99, block);
     }
 }
@@ -29,22 +29,22 @@ bool HttpApiServer::start(const std::string& address) {
                                                    /*queueSize=*/controller_->get_available_concurrency() * 5));
     metric_reporter_.reset(new ApiServerMetricReporter());
     if (!metric_reporter_->init()) {
-        FT_LOG_WARNING("HttpApiServer start init metric reporter failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer start init metric reporter failed.");
         return false;
     }
 
     if (!registerServices()) {
-        FT_LOG_ERROR("HttpApiServer start failed, register services failed, address is %s.", address.c_str());
+        RTP_LLM_LOG_ERROR("HttpApiServer start failed, register services failed, address is %s.", address.c_str());
         return false;
     }
 
     if (!http_server_->Start(address)) {
-        FT_LOG_ERROR("HttpApiServer start failed, start http server failed, address is %s.", address.c_str());
+        RTP_LLM_LOG_ERROR("HttpApiServer start failed, start http server failed, address is %s.", address.c_str());
         return false;
     }
 
     is_stopped_.store(false);
-    FT_LOG_INFO("HttpApiServer start success, listen address is %s.", address.c_str());
+    RTP_LLM_LOG_INFO("HttpApiServer start success, listen address is %s.", address.c_str());
     return true;
 }
 
@@ -72,71 +72,71 @@ bool HttpApiServer::registerServices() {
     // GET: / /health /GraphService/cm2_status /SearchService/cm2_status
     // POST: /health /GraphService/cm2_status /SearchService/cm2_status /health_check
     if (!registerHealthService()) {
-        FT_LOG_WARNING("HttpApiServer register health service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register health service failed.");
         return false;
     }
 
     // add uri:
     // GET: /worker_status
     if (!registerWorkerStatusService()) {
-        FT_LOG_WARNING("HttpApiServer register worker status service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register worker status service failed.");
         return false;
     }
 
     // GET: /v1/models
     if (!registerModelStatusService()) {
-        FT_LOG_WARNING("HttpApiServer register model status service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register model status service failed.");
         return false;
     }
 
     // POST: /set_log_level
     if (!registerSysCmdService()) {
-        FT_LOG_WARNING("HttpApiServer register sys cmd service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register sys cmd service failed.");
         return false;
     }
 
     // add uri:
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
-        FT_LOG_WARNING("HttpApiServer register tokenizer service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register tokenizer service failed.");
         return false;
     }
 
     // add uri:
     // POST: /chat/completions /v1/chat/completions /chat/render /v1/chat/render
     if (!registerChatService()) {
-        FT_LOG_WARNING("HttpApiServer register chat service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register chat service failed.");
         return false;
     }
 
     // add uri:
     // POST: /
     if (!is_embedding_ && !registerInferenceService()) {
-        FT_LOG_WARNING("HttpApiServer register inference service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register inference service failed.");
         return false;
     }
 
     // add uri
     // POST / /v1/embeddings /v1/embeddings/similarity /v1/classifier /v1/rerank
     if (is_embedding_ && !registerEmbedingService()) {
-        FT_LOG_WARNING("HttpApiServer register embeding service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register embeding service failed.");
         return false;
     }
 
     // add uri:
     // POST: //add_lora_internal /remove_lora_internal /update
     if (!registerLoraService()) {
-        FT_LOG_WARNING("HttpApiServer register lora service failed.");
+        RTP_LLM_LOG_WARNING("HttpApiServer register lora service failed.");
         return false;
     }
 
-    FT_LOG_INFO("HttpApiServer register services success.");
+    RTP_LLM_LOG_INFO("HttpApiServer register services success.");
     return true;
 }
 
 bool HttpApiServer::registerHealthService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register health service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register health service failed, http server is null");
         return false;
     }
 
@@ -146,7 +146,7 @@ bool HttpApiServer::registerHealthService() {
 
 bool HttpApiServer::registerWorkerStatusService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register worker status service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register worker status service failed, http server is null");
         return false;
     }
 
@@ -161,7 +161,7 @@ bool HttpApiServer::registerWorkerStatusService() {
 
 bool HttpApiServer::registerModelStatusService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register model status service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register model status service failed, http server is null");
         return false;
     }
 
@@ -176,7 +176,7 @@ bool HttpApiServer::registerModelStatusService() {
 
 bool HttpApiServer::registerSysCmdService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register sys cmd service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register sys cmd service failed, http server is null");
         return false;
     }
 
@@ -191,7 +191,7 @@ bool HttpApiServer::registerSysCmdService() {
 
 bool HttpApiServer::registerTokenizerService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register tokenizer service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register tokenizer service failed, http server is null");
         return false;
     }
 
@@ -226,10 +226,10 @@ bool HttpApiServer::registerChatService() {
             }
             chat_service->chatCompletions(writer, request, request_id);
         } catch (const py::error_already_set& e) {
-            FT_LOG_WARNING("chat completion failed, found python exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("chat completion failed, found python exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("chat completion failed, found cpp exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("chat completion failed, found cpp exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
@@ -244,10 +244,10 @@ bool HttpApiServer::registerChatService() {
             CounterGuard counter_guard(active_request_count);
             chat_service->chatRender(writer, request);
         } catch (const py::error_already_set& e) {
-            FT_LOG_WARNING("chat render failed, found python exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("chat render failed, found python exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("called chat render route but found exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("called chat render route but found exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
@@ -259,7 +259,7 @@ bool HttpApiServer::registerChatService() {
 
 bool HttpApiServer::registerInferenceService() {
     if (!http_server_) {
-        FT_LOG_WARNING("register inference service failed, http server is null");
+        RTP_LLM_LOG_WARNING("register inference service failed, http server is null");
         return false;
     }
     inference_service_.reset(new InferenceService(engine_,
@@ -333,11 +333,11 @@ bool HttpApiServer::registerLoraService() {
         try {
             lora_service->addLoraInternal(writer, request);
         } catch (const py::error_already_set& e) {
-            FT_LOG_WARNING("add lora internal failed, found python exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("add lora internal failed, found python exception: [%s]", e.what());
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
             metric_reporter->reportErrorUpdateTargetQpsMetric();
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("add lora internal failed, found cpp exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("add lora internal failed, found cpp exception: [%s]", e.what());
             metric_reporter->reportErrorUpdateTargetQpsMetric();
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
@@ -352,11 +352,11 @@ bool HttpApiServer::registerLoraService() {
         try {
             lora_service->removeLoraInternal(writer, request);
         } catch (const py::error_already_set& e) {
-            FT_LOG_WARNING("remove lora internal failed, found python exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("remove lora internal failed, found python exception: [%s]", e.what());
             metric_reporter->reportErrorUpdateTargetQpsMetric();
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("remove lora internal failed, found cpp exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("remove lora internal failed, found cpp exception: [%s]", e.what());
             metric_reporter->reportErrorUpdateTargetQpsMetric();
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
@@ -371,11 +371,11 @@ bool HttpApiServer::registerLoraService() {
         try {
             lora_service->update(writer, request);
         } catch (const py::error_already_set& e) {
-            FT_LOG_WARNING("update lora failed, found python exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("update lora failed, found python exception: [%s]", e.what());
             metric_reporter->reportErrorUpdateTargetQpsMetric();
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         } catch (const std::exception& e) {
-            FT_LOG_WARNING("update lora failed, found cpp exception: [%s]", e.what());
+            RTP_LLM_LOG_WARNING("update lora failed, found cpp exception: [%s]", e.what());
             metric_reporter->reportErrorUpdateTargetQpsMetric();
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
@@ -386,7 +386,7 @@ bool HttpApiServer::registerLoraService() {
 }
 
 void HttpApiServer::stop() {
-    FT_LOG_WARNING("http api server stopped");
+    RTP_LLM_LOG_WARNING("http api server stopped");
     is_stopped_.store(true);
 
     if (health_service_) {
@@ -400,7 +400,7 @@ void HttpApiServer::stop() {
     // wait all active request finished
     if (active_request_count_) {
         while (active_request_count_->getValue() > 0) {
-            FT_LOG_DEBUG("wait active request processed. active request count: %d", active_request_count_->getValue());
+            RTP_LLM_LOG_DEBUG("wait active request processed. active request count: %d", active_request_count_->getValue());
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }

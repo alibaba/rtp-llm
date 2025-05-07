@@ -1,7 +1,7 @@
 #pragma once
 
 #include "maga_transformer/cpp/stream/GenerateStream.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <optional>
 #include <string>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 

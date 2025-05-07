@@ -371,12 +371,12 @@ bool initKmonitorFactory() {
         size_t limit = 0;
         if (autil::StringUtil::fromString<size_t>(param.kmonitorMetricsReporterCacheLimit, limit) || limit > 0) {
             kmonitor::MetricsReporter::setMetricsReporterCacheLimit(limit);
-            FT_LOG_INFO("set metrics reporter cache limit [%lu].", limit);
+            RTP_LLM_LOG_INFO("set metrics reporter cache limit [%lu].", limit);
         }
     }
 
     if (param.kmonitorNormalSamplePeriod > 0) {
-        FT_LOG_INFO("set kmonitor normal sample period [%d] seconds.", param.kmonitorNormalSamplePeriod);
+        RTP_LLM_LOG_INFO("set kmonitor normal sample period [%d] seconds.", param.kmonitorNormalSamplePeriod);
         kmonitor::MetricLevelConfig config;
         config.period[kmonitor::NORMAL] = (unsigned int)param.kmonitorNormalSamplePeriod;
         kmonitor::MetricLevelManager::SetGlobalLevelConfig(config);
@@ -399,16 +399,16 @@ bool initKmonitorFactory() {
         metricsConfig.AddGlobalTag(pair.first, pair.second);
     }
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
-        FT_LOG_ERROR("init kmonitor factory failed with");
+        RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
         return false;
     }
 
     // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
     kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
-    FT_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
 
     kmonitor::KMonitorFactory::Start();
-    FT_LOG_INFO("KMonitorFactory::Start() finished");
+    RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
     return true;
 }
 

@@ -10,7 +10,7 @@ std::string TOKENIZE_PATH = "/tokenize";
 
 bool RemoteTokenizeModule::init(std::shared_ptr<PrefillLoadBalancer> load_balancer) {
     if (!load_balancer) {
-        FT_LOG_WARNING("load balancer is null, RemoteTokenizeModule init failed");
+        RTP_LLM_LOG_WARNING("load balancer is null, RemoteTokenizeModule init failed");
         return false;
     }
     load_balancer_ = load_balancer;

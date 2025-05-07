@@ -36,7 +36,7 @@ protected:
         }
 
         std::string test_binary_str = std::string(test_binary);
-        FT_CHECK(*test_binary_str.rbegin() != '/');
+        RTP_LLM_CHECK(*test_binary_str.rbegin() != '/');
         size_t filePos         = test_binary_str.rfind('/');
         auto   test_data_path_ = std::string(test_src_dir) + "/" + std::string(test_work_space) + "/"
                                + test_binary_str.substr(0, filePos) + "/";

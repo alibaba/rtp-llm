@@ -7,12 +7,12 @@
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -209,7 +209,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_TRUE(stream4->getLoss());
     auto loss4 = stream4->getLoss();
     EXPECT_EQ(2, loss4->size());
-    EXPECT_NEAR(2.25525, *(torch::mean(ft::Buffer2torchTensor(*loss4)).exp().data_ptr<float>()), 0.0001);
+    EXPECT_NEAR(2.25525, *(torch::mean(rtp_llm::Buffer2torchTensor(*loss4)).exp().data_ptr<float>()), 0.0001);
 }
 
 

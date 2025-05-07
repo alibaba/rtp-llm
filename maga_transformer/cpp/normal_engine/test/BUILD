@@ -37,8 +37,8 @@ cc_library(
     ],
     copts = test_copts,
     deps =  [
-        "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         "//maga_transformer/cpp:normal_engine",
         "//:gpt_init_params",
         "@com_google_googletest//:gtest",
@@ -59,8 +59,8 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = [
-        "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         "//maga_transformer/cpp:normal_engine",
         "//:gpt_init_params",
         "@com_google_googletest//:gtest",

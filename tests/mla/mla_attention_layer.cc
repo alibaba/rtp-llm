@@ -1,11 +1,12 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "maga_transformer/cpp/devices/OpData.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
-using namespace fastertransformer;
+using namespace rtp_llm;
+
 namespace unittest {
 class MlaAttnLayerOp: public torch::jit::CustomClassHolder {
 public:
@@ -39,8 +40,8 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                double  softmax_extra_scale) {
     rtp_llm::initLogger();
 
-    fastertransformer::DeviceFactory::initDevices(GptInitParameter());
-    device_      = fastertransformer::DeviceFactory::getDefaultDevice();
+    rtp_llm::DeviceFactory::initDevices(GptInitParameter());
+    device_      = rtp_llm::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
         static_cast<size_t>(head_num),

@@ -33,7 +33,7 @@ public:
     absl::Status step();
     absl::Status startLoop();
     int64_t getLastScheduleTime() override;
-    const ft::GptInitParameter gptInitParameter() const;
+    const rtp_llm::GptInitParameter gptInitParameter() const;
     void reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
@@ -57,7 +57,7 @@ private:
     autil::ThreadPtr               loop_thread_;
     std::atomic<bool>              running_{false};
     std::unique_ptr<Executor>      executor_;
-    const ft::GptInitParameter     params_;
+    const rtp_llm::GptInitParameter     params_;
     StepRecorder                   step_recorder_;
     kmonitor::MetricsReporterPtr   metrics_reporter_;
 };

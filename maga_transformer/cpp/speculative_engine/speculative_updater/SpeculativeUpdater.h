@@ -33,7 +33,7 @@ public:
             RETURN_IF_STATUS_ERROR(dispatch(stream, sampler_output.outputs[stream_index]));
             stream_index++;
         }
-        FT_LOG_DEBUG("speculative update done");
+        RTP_LLM_LOG_DEBUG("speculative update done");
         return absl::OkStatus();
     };
 

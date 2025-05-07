@@ -1,6 +1,6 @@
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
+#include "maga_transformer/cpp/kernels/decoder_masked_multihead_attention_utils.h"
 
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -22,7 +22,7 @@ __global__ void logn_attention_kernel(
     if (work) {
         query_vec.x = input[batch_idx][seq_idx][headnum_idx][headsize_idx];
         query_vec.y = input[batch_idx][seq_idx][headnum_idx][headsize_idx+1];
-        fastertransformer::logn_attention(query_vec, seq_idx, logn_seq_len);
+        rtp_llm::logn_attention(query_vec, seq_idx, logn_seq_len);
         output[batch_idx][seq_idx][headnum_idx][headsize_idx] = query_vec.x;
         output[batch_idx][seq_idx][headnum_idx][headsize_idx+1] = query_vec.y;
     }

@@ -31,7 +31,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->AddHeader("Content-Type", "application/json");
     if (!ParallelInfo::globalParallelInfo().isMaster()) {
-        FT_LOG_WARNING("gang worker should not access /tokenizer/encode api directly");
+        RTP_LLM_LOG_WARNING("gang worker should not access /tokenizer/encode api directly");
         auto msg = ErrorResponse::CreateErrorResponseJsonString(
             515, "gang worker should not access /tokenizer/encode api directly");
         writer->Write(msg);
@@ -43,7 +43,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         TokenizerEncodeRequest req;
         autil::legacy::FromJsonString(req, body);
         if (req.prompt.has_value() == false) {
-            FT_LOG_WARNING("tokenizer encode failed, request has no prompt, request body: %s", body.c_str());
+            RTP_LLM_LOG_WARNING("tokenizer encode failed, request has no prompt, request body: %s", body.c_str());
             writer->SetStatus(500, "Internal Server Error");
             auto msg = ErrorResponse::CreateErrorResponseJsonString(514,
                     "tokenizer encode failed, request has no prompt");
@@ -70,7 +70,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         }
 
         if (!tokenizer_response) {
-            FT_LOG_WARNING("tokenizer encode failed, response is null, request body: %s", body.c_str());
+            RTP_LLM_LOG_WARNING("tokenizer encode failed, response is null, request body: %s", body.c_str());
             writer->SetStatus(500, "Internal Server Error");
             auto msg =
                 ErrorResponse::CreateErrorResponseJsonString(514, "tokenizer encode failed, maybe tokenizer failed");
@@ -83,7 +83,7 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         writer->Write(response_json_str);
         return;
     } catch (const std::exception& e) {
-        FT_LOG_WARNING(
+        RTP_LLM_LOG_WARNING(
             "tokenizer encode failed, found exception. request body: %s, exception: [%s]", body.c_str(), e.what());
         writer->SetStatus(500, "Internal Server Error");
         auto msg = ErrorResponse::CreateErrorResponseJsonString(514, "tokenizer encode failed, exception occurred");

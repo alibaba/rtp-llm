@@ -15,7 +15,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
     writer->AddHeader("Content-Type", "application/json");
 
     if (is_stopped_.load()) {
-        FT_LOG_WARNING("called worker status route, but server has been shutdown");
+        RTP_LLM_LOG_WARNING("called worker status route, but server has been shutdown");
         writer->SetStatus(503, "Service Unavailable");
         writer->Write(R"({"detail":"this server has been shutdown"})");
         return;
@@ -25,7 +25,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
     if (engine_) {
         load_balance_info = engine_->getLoadBalanceInfo();
     } else {
-        FT_LOG_WARNING("worker status service call worker status error, engine is null");
+        RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }
 
     int available_concurrency = 0;
@@ -37,7 +37,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
         if (controller_) {  // controller should not be null
             available_concurrency = controller_->get_available_concurrency();
         } else {
-            FT_LOG_WARNING("called register worker status route, concurrency controller is null");
+            RTP_LLM_LOG_WARNING("called register worker status route, concurrency controller is null");
         }
     }
     WorkerStatusResponse worker_status_response;

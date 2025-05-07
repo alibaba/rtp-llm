@@ -8,7 +8,7 @@ namespace rtp_llm_master {
         for (auto& config: configs) {
             impl_map_.emplace(config.machine_info, LookupMapImpl());
             if (!impl_map_[config.machine_info].init(config.config_path)) {
-                FT_LOG_ERROR("failed to init LookupMapImpl with machine:[%s], config:[%s], init LookupPrefillEstimator failed");
+                RTP_LLM_LOG_ERROR("failed to init LookupMapImpl with machine:[%s], config:[%s], init LookupPrefillEstimator failed");
                 return false;
             }
         }

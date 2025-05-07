@@ -8,7 +8,7 @@
 namespace rtp_llm {
 
 absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     std::list<GenerateStreamPtr> propose_streams;
     ProposeOutput propose_output;
 
@@ -24,14 +24,14 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
     }
 
     for (auto& stream: propose_streams) {
-        FT_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
         bool stop_propose = propose_streams.empty();
         tpSyncStopFinishedStream(stop_propose);
         if (stop_propose) {
-            FT_LOG_DEBUG("early stop propose");
+            RTP_LLM_LOG_DEBUG("early stop propose");
             break;
         }
         RETURN_IF_STATUS_ERROR(normal_executor_.process(propose_streams));
@@ -44,10 +44,10 @@ absl::StatusOr<ProposeOutput> VanillaExecutor::propose(const std::list<GenerateS
     }
 
     for (auto& stream: propose_streams) {
-        FT_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    FT_LOG_DEBUG("propose done");
+    RTP_LLM_LOG_DEBUG("propose done");
 
     return propose_output;
 }

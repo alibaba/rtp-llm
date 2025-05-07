@@ -2,11 +2,11 @@
 
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <cstddef>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -29,19 +29,19 @@ public:
     {
         // we need to check hidden states is not empty,
         // that this stream pass pre-base-model compute.
-        FT_CHECK(getLastHiddenStates() != nullptr);
-        FT_CHECK(!isContextStream());
+        RTP_LLM_CHECK(getLastHiddenStates() != nullptr);
+        RTP_LLM_CHECK(!isContextStream());
 
         // we do not support chunk prefill and batch stream now.
-        FT_CHECK(!isChunkStream());
-        FT_CHECK(tileNum() == 1);
+        RTP_LLM_CHECK(!isChunkStream());
+        RTP_LLM_CHECK(tileNum() == 1);
 
 
         // get token ids
         size_t total_token_num = seqLength();
         size_t input_token_num = total_token_num - mtp_token_index_ - 1;
         // check hidden states num is equal to token ids
-        FT_CHECK_WITH_INFO(getLastHiddenStates()->shape()[0] == input_token_num,
+        RTP_LLM_CHECK_WITH_INFO(getLastHiddenStates()->shape()[0] == input_token_num,
             "hidde_states_num: %d, input_token_num: %d",
             getLastHiddenStates()->shape()[0], input_token_num);
         // change prefix len
@@ -60,7 +60,7 @@ public:
         setMetricsReporter(nullptr);
         setNeedReleaseResource(false);
         setGenerateConfig();
-        FT_LOG_DEBUG("\nsuccess create MTP stream: %s", debugString().c_str());
+        RTP_LLM_LOG_DEBUG("\nsuccess create MTP stream: %s", debugString().c_str());
 
     };
 
@@ -71,7 +71,7 @@ public:
     };
 
     ErrorResult<GenerateOutputs> nextOutput() override {
-        FT_FAIL("MTPStream::nextOutput should not be called");
+        RTP_LLM_FAIL("MTPStream::nextOutput should not be called");
         return ErrorInfo::OkStatus();
     };
 
@@ -82,16 +82,16 @@ public:
             if (!output_buffer->all_probs) {
                 size_t vocab_size         = update_info.all_probs->shape()[1];
                 output_buffer->all_probs  = device_->allocateBuffer(
-                    {ft::DataType::TYPE_FP32, {propose_step_, vocab_size}, ft::AllocationType::DEVICE}, {"mtp_all_probs"});
+                    {rtp_llm::DataType::TYPE_FP32, {propose_step_, vocab_size}, rtp_llm::AllocationType::DEVICE}, {"mtp_all_probs"});
             }
             device_->copy({output_buffer->all_probs->view(current_step_, 1), *update_info.all_probs});
         }
         *((*output_buffer->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)update_info.new_tokens->data())[0];
         current_step_++;
 
-        FT_CHECK(update_info.all_hidden_states != nullptr);
+        RTP_LLM_CHECK(update_info.all_hidden_states != nullptr);
         last_hidden_states_ = device_->clone(
-            {*update_info.all_hidden_states, ft::AllocationType::DEVICE});
+            {*update_info.all_hidden_states, rtp_llm::AllocationType::DEVICE});
     };
 
 
@@ -102,14 +102,14 @@ public:
         // re init token ids
         std::shared_ptr<GenerateInput> fake_input = std::make_shared<GenerateInput>();
         fake_input->generate_config               = std::make_shared<GenerateConfig>();
-        fake_input->input_ids                     = device_->clone({*ft::vector2Buffer<int32_t>(new_token_ids),
-                                                                    ft::AllocationType::HOST});
+        fake_input->input_ids                     = device_->clone({*rtp_llm::vector2Buffer<int32_t>(new_token_ids),
+                                                                    rtp_llm::AllocationType::HOST});
         complete_token_ids_                       = std::make_shared<CompleteTokenIds>(device_,
                                                                                        tileNum(),
                                                                                        max_seq_len_,
                                                                                        seqSizePerBlock());
         complete_token_ids_->init(fake_input);
-        FT_LOG_DEBUG("\nMTP stream fake input is %s", fake_input->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("\nMTP stream fake input is %s", fake_input->debugString().c_str());
     }
 
     void updatePrefixLen() {
@@ -118,7 +118,7 @@ public:
         size_t last_mtp_index = mtp_token_index_ - last_hidden_size;
         size_t total_token_num = seqLength();
         size_t input_token_num = total_token_num - last_mtp_index - 1;
-        FT_LOG_DEBUG("updatePrefixLen: last_mtp_index: %d, input_token_num: %d", last_mtp_index, input_token_num);
+        RTP_LLM_LOG_DEBUG("updatePrefixLen: last_mtp_index: %d, input_token_num: %d", last_mtp_index, input_token_num);
         if (input_token_num < last_hidden_size) {
             setReuseLength(last_mtp_index);
             setFallbackPrefixLength(0);
@@ -137,7 +137,7 @@ public:
 private:
     void allocateOutputBuffer(size_t propose_step) {
         propose_output_->outputs[streamId()]->tokens = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"mtp propose tokens"});
+            {rtp_llm::DataType::TYPE_INT32, {1, propose_step}, rtp_llm::AllocationType::HOST}, {"mtp propose tokens"});
     }
 
 private:

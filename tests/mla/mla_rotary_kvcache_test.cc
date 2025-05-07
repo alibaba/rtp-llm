@@ -1,10 +1,10 @@
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaFlashInfer.h"
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-using namespace fastertransformer;
+#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "maga_transformer/cpp/devices/OpData.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+using namespace rtp_llm;
 
 namespace unittest {
 
@@ -45,8 +45,8 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
 
     auto gpt_params = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
-    fastertransformer::DeviceFactory::initDevices(gpt_params);
-    device_      = fastertransformer::DeviceFactory::getDefaultDevice();
+    rtp_llm::DeviceFactory::initDevices(gpt_params);
+    device_      = rtp_llm::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
         static_cast<size_t>(head_num),
@@ -107,9 +107,9 @@ void MlaRotaryKVCacheOp::applyRotaryKVCache(
     auto q_buf = torchTensor2Buffer(q);
     auto fused_qkv_buf = torchTensor2Buffer(fused_qkv);
 
-    FT_LOG_INFO("before run");
+    RTP_LLM_LOG_INFO("before run");
     if (context_params_ != nullptr) {
-        FT_LOG_INFO("run context");
+        RTP_LLM_LOG_INFO("run context");
         auto context_q_buf = q_buf->slice(decoder_batch_size_, q_buf->shape()[0] - decoder_batch_size_);
         auto context_fused_qkv_buf = fused_qkv_buf->slice(decoder_batch_size_, fused_qkv_buf->shape()[0] - decoder_batch_size_);
 
@@ -127,7 +127,7 @@ void MlaRotaryKVCacheOp::applyRotaryKVCache(
         device_->mlaRotaryWriteKVCache(context_params);
     }
     if (decode_params_ != nullptr) {
-        FT_LOG_INFO("run decode");
+        RTP_LLM_LOG_INFO("run decode");
         auto decode_q_buf = q_buf->slice(0, decoder_batch_size_);
         auto decode_fused_qkv_buf = fused_qkv_buf->slice(0, decoder_batch_size_);
 
@@ -144,7 +144,7 @@ void MlaRotaryKVCacheOp::applyRotaryKVCache(
         };
         device_->mlaRotaryWriteKVCache(decode_params);
     }
-    FT_LOG_INFO("after run");
+    RTP_LLM_LOG_INFO("after run");
 }
 }  // namespace unittest
 

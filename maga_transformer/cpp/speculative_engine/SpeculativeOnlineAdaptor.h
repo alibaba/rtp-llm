@@ -10,7 +10,7 @@ class SpeculativeOnlineAdaptor {
 public:
     void dynamicUpdateProposerConfig(std::unique_ptr<ProposeExecutor>&     proposer,
                                      const std::unique_ptr<SchedulerBase>& scheduler) const {
-        FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+        RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
         // TODO(xyz): update proposer config based on the status of metrics and scheduler
     }
 };

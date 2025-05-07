@@ -1,13 +1,13 @@
 #include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(
-    ft::DeviceBase* device, std::vector<StreamThinkInfo> think_infos) :
+    rtp_llm::DeviceBase* device, std::vector<StreamThinkInfo> think_infos) :
     BaseLogitsProcessor(device), think_infos_(think_infos) {};
 
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs) {
@@ -26,11 +26,11 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs) {
 
 void ThinkModeLogitsProcessor::setVocabMask(
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-    ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+    rtp_llm::BufferPtr new_tokens_logits, int num_new_tokens, 
     std::vector<int> template_token_ids, size_t vocab_size, bool enforce) 
 {
     if (!dfa_ptr->isFinished() && enforce) {
-        FT_LOG_INFO("sampler enforce transfer status");
+        RTP_LLM_LOG_INFO("sampler enforce transfer status");
         memFill(new_tokens_logits, vocab_size, (size_t) template_token_ids[dfa_ptr->status()]);
     }
 }

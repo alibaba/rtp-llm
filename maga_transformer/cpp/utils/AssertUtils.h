@@ -21,7 +21,7 @@ namespace rtp_llm {
 [[noreturn]] inline void myAssert(const char* const file, int const line, std::string const& info = "") {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
-    FT_LOG_ERROR("FATAIL ERROR!!! %s", error_msg.c_str());
+    RTP_LLM_LOG_ERROR("FATAIL ERROR!!! %s", error_msg.c_str());
     if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
         fflush(stdout);
         fflush(stderr);
@@ -32,7 +32,7 @@ namespace rtp_llm {
 
 }  // namespace rtp_llm
 
-#define FT_CHECK_WITH_INFO(val, info, ...)                                                  \
+#define RTP_LLM_CHECK_WITH_INFO(val, info, ...)                                                  \
     do {                                                                                    \
         bool is_valid_val = (val);                                                          \
         if (!is_valid_val) {						                                        \
@@ -41,6 +41,6 @@ namespace rtp_llm {
         }								                                                    \
     } while (0)
 
-#define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")
+#define RTP_LLM_CHECK(val) RTP_LLM_CHECK_WITH_INFO(val, "")
 
-#define FT_FAIL(info, ...) rtp_llm::myAssert(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
+#define RTP_LLM_FAIL(info, ...) rtp_llm::myAssert(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))

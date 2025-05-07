@@ -7,7 +7,7 @@
 #include <functional>
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
 
@@ -18,7 +18,7 @@ namespace rtp_llm {
 class RequestBlockBufferStore {
 
 public:
-    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, fastertransformer::DeviceBase* device);
+    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, rtp_llm::DeviceBase* device);
     ~RequestBlockBufferStore() = default;
 
 public:
@@ -41,7 +41,7 @@ private:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
-    fastertransformer::DeviceBase*                 device_;
+    rtp_llm::DeviceBase*                 device_;
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;

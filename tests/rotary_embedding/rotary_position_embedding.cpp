@@ -1,11 +1,12 @@
 
-#include "src/fastertransformer/kernels/rotary_position_embedding.h"
+#include "maga_transformer/cpp/kernels/rotary_position_embedding.h"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
-using namespace fastertransformer;
+using namespace rtp_llm;
+
 namespace unittest {
 
 using _4DTensor = at::PackedTensorAccessor32<float,4,at::RestrictPtrTraits>;

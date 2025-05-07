@@ -31,7 +31,7 @@ public:
                 addLora(adapter_name, lora_path);
             }
         }
-        FT_LOG_INFO("cpp update lora weights time: %f s", timer.done_sec());
+        RTP_LLM_LOG_INFO("cpp update lora weights time: %f s", timer.done_sec());
     }
     ~LoraService() = default;
 

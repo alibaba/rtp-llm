@@ -5,7 +5,7 @@
 #include "maga_transformer/cpp/model_rpc/RpcServer.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include <grpc++/test/mock_stream.h>
 
 using grpc::testing::MockClientReader;
@@ -32,8 +32,8 @@ TEST_F(RpcServiceTest, testSimple) {
     grpc::ClientContext context;
 
     MagaInitParams                                                   maga_init_params;
-    std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights;
-    std::unordered_map<std::string, ft::ConstBufferPtr>              weights;
+    std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
+    std::unordered_map<std::string, rtp_llm::ConstBufferPtr>              weights;
 
     RpcServiceImpl service(maga_init_params, layer_weights, weights);
     // auto stream = service.generate_stream(&context, input);

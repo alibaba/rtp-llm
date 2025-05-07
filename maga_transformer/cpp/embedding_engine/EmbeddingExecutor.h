@@ -14,7 +14,7 @@ namespace rtp_llm {
 
 class EmbeddingExecutor {
 public:
-    explicit EmbeddingExecutor(const EngineInitParams& params, ft::DeviceBase* device, py::object handler);
+    explicit EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler);
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
@@ -22,10 +22,10 @@ private:
     std::unique_ptr<GptModel>             model_;
     py::object                            handler_;
     py::handle                            torch_type_;
-    ft::DeviceBase*                       device_;
-    ft::BufferPtr                         max_position_ids_buf_;
+    rtp_llm::DeviceBase*                       device_;
+    rtp_llm::BufferPtr                         max_position_ids_buf_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
-    const fastertransformer::GptInitParameter params_;
+    const rtp_llm::GptInitParameter params_;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

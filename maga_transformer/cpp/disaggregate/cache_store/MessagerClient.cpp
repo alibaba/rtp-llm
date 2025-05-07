@@ -19,7 +19,7 @@ MessagerClient::~MessagerClient() {
 
 bool MessagerClient::init(bool enable_metric) {
     if (!initTcpClient(enable_metric)) {
-        FT_LOG_WARNING("messager client init failed, tcp client init failed");
+        RTP_LLM_LOG_WARNING("messager client init failed, tcp client init failed");
         return false;
     }
     return true;
@@ -43,12 +43,12 @@ bool MessagerClient::initTcpClient(bool enable_metric) {
         metricConfig.metricLevel                 = kmonitor::NORMAL;
         auto metricReporter = std::make_shared<arpc::KMonitorANetClientMetricReporter>(metricConfig);
         if (!metricReporter->init(rpc_channel_transport_.get())) {
-            FT_LOG_ERROR("anet metric reporter init failed");
+            RTP_LLM_LOG_ERROR("anet metric reporter init failed");
             return false;
         }
         rpc_channel_manager_->SetMetricReporter(metricReporter);
     }
-    FT_LOG_INFO("layer cache messager client init tcp client success");
+    RTP_LLM_LOG_INFO("layer cache messager client init tcp client success");
     return true;
 }
 
@@ -75,7 +75,7 @@ void MessagerClient::load(const std::string&                                    
                           int                                                          partition_id) {
     auto channel = getChannel(ip, port);
     if (channel == nullptr) {
-        FT_LOG_WARNING("messager client get channel failed, ip %s", ip.c_str());
+        RTP_LLM_LOG_WARNING("messager client get channel failed, ip %s", ip.c_str());
         callback(false, CacheStoreErrorCode::LoadConnectFailed);
         return;
     }
@@ -83,7 +83,7 @@ void MessagerClient::load(const std::string&                                    
     auto request = makeLoadRequest(
         request_block_buffer, timeout_ms - 10, partition_count, partition_id);  // TODO: 10 is message transfer time
     if (request == nullptr) {
-        FT_LOG_WARNING("messager client generate load request failed");
+        RTP_LLM_LOG_WARNING("messager client generate load request failed");
         callback(false, CacheStoreErrorCode::LoadSendRequestFailed);
         return;
     }
@@ -135,14 +135,14 @@ std::shared_ptr<arpc::RPCChannelBase> MessagerClient::getChannel(const std::stri
         return nullptr;
     }
 
-    FT_LOG_INFO("new channel connect to %s", spec.c_str());
+    RTP_LLM_LOG_INFO("new channel connect to %s", spec.c_str());
     channel_map_[spec] = new_channel;
     return new_channel;
 }
 
 std::shared_ptr<arpc::RPCChannelBase> MessagerClient::openChannel(const std::string& spec) {
     if (!rpc_channel_manager_) {
-        FT_LOG_WARNING("messager client open channel failed, rpc channel manager is null");
+        RTP_LLM_LOG_WARNING("messager client open channel failed, rpc channel manager is null");
         return nullptr;
     }
 

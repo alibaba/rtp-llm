@@ -36,9 +36,9 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = torch_deps() + [
-        "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/core:buffer",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/core:buffer",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         "//:gpt_init_params",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

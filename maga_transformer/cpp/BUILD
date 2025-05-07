@@ -48,16 +48,16 @@ cc_library(
         ":system_prompt",
         ":position_ids_generator",
         "//:gpt_init_params",
-        "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices:device_utils",
-        "//src/fastertransformer/models:weights_define",
+        "//maga_transformer/cpp/devices:devices_base",
+        "//maga_transformer/cpp/devices:device_utils",
+        "//maga_transformer/cpp/models_weight:weights_define",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
         "@havenask//aios/autil:json",
     ] + select({
         "@//:using_arm": [
-            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
+            "//maga_transformer/cpp/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [],
     }),
@@ -129,9 +129,9 @@ cc_library(
         "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices:device_utils",
-        "//src/fastertransformer/models:weights_define",
+        "//maga_transformer/cpp/devices:devices_base",
+        "//maga_transformer/cpp/devices:device_utils",
+        "//maga_transformer/cpp/models_weight:weights_define",
     ],
     visibility = ["//visibility:public"],
 )
@@ -151,8 +151,8 @@ cc_library(
         "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices:device_utils",
+        "//maga_transformer/cpp/devices:devices_base",
+        "//maga_transformer/cpp/devices:device_utils",
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
     ],
     visibility = ["//visibility:public"],
@@ -170,17 +170,17 @@ cc_library(
         ":dataclass",
         ":utils",
         ":cache",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
     ] + select({
         "@//:using_cuda": [],
         "@//:using_rocm": [
-            "//src/fastertransformer/devices/rocm_impl:rocm_impl",
+            "//maga_transformer/cpp/devices/rocm_impl:rocm_impl",
         ],
         "@//:using_arm": [
-            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
+            "//maga_transformer/cpp/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [
-            "//src/fastertransformer/devices/cpu_impl:cpu_impl",
+            "//maga_transformer/cpp/devices/cpu_impl:cpu_impl",
         ],
     }),
     visibility = ["//visibility:public"]
@@ -197,7 +197,7 @@ cc_library(
     deps = torch_deps() + [
         ":dataclass",
         ":models",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
     ],
     visibility = ["//visibility:public"],
 )
@@ -266,13 +266,13 @@ cc_library(
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/devices:devices_base_impl",
+        "//maga_transformer/cpp/devices:devices_base_impl",
     ] + select({
         "@//:using_cuda": [
-            "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+            "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         ],
         "@//:using_arm": [
-            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
+            "//maga_transformer/cpp/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [],
     }),
@@ -307,10 +307,10 @@ cc_library(
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//src/fastertransformer/devices:devices_base_impl",
+        "//maga_transformer/cpp/devices:devices_base_impl",
     ] + select({
         "@//:using_cuda": [
-            "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+            "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         ],
         "//conditions:default": [],
     }),
@@ -342,7 +342,7 @@ cc_library(
     ]),
     deps = [
         ":dataclass",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
     ],
     visibility = ["//visibility:public"]
 )
@@ -356,7 +356,7 @@ cc_library(
         "position_ids_generator/*.cc",
     ]),
     deps = [
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
     ],
     visibility = ["//visibility:public"]
 )
@@ -370,7 +370,7 @@ cc_library(
         "tokenizer/*.cc",
     ]),
     deps = [
-        "//src/fastertransformer/devices:devices_base", # for pybind11
+        "//maga_transformer/cpp/devices:devices_base", # for pybind11
     ],
     visibility = ["//visibility:public"]
 )
@@ -391,7 +391,7 @@ cc_library(
         "//maga_transformer/cpp/embedding_engine:embedding_engine",
         ":embedding_arpc_deps",
         # "//maga_transformer/cpp:speculative_engine",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
         "//maga_transformer/cpp:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
@@ -427,7 +427,7 @@ cc_library(
     hdrs =  glob(["model_rpc/*.h"]),
     deps = [
         ":embedding_arpc_deps",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
@@ -450,3 +450,6 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+exports_files(glob(["th_op/**/*.cc"]))
+exports_files(glob(["th_op/**/*.h"]))

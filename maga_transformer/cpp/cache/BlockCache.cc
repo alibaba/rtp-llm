@@ -86,7 +86,7 @@ std::vector<int> BlockCache::pop() {
 
     while (!lru_cache_.empty()) {
         auto [success, cache_item] = lru_cache_.pop();
-        FT_CHECK(success);
+        RTP_LLM_CHECK(success);
         if (cache_item.is_resident) {
             resident_list.push_back(cache_item);
         } else {
@@ -139,7 +139,7 @@ bool BlockCache::isResident(const std::vector<int>& token_list) const {
         return false;
     }
     const auto& [success, item] = lru_cache_.get(item_key);
-    FT_CHECK(success);
+    RTP_LLM_CHECK(success);
     return item.is_resident;
 }
 

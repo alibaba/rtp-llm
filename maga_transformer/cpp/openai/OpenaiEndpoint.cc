@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                                const std::shared_ptr<ChatRender>& chat_render,
-                               const ft::GptInitParameter&        params):
+                               const rtp_llm::GptInitParameter&        params):
     tokenizer_(tokenizer), chat_render_(chat_render), model_config_(params) {
 
     max_seq_len_ = model_config_.max_seq_len_;
@@ -30,7 +30,7 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
         stop_word_ids_list_.insert(
             stop_word_ids_list_.begin(), extra_stop_word_ids_list.begin(), extra_stop_word_ids_list.end());
     } else {
-        FT_LOG_WARNING("chat render is null");
+        RTP_LLM_LOG_WARNING("chat render is null");
     }
 
     for (const auto& stop_word_ids: stop_word_ids_list_) {
@@ -41,7 +41,7 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
             }
         }
     }
-    FT_LOG_INFO("use stop_words_list [%s]", autil::StringUtil::join(stop_words_list_, ",").c_str());
+    RTP_LLM_LOG_INFO("use stop_words_list [%s]", autil::StringUtil::join(stop_words_list_, ",").c_str());
 }
 
 std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const ChatCompletionRequest &req) {

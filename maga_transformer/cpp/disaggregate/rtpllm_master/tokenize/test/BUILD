@@ -7,7 +7,7 @@ cc_test(
         "//maga_transformer/cpp/disaggregate/rtpllm_master/estimator",
         "//maga_transformer/cpp/disaggregate/rtpllm_master/tokenize:tokenize_service",
         "//maga_transformer/cpp/disaggregate/rtpllm_master/cluster/test:fake_server",
-        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
     ],
     copts = ["-fno-access-control",],
     exec_properties = {'gpu':'A10'},

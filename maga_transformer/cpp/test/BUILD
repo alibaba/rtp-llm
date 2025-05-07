@@ -1,6 +1,6 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cuda_copts", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//src/fastertransformer/devices:device_defs.bzl",
+load("//maga_transformer/cpp/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs", "device_linkopts")
 
 test_copts = [
@@ -23,7 +23,7 @@ cc_library(
 )
 
 test_deps = [
-    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//maga_transformer/cpp/devices/testing:device_test_utils",
     "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     ":test_headers",
@@ -57,7 +57,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps + [
         ":test_utils",
-        "//src/fastertransformer/devices/torch_impl:torch_reference_impl",
+        "//maga_transformer/cpp/devices/torch_impl:torch_reference_impl",
         "//maga_transformer/cpp:utils",
     ],
     env = device_test_envs(),
@@ -81,5 +81,98 @@ cc_test(
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_binary(
+    name = "long_seq_perf",
+    srcs = [
+        "long_seq.cu",
+    ],
+    deps = [
+        "//maga_transformer/cpp/cutlass:cutlass_kernels_impl",
+        "//maga_transformer/cpp/cuda:cuda",
+        "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp/cuda:allocator_cuda",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "gemm_perf",
+    srcs = [
+        "int4_perf.cu"
+    ],
+    deps = [
+        "//maga_transformer/cpp/cutlass:cutlass_kernels_impl",
+        "//maga_transformer/cpp/cuda:cuda",
+        "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp/cuda:allocator_cuda",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "int8_perf",
+    srcs = [
+        "int8_gemm_perf.cu",
+    ],
+    deps = [
+        "//maga_transformer/cpp/cutlass:cutlass_kernels_impl",
+        "//maga_transformer/cpp/cuda:cuda",
+        "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp/cuda:allocator_cuda",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "int8_test",
+    srcs = [
+        "int8_gemm_test.cu",
+    ],
+    deps = [
+        "//maga_transformer/cpp/cutlass:cutlass_kernels_impl",
+        "//maga_transformer/cpp/cuda:cuda",
+        "//maga_transformer/cpp:utils",
+        "//maga_transformer/cpp/cuda:allocator_cuda",
+        "//:th_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_sample_helpers",
+    hdrs = [
+        "helper_cuda.h",
+        "helper_string.h",
+    ],
+    strip_include_prefix = "",
+)
+
+cc_test(
+    name = "memory_test",
+    srcs = [
+        "MemoryTest.cc",
+    ],
+    deps = [
+        "//maga_transformer/cpp/core:allocator",
+        "//maga_transformer/cpp/core:memory_tracker",
+        "//maga_transformer/cpp/cuda:allocator_cuda",
+        "@com_google_googletest//:gtest"
+    ],
+    copts = copts(),
     exec_properties = {'gpu':'A10'},
 )

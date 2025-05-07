@@ -1,16 +1,16 @@
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/models/W.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/models_weight/W.h"
 #include <memory>
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
-ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& tensor) {
+rtp_llm::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& tensor) {
     auto buffer = torchTensor2Buffer(tensor);
     if (need_copy_) {
         auto new_buffer = device_->allocateBuffer({buffer->type(),
@@ -24,7 +24,7 @@ ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& 
     }
 }
 
-ft::ConstBufferPtr
+rtp_llm::ConstBufferPtr
 WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
                                 const std::string& key)
 {
@@ -35,7 +35,7 @@ WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
     return nullptr;
 }
 
-ft::LayerNormWeightsPtr
+rtp_llm::LayerNormWeightsPtr
 WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                                             const std::string& gamma_key,
                                             const std::string& beta_key,
@@ -53,7 +53,7 @@ WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
     return nullptr;
 }
 
-ft::DenseWeightsPtr
+rtp_llm::DenseWeightsPtr
 WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& kernel_key,
                                         const std::string& bias_key,
@@ -89,7 +89,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
         if (quant_algo_.isFp8() && scales) {
             dtype = DataType::TYPE_FP8_E4M3;
         } else if (quant_algo_.isQuant() && scales) {
-            FT_LOG_DEBUG("load weight_only qbuffer weight [%s] scale [%s]", kernel_key.c_str(), scales_key.c_str());
+            RTP_LLM_LOG_DEBUG("load weight_only qbuffer weight [%s] scale [%s]", kernel_key.c_str(), scales_key.c_str());
             if (quant_algo_.getWeightBits() == 4) {
                 dtype = DataType::TYPE_INT4X2;
 
@@ -101,10 +101,10 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
             }
         }
         dense_weights->kernel = ConstBufferPtr(
-                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
+                new rtp_llm::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
                             std::move(scalesBuffer),
                             std::move(zerosBuffer)));
-        FT_LOG_DEBUG("quant_method:%d, kernel_key:%s have scale use Qbuffer, kernel:%s",
+        RTP_LLM_LOG_DEBUG("quant_method:%d, kernel_key:%s have scale use Qbuffer, kernel:%s",
                         quant_algo_.getQuantMethod(), kernel_key.c_str(), kernel->debugString().c_str());
 
     }
@@ -114,9 +114,9 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
     return unique_ptr<DenseWeights>(dense_weights);
 }
 
-ft::FfnLayerWeights
+rtp_llm::FfnLayerWeights
 WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
-    ft::FfnLayerWeights ffn_weights;
+    rtp_llm::FfnLayerWeights ffn_weights;
 
     ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3, W::ffn_z3);
     ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1, W::ffn_z1);
@@ -138,11 +138,11 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     if (ffn_weights.moe_gating_weight) {
         // this moe layer has a parallel dense ffn layer as shared expert.
         if (ffn_weights.gate_up_weight) {
-            ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
+            ffn_weights.shared_expert = make_shared<rtp_llm::FfnLayerWeights>();
             ffn_weights.shared_expert->gate_up_weight = move(ffn_weights.gate_up_weight);
             ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
         } else if (ffn_weights.up_weight) {
-            ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
+            ffn_weights.shared_expert = make_shared<rtp_llm::FfnLayerWeights>();
             ffn_weights.shared_expert->up_weight = move(ffn_weights.up_weight);
             ffn_weights.shared_expert->gate_weight = move(ffn_weights.gate_weight);
             ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
@@ -159,9 +159,9 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     return ffn_weights;
 }
 
-ft::AttentionLayerWeights
+rtp_llm::AttentionLayerWeights
 WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
-    ft::AttentionLayerWeights attention_weights;
+    rtp_llm::AttentionLayerWeights attention_weights;
     attention_weights.pre_attention_layernorm = mayCreateLayerNormWeights(map,
                                                                           W::pre_attn_ln_gamma,
                                                                           W::pre_attn_ln_beta);
@@ -259,7 +259,7 @@ WeightsConverter::convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_w
     return std::make_unique<ConstBufferPtrMap>(std::move(global_weights));
 }
 
-std::unique_ptr<ft::Weights>
+std::unique_ptr<rtp_llm::Weights>
 WeightsConverter::createGptWeights(py::object layer_weights,
                                    py::object global_weight)
 {
@@ -267,7 +267,7 @@ WeightsConverter::createGptWeights(py::object layer_weights,
                                       std::move(convertGlobalWeight(global_weight))));
 }
 
-std::unique_ptr<ft::Weights>
+std::unique_ptr<rtp_llm::Weights>
 WeightsConverter::createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
                                    std::unique_ptr<TensorMap>  global_weight)
 {
@@ -275,12 +275,12 @@ WeightsConverter::createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
                                       std::move(convertGlobalWeight(std::move(global_weight)))));
 }
 
-std::unique_ptr<ft::Weights>
+std::unique_ptr<rtp_llm::Weights>
 WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
                                    std::unique_ptr<ConstBufferPtrMap>  global_weight)
 {
     auto        layers_weights = *layer_weights;
-    ft::Weights gpt_weights;
+    rtp_llm::Weights gpt_weights;
 
     // make global weight
     gpt_weights.embedding = mayCreateDenseWeights(*global_weight,
@@ -305,7 +305,7 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
     gpt_weights.linear_bias_slopes = mayCreateDenseWeights(*global_weight, W::linear_bias_slopes);
 
     for (auto& layer_weights : layers_weights) {
-        ft::LayerWeights layer_ws;
+        rtp_llm::LayerWeights layer_ws;
         layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);
         layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                W::pre_ln_gamma,
@@ -329,7 +329,7 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 
         layer_ws.self_attention_weights.rope_cos_sin_cache = mayFindBuffer(*global_weight, W::rope_cos_sin_cache);
         if (layer_ws.self_attention_weights.rope_cos_sin_cache){
-            FT_CHECK_WITH_INFO(layer_ws.self_attention_weights.rope_cos_sin_cache->type() == DataType::TYPE_FP32, "rope_cos_sin_cache must be fp32");
+            RTP_LLM_CHECK_WITH_INFO(layer_ws.self_attention_weights.rope_cos_sin_cache->type() == DataType::TYPE_FP32, "rope_cos_sin_cache must be fp32");
         }
 
         layer_ws.ffn_weights = createFfnWeights(layer_weights);
@@ -347,7 +347,7 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 
         gpt_weights.layers.emplace_back(std::move(layer_ws));
     }
-    return std::make_unique<ft::Weights>(gpt_weights);
+    return std::make_unique<rtp_llm::Weights>(gpt_weights);
 }
 
 
@@ -364,11 +364,11 @@ std::unique_ptr<ConstBufferPtrMap>  WeightsConverter::convertGlobalWeight_(py::o
     return convertGlobalWeight(std::move(convertGlobalWeight(py_global_weight)));
 }
 
-std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
+std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
     if (sp_model) {
         model = model.attr("model");
     }
-    const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+    const rtp_llm::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<rtp_llm::GptInitParameter>();
     py::object                  py_layers_weights = model.attr("weight").attr("weights");
     py::object                  py_global_weights = model.attr("weight").attr("global_weights");
 
@@ -383,11 +383,11 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::obj
     auto sp_model = model.attr("model");
     std::string sp_type = model.attr("sp_type").cast<std::string>();
     size_t gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
-    FT_CHECK(sp_type == "mtp");
+    RTP_LLM_CHECK(sp_type == "mtp");
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    const ft::GptInitParameter& gpt_init_params = sp_model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+    const rtp_llm::GptInitParameter& gpt_init_params = sp_model.attr("config").attr("gpt_init_params").cast<rtp_llm::GptInitParameter>();
     py::object                  py_layers_weights = sp_model.attr("weight").attr("weights");
     py::object                  py_global_weights = sp_model.attr("weight").attr("global_weights");
     auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);

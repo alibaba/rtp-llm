@@ -30,7 +30,7 @@ EstimateFunction get_estimate_func_from_string(const std::string& s) {
     HELPER_FUNC(MEAN);
     HELPER_FUNC(FLOOR);
     HELPER_FUNC(CEIL);
-    FT_LOG_WARNING("unrecognized estimate function: [%s], using EstimateFunction::CEIL as default", s.c_str());
+    RTP_LLM_LOG_WARNING("unrecognized estimate function: [%s], using EstimateFunction::CEIL as default", s.c_str());
     return EstimateFunction::CEIL;
 }
 #undef HELPER_FUNC
@@ -38,7 +38,7 @@ EstimateFunction get_estimate_func_from_string(const std::string& s) {
 bool LookupMapImpl::init(const std::string& filePath) {
     std::ifstream fileStream(filePath);
     if (!fileStream.is_open()) {
-        FT_LOG_ERROR("failed to open file at [%s], LookupMapImpl init failed", filePath.c_str());
+        RTP_LLM_LOG_ERROR("failed to open file at [%s], LookupMapImpl init failed", filePath.c_str());
         return false;
     }
     std::stringstream buffer;
@@ -49,10 +49,10 @@ bool LookupMapImpl::init(const std::string& filePath) {
     try {
         autil::legacy::FromJsonString(lookup_map, fileContent);
     } catch (const std::exception& e) {
-        FT_LOG_WARNING("response deserialize failed, error: %s", e.what());
+        RTP_LLM_LOG_WARNING("response deserialize failed, error: %s", e.what());
         return false;
     } catch (...) {
-        FT_LOG_WARNING("failed to parse file [%s] to LookupMapJson, please check", filePath.c_str());
+        RTP_LLM_LOG_WARNING("failed to parse file [%s] to LookupMapJson, please check", filePath.c_str());
         return false;
     }
     return initFromLookupMapJson(lookup_map);
@@ -65,7 +65,7 @@ bool LookupMapImpl::checkConfigValid(int                 input_lower_bound,
     // prefix_config of different scope support euqal now
     if (input_lower_bound != input_config.lower_bound || (prefix_lower_bound != prefix_config.lower_bound && prefix_lower_bound != 
     prefix_config.lower_bound + 1)) {
-        FT_LOG_WARNING("input or prefix lower bound match failed, expect: [%d:%d], actual: [%d:%d]",
+        RTP_LLM_LOG_WARNING("input or prefix lower bound match failed, expect: [%d:%d], actual: [%d:%d]",
                        input_lower_bound,
                        prefix_lower_bound,
                        input_config.lower_bound,
@@ -74,12 +74,12 @@ bool LookupMapImpl::checkConfigValid(int                 input_lower_bound,
     }
     if ((input_config.lower_bound % input_config.step_size != 0)
         || (input_config.upper_bound % input_config.step_size != 0)) {
-        FT_LOG_WARNING("input config step length error, range: (%d, %d], step: %d", input_config.lower_bound, input_config.upper_bound, input_config.step_size);
+        RTP_LLM_LOG_WARNING("input config step length error, range: (%d, %d], step: %d", input_config.lower_bound, input_config.upper_bound, input_config.step_size);
         return false;
     }
     if ((prefix_config.lower_bound % prefix_config.step_size != 0)
         || (prefix_config.upper_bound % prefix_config.step_size != 0)) {
-        FT_LOG_WARNING("prefix config step length error, range: (%d, %d], step: %d", prefix_config.lower_bound, prefix_config.upper_bound, prefix_config.step_size);
+        RTP_LLM_LOG_WARNING("prefix config step length error, range: (%d, %d], step: %d", prefix_config.lower_bound, prefix_config.upper_bound, prefix_config.step_size);
         return false;
     }
     return true;
@@ -149,7 +149,7 @@ bool LookupMapImpl::initFromLookupMapJson(LookupMapJson& map_json) {
     max_input_length_  = 0;
     max_prefix_length_ = -1;
     if (map_json.items.size() == 0) {
-        FT_LOG_WARNING("map json items size == 0, init LookupMapImpl failed");
+        RTP_LLM_LOG_WARNING("map json items size == 0, init LookupMapImpl failed");
         return false;
     }
     for (int i = 0; i < map_json.items.size(); i++) {        
@@ -163,7 +163,7 @@ bool LookupMapImpl::initFromLookupMapJson(LookupMapJson& map_json) {
     map_[{0, 0}] = 0;
     std::swap(scopes_, map_json.items);
     if (max_input_length_ <= 0 || max_prefix_length_ < 0) {
-        FT_LOG_WARNING("get max_input_length == %d and max_prefix_length == %d not valid, init LookupMapImpl failed", max_input_length_, max_prefix_length_);
+        RTP_LLM_LOG_WARNING("get max_input_length == %d and max_prefix_length == %d not valid, init LookupMapImpl failed", max_input_length_, max_prefix_length_);
         return false;
     }
     return true;
@@ -173,7 +173,7 @@ bool LookupMapImpl::checkInitScopeMap(const LookupMapScope& scope) {
     // insert
     for (auto& item : scope.map_items) {
         if (map_.find({item.prefix_length, item.input_length}) != map_.end()) {
-            FT_LOG_WARNING(
+            RTP_LLM_LOG_WARNING(
                 "find repeat entry: {%d, %d} in map, init scope map failed", item.prefix_length, item.input_length);
             return false;
         }
@@ -184,7 +184,7 @@ bool LookupMapImpl::checkInitScopeMap(const LookupMapScope& scope) {
         for (int j = scope.input_config.lower_bound + scope.input_config.step_size; j <= scope.input_config.upper_bound;
              j += scope.input_config.step_size) {
             if (map_.find({i, j}) == map_.end()) {
-                FT_LOG_WARNING("failed to find entry: {%d, %d} in map, init scope map failed", i, j);
+                RTP_LLM_LOG_WARNING("failed to find entry: {%d, %d} in map, init scope map failed", i, j);
                 return false;
             }
         }
@@ -194,7 +194,7 @@ bool LookupMapImpl::checkInitScopeMap(const LookupMapScope& scope) {
         for (int j = scope.input_config.step_size; j <= scope.input_config.upper_bound;
              j += scope.input_config.step_size) {
             if (map_.find({i, j}) == map_.end()) {
-                FT_LOG_WARNING("failed to find entry: {%d, %d} in map, init scope map failed", i, j);
+                RTP_LLM_LOG_WARNING("failed to find entry: {%d, %d} in map, init scope map failed", i, j);
                 return false;
             }
         }

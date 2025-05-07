@@ -44,9 +44,9 @@ void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
                      << "); stack trace: ***" << std::endl;
             break;
     }
-    FT_STACKTRACE_LOG_INFO("%s", stack_ss.str().c_str());
+    RTP_LLM_STACKTRACE_LOG_INFO("%s", stack_ss.str().c_str());
 
-    fastertransformer::printStackTrace();
+    rtp_llm::printStackTrace();
 }
 
 void flushLog() {

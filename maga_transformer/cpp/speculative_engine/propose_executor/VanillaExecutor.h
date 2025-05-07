@@ -11,7 +11,7 @@ namespace rtp_llm {
 class VanillaExecutor: public ProposeExecutor {
 public:
     explicit VanillaExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                             ft::DeviceBase*                                device,
+                             rtp_llm::DeviceBase*                                device,
                              const std::shared_ptr<CacheManager>&           cache_manager,
                              const std::shared_ptr<lora::LoraManager>&      lora_manager,
                              bool                                           warm_up = false):
@@ -19,7 +19,7 @@ public:
         propose_step_(propose_model_engine_init_params->gen_num_per_circle),
         normal_executor_(
             *propose_model_engine_init_params->vanilla_model_params, cache_manager, device_, lora_manager, warm_up) {
-            FT_LOG_INFO("VanillaExecutor propose step is %ld", propose_step_);
+            RTP_LLM_LOG_INFO("VanillaExecutor propose step is %ld", propose_step_);
         }
 
     ~VanillaExecutor() {}
@@ -41,7 +41,7 @@ public:
         if (device_->getDeviceProperties().tp_size <= 1) {
             return;
         }
-        auto disable_sp_run = device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST});
+        auto disable_sp_run = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::HOST});
         auto disable_sp_run_ptr = disable_sp_run->data<int32_t>();
         disable_sp_run_ptr[(size_t)0] = need_stop;
 

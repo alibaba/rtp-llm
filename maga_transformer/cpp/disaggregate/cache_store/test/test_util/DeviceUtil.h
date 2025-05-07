@@ -1,9 +1,9 @@
 #include <vector>
 
-#include "src/fastertransformer/devices/DeviceBase.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -21,8 +21,8 @@ public:
     bool  memcopy(void* dst, bool dst_gpu, const void* src, bool src_gpu, size_t size);
 
 public:
-    ft::DeviceBase*                          device_;
-    std::unordered_map<void*, ft::BufferPtr> buffer_map_;
+    rtp_llm::DeviceBase*                          device_;
+    std::unordered_map<void*, rtp_llm::BufferPtr> buffer_map_;
 private:
     std::mutex mutex_;
 };

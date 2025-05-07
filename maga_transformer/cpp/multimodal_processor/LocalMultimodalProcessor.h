@@ -2,7 +2,7 @@
 
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 

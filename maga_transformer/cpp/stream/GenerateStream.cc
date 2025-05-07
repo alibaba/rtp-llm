@@ -5,18 +5,18 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ft::GptInitParameter&      params,
+                               const rtp_llm::GptInitParameter&      params,
                                const ResourceContext&           resource_context,
                                kmonitor::MetricsReporterPtr     metrics_reporter)
     : generate_input_(input)
@@ -31,7 +31,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
     , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
-    , dtype_(ft::getDataType(params.data_type_))
+    , dtype_(rtp_llm::getDataType(params.data_type_))
     , hidden_size_(params.hidden_size_)
 {
     if (!updatePrefix(resource_context.system_prompt)) {
@@ -39,14 +39,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     begin_time_us_      = input->begin_time_us;
-    device_             = ft::DeviceFactory::getDefaultDevice();
+    device_             = rtp_llm::DeviceFactory::getDefaultDevice();
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = device_->allocateBuffer(
-                {ft::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, ft::AllocationType::HOST}, {});
+                {rtp_llm::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, rtp_llm::AllocationType::HOST}, {});
     }
     if (generate_input_->generate_config->return_softmax_probs) {
         softmax_probs_ = device_->allocateBuffer(
-                {ft::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
+                {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
     complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
@@ -56,7 +56,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     max_chunk_len_ = seqLength();
 
     cum_log_probs_ =
-        device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum()}, rtp_llm::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
 
     generate_status_.status = StreamState::WAITING;
@@ -116,7 +116,7 @@ absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
     } else if (!isContextStream()) {
         return 1;
     }
-    FT_CHECK(false);
+    RTP_LLM_CHECK(false);
     return absl::InternalError("unexpected call");
 }
 
@@ -187,7 +187,7 @@ std::string GenerateStream::adapterName() const {
     return generate_input_->generate_config->adapter_name;
 }
 
-ft::SpecialTokens GenerateStream::specialTokens() const {
+rtp_llm::SpecialTokens GenerateStream::specialTokens() const {
     return special_tokens_;
 }
 
@@ -337,21 +337,21 @@ bool GenerateStream::isChunkStream() const {
     return enable_fast_gen_ && current_chunk_len_ < max_chunk_len_;
 }
 
-const ft::BufferPtr& GenerateStream::cumLogProbs() const {
+const rtp_llm::BufferPtr& GenerateStream::cumLogProbs() const {
     return cum_log_probs_;
 }
 
-const ft::BufferPtr& GenerateStream::completeTokenIds() {
+const rtp_llm::BufferPtr& GenerateStream::completeTokenIds() {
     return complete_token_ids_->completeTokenIds();
 }
 
 std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
-    FT_CHECK(batch_idx < tileNum());
+    RTP_LLM_CHECK(batch_idx < tileNum());
     return complete_token_ids_->completeTokenIdsVec(batch_idx);
 }
 
 std::vector<int> GenerateStream::commonCompleteTokenIdsVec(int batch_idx) {
-    FT_CHECK(batch_idx < tileNum());
+    RTP_LLM_CHECK(batch_idx < tileNum());
     return complete_token_ids_->commonCompleteTokenIdsVec(batch_idx);
 }
 
@@ -372,7 +372,7 @@ int GenerateStream::multimodalFeaturesLength() const {
     return multimodalFeatures().size() * batchSize();
 }
 
-ft::BufferPtr GenerateStream::multimodalLocations() const {
+rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return nullptr;
     }
@@ -397,7 +397,7 @@ vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};
     }
-    auto token_masks = fastertransformer::buffer2vector<int>(*generate_input_->text_tokens_mask.value());
+    auto token_masks = rtp_llm::buffer2vector<int>(*generate_input_->text_tokens_mask.value());
     if (reuseLength() > 0) {
         return vector<int>(token_masks.begin() + reuseLength(), token_masks.end());
     } else {
@@ -405,10 +405,10 @@ vector<int> GenerateStream::textTokensMask() const {
     }
 }
 
-ft::BufferPtr GenerateStream::generateContextPositionIds(ft::DeviceBase* device) {
-    optional<vector<ft::BufferPtr>> position_ids_buffer = nullopt;
+rtp_llm::BufferPtr GenerateStream::generateContextPositionIds(rtp_llm::DeviceBase* device) {
+    optional<vector<rtp_llm::BufferPtr>> position_ids_buffer = nullopt;
     if (generate_input_->mm_position_ids.has_value()) {
-        position_ids_buffer = ft::torchTensorVec2BufferVec(generate_input_->mm_position_ids.value());
+        position_ids_buffer = rtp_llm::torchTensorVec2BufferVec(generate_input_->mm_position_ids.value());
     }
     context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(),
         mm_position_ids_style_, generate_input_->mm_locs, position_ids_buffer);
@@ -455,7 +455,7 @@ void GenerateStream::checkTimeout() {
 
 void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-    FT_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
+    RTP_LLM_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
                     "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
                     streamId(), error_msg.c_str(), StreamStateToString(generate_status_.status).c_str(),
                     inputLength(), seqLength(), getTimeoutMs(), cost_time_ms);
@@ -542,7 +542,7 @@ void GenerateStream::cancelIfNotRunning() {
     if (generate_status_.status == StreamState::WAITING
             || generate_status_.status == StreamState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-        FT_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
+        RTP_LLM_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
             streamId(), "cancel stream in waiting or remote running",
             inputLength(), seqLength(),
             getTimeoutMs(), cost_time_ms);
@@ -650,7 +650,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    FT_LOG_DEBUG("stream [%ld] update", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
         return;
@@ -672,38 +672,38 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 }
 
 // beam_idx: [beam_width] int, the element must less than beam_width.
-void GenerateStream::beamSearchKvCacheUpdate(ft::BufferPtr beam_idx) {
-    auto beam_idx_vec = ft::buffer2vector<int>(*beam_idx);
-    FT_CHECK(beam_idx_vec.size() == tileNum());
+void GenerateStream::beamSearchKvCacheUpdate(rtp_llm::BufferPtr beam_idx) {
+    auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
+    RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
 
     stream_cache_resource_.beamSearchKvCacheUpdate(beam_idx_vec);
 }
 
 
 
-void GenerateStream::setLoss(const ft::Buffer& loss) {
-    FT_CHECK(loss_index_ + loss.size() < inputLength());
+void GenerateStream::setLoss(const rtp_llm::Buffer& loss) {
+    RTP_LLM_CHECK(loss_index_ + loss.size() < inputLength());
     device_->copy({loss_->view(loss_index_, loss.size()), loss});
     loss_index_ += loss.size();
 }
 
-void GenerateStream::setSoftmaxProbs(const ft::Buffer& softmax_probs, int start_pos) {
-    FT_CHECK(softmax_probs.dim() == 2);
-    FT_CHECK(softmax_probs.shape()[0] == tileNum());
+void GenerateStream::setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos) {
+    RTP_LLM_CHECK(softmax_probs.dim() == 2);
+    RTP_LLM_CHECK(softmax_probs.shape()[0] == tileNum());
     for (int i = 0; i < tileNum(); ++i) {
         device_->copy({(*softmax_probs_)[i].view(start_pos, softmax_probs.shape()[1]), softmax_probs[i]});
     }
 }
 
-ft::BufferPtr GenerateStream::getLoss() {
+rtp_llm::BufferPtr GenerateStream::getLoss() {
     return loss_;
 }
 
-ft::BufferPtr GenerateStream::getLastHiddenStates() {
+rtp_llm::BufferPtr GenerateStream::getLastHiddenStates() {
     return last_hidden_states_;
 }
 
-ft::BufferPtr GenerateStream::getSoftmaxProbs() {
+rtp_llm::BufferPtr GenerateStream::getSoftmaxProbs() {
     return softmax_probs_;
 }
 
@@ -728,7 +728,7 @@ void GenerateStream::reportMetric() {
             collector.query_batch_size       = tileNum();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
-            FT_LOG_DEBUG("stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
+            RTP_LLM_LOG_DEBUG("stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
             collector.wait_latency_us        = wait_time_us_;
             collector.pause_latency_us       = pause_time_us_;
             collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
@@ -800,9 +800,9 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss) {
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_);
-    cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, ft::AllocationType::HOST});
+    cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, rtp_llm::AllocationType::HOST});
     if (other_stream.calculateLoss() && copy_loss) {
-        loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
+        loss_ = device_->clone({*other_stream.loss_, rtp_llm::AllocationType::HOST});
     } else {
         loss_ = nullptr;
     }

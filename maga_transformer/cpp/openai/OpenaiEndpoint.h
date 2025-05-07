@@ -2,11 +2,11 @@
 
 #include <memory>
 
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/openai/ChatRender.h"
 #include "maga_transformer/cpp/tokenizer/Tokenizer.h"
 
-namespace ft = fastertransformer;
+
 namespace th = torch;
 
 namespace rtp_llm {
@@ -15,7 +15,7 @@ class OpenaiEndpoint {
 public:
     OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                    const std::shared_ptr<ChatRender>& chat_render,
-                   const ft::GptInitParameter&        params);
+                   const rtp_llm::GptInitParameter&        params);
     virtual ~OpenaiEndpoint() {}
 
 public:
@@ -35,7 +35,7 @@ private:
 
     std::shared_ptr<Tokenizer>  tokenizer_;
     std::shared_ptr<ChatRender> chat_render_;
-    ft::GptInitParameter        model_config_;
+    rtp_llm::GptInitParameter        model_config_;
 };
 
 }  // namespace rtp_llm

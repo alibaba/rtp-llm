@@ -102,14 +102,14 @@ void ConnectionPool::recycleHttpConnection(const std::string&                   
         idle_iter = idle_connection_pool_.find(address);
         busy_iter = busy_connection_pool_.find(address);
         if (idle_iter == idle_connection_pool_.end() || busy_iter == busy_connection_pool_.end()) {
-            FT_LOG_WARNING("recycle http connection failed, address %s is not in connection pool", address.c_str());
+            RTP_LLM_LOG_WARNING("recycle http connection failed, address %s is not in connection pool", address.c_str());
             return;
         }
         auto idle_list = idle_iter->second;
         auto busy_list = busy_iter->second;
 
         if (!conn) {
-            FT_LOG_WARNING("recycle http connection failed, connection is null");
+            RTP_LLM_LOG_WARNING("recycle http connection failed, connection is null");
             return;
         }
         if (close && !conn->isClosed()) {

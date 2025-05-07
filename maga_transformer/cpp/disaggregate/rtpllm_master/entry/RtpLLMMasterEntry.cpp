@@ -47,7 +47,7 @@ LoadBalancerInitParams RtpLLMMasterEntry::createLoadBalancerInitParams(const Mas
             load_balance_params.subscribe_config.local_configs.push_back(local_config);
             biz_name_ = "local";
         } else {
-            FT_LOG_ERROR("unsupported subscribe config type %d", py_config.type);
+            RTP_LLM_LOG_ERROR("unsupported subscribe config type %d", py_config.type);
         }
     return load_balance_params;
 }
@@ -72,7 +72,7 @@ bool RtpLLMMasterEntry::initLoadBalancer(const MasterInitParameter& param) {
         load_balance_params = createLoadBalancerInitParams(param);
         estimator_config    = createEstimatorConfig(param.estimator_config);
     } catch (std::exception& e) {
-        FT_LOG_ERROR("create subscribe_config failed, error %s", e.what());
+        RTP_LLM_LOG_ERROR("create subscribe_config failed, error %s", e.what());
         return false;
     }
     return load_balancer_->initWithEstimator(load_balance_params, estimator_config);

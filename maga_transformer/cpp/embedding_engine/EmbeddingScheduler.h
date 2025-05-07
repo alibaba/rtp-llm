@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 class EmbeddingScheduler {
 public:
-    explicit EmbeddingScheduler(const fastertransformer::GptInitParameter& config,
+    explicit EmbeddingScheduler(const rtp_llm::GptInitParameter& config,
                                 const kmonitor::MetricsReporterPtr         metrics_reporter = nullptr);
 
     ~EmbeddingScheduler();
@@ -26,7 +26,7 @@ public:
 private:
     void reportMetrics(size_t new_stream_size);
 
-    const ft::GptInitParameter    config_;
+    const rtp_llm::GptInitParameter    config_;
     std::list<EmbeddingStreamPtr> waiting_streams_;
     std::atomic<bool>             stop_ = false;
     std::mutex                    lock_;

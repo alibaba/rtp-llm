@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/speculative_sampler/RejectionSampler.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 #include <ATen/ops/zeros_like.h>
 #include <c10/core/Device.h>
@@ -10,15 +10,15 @@
 #include <torch/csrc/autograd/generated/variable_factories.h>
 #include <torch/types.h>
 
-namespace ft = fastertransformer;
+
 namespace rtp_llm {
 
 absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::list<GenerateStreamPtr>& streams,
                                                                   const ProposeOutput&                proposer_output,
                                                                   const ScoreOutput& scorer_output) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     SpeculativeSamplerOutput sampler_output;
-    FT_CHECK(proposer_output.outputs.size() == scorer_output.outputs.size());
+    RTP_LLM_CHECK(proposer_output.outputs.size() == scorer_output.outputs.size());
     // TODO(xyz): optimize the RejectionSampler with batch processing interface
     for (const GenerateStreamPtr& stream : streams) {
         size_t stream_id = stream->streamId();
@@ -44,50 +44,50 @@ absl::StatusOr<SpeculativeSamplerOutput> RejectionSampler::sample(const std::lis
             }
         }
 
-        FT_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
+        RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
                      stream->streamId(),
                      stream_config->top_k,
                      stream_config->top_p,
                      propose_step,
                      accepted_len);
 
-        ft::BufferPtr accepted_tokens =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {1, accepted_len}, ft::AllocationType::HOST}, {"accepted_tokens"});
+        rtp_llm::BufferPtr accepted_tokens =
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, accepted_len}, rtp_llm::AllocationType::HOST}, {"accepted_tokens"});
         device_->copy(
             {(*accepted_tokens)[0].view(0, accepted_len), (*scorer_stream_output->tokens)[0].view(0, accepted_len)});
 
-        ft::BufferPtr logits        = nullptr;
-        ft::BufferPtr hidden_states = nullptr;
-        ft::BufferPtr loss          = nullptr;
-        ft::BufferPtr softmax_probs = nullptr;
+        rtp_llm::BufferPtr logits        = nullptr;
+        rtp_llm::BufferPtr hidden_states = nullptr;
+        rtp_llm::BufferPtr loss          = nullptr;
+        rtp_llm::BufferPtr softmax_probs = nullptr;
 
         // TODO(xyz): optimize deepclone
         if (stream->generateConfig()->return_logits) {
             logits = device_->clone(
-                {scorer_stream_output->logits->view(0, accepted_len), ft::AllocationType::HOST, {"return_logits"}});
+                {scorer_stream_output->logits->view(0, accepted_len), rtp_llm::AllocationType::HOST, {"return_logits"}});
         }
 
         if (stream->needReturnHiddenStates()) {
             if (stream->getLastHiddenStates()) {
                 hidden_states = device_->clone({scorer_stream_output->hidden_states->view(0, accepted_len),
-                    ft::AllocationType::DEVICE,
+                    rtp_llm::AllocationType::DEVICE,
                     {"return_hidden_states"}});
             } else {
-                hidden_states = device_->clone({*scorer_stream_output->hidden_states, ft::AllocationType::DEVICE, {"return_hidden_states"}});
+                hidden_states = device_->clone({*scorer_stream_output->hidden_states, rtp_llm::AllocationType::DEVICE, {"return_hidden_states"}});
             }
-            FT_LOG_DEBUG("sample hidden states: %s", hidden_states->debugStringMeta().c_str());
+            RTP_LLM_LOG_DEBUG("sample hidden states: %s", hidden_states->debugStringMeta().c_str());
 
         }
         if (scorer_stream_output->loss) {
-            loss = device_->clone({*scorer_stream_output->loss, ft::AllocationType::HOST, {"return_loss"}});
+            loss = device_->clone({*scorer_stream_output->loss, rtp_llm::AllocationType::HOST, {"return_loss"}});
         }
         if (scorer_stream_output->softmax_probs) {
-            softmax_probs = device_->clone({*scorer_stream_output->softmax_probs, ft::AllocationType::HOST, {"return_softmax_probs"}});
+            softmax_probs = device_->clone({*scorer_stream_output->softmax_probs, rtp_llm::AllocationType::HOST, {"return_softmax_probs"}});
         }
         sampler_output.outputs.emplace_back(
             propose_step, accepted_len, std::move(accepted_tokens), std::move(logits), std::move(hidden_states), std::move(loss), std::move(softmax_probs), accepted_len > propose_step);
     }
-    FT_LOG_DEBUG("speculative sample done");
+    RTP_LLM_LOG_DEBUG("speculative sample done");
     return sampler_output;
 }
 
@@ -113,12 +113,12 @@ absl::StatusOr<size_t> RejectionSampler::stochasticSample(size_t                
 
     if (!propose_stream_output->all_probs) {
         auto all_probs = device_->allocateBuffer(
-            {ft::DataType::TYPE_FP32, {propose_step, score_vocab_size}, ft::AllocationType::HOST}, {""});
+            {rtp_llm::DataType::TYPE_FP32, {propose_step, score_vocab_size}, rtp_llm::AllocationType::HOST}, {""});
         device_->bufMemset(*all_probs, 0);
         for (size_t i = 0; i < propose_step; i++) {
             *(all_probs->view(i, 1).dataWithOffset<float>(*propose_stream_output->tokens->dataWithOffset<int32_t>(i))) = 1.0;
         }
-        propose_stream_output->all_probs = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"all_probs"}});
+        propose_stream_output->all_probs = device_->clone({*all_probs, rtp_llm::AllocationType::DEVICE, {"all_probs"}});
     }
 
 

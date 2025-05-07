@@ -1,7 +1,7 @@
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
+#include "maga_transformer/cpp/kernels/layernorm_kernels.h"
 
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -30,7 +30,7 @@ torch::Tensor LayerNormOp::forward(torch::Tensor input, torch::Tensor gamma, tor
     auto batch_size = input.size(0);
     auto d_model    = input.size(1);
     torch::Tensor output     = torch::zeros_like(input);
-    fastertransformer::invokeGeneralLayerNorm((float*)nullptr,
+    rtp_llm::invokeGeneralLayerNorm((float*)nullptr,
                                               (float*)output.data_ptr(),
                                               (float*)input.data_ptr(),
                                               (float*)gamma.data_ptr(),
@@ -55,7 +55,7 @@ torch::Tensor LayerNormOp::forward(torch::Tensor input, torch::Tensor gamma, tor
     // auto output = torch::empty(input.dims(), torch::dtype(input.dtype()).device(torch::kCUDA).requires_grad(false));
 #ifdef ENABLE_FP8
     __nv_fp8_e4m3 *quant_output = reinterpret_cast<__nv_fp8_e4m3*>(output.data_ptr());
-    fastertransformer::invokeGeneralLayerNorm(
+    rtp_llm::invokeGeneralLayerNorm(
             (float*)nullptr,
             (float*)output.data_ptr(), 
             (float*)input.data_ptr(), 
@@ -74,7 +74,7 @@ torch::Tensor LayerNormOp::stride_forward(torch::Tensor input, torch::Tensor gam
 
     auto batch_size = input.size(0);
     auto norm_size = gamma.size(0);
-    fastertransformer::invokeLayerNormWithStride((float*)input.data_ptr() + offset,
+    rtp_llm::invokeLayerNormWithStride((float*)input.data_ptr() + offset,
                                                  (int)stride,
                                                  (float*)input.data_ptr() + offset,
                                                  (int)stride,

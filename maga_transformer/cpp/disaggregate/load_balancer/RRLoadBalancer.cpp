@@ -6,20 +6,20 @@ namespace rtp_llm {
 RRLoadBalancer::~RRLoadBalancer() {
     service_discovery_thread_->stop();
     service_discovery_thread_.reset();
-    FT_LOG_INFO("destroy RRLoadBalancer done");
+    RTP_LLM_LOG_INFO("destroy RRLoadBalancer done");
 }
 
 bool RRLoadBalancer::init(const LoadBalancerInitParams& params) {
     subscribe_service_manager_.reset(new SubscribeServiceManager);
     if (!subscribe_service_manager_->init(params.subscribe_config)) {
-        FT_LOG_WARNING("random load balancer init failed, subscribe service manager init failed");
+        RTP_LLM_LOG_WARNING("random load balancer init failed, subscribe service manager init failed");
         return false;
     }
 
     service_discovery_thread_ = autil::LoopThread::createLoopThread(
         std::bind(&RRLoadBalancer::discovery, this), params.update_interval_ms * 1000, "discovery");
 
-    FT_LOG_INFO("RRLoadBalancer init done");
+    RTP_LLM_LOG_INFO("RRLoadBalancer init done");
     return true;
 }
 

@@ -8,7 +8,7 @@
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 
 using namespace std;

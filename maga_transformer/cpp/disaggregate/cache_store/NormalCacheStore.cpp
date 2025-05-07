@@ -22,7 +22,7 @@ NormalCacheStore::~NormalCacheStore() {
     messager_client_.reset();
     messager_server_.reset();
     request_block_buffer_store_.reset();
-    FT_LOG_INFO("destory cache store done");
+    RTP_LLM_LOG_INFO("destory cache store done");
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {
@@ -47,17 +47,17 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     metrics_reporter_ = std::make_shared<CacheStoreMetricsReporter>();
     if (params.enable_metric) {
         if (!metrics_reporter_->init()) {
-            FT_LOG_WARNING("normal cache store init metrics reporter failed");
+            RTP_LLM_LOG_WARNING("normal cache store init metrics reporter failed");
         }
     }
     timer_manager_ = std::make_shared<arpc::TimerManager>();
     if (!timer_manager_) {
-        FT_LOG_INFO("normal cache store init failed, timer init failed");
+        RTP_LLM_LOG_INFO("normal cache store init failed, timer init failed");
         return false;
     }
     messager_client_ = std::move(createMessagerClient(memory_util_));
     if (!messager_client_ || !messager_client_->init(params.enable_metric)) {
-        FT_LOG_ERROR("normal cache store init failed : init messager client failed");
+        RTP_LLM_LOG_ERROR("normal cache store init failed : init messager client failed");
         return false;
     }
 
@@ -65,25 +65,25 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         std::move(createMessagerServer(memory_util_, request_block_buffer_store_, metrics_reporter_, timer_manager_));
     if (!messager_server_
         || !messager_server_->init(params.listen_port, params.rdma_listen_port, params.enable_metric)) {
-        FT_LOG_ERROR("normal cache store init failed : init messager server failed");
+        RTP_LLM_LOG_ERROR("normal cache store init failed : init messager server failed");
         return false;
     }
 
     thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
         params.thread_count, params.queue_size, nullptr, "NormalCacheStoreTask");
     if (!thread_pool_ || !thread_pool_->start()) {
-        FT_LOG_ERROR("normal cache store init failed : init thread pool failed");
+        RTP_LLM_LOG_ERROR("normal cache store init failed : init thread pool failed");
         return false;
     }
 
-    FT_LOG_INFO("normal cache store init done");
+    RTP_LLM_LOG_INFO("normal cache store init done");
     return true;
 }
 
 void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                              CacheStoreStoreDoneCallback                callback) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid()) {
-        FT_LOG_WARNING("normal cache store call store failed, request block is invalid");
+        RTP_LLM_LOG_WARNING("normal cache store call store failed, request block is invalid");
         callback(false, CacheStoreErrorCode::InvalidParams);
         return;
     }
@@ -100,7 +100,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-        FT_LOG_WARNING("normal cache store push store task to thread pool failed");
+        RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
         return;
     }
@@ -131,7 +131,7 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
 
     CacheStoreClientStoreMetricsCollector::markEnd(collector, ret);
     if (!ret) {
-        FT_LOG_WARNING("normal cache store run store task failed, request id is %s",
+        RTP_LLM_LOG_WARNING("normal cache store run store task failed, request id is %s",
                        request_block_buffer->getRequestId().c_str());
         callback(false, CacheStoreErrorCode::StoreFailed);
         return;
@@ -148,13 +148,13 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             int                                        partition_count,
                             int                                        partition_id) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
-        FT_LOG_WARNING("normal cache store run load failed, invalid params");
+        RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
         callback(false, CacheStoreErrorCode::InvalidParams);
         return;
     }
 
     if (port == 0 || (memory_util_->isRdmaMode() && rdma_port == 0)) {
-        FT_LOG_WARNING("normal cache store run load failed, port is 0");
+        RTP_LLM_LOG_WARNING("normal cache store run load failed, port is 0");
         callback(false, CacheStoreErrorCode::InvalidParams);
         return;
     }
@@ -180,7 +180,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-        FT_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
+        RTP_LLM_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
                        request_block_buffer->getRequestId().c_str());
         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
         return;

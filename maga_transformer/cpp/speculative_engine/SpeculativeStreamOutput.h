@@ -1,10 +1,10 @@
 #pragma once
 
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include <cstdint>
 #include <memory>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -34,23 +34,23 @@ public:
 
 public:
     size_t propose_step = 0;
-    ft::BufferPtr tokens        = nullptr;  // selected tokens
-    ft::BufferPtr logits        = nullptr;
-    ft::BufferPtr hidden_states = nullptr;
-    ft::BufferPtr loss          = nullptr;
-    ft::BufferPtr all_probs     = nullptr;
-    ft::BufferPtr softmax_probs = nullptr;
+    rtp_llm::BufferPtr tokens        = nullptr;  // selected tokens
+    rtp_llm::BufferPtr logits        = nullptr;
+    rtp_llm::BufferPtr hidden_states = nullptr;
+    rtp_llm::BufferPtr loss          = nullptr;
+    rtp_llm::BufferPtr all_probs     = nullptr;
+    rtp_llm::BufferPtr softmax_probs = nullptr;
 };
 
 struct SpeculativeSamplerStreamOutput {
 public:
     SpeculativeSamplerStreamOutput(size_t        propose_step,
                                    size_t        accepted_token_nums,
-                                   ft::BufferPtr accepted_tokens,
-                                   ft::BufferPtr logits,
-                                   ft::BufferPtr hidden_states,
-                                   ft::BufferPtr loss,
-                                   ft::BufferPtr softmax_probs,
+                                   rtp_llm::BufferPtr accepted_tokens,
+                                   rtp_llm::BufferPtr logits,
+                                   rtp_llm::BufferPtr hidden_states,
+                                   rtp_llm::BufferPtr loss,
+                                   rtp_llm::BufferPtr softmax_probs,
                                    bool          accepted_bouns_token = false):
         propose_step(propose_step),
         accepted_token_nums(accepted_token_nums),
@@ -82,11 +82,11 @@ public:
 public:
     size_t        propose_step;
     size_t        accepted_token_nums;
-    ft::BufferPtr accepted_tokens = nullptr;
-    ft::BufferPtr logits = nullptr;
-    ft::BufferPtr hidden_states = nullptr;
-    ft::BufferPtr loss = nullptr;
-    ft::BufferPtr softmax_probs = nullptr;
+    rtp_llm::BufferPtr accepted_tokens = nullptr;
+    rtp_llm::BufferPtr logits = nullptr;
+    rtp_llm::BufferPtr hidden_states = nullptr;
+    rtp_llm::BufferPtr loss = nullptr;
+    rtp_llm::BufferPtr softmax_probs = nullptr;
     bool          acceped_bouns_token = false;
 };
 

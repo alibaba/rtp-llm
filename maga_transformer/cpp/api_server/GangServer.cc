@@ -38,12 +38,12 @@ public:
             counter_->dec();
         }
         if (!http_client_) {
-            FT_LOG_WARNING("process gang server request work item failed, http client is null");
+            RTP_LLM_LOG_WARNING("process gang server request work item failed, http client is null");
             return;
         }
         auto succ = http_client_->post(server_addr_, route_, body_json_str_, nullptr);
         if (!succ) {
-            FT_LOG_WARNING(
+            RTP_LLM_LOG_WARNING(
                 "process gang server request work item failed, http client post failed, "
                 "server addr: %s, route: %s, request body: %s",
                 server_addr_.c_str(),
@@ -103,7 +103,7 @@ void GangServer::requestWorkers(const std::map<std::string, std::string>& body_m
         auto              work_item     = new GangServerRequestWorkItem(server_addr, route, body_json_str, &counter, http_client);
         auto              code          = thread_pool_->pushWorkItem(work_item, false);
         if (code != autil::ThreadPool::ERROR_NONE) {
-            FT_LOG_WARNING(
+            RTP_LLM_LOG_WARNING(
                 "gang server request worker failed, push work item failed, error code: %d, url: %s, body: %s",
                 code,
                 (server_addr + route).c_str(),

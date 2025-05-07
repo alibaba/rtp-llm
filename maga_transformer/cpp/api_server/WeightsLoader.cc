@@ -7,9 +7,9 @@ namespace rtp_llm {
 WeightsLoader::WeightsLoader(py::object model_weights_loader): model_weights_loader_(model_weights_loader) {
 }
 
-std::pair<std::unique_ptr<ft::lora::loraLayerWeightsMap>, std::unique_ptr<ft::lora::loraLayerWeightsMap>>
+std::pair<std::unique_ptr<rtp_llm::lora::loraLayerWeightsMap>, std::unique_ptr<rtp_llm::lora::loraLayerWeightsMap>>
 WeightsLoader::loadLoraWeights(const std::string& adapter_name, const std::string& lora_path) {
-    std::unique_ptr<ft::lora::loraLayerWeightsMap> lora_a_weights, lora_b_weights;
+    std::unique_ptr<rtp_llm::lora::loraLayerWeightsMap> lora_a_weights, lora_b_weights;
     {
         py::gil_scoped_acquire acquire;
         auto res = model_weights_loader_.attr("load_lora_weights_from_scratch")(

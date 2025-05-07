@@ -1,31 +1,31 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
 #include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
 class EmbeddingInput {
 public:
-    explicit EmbeddingInput(const std::shared_ptr<ft::Buffer>&   token_ids,
-                            const std::shared_ptr<ft::Buffer>&   token_type_ids,
-                            const std::shared_ptr<ft::Buffer>&   input_lengths,
+    explicit EmbeddingInput(const std::shared_ptr<rtp_llm::Buffer>&   token_ids,
+                            const std::shared_ptr<rtp_llm::Buffer>&   token_type_ids,
+                            const std::shared_ptr<rtp_llm::Buffer>&   input_lengths,
                             const int64_t                        total_length,
                             int64_t                              request_id,
                             std::optional<MultimodalFeature> multimodal_features = std::nullopt);
 
-    std::shared_ptr<ft::Buffer>         token_ids;
-    std::shared_ptr<ft::Buffer>         token_type_ids;
-    std::shared_ptr<ft::Buffer>         input_lengths;
+    std::shared_ptr<rtp_llm::Buffer>         token_ids;
+    std::shared_ptr<rtp_llm::Buffer>         token_type_ids;
+    std::shared_ptr<rtp_llm::Buffer>         input_lengths;
     int64_t                             total_length;
     int64_t                             request_id;
     std::optional<MultimodalFeature>    multimodal_features;

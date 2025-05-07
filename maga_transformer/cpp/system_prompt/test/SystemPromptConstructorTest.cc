@@ -5,7 +5,7 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "maga_transformer/cpp/normal_engine/test/MockEngine.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include <cuda_runtime.h>
 
 #include <cstdlib>
@@ -14,7 +14,7 @@
 #include <chrono>
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 

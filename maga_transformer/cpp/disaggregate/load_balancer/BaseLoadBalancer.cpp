@@ -19,7 +19,7 @@ void BaseLoadBalancer::discovery() {
 
     std::vector<std::shared_ptr<const TopoNode>> topo_nodes;
     if (!subscribe_service_manager_->getTopoNodes(topo_nodes)) {
-        FT_LOG_WARNING("random load balancer discovery failed, get cluster info map failed");
+        RTP_LLM_LOG_WARNING("random load balancer discovery failed, get cluster info map failed");
         return;
     }
 

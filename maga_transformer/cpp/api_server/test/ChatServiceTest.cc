@@ -42,10 +42,10 @@ protected:
         MockWhenConstructOpenaiEndPoint();
 
         chat_service_ = std::make_shared<ChatService>(
-            engine, nullptr, request_counter, tokenizer, render, ft::GptInitParameter(), metric_reporter);
+            engine, nullptr, request_counter, tokenizer, render, rtp_llm::GptInitParameter(), metric_reporter);
 
         // mock OpenaiEndpoint 方便测试
-        mock_openai_endpoint_ = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, ft::GptInitParameter());
+        mock_openai_endpoint_ = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, rtp_llm::GptInitParameter());
         auto openai_endpoint  = std::dynamic_pointer_cast<OpenaiEndpoint>(mock_openai_endpoint_);
         chat_service_->openai_endpoint_ = openai_endpoint;
 
@@ -83,18 +83,18 @@ protected:
         std::vector<size_t> shape = {data_.size()};
         // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
         input->input_ids =
-            std::make_shared<ft::Buffer>(ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, shape, data_.data());
+            std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
-        ft::GptInitParameter param;
+        rtp_llm::GptInitParameter param;
         param.max_seq_len_ = data_.size();
 
         auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
         return mock_stream;
     }
 
-    ft::ConstBufferPtr CreateBuffer() {
+    rtp_llm::ConstBufferPtr CreateBuffer() {
         std::vector<size_t> shape = {data_.size()};
-        return std::make_shared<ft::Buffer>(ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, shape, data_.data());
+        return std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
     }
 
 protected:
@@ -242,7 +242,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
                 EXPECT_EQ(config, generate_config);
                 EXPECT_EQ(is_streaming, true);
                 auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = ft::buffer2vector<int>(*buffer_ptr);
+                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
                 EXPECT_EQ(output_tokens_list.size(), data.size());
                 for (int i = 0; i < output_tokens_list.size(); ++i) {
                     EXPECT_EQ(output_tokens_list.at(i), data.at(i));
@@ -257,7 +257,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
                 EXPECT_EQ(config, generate_config);
                 EXPECT_EQ(is_streaming, true);
                 auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = ft::buffer2vector<int>(*buffer_ptr);
+                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
                 EXPECT_EQ(output_tokens_list.size(), data.size());
                 for (int i = 0; i < output_tokens_list.size(); ++i) {
                     EXPECT_EQ(output_tokens_list.at(i), data.at(i));
@@ -268,7 +268,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
         .WillOnce(
             Invoke([data = data_, json_response](const GenerateOutputs& resp) {
                 auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = ft::buffer2vector<int>(*buffer_ptr);
+                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
                 EXPECT_EQ(output_tokens_list.size(), data.size());
                 for (int i = 0; i < output_tokens_list.size(); ++i) {
                     EXPECT_EQ(output_tokens_list.at(i), data.at(i));

@@ -2,12 +2,12 @@
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/utils/PyUtils.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include <ATen/TensorIndexing.h>
 #include <torch/extension.h>
@@ -17,11 +17,11 @@
 
 using namespace std;
 using namespace at::indexing;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
-EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceBase* device, py::object handler):
+EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler):
     handler_(handler),
     device_(device),
     metrics_reporter_(params.metrics_reporter),
@@ -34,7 +34,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
 }
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
-    max_position_ids_buf_ = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)max_seq_len}, ft::AllocationType::HOST}, {});
+    max_position_ids_buf_ = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)max_seq_len}, rtp_llm::AllocationType::HOST}, {});
     int*  position_ids    = (int*)max_position_ids_buf_->data();
     for (int i = 0; i < max_seq_len; i++) {
         position_ids[i] = i;
@@ -47,17 +47,17 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     calcTokenNum(streams, token_num, batch_size);
     GptModelInputs model_input;
     model_input.combo_tokens =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)token_num}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
     model_input.combo_tokens_type_ids =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)token_num}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
     model_input.combo_position_ids =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)token_num}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
     model_input.input_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.sequence_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {0}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {0}, rtp_llm::AllocationType::HOST}, {});
     model_input.prefix_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size}, rtp_llm::AllocationType::HOST}, {});
     memset(model_input.prefix_lengths->data(), 0, model_input.prefix_lengths->sizeBytes());
     int*      merged_tokens    = model_input.combo_tokens->data<int>();
     int*      input_lengths    = model_input.input_lengths->data<int>();
@@ -69,7 +69,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     if (params_.position_ids_style_ == 1) {
         position_bias = params_.special_tokens_.pad_token_id_ + 1;
     }
-    std::vector<ft::BufferPtr> gathered_mm_features;
+    std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     std::vector<int> new_locs;
     std::vector<int> merged_text_mask;
     merged_text_mask.resize(token_num, 1);
@@ -94,7 +94,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         int length_idx = 0;
         for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
-            FT_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]), "position index exceed max_position_length");
+            RTP_LLM_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]), "position index exceed max_position_length");
             memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data<int32_t>() + position_bias, seqLen * sizeof(int32_t));
             length_idx += seqLen;
         }
@@ -106,8 +106,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     }
     if (!gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
-        model_input.mm_features_locs = device_->clone({*vector2Buffer(new_locs), ft::AllocationType::HOST});
-        model_input.text_tokens_mask = device_->clone({*vector2Buffer(merged_text_mask), ft::AllocationType::HOST});
+        model_input.mm_features_locs = device_->clone({*vector2Buffer(new_locs), rtp_llm::AllocationType::HOST});
+        model_input.text_tokens_mask = device_->clone({*vector2Buffer(merged_text_mask), rtp_llm::AllocationType::HOST});
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
     reportMetrics(batch_size, token_num, max_seq_len);
@@ -140,7 +140,7 @@ void EmbeddingExecutor::calcTokenNum(const list<EmbeddingStreamPtr>& streams, in
 unique_ptr<GptModelOutputs> EmbeddingExecutor::copyResultToCPU(th::Tensor gpu_outputs) const {
     auto output = std::make_unique<GptModelOutputs>();
     auto buffer_ptr = torchTensor2Buffer(gpu_outputs);
-    output->hidden_states = device_->allocateBuffer({buffer_ptr->type(), buffer_ptr->shape(), ft::AllocationType::HOST}, {});
+    output->hidden_states = device_->allocateBuffer({buffer_ptr->type(), buffer_ptr->shape(), rtp_llm::AllocationType::HOST}, {});
     device_->copy({*(output->hidden_states), *(buffer_ptr)});
     return output;
 }
@@ -227,7 +227,7 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
 
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
     CHECK_AND_RETURN_REF(model_input, gatherModelInput(streams));
-    FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
+    RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest model_request = generateOldModelRequest(model_input);

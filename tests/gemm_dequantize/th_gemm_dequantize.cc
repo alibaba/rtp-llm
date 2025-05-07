@@ -22,11 +22,11 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "src/fastertransformer/cutlass/interface.h"
-#include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cuda/quantize_utils.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "maga_transformer/cpp/cutlass/interface.h"
+#include "maga_transformer/cpp/th_op/th_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/cuda/quantize_utils.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
 
 #include "cutlass/numeric_types.h"
 
@@ -36,7 +36,7 @@ namespace torch_ext {
 
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 namespace tc  = tensorrt_llm::cutlass_extensions;
-namespace ft = fastertransformer;
+
 
 
 template <typename T, typename WeightType>
@@ -84,7 +84,7 @@ Tensor fused_gemm_dq_helper(Tensor input_activations, Tensor weight, Tensor scal
             runner->gemm(input_act_ptr, weight_ptr, scales_ptr, zeros_ptr, nullptr, output_tensor_ptr, m, n, k,
                 group_size, config, ws_ptr, ws_bytes, stream);
         };
-        avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+        avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
     }
     else
     {
@@ -105,7 +105,7 @@ Tensor fused_gemm_dq_helper(Tensor input_activations, Tensor weight, Tensor scal
                 runner->gemm(input_act_ptr, weight_ptr, scales_ptr, zeros_ptr, nullptr, output_tensor_ptr, m, n, k,
                     group_size, configs[i], ws_ptr, ws_bytes, stream);
             };
-            float cur_avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+            float cur_avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
 
             if (cur_avg_time < min_time)
             {
@@ -160,7 +160,7 @@ Tensor fused_gemm_dq_helper(Tensor input_activations, Tensor weight, Tensor scal
             runner->gemm(
                 input_act_ptr, weight_ptr, scales_ptr, output_tensor_ptr, m, n, k, config, ws_ptr, ws_bytes, stream);
         };
-        avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+        avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
     }
     else
     {
@@ -182,7 +182,7 @@ Tensor fused_gemm_dq_helper(Tensor input_activations, Tensor weight, Tensor scal
                 runner->gemm(input_act_ptr, weight_ptr, scales_ptr, output_tensor_ptr, m, n, k, configs[i], ws_ptr,
                     ws_bytes, stream);
             };
-            float cur_avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
+            float cur_avg_time = rtp_llm::timing_function(runner_operation, timing_iterations, stream);
 
             if (cur_avg_time < min_time)
             {
@@ -213,7 +213,7 @@ Tensor fused_gemv_dq_helper(
 
     T* output_tensor_ptr = get_ptr<T>(output_tensor);
 
-    int arch = fastertransformer::get_sm();
+    int arch = rtp_llm::get_sm();
 
     tensorrt_llm::kernels::weight_only::KernelType type = tensorrt_llm::kernels::weight_only::KernelType::FP16Int8PerChannel;
 
@@ -322,7 +322,7 @@ Tensor gemm_config_select(Tensor input_activations, Tensor weight, Tensor scales
 
 Tensor
 bench_cublas(Tensor input_activations, Tensor weight_dequantized, const int64_t timing_iterations, float& avg_time) {
-    using namespace fastertransformer;
+    
     const int m = input_activations.size(0);
     const int n = weight_dequantized.size(1);
     const int k = input_activations.size(1);
@@ -445,8 +445,8 @@ Tensor unpack_int4_packed_tensor_to_int8(Tensor weight)
 // Exposed mainly for testing, so that the unprocessed weights can be passed to torch functions.
 std::vector<Tensor> _symmetric_quantize_last_axis_of_batched_matrix(Tensor weight, torch::ScalarType quant_type)
 {
-    int arch = fastertransformer::get_sm();
-    return ft::symmetric_quantize_helper(weight, quant_type, true, arch);
+    int arch = rtp_llm::get_sm();
+    return rtp_llm::symmetric_quantize_helper(weight, quant_type, true, arch);
 }
 
 TORCH_LIBRARY(gemm_dq_unit_ops, m) {
@@ -455,12 +455,12 @@ TORCH_LIBRARY(gemm_dq_unit_ops, m) {
     m.def("benchmark_against_cublas_fp", benchmark_against_cublas_fp);
     m.def("unpack_int4_packed_tensor_to_int8", unpack_int4_packed_tensor_to_int8);
 #if USING_CUDA
-    m.def("pack_int8_tensor_to_packed_int4", ft::CudaDevice::packInt8TensorToPackedInt4);
-    m.def("preprocess_weights_for_mixed_gemm", ft::CudaDevice::preprocessWeightsForMixedGemm);
+    m.def("pack_int8_tensor_to_packed_int4", rtp_llm::CudaDevice::packInt8TensorToPackedInt4);
+    m.def("preprocess_weights_for_mixed_gemm", rtp_llm::CudaDevice::preprocessWeightsForMixedGemm);
 #endif
 #if USING_ROCM
-    m.def("pack_int8_tensor_to_packed_int4", ft::ROCmDevice::packInt8TensorToPackedInt4);
-    m.def("preprocess_weights_for_mixed_gemm", ft::ROCmDevice::preprocessWeightsForMixedGemm);
+    m.def("pack_int8_tensor_to_packed_int4", rtp_llm::ROCmDevice::packInt8TensorToPackedInt4);
+    m.def("preprocess_weights_for_mixed_gemm", rtp_llm::ROCmDevice::preprocessWeightsForMixedGemm);
 #endif
     m.def("_symmetric_quantize_last_axis_of_batched_matrix", _symmetric_quantize_last_axis_of_batched_matrix);
 }

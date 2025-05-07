@@ -41,7 +41,7 @@ public:
                 std::chrono::time_point deadline = std::chrono::system_clock::now() + std::chrono::seconds(10);
                 bool isChannelReady = grpc_channel->WaitForConnected(deadline);
                 if (!(isChannelReady && grpc_channel->GetState(false) == GRPC_CHANNEL_READY)) {
-                    FT_LOG_WARNING("wait channel ready failed channel, isChannelReady %d, current status %ld", isChannelReady, grpc_channel->GetState(false));
+                    RTP_LLM_LOG_WARNING("wait channel ready failed channel, isChannelReady %d, current status %ld", isChannelReady, grpc_channel->GetState(false));
                     std::string error_msg = "create grpc channel connection for " + peer + " failed, not ready";
                     return absl::InternalError(error_msg);
                 }

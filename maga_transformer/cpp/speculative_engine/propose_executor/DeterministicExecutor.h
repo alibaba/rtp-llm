@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -12,7 +12,7 @@ class DeterministicExecutor: public ProposeExecutor {
 public:
     explicit DeterministicExecutor(const EngineInitParams&                        score_model_engine_init_params,
                                    std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                                   ft::DeviceBase*                                device):
+                                   rtp_llm::DeviceBase*                                device):
         ProposeExecutor(device) {
 
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
@@ -21,9 +21,9 @@ public:
         min_token_match_len_ = autil::EnvUtil::getEnv("SP_MIN_TOKEN_MATCH", 2);
         max_token_match_len_ = autil::EnvUtil::getEnv("SP_MAX_TOKEN_MATCH", 2);
         
-        FT_LOG_INFO("DeterministicExecutor propose step is %ld", propose_step_);
-        FT_LOG_INFO("DeterministicExecutor min token match size is %ld", min_token_match_len_);
-        FT_LOG_INFO("DeterministicExecutor max token match size is %ld", max_token_match_len_);
+        RTP_LLM_LOG_INFO("DeterministicExecutor propose step is %ld", propose_step_);
+        RTP_LLM_LOG_INFO("DeterministicExecutor min token match size is %ld", min_token_match_len_);
+        RTP_LLM_LOG_INFO("DeterministicExecutor max token match size is %ld", max_token_match_len_);
     }
 
     ~DeterministicExecutor() {}

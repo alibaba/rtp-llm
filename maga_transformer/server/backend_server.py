@@ -183,7 +183,7 @@ class BackendServer(object):
     def set_log_level(self, req: Union[str,Dict[Any, Any]]) -> None:
         if isinstance(req, str):
             req = json.loads(req)
-        return torch.ops.fastertransformer.set_log_level(req['log_level'])
+        return torch.ops.rtp_llm.set_log_level(req['log_level'])
 
     async def update(self, version_info: VersionInfo):
         try:

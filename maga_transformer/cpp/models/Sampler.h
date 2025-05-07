@@ -1,13 +1,13 @@
 #pragma once
 
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/DFAUtil.h"
 #include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
 #include "maga_transformer/cpp/models/SampleInfos.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
@@ -24,9 +24,9 @@ private:
     void updateGrammarStatus(const SamplerInputs& inputs);
 
 private:
-    ft::DeviceBase* device_;
-    ft::BufferPtr eos_ids_;
-    ft::BufferPtr eos_ids_host_;
+    rtp_llm::DeviceBase* device_;
+    rtp_llm::BufferPtr eos_ids_;
+    rtp_llm::BufferPtr eos_ids_host_;
 };
 
 }  // namespace rtp_llm

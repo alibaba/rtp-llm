@@ -1,14 +1,14 @@
 
 #include "gtest/gtest.h"
 
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
 
 using namespace std;
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -16,13 +16,13 @@ class SamplerDataBuilder {
 public:
 
     SamplerDataBuilder() :
-        device_(ft::DeviceFactory::getDefaultDevice()) {};
+        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {};
 
     struct Config {
         size_t batch_size;
         size_t vocab_size;
         size_t max_length;
-        ft::DataType logits_type = ft::DataType::TYPE_FP32;
+        rtp_llm::DataType logits_type = rtp_llm::DataType::TYPE_FP32;
     };
 
     BaseLogitsProcessorPtr generateLogitsProcessor(bool think_mode, std::vector<int> max_thinking_tokens, std::vector<int> end_think_token_ids, std::vector<int> think_status) {
@@ -49,31 +49,31 @@ public:
         sampler_inputs.vocab_size           = config.vocab_size;
         sampler_inputs.grammars.clear();
         sampler_inputs.grammars.insert(sampler_inputs.grammars.end(), grammars.begin(), grammars.end());
-        sampler_inputs.logits               = device_->allocateBuffer({config.logits_type, {config.batch_size, config.vocab_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.sequence_lengths     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.input_lengths        = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.num_beams            = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.top_k                = device_->allocateBuffer({ft::DataType::TYPE_UINT32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.top_p                = device_->allocateBuffer({ft::DataType::TYPE_FP32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.temperature          = device_->allocateBuffer({ft::DataType::TYPE_FP32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.random_seeds         = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.repetition_penalty   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.min_lengths          = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.cum_log_probs        = device_->allocateBuffer({ft::DataType::TYPE_FP32, {config.batch_size}, ft::AllocationType::HOST}, {});
-        sampler_inputs.token_ids            = device_->allocateBuffer({ft::DataType::TYPE_INT32, {config.batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
+        sampler_inputs.logits               = device_->allocateBuffer({config.logits_type, {config.batch_size, config.vocab_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.sequence_lengths     = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.input_lengths        = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.num_beams            = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.top_k                = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.top_p                = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.temperature          = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.random_seeds         = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.repetition_penalty   = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.min_lengths          = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.cum_log_probs        = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.token_ids            = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST}, {});
         device_->bufMemset(*sampler_inputs.logits, 0);
         device_->bufMemset(*sampler_inputs.token_ids, 0);
         return sampler_inputs;
     };
 
     void setSequenceLengths(SamplerInputs& sampler_inputs, std::vector<int>& sequence_lengths) {
-        FT_CHECK(sequence_lengths.size() == sampler_inputs.batch_size);
-        sampler_inputs.sequence_lengths = ft::vector2Buffer(sequence_lengths);
+        RTP_LLM_CHECK(sequence_lengths.size() == sampler_inputs.batch_size);
+        sampler_inputs.sequence_lengths = rtp_llm::vector2Buffer(sequence_lengths);
     };
 
     void setTokenIds(SamplerInputs& sampler_inputs, std::vector<std::vector<int>>& token_ids) {
-        FT_CHECK(token_ids.size() == sampler_inputs.batch_size);
-        FT_CHECK(token_ids[0].size() == sampler_inputs.step + 1);
+        RTP_LLM_CHECK(token_ids.size() == sampler_inputs.batch_size);
+        RTP_LLM_CHECK(token_ids[0].size() == sampler_inputs.step + 1);
         for (auto i = 0; i < sampler_inputs.batch_size; i++) {
             auto tensor = Buffer2torchTensor(*sampler_inputs.token_ids->index(i), false);
             for (auto j = 0; j < sampler_inputs.step + 1; j++) {
@@ -82,7 +82,7 @@ public:
         }
     }
 
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
 };
 
 
@@ -96,13 +96,13 @@ protected:
         DeviceTestBase::TearDown();
     }
     
-    ft::BufferPtr randint(int start, int end, std::vector<int64_t> shape, bool is_host) {
+    rtp_llm::BufferPtr randint(int start, int end, std::vector<int64_t> shape, bool is_host) {
         auto tensor  = torch::randint(start, end, shape, at::TensorOptions().dtype(at::ScalarType::Int));
         auto alloc_t = is_host ? AllocationType::HOST : AllocationType::DEVICE;
         return tensorToBuffer(tensor, alloc_t);
     }
 
-    ft::BufferPtr rand(std::vector<int64_t> shape, bool is_host) {
+    rtp_llm::BufferPtr rand(std::vector<int64_t> shape, bool is_host) {
         auto tensor  = torch::rand(torch::IntArrayRef(shape));
         auto alloc_t = is_host ? AllocationType::HOST : AllocationType::DEVICE;
         return tensorToBuffer(tensor, alloc_t);

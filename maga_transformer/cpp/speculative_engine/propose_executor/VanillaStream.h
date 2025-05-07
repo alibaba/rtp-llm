@@ -1,11 +1,11 @@
 #pragma once
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/propose_executor/ProposeOutput.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include <cstddef>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -16,7 +16,7 @@ public:
                   size_t                                    propose_step):
         GenerateStream(stream), propose_output_(propose_output), propose_step_(propose_step) {
         // WARNING: VanillaStream currently only support batch_size = 1
-        FT_CHECK(tileNum() == 1);
+        RTP_LLM_CHECK(tileNum() == 1);
         CopyOnWrite(stream, false);
         setMetricsReporter(nullptr);
         allocateOutputBuffer(propose_step);
@@ -32,7 +32,7 @@ public:
     }
 
     ErrorResult<GenerateOutputs> nextOutput() override {
-        FT_FAIL("VanillaStream::nextOutput should not be called");
+        RTP_LLM_FAIL("VanillaStream::nextOutput should not be called");
         return ErrorInfo::OkStatus();
     };
 
@@ -50,7 +50,7 @@ public:
             if (!output_buffer->all_probs) {
                 size_t vocab_size         = update_info.all_probs->shape()[1];
                 output_buffer->all_probs = device_->allocateBuffer(
-                    {ft::DataType::TYPE_FP32, {propose_step_, vocab_size}, ft::AllocationType::DEVICE}, {"vanilla_all_probs"});
+                    {rtp_llm::DataType::TYPE_FP32, {propose_step_, vocab_size}, rtp_llm::AllocationType::DEVICE}, {"vanilla_all_probs"});
             }
             device_->copy({output_buffer->all_probs->view(current_step_, 1), *update_info.all_probs});
         }
@@ -61,7 +61,7 @@ public:
 private:
     void allocateOutputBuffer(size_t propose_step) {
         propose_output_->outputs[streamId()]->tokens = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {1, propose_step}, ft::AllocationType::HOST}, {"vanilla_propose_tokens"});
+            {rtp_llm::DataType::TYPE_INT32, {1, propose_step}, rtp_llm::AllocationType::HOST}, {"vanilla_propose_tokens"});
     }
 
     void handleBounsToken() {

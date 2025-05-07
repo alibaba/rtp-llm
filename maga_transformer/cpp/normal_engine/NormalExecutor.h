@@ -5,7 +5,7 @@
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/lora/LoraManager.h"
 #include "maga_transformer/cpp/eplb/ExpertBalancer.h"
@@ -16,7 +16,7 @@ class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams& params,
                             const std::shared_ptr<CacheManager>& cache_manager,
-                            ft::DeviceBase* device,
+                            rtp_llm::DeviceBase* device,
                             const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
                             bool warm_up = false);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;

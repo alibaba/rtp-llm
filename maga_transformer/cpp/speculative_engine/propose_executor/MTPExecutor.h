@@ -14,7 +14,7 @@ namespace rtp_llm {
 class MTPExecutor: public ProposeExecutor {
 public:
     explicit MTPExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                             ft::DeviceBase*                                device,
+                             rtp_llm::DeviceBase*                                device,
                              const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
                              const std::shared_ptr<lora::LoraManager>&      lora_manager,
                              bool                                           warm_up = false):
@@ -23,7 +23,7 @@ public:
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
                                  propose_model_engine_init_params->mtp_model_params_->size());
 
-        FT_LOG_INFO("create MTPExecutor use propose_step_ is %d, gen_num_per_circle is %d, mtp_model_num is %d",
+        RTP_LLM_LOG_INFO("create MTPExecutor use propose_step_ is %d, gen_num_per_circle is %d, mtp_model_num is %d",
             propose_step_,
             propose_model_engine_init_params->gen_num_per_circle,
             propose_model_engine_init_params->mtp_model_params_->size());
@@ -46,7 +46,7 @@ public:
             mtp_executors_.push_back((executor));
             index++;
         }
-        FT_LOG_INFO("mtp executor init index is %d", index);
+        RTP_LLM_LOG_INFO("mtp executor init index is %d", index);
 
     }
 

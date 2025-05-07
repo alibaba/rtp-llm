@@ -23,9 +23,9 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t request_id
     metric_reporter_->reportFTNumBeansMetric(input->generate_config->num_beams);
 
     const auto& vec            = rendered_input.input_ids;
-    auto        device         = ft::DeviceFactory::getDefaultDevice();
+    auto        device         = rtp_llm::DeviceFactory::getDefaultDevice();
     input->input_ids =
-        device->allocateBuffer({ft::DataType::TYPE_INT32, {vec.size()}, ft::AllocationType::HOST}, {});
+        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     input->multimodal_inputs   = std::move(rendered_input.multimodal_inputs);
@@ -63,11 +63,11 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>& config
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
-            FT_LOG_INFO("stream nextOutput failed");
+            RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }
         outputs = result.value();
-        FT_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
+        RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
                 "generate_outputs.size() != num_return_sequences");
 
         iterate_stage_timer.end_stage();
@@ -136,11 +136,11 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
     while (!stream->finished()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
-            FT_LOG_INFO("stream nextOutput failed");
+            RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }
         outputs = output_status.value();
-        FT_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
+        RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
                 "generate_outputs.size() != num_return_sequences");
 
         iterate_stage_timer.end_stage();

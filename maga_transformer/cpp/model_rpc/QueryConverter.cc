@@ -1,10 +1,10 @@
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 #define TRANS_OPTIONAL(name)                                                                                           \
@@ -72,9 +72,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
-    auto device                   = ft::DeviceFactory::getDefaultDevice();
+    auto device                   = rtp_llm::DeviceFactory::getDefaultDevice();
     generate_input->input_ids     = device->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
@@ -109,7 +109,7 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);
         now_input->set_multimodal_type(mm_input.mm_type);
-        transTensorPB(now_input->mutable_multimodal_tensor(), ft::torchTensor2Buffer(mm_input.tensor).get());
+        transTensorPB(now_input->mutable_multimodal_tensor(), rtp_llm::torchTensor2Buffer(mm_input.tensor).get());
         transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);
     }
     return mm_inputs_pb;
@@ -168,8 +168,8 @@ torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
 }
 
 
-void QueryConverter::transTensorPB(TensorPB* t, const ft::Buffer* buffer) {
-    FT_CHECK(t != nullptr);
+void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
+    RTP_LLM_CHECK(t != nullptr);
     auto shape       = t->mutable_shape();
     auto shape_array = buffer->shape();
     shape->Resize(shape_array.size(), 0);
@@ -177,19 +177,19 @@ void QueryConverter::transTensorPB(TensorPB* t, const ft::Buffer* buffer) {
 
     TensorPB_DataType data_type;
     switch(buffer->type()) {
-        case ft::DataType::TYPE_FP32:
+        case rtp_llm::DataType::TYPE_FP32:
             data_type = TensorPB_DataType::TensorPB_DataType_FP32;
             t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
             break;
-        case ft::DataType::TYPE_INT32:
+        case rtp_llm::DataType::TYPE_INT32:
             data_type = TensorPB_DataType::TensorPB_DataType_INT32;
             t->set_int32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
             break;
-        case ft::DataType::TYPE_FP16:
+        case rtp_llm::DataType::TYPE_FP16:
             data_type = TensorPB_DataType::TensorPB_DataType_FP16;
             t->set_fp16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
             break;
-        case ft::DataType::TYPE_BF16:
+        case rtp_llm::DataType::TYPE_BF16:
             data_type = TensorPB_DataType::TensorPB_DataType_BF16;
             t->set_bf16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
             break;
@@ -201,7 +201,7 @@ void QueryConverter::transTensorPB(TensorPB* t, const ft::Buffer* buffer) {
 }
 
 void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* responses) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
     for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
         const auto& response = responses->generate_outputs[i];
@@ -240,7 +240,7 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
             transTensorPB(output->mutable_logits(), response.logits.value().get());
         }
     }
-    FT_LOG_DEBUG("transResponse done");
+    RTP_LLM_LOG_DEBUG("transResponse done");
 }
 
 }  // namespace rtp_llm

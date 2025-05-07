@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -40,18 +40,18 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.fallback_times  = fallback_times_;
 
         generate_output.output_ids =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1lu, output_len}, rtp_llm::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
         if (returnLogits() && update_info.logits) {
-            ft::BufferPtr host_logits;
+            rtp_llm::BufferPtr host_logits;
             if (update_info.logits->shape()[0] == 1) {
-                host_logits = device_->clone({*update_info.logits, ft::AllocationType::HOST});
+                host_logits = device_->clone({*update_info.logits, rtp_llm::AllocationType::HOST});
             } else {
-                host_logits = device_->clone({update_info.logits->view(i, 1), ft::AllocationType::HOST});
+                host_logits = device_->clone({update_info.logits->view(i, 1), rtp_llm::AllocationType::HOST});
             }
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                auto select_buf        = ft::vector2Buffer(generate_input_->generate_config->select_tokens_id);
+                auto select_buf        = rtp_llm::vector2Buffer(generate_input_->generate_config->select_tokens_id);
                 generate_output.logits = device_->select({*host_logits, *select_buf, 1});
             } else {
                 // TODO(xinfei.sxf) not set logits in middle step for streaming
@@ -61,26 +61,26 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states) {
             if (update_info.hidden_states->shape()[0] == 1) {
-                generate_output.hidden_states = device_->clone({*update_info.hidden_states, ft::AllocationType::HOST});
+                generate_output.hidden_states = device_->clone({*update_info.hidden_states, rtp_llm::AllocationType::HOST});
             } else {
-                generate_output.hidden_states = device_->clone({update_info.hidden_states->view(i, 1), ft::AllocationType::HOST});
+                generate_output.hidden_states = device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
         if (loss_) {
-            FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
+            RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
                                "loss index should be input len [%d] - 1 but is [%d]",
                                inputLength(),
                                loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {
-                loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()),
-                                       ft::AllocationType::HOST});
+                loss = device_->clone({*rtp_llm::torchTensor2Buffer(torch::mean(rtp_llm::Buffer2torchTensor(*loss_)).exp()),
+                                       rtp_llm::AllocationType::HOST});
             }
             generate_output.loss = loss;
         }
 
         if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
-            generate_output.aux_info.softmax_probs = device_->clone({(*softmax_probs_)[i].view(last_output_pos_, output_len), ft::AllocationType::HOST});
+            generate_output.aux_info.softmax_probs = device_->clone({(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
         }
 
         generate_output.finished              = sub_generate_status_[i].status == StreamState::FINISHED;
@@ -96,7 +96,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.pd_sep             = queryPdSep();
 
         generate_output.aux_info.cum_log_probs =
-            device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {1lu}, rtp_llm::AllocationType::HOST}, {});
 
         if (update_info.cum_log_probs) {
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
@@ -109,7 +109,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
             generate_output.aux_info.all_probs = device_->clone(
-                {all_probs_->view(i, 1), ft::AllocationType::HOST});
+                {all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
         }
 
         generate_results.generate_outputs.push_back(generate_output);
@@ -128,7 +128,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs generate_result
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
 
     if (update_info.loss) {
@@ -136,15 +136,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     if (needReturnHiddenStates()) {
-        FT_CHECK(update_info.all_hidden_states != nullptr);
+        RTP_LLM_CHECK(update_info.all_hidden_states != nullptr);
         last_hidden_states_ = device_->clone(
-            {*update_info.all_hidden_states, ft::AllocationType::DEVICE});
+            {*update_info.all_hidden_states, rtp_llm::AllocationType::DEVICE});
     }
 
 
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {
-        FT_CHECK(update_info.softmax_probs->dim() == 2);
-        FT_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);
+        RTP_LLM_CHECK(update_info.softmax_probs->dim() == 2);
+        RTP_LLM_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);
         setSoftmaxProbs(*update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
@@ -156,7 +156,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         device_->copy({*cum_log_probs_, *update_info.cum_log_probs});
     }
     if (update_info.all_probs) {
-        all_probs_ = device_->clone({*update_info.all_probs, ft::AllocationType::HOST});
+        all_probs_ = device_->clone({*update_info.all_probs, rtp_llm::AllocationType::HOST});
     }
 
     //TODO: move it to better position
@@ -174,7 +174,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    FT_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (stoppedWithoutLock()) {

@@ -4,7 +4,7 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 using namespace std;
 
@@ -13,8 +13,8 @@ namespace rtp_llm {
 class GenerateStreamBuilder {
 public:
 
-    GenerateStreamBuilder(ft::GptInitParameter params) :
-        params_(params), device_(ft::DeviceFactory::getDefaultDevice()) {
+    GenerateStreamBuilder(rtp_llm::GptInitParameter params) :
+        params_(params), device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
         params_.max_seq_len_ = 2048;
     }
 
@@ -28,7 +28,7 @@ public:
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext resource_context;
         generate_input->generate_config = generate_config;
-        generate_input->input_ids = ft::vector2Buffer(input_ids);
+        generate_input->input_ids = rtp_llm::vector2Buffer(input_ids);
         return std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context, nullptr);
     };
 
@@ -42,9 +42,9 @@ public:
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_beams = 2;
-        generate_input->input_ids = ft::vector2Buffer(input_ids);
+        generate_input->input_ids = rtp_llm::vector2Buffer(input_ids);
         generate_input->generate_config = generate_config;
-        ft::GptInitParameter params;
+        rtp_llm::GptInitParameter params;
         params.max_seq_len_ = 2048;
         auto stream = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
         return stream;
@@ -55,10 +55,10 @@ public:
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext resource_context;
         generate_input->generate_config = generate_config;
-        generate_input->input_ids = ft::vector2Buffer(input_ids);
+        generate_input->input_ids = rtp_llm::vector2Buffer(input_ids);
         auto stream_ptr = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context, nullptr);
         stream_ptr->setIsContextStream(false);
-        auto new_tokens_ptr = ft::vector2Buffer(new_token_ids);
+        auto new_tokens_ptr = rtp_llm::vector2Buffer(new_token_ids);
         device_->copy({*(stream_ptr->completeTokenIds()->index(0)->slice(stream_ptr->seqLength(), new_token_ids.size())),
                        *new_tokens_ptr});
         stream_ptr->setSeqLength(stream_ptr->seqLength() + new_token_ids.size());
@@ -66,8 +66,8 @@ public:
     };
 
 private:
-    ft::GptInitParameter params_;
-    ft::DeviceBase* device_;
+    rtp_llm::GptInitParameter params_;
+    rtp_llm::DeviceBase* device_;
 };
 
 class GenerateStreamTest: public DeviceTestBase {
@@ -75,14 +75,14 @@ protected:
 };
 
 TEST_F(GenerateStreamTest, testConstruct) {
-    ft::GptInitParameter params;
+    rtp_llm::GptInitParameter params;
     auto builder = GenerateStreamBuilder(params);
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
 TEST_F(GenerateStreamTest, testConstructCacheKey) {
-    ft::GptInitParameter params;
+    rtp_llm::GptInitParameter params;
     auto builder = GenerateStreamBuilder(params);
     auto stream1 = builder.createComplexContextStream({{1, 2, 3, 4, 5}, {}});
     auto& cache_key1 = stream1->cacheKeys(0);

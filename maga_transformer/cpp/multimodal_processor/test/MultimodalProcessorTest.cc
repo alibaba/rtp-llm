@@ -7,11 +7,11 @@
 #define private public
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 

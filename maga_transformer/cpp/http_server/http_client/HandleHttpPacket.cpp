@@ -20,20 +20,20 @@ anet::IPacketHandler::HPRetCode HandleHttpPacket::handlePacket(anet::Packet* pac
         handle_packet_unique_ptr->address_, handle_packet_unique_ptr->conn_, false);
 
     if (!packet) {
-        FT_LOG_WARNING("decode body failed, packet is null");
+        RTP_LLM_LOG_WARNING("decode body failed, packet is null");
         triggerCallBack(false, "", handle_packet_unique_ptr->http_call_back_);
         return anet::IPacketHandler::FREE_CHANNEL;
     }
 
     if (!packet->isRegularPacket()) {
-        FT_LOG_WARNING("decode body failed, packet is not regular");
+        RTP_LLM_LOG_WARNING("decode body failed, packet is not regular");
         triggerCallBack(false, "", handle_packet_unique_ptr->http_call_back_);
         return anet::IPacketHandler::FREE_CHANNEL;
     }
 
     ::anet::HTTPPacket* httpPacket = dynamic_cast<::anet::HTTPPacket*>(packet);
     if (!httpPacket) {
-        FT_LOG_WARNING("decode body failed, packet is not http packet");
+        RTP_LLM_LOG_WARNING("decode body failed, packet is not http packet");
         triggerCallBack(false, "", handle_packet_unique_ptr->http_call_back_);
         return anet::IPacketHandler::FREE_CHANNEL;
     }
@@ -44,7 +44,7 @@ anet::IPacketHandler::HPRetCode HandleHttpPacket::handlePacket(anet::Packet* pac
         if (httpPacket->getBody(length)) {
             response = std::string(httpPacket->getBody(), length);
         }
-        FT_LOG_WARNING("decode body failed, packet get error status, status: %d, response: %s, length: %d", httpPacket->getStatusCode(), response.c_str(), length);
+        RTP_LLM_LOG_WARNING("decode body failed, packet get error status, status: %d, response: %s, length: %d", httpPacket->getStatusCode(), response.c_str(), length);
         triggerCallBack(false, response, handle_packet_unique_ptr->http_call_back_);
         return anet::IPacketHandler::FREE_CHANNEL;
     }

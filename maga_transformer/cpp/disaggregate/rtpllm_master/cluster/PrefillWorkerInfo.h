@@ -56,7 +56,7 @@ public:
     }
 
     int64_t expect_wait_time() const {
-        FT_LOG_DEBUG("running_task_cost_time_ %ld, pending_task_cost_time_ %ld, update_time_ %ld, last_running_delta_ %ld", running_task_cost_time_, pending_task_cost_time_, update_time_, last_running_delta_);
+        RTP_LLM_LOG_DEBUG("running_task_cost_time_ %ld, pending_task_cost_time_ %ld, update_time_ %ld, last_running_delta_ %ld", running_task_cost_time_, pending_task_cost_time_, update_time_, last_running_delta_);
         auto running_task_cost_time = std::max((int64_t)0, running_task_cost_time_ - (autil::TimeUtility::currentTimeInMilliSeconds() - update_time_ + last_running_delta_));
         auto pending_task_penalty = pending_task_cost_time_;
         return running_task_cost_time + pending_task_penalty;
@@ -104,18 +104,18 @@ protected:
     bool
     timeoutOrTaskEnqueued(const WorkerStatusResponse& remote, const PendingTask& pending_task, int64_t timeout_ms) {
         if (pending_task.timeout(timeout_ms)) {
-            FT_LOG_DEBUG("pending task %s set timeout", pending_task.task_id.c_str());
+            RTP_LLM_LOG_DEBUG("pending task %s set timeout", pending_task.task_id.c_str());
             return true;
         }
         for (auto& finish_task : remote.finished_task_list) {
             if (finish_task.task_id == pending_task.task_id) {
-                FT_LOG_DEBUG("pending task %s set finished", pending_task.task_id.c_str());
+                RTP_LLM_LOG_DEBUG("pending task %s set finished", pending_task.task_id.c_str());
                 return true;
             }
         }
         for (auto& running_task : remote.running_task_list) {
             if (running_task.task_id == pending_task.task_id) {
-                FT_LOG_DEBUG("pending task %s set running", pending_task.task_id.c_str());
+                RTP_LLM_LOG_DEBUG("pending task %s set running", pending_task.task_id.c_str());
                 return true;
             }
         }

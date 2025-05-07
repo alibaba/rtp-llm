@@ -2,8 +2,8 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_deps = [
-    "//src/fastertransformer/devices/testing:device_test_utils",
-    "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//maga_transformer/cpp/devices/testing:device_test_utils",
+    "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
     "//maga_transformer/cpp:utils",
     "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:schedulers",

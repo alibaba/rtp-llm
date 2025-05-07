@@ -29,7 +29,7 @@ std::string EmbeddingService::getSource(const std::string& raw_request) {
         FromJson(source, it->second);
         return source;
     } catch (const std::exception& e) {
-        FT_LOG_DEBUG("embedding getSource failed, error: %s", e.what());
+        RTP_LLM_LOG_DEBUG("embedding getSource failed, error: %s", e.what());
     }
     return source;
 }
@@ -45,7 +45,7 @@ std::string EmbeddingService::getUsage(const std::string& response) {
         }
         usage = ToJsonString(it->second, /*isCompact=*/true);
     } catch (const std::exception& e) {
-        FT_LOG_DEBUG("embedding getUsage failed, error: %s", e.what());
+        RTP_LLM_LOG_DEBUG("embedding getUsage failed, error: %s", e.what());
     }
     return usage;
 }
@@ -70,7 +70,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
     writer->AddHeader("Content-Type", "application/json");
 
     if (!ParallelInfo::globalParallelInfo().isMaster()) {
-        FT_LOG_WARNING("worker can't process embedding request.");
+        RTP_LLM_LOG_WARNING("worker can't process embedding request.");
         writer->SetStatus(403, "Forbidden");
         writer->Write(R"({"detail": "worker can't process embedding request."})");
         auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNSUPPORTED_OPERATION));
@@ -80,7 +80,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
     }
 
     if (!embedding_endpoint_) {
-        FT_LOG_WARNING("non-embedding model can't handle embedding request!");
+        RTP_LLM_LOG_WARNING("non-embedding model can't handle embedding request!");
         writer->SetStatus(501, "Not Implemented");
         writer->Write(R"({"detail": "non-embedding model can't handle embedding request!"})");
         auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNKNOWN_ERROR));
@@ -89,7 +89,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         return;
     }
     if (!controller_ || !request_counter_) {
-        FT_LOG_WARNING("embedding model: controller or request_counter null!");
+        RTP_LLM_LOG_WARNING("embedding model: controller or request_counter null!");
         writer->SetStatus(500, "Internal Server Error");
         writer->Write(R"({"detail": "embedding model: controller or request_counter null!"})");
         auto tags = kmonitor::MetricsTags("error_code", std::to_string(HttpApiServerException::UNKNOWN_ERROR));
@@ -105,7 +105,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
     try {
         FromJsonString(req, body);
     } catch (autil::legacy::ExceptionBase &e) {
-        FT_LOG_WARNING("embedding request parse failed.");
+        RTP_LLM_LOG_WARNING("embedding request parse failed.");
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
         writer->SetStatus(400, "Bad Request");
         writer->Write(R"({"detail": "embedding request parse failed."})");
@@ -131,7 +131,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
 
         AccessLogWrapper::logSuccessAccess(body, request_id, request.getRecvTime(), logable_response, req.private_request);
     } catch (const std::exception& e) {
-        FT_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
+        RTP_LLM_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
         HttpApiServerException::handleException(e, request_id, metrics_reporter_, request, writer);
     }
 }

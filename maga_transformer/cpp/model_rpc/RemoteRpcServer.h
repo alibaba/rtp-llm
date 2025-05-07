@@ -20,7 +20,7 @@ public:
 private:
     void initLocalHostInfo();
     void initLocalPeerInfo();
-    void initCacheStore(const fastertransformer::GptInitParameter& params);
+    void initCacheStore(const rtp_llm::GptInitParameter& params);
 
 protected:
     std::string process_id_;

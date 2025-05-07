@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerServer.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 #include "autil/NetUtil.h"
 #include "autil/EnvUtil.h"
 
@@ -27,7 +27,7 @@ protected:
 
 bool MessagerClientTest::initMessager() {
     server_buffer_store_ =
-        std::make_shared<RequestBlockBufferStore>(memory_util_, fastertransformer::DeviceFactory::getDefaultDevice());
+        std::make_shared<RequestBlockBufferStore>(memory_util_, rtp_llm::DeviceFactory::getDefaultDevice());
 
     port_ = autil::NetUtil::randomPort();
 

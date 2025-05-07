@@ -1,24 +1,24 @@
 #pragma once
 
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Event.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/devices/Weights.h"
-#include "src/fastertransformer/stats/ExpertStats.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Event.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/OpData.h"
+#include "maga_transformer/cpp/devices/Weights.h"
+#include "maga_transformer/cpp/stats/ExpertStats.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include <string>
 #include <utility>
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
 struct GptModelDescription {
-    ft::AttentionConfigs attention_conf;
-    ft::FfnConfigs       ffn_conf;
-    ft::NormType         norm_type;
-    ft::QScheme          act_qscheme = ft::QScheme::NoQuantize;
+    rtp_llm::AttentionConfigs attention_conf;
+    rtp_llm::FfnConfigs       ffn_conf;
+    rtp_llm::NormType         norm_type;
+    rtp_llm::QScheme          act_qscheme = rtp_llm::QScheme::NoQuantize;
     double               layernorm_eps = 1e-5;
     size_t               vocab_size = 0;
     bool                 post_layernorm = false;
@@ -28,8 +28,8 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    ft::DeviceBase*                                  device;
-    const ft::Weights                                weights;
+    rtp_llm::DeviceBase*                                  device;
+    const rtp_llm::Weights                                weights;
     const GptModelDescription                        description;
     const std::optional<CacheManager::KVCacheBuffer> kv_cache_buffer;
 };
@@ -42,36 +42,36 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
-    ft::BufferPtr input_lengths;     // [batch_size]
-    ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
-    ft::BufferPtr lm_output_indexes; // [context_batch_size]
-    ft::BufferPtr prefix_lengths;    // [context_batch_size]
+    mutable rtp_llm::BufferPtr combo_tokens;      // [cumulated_seq_len]
+    rtp_llm::BufferPtr input_lengths;     // [batch_size]
+    rtp_llm::BufferPtr sequence_lengths;  // [decoder_batch_size]
+    rtp_llm::BufferPtr lm_output_indexes; // [context_batch_size]
+    rtp_llm::BufferPtr prefix_lengths;    // [context_batch_size]
 
-    ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
-    ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
+    rtp_llm::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
+    rtp_llm::BufferPtr combo_position_ids;         // [cumulated_seq_len]
 
     // for mtp model
-    ft::BufferPtr last_hidden_states;
+    rtp_llm::BufferPtr last_hidden_states;
 
     // for tp sync
-    ft::BufferPtr lora_ids;           // [batch_size]
-    ft::BufferPtr lora_input_lengths; // [batch_size]
+    rtp_llm::BufferPtr lora_ids;           // [batch_size]
+    rtp_llm::BufferPtr lora_input_lengths; // [batch_size]
 
     // no need tp sync
-    ft::lora::LoraModelInputPtr lora_model_input;
+    rtp_llm::lora::LoraModelInputPtr lora_model_input;
 
-    ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
+    rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    ft::BufferPtr kv_cache_block_id;    // [batch_size, block_nums], kv cache block block id
+    rtp_llm::BufferPtr kv_cache_block_id;    // [batch_size, block_nums], kv cache block block id
 
-    std::optional<std::vector<ft::BufferPtr>> multimodal_features; // all features in gathered stream stored here
-    ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
-    ft::BufferPtr                             mm_features_locs;    // features index
+    std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features; // all features in gathered stream stored here
+    rtp_llm::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
+    rtp_llm::BufferPtr                             mm_features_locs;    // features index
 
-    ft::BufferPtr                             request_id;               // int64, [context_batch_size]
-    ft::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
-    ft::BufferPtr                             cache_keys;               // [context_batch_size]
+    rtp_llm::BufferPtr                             request_id;               // int64, [context_batch_size]
+    rtp_llm::BufferPtr                             request_pd_separation;    // bool, [context_batch_size]
+    rtp_llm::BufferPtr                             cache_keys;               // [context_batch_size]
     size_t                                    k_block_size;
     size_t                                    v_block_size;
     size_t                                    scale_block_size;
@@ -106,25 +106,25 @@ enum GptModelInputIndex : size_t{
     gptModelInputLength
 };
 
-void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device);
+void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device);
 
 struct GptModelOutputs {
-    ft::BufferPtr logits;
-    ft::BufferPtr hidden_states;
-    ft::BufferPtr all_hidden_states;
-    ft::BufferPtr all_logits;
-    ft::BufferPtr softmax_result;
+    rtp_llm::BufferPtr logits;
+    rtp_llm::BufferPtr hidden_states;
+    rtp_llm::BufferPtr all_hidden_states;
+    rtp_llm::BufferPtr all_logits;
+    rtp_llm::BufferPtr softmax_result;
 
-    mutable ft::BufferPtr scatter_logits;
-    mutable ft::BufferPtr scatter_hidden_states;
+    mutable rtp_llm::BufferPtr scatter_logits;
+    mutable rtp_llm::BufferPtr scatter_hidden_states;
     std::shared_ptr<void> captured_values;
 };
 
-using LoraMap = std::unordered_map<std::string, ft::ConstBufferPtr>;
+using LoraMap = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 
 struct GptLayerOutputs {
-    ft::BufferPtr hidden;
-    ft::BufferPtr pre_decoder_residual;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr pre_decoder_residual;
 };
 
 struct MicroBatchInfo {
@@ -138,17 +138,17 @@ struct MicroBatchPlan {
 };
 
 struct LayerMicroBatchInputs {
-    ft::BufferPtr hidden;
-    ft::BufferPtr pre_decoder_residual;
-    ft::AttentionCommonInputs attention_common_inputs;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr pre_decoder_residual;
+    rtp_llm::AttentionCommonInputs attention_common_inputs;
     bool fake = false;
 };
 
 struct GptLayerInputs {
-    ft::BufferPtr hidden;
-    ft::BufferPtr pre_decoder_residual;
-    ft::AttentionCommonInputs attention_common_inputs;
-    const ft::DataType dtype;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr pre_decoder_residual;
+    rtp_llm::AttentionCommonInputs attention_common_inputs;
+    const rtp_llm::DataType dtype;
     std::vector<LayerMicroBatchInputs> micro_batch_inputs;
     bool enable_sp = false;
     size_t token_num = 0;
@@ -156,32 +156,32 @@ struct GptLayerInputs {
 };
 
 struct AttentionBlockOutputs {
-    ft::BufferPtr hidden;
-    ft::BufferPtr residual;
-    ft::BufferPtr residual2;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr residual;
+    rtp_llm::BufferPtr residual2;
 };
 
 struct EpFfnInputs {
-    ft::BufferPtr hidden;
-    ft::BufferPtr residual;
-    ft::BufferPtr shared_expert_output;
-    ft::FfnLayerParams moe_ffn_params;
-    ft::MoeGateSelectOutput gate_output;
-    ft::MoeDispatchOutput dispatch_output;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr residual;
+    rtp_llm::BufferPtr shared_expert_output;
+    rtp_llm::FfnLayerParams moe_ffn_params;
+    rtp_llm::MoeGateSelectOutput gate_output;
+    rtp_llm::MoeDispatchOutput dispatch_output;
 };
 
 struct EpFfnOutputs {
-    ft::BufferPtr hidden;
-    ft::MoeCombineOutput combine_output;
-    ft::DeviceHookPtr comm_barrier_hook;
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::MoeCombineOutput combine_output;
+    rtp_llm::DeviceHookPtr comm_barrier_hook;
 };
 
 struct LastLayerDeferedParams {
-    ft::BufferPtr residual;
-    ft::BufferPtr shared_expert_output;
-    std::optional<ft::MoeCombineOutput> combine_output;
-    std::shared_ptr<const ft::LayerNormWeights> post_ffn_layernorm_weights;
-    ft::DeviceHookPtr comm_barrier_hook;
+    rtp_llm::BufferPtr residual;
+    rtp_llm::BufferPtr shared_expert_output;
+    std::optional<rtp_llm::MoeCombineOutput> combine_output;
+    std::shared_ptr<const rtp_llm::LayerNormWeights> post_ffn_layernorm_weights;
+    rtp_llm::DeviceHookPtr comm_barrier_hook;
 };
 
 class GptModel {
@@ -192,34 +192,34 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
 protected:
-    ft::AttentionCommonInputs prepareAttentionInputs(
+    rtp_llm::AttentionCommonInputs prepareAttentionInputs(
         const GptModelInputs& inputs,
-        ft::DataType attn_dtype,
-        ft::BufferPtr combo_position_ids);
+        rtp_llm::DataType attn_dtype,
+        rtp_llm::BufferPtr combo_position_ids);
 
     MicroBatchPlan planMicroBatches(const GptModelInputs& inputs);
     std::vector<LayerMicroBatchInputs> prepareMicroBatchInputs(
         const GptModelInputs& model_inputs,
-        const ft::BufferPtr& hidden,
-        const ft::BufferPtr& pre_decoder_residual,
-        const ft::DataType attn_dtype,
+        const rtp_llm::BufferPtr& hidden,
+        const rtp_llm::BufferPtr& pre_decoder_residual,
+        const rtp_llm::DataType attn_dtype,
         const MicroBatchPlan& micro_batch_plan);
 
-    virtual ft::BufferPtr embeddingPost(const ft::BufferPtr& hidden_states, const GptModelInputs& inputs);
+    virtual rtp_llm::BufferPtr embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs);
 
-    ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
+    rtp_llm::BufferPtr tpSyncEmbeddingOrLogits(const rtp_llm::BufferPtr& buffer);
 
     GptLayerInputs forwardPreLayers(const GptModelInputs& inputs);
 
     GptLayerOutputs forwardGptLayer(
         GptLayerInputs inputs,
         const int32_t layer_id,
-        ft::lora::LoraModelInputPtr lora_model_input);
+        rtp_llm::lora::LoraModelInputPtr lora_model_input);
 
     AttentionBlockOutputs forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
-        ft::lora::LoraModelInputPtr lora_model_input,
+        rtp_llm::lora::LoraModelInputPtr lora_model_input,
         const LastLayerDeferedParams& last_layer_defered_params = {});
 
     // These methods are dedicated for moe ep micro batching
@@ -235,36 +235,36 @@ protected:
     GptLayerOutputs forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id);
 
     GptModelOutputs forwardPostLayers(
-        const ft::BufferPtr hidden,
+        const rtp_llm::BufferPtr hidden,
         const bool has_context_request,
         const bool need_all_logits,
-        const ft::BufferPtr lm_output_indexes,
+        const rtp_llm::BufferPtr lm_output_indexes,
         bool enable_sp,
         size_t token_num,
         const GptModelInputs& inputs);
 
     void prepareExpertStats(
         const size_t layer_id,
-        ft::FfnLayerParams& ffn_layer_params);
+        rtp_llm::FfnLayerParams& ffn_layer_params);
 
     void cleanExpertStats();
 
 protected:
-    ft::DeviceBase*            device_;
-    const ft::DeviceProperties device_props_;
+    rtp_llm::DeviceBase*            device_;
+    const rtp_llm::DeviceProperties device_props_;
     const size_t               layer_num_;
     const GptModelDescription  description_;
-    ft::BufferPtr              k_cache_buffer_;
-    ft::BufferPtr              v_cache_buffer_;
-    ft::BufferPtr              k_scale_buffer_;
-    ft::BufferPtr              v_scale_buffer_;
-    ft::BufferPtr              residual_scale_fp32_;
-    ft::BufferPtr              residual_scale_;
+    rtp_llm::BufferPtr              k_cache_buffer_;
+    rtp_llm::BufferPtr              v_cache_buffer_;
+    rtp_llm::BufferPtr              k_scale_buffer_;
+    rtp_llm::BufferPtr              v_scale_buffer_;
+    rtp_llm::BufferPtr              residual_scale_fp32_;
+    rtp_llm::BufferPtr              residual_scale_;
 
-    ft::DeviceHookPtr          last_comm_hook_;
+    rtp_llm::DeviceHookPtr          last_comm_hook_;
 public:
-    ft::Weights            weights_;
-    ft::OverallExpertStats overall_expert_stats_;
+    rtp_llm::Weights            weights_;
+    rtp_llm::OverallExpertStats overall_expert_stats_;
 };
 
 }  // namespace rtp_llm

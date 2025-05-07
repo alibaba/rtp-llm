@@ -8,7 +8,7 @@ namespace rtp_llm {
 std::unique_ptr<ProposeExecutor>
 createProposeExecutor(const EngineInitParams&                        score_model_engine_init_params,
                       std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                      ft::DeviceBase*                                device,
+                      rtp_llm::DeviceBase*                                device,
                       const std::shared_ptr<CacheManager>&           cache_manager,
                       const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_manager,
                       const std::shared_ptr<lora::LoraManager>&      lora_manager) {
@@ -24,7 +24,7 @@ createProposeExecutor(const EngineInitParams&                        score_model
         propose_executor.reset(
             new MTPExecutor(propose_model_engine_init_params, device, mtp_cache_manager, lora_manager));
     } else {
-        FT_FAIL("invalid sp_type: %s", sp_type);
+        RTP_LLM_FAIL("invalid sp_type: %s", sp_type);
     }
     return propose_executor;
 }

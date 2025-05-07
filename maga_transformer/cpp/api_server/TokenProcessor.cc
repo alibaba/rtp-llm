@@ -2,12 +2,12 @@
 
 #include <algorithm>
 
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/api_server/Exception.h"
 
 namespace rtp_llm {
 
-namespace ft = fastertransformer;
+
 
 TokenProcessor::TokenProcessor(py::object token_processor): token_processor_(token_processor) {}
 
@@ -46,7 +46,7 @@ std::shared_ptr<TokenizerEncodeResponse> TokenProcessor::tokenizer(const std::st
     if (py_res.contains("offset_mapping")) {
         auto py_offset_mapping = py_res["offset_mapping"];
         if (!py::isinstance<py::list>(py_offset_mapping)) {
-            FT_LOG_WARNING("tokenizer failed, offset mapping expected list but type is %s, offset mapping: %s",
+            RTP_LLM_LOG_WARNING("tokenizer failed, offset mapping expected list but type is %s, offset mapping: %s",
                            py::cast<std::string>(py::str(py::type::of(py_offset_mapping))).c_str(),
                            py::cast<std::string>(py::str(py_offset_mapping)).c_str());
             return nullptr;
@@ -62,14 +62,14 @@ std::shared_ptr<TokenizerEncodeResponse> TokenProcessor::tokenizer(const std::st
         }
         response->offset_mapping = offset_mapping;
     } else {
-        FT_LOG_WARNING("tokenizer result has no offset_mapping");
+        RTP_LLM_LOG_WARNING("tokenizer result has no offset_mapping");
     }
 
     // input_ids
     if (py_res.contains("input_ids")) {
         auto py_input_ids = py_res["input_ids"];
         if (!py::isinstance<py::list>(py_input_ids)) {
-            FT_LOG_WARNING("tokenizer failed, input ids expected list but type is: %s, input ids: %s",
+            RTP_LLM_LOG_WARNING("tokenizer failed, input ids expected list but type is: %s, input ids: %s",
                            py::cast<std::string>(py::str(py::type::of(py_input_ids))).c_str(),
                            py::cast<std::string>(py::str(py_input_ids)).c_str());
             return nullptr;
@@ -81,7 +81,7 @@ std::shared_ptr<TokenizerEncodeResponse> TokenProcessor::tokenizer(const std::st
         }
         response->token_ids = input_ids;
     } else {
-        FT_LOG_WARNING("tokenizer result has no input_ids");
+        RTP_LLM_LOG_WARNING("tokenizer result has no input_ids");
     }
 
     return response;
@@ -115,11 +115,11 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
     std::vector<std::string> texts;
     for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
         auto& response = responses.generate_outputs[i];
-        auto token_ids = ft::Buffer2torchTensor(response.output_ids, true);
+        auto token_ids = rtp_llm::Buffer2torchTensor(response.output_ids, true);
         py::tuple result = token_processor_stream_.attr("decode_tokens")(i, token_ids, response.finished,
                 config->print_stop_words, config->stop_words_str, config->stop_words_list, config->return_incremental);
         if (result.size() != 2) {
-            FT_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
+            RTP_LLM_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
             continue;
         }
         int len = result[0].cast<int>();

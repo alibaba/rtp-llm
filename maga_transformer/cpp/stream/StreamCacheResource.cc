@@ -1,10 +1,10 @@
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/utils/HashUtil.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
 
 using namespace std;
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -23,7 +23,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
         const auto& cache_keys = stream_->cacheKeys(batch_id);
         vector<float> loss;
         if (stream_->getLoss()) {
-            loss = ft::buffer2vector<float>(*(stream_->getLoss()));
+            loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
         }
         // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
         CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss);
@@ -46,7 +46,7 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
-    FT_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
+    RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;
     size_t reserved_blocks = 0;
 
@@ -67,7 +67,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-    FT_LOG_DEBUG("stream [%ld] max block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache", stream_->streamId(), maxBlockSize(), total_seq_len, release_seq_len);
+    RTP_LLM_LOG_DEBUG("stream [%ld] max block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache", stream_->streamId(), maxBlockSize(), total_seq_len, release_seq_len);
     size_t last_block_occupied_seq_len = seqSizePerBlock() == 1 ? 1 : ((total_seq_len + seqSizePerBlock() - 2) % seqSizePerBlock() + 1);
     if (release_seq_len < last_block_occupied_seq_len) {
         return absl::OkStatus();
@@ -106,7 +106,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         stream_->setReuseLength(match_info.reuse_length);
         stream_->setInitialReuseLength(match_info.reuse_length);
         if (!match_info.loss.empty()) {
-            auto loss = ft::vector2Buffer<float>(match_info.loss);
+            auto loss = rtp_llm::vector2Buffer<float>(match_info.loss);
             stream_->setLoss(*loss);
         }
         if (match_info.reuse_length) {
@@ -191,15 +191,15 @@ void StreamCacheResource::beamSearchKvCacheUpdate(const std::vector<int>& beam_i
     std::vector<int> target_block_offset(batch_size * block_size);
     // check all batch has same block num
     for (int i = 0; i < batch_size; i ++) {
-        FT_CHECK(block_size == kv_cache.blocks(i).size());
+        RTP_LLM_CHECK(block_size == kv_cache.blocks(i).size());
         for (int j = 0; j < block_size; j++) {
             src_block_offset[i * block_size + j] = kv_cache.blocks(i)[j];
             target_block_offset[i * block_size + j] = kv_cache.blocks(beam_index[i])[j];
         }
     }
 
-    resource_context_.cache_manager->beamSearchKvUpdate(ft::vector2Buffer(src_block_offset),
-                                                        ft::vector2Buffer(target_block_offset));
+    resource_context_.cache_manager->beamSearchKvUpdate(rtp_llm::vector2Buffer(src_block_offset),
+                                                        rtp_llm::vector2Buffer(target_block_offset));
 }
 
 // TODO(xinfei.sxf) move code to batch resource class
@@ -259,7 +259,7 @@ bool StreamCacheResource::hasCacheKeys() const {
 }
 
 const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) const {
-    FT_CHECK_WITH_INFO(batch_resource_.cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
+    RTP_LLM_CHECK_WITH_INFO(batch_resource_.cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
     return batch_resource_.cache_keys[batch_id];
 }
 

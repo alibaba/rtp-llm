@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 #include <random>
-#include "src/fastertransformer/kernels/eplb/experts_stats_kernels.h"
+#include "maga_transformer/cpp/kernels/eplb/experts_stats_kernels.h"
 
 using namespace std;
-using namespace fastertransformer;
+using namespace rtp_llm;
 
 using double_vec_t = tuple<vector<int>, vector<int>>;
 using triple_vec_t = tuple<vector<int>, vector<int>, vector<int>>;

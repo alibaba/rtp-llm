@@ -21,7 +21,7 @@ These are components used in the main execution loop, including:
 
 # model
 
-These are models implementations calling hardware computational API at `src/fastertransformer/devices`
+These are models implementations calling hardware computational API at `maga_transformer/cpp/devices`
 
 currently we have:
  - GptModel: corresponding to `PreTrainedModel` in transformers

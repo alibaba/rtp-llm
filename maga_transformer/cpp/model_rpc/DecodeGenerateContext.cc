@@ -35,7 +35,7 @@ void DecodeStatInfo::nextStage() {
             break;
         }
         default: {
-            FT_CHECK_WITH_INFO(false, "error stage");
+            RTP_LLM_CHECK_WITH_INFO(false, "error stage");
         }
     }
 }

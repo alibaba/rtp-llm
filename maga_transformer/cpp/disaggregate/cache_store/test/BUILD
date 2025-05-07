@@ -1,7 +1,7 @@
 package(default_visibility = ["//maga_transformer/cpp/disaggregate/cache_store:__subpackages__"])
 
 load("//:def.bzl", "copts")
-load("//src/fastertransformer/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
+load("//maga_transformer/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
 
 cc_library(
     name = "cache_store_test_base",
@@ -17,9 +17,9 @@ cc_library(
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/cache_store:cache_store",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:devices_base",
         "@com_google_googletest//:gtest",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
     ],
     visibility=['//visibility:public'],
 )

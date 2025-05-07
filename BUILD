@@ -45,16 +45,15 @@ config_setting(
 cc_library(
     name = "gpt_init_params",
     srcs = [
-        "src/fastertransformer/th_op/GptInitParameter.cc"
+        "//maga_transformer/cpp:th_op/GptInitParameter.cc"
     ],
     hdrs = [
-        "src/fastertransformer/th_op/GptInitParameter.h",
-        "src/fastertransformer/th_op/GptInitParameterRegister.h",
+        "//maga_transformer/cpp:th_op/GptInitParameter.h",
+        "//maga_transformer/cpp:th_op/GptInitParameterRegister.h",
     ],
     deps = [
-        "//src/fastertransformer/utils",
         "//maga_transformer/cpp:utils",
-	    "//src/fastertransformer/core:types"
+	    "//maga_transformer/cpp/core:types"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -62,11 +61,13 @@ cc_library(
 
 filegroup(
     name = "th_op_hdrs_files",
-    srcs = glob([
-        "src/fastertransformer/th_op/**/*.h"],
-    exclude=[
-        "src/fastertransformer/th_op/GptInitParameter.h",
-    ]),
+    srcs = [
+        "//maga_transformer/cpp:th_op/common/NcclOp.h",
+        "//maga_transformer/cpp:th_op/common/InitEngineOps.h",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
+    ],
 )
 
 cc_library(
@@ -80,15 +81,15 @@ cc_library(
 filegroup(
     name = "th_transformer_lib_files",
     srcs = [
-        "src/fastertransformer/th_op/GptInitParameter.cc",
-        "src/fastertransformer/th_op/init.cc",
-        "src/fastertransformer/th_op/common/InitEngineOps.cc",
-        "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-        "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
-        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc",
+        "//maga_transformer/cpp:th_op/GptInitParameter.cc",
+        "//maga_transformer/cpp:th_op/init.cc",
+        "//maga_transformer/cpp:th_op/common/InitEngineOps.cc",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
+        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
     ] + select({
         "@//:using_cuda": [
-            "src/fastertransformer/th_op/common/NcclOp.cc",
+            "//maga_transformer/cpp:th_op/common/NcclOp.cc",
         ],
         "//conditions:default": [],
     }),
@@ -104,14 +105,14 @@ cc_library(
         ":gpt_init_params",
     	":th_op_hdrs",
         "//maga_transformer/cpp:utils",
-        "//src/fastertransformer/devices:device_py_export",
-        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp/devices:device_py_export",
+        "//maga_transformer/cpp/devices:devices_base",
         "//maga_transformer/cpp:http_api_server",
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
         "@//:using_cuda": [
-            "//src/fastertransformer/cuda:allocator_torch",
+            "//maga_transformer/cpp/cuda:allocator_torch",
         ],
         "//conditions:default": [],
     }),
@@ -124,10 +125,10 @@ cc_library(
     name = "th_transformer_gpu",
     srcs = select({
         "@//:using_cuda11": [
-            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+            "//maga_transformer/cpp:th_op/common/CutlassConfigOps.cc",
         ],
         "@//:using_cuda12": [
-            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+            "//maga_transformer/cpp:th_op/common/CutlassConfigOps.cc",
         ],
         "//conditions:default": [],
     }),
@@ -139,7 +140,7 @@ cc_library(
         "@grpc//:grpc++",
     ] + select({
         "@//:using_cuda": [
-            "//src/fastertransformer/cuda:allocator_torch",
+            "//maga_transformer/cpp/cuda:allocator_torch",
         ],
         "//conditions:default": [],
     }),
@@ -170,7 +171,7 @@ cc_binary(
 cc_library(
     name = "th_utils",
     hdrs = [
-        "src/fastertransformer/th_op/th_utils.h",
+        "//maga_transformer/cpp:th_op/th_utils.h",
     ],
     deps = [
         "//maga_transformer/cpp:utils",

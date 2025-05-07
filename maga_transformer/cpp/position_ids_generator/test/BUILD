@@ -37,8 +37,8 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = torch_deps() + [
-        "//src/fastertransformer/devices/testing:device_test_utils",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         "//maga_transformer/cpp:position_ids_generator",
         "//maga_transformer/cpp:models",
         "//maga_transformer/cpp:stream",

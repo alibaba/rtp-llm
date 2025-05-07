@@ -58,7 +58,7 @@ void PrefillStatInfo::nextStage() {
             break;
         }
         default: {
-            FT_CHECK_WITH_INFO(false, "error stage");
+            RTP_LLM_CHECK_WITH_INFO(false, "error stage");
         }
     }
 }
@@ -83,7 +83,7 @@ void PrefillGenerateContext::stopStream() {
         stream_->cancelIfNotRunning();
         // if is running, waiting util done
         while (stream_->running()) {
-            FT_LOG_DEBUG("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
+            RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
         }
         markRequestEnd();
@@ -136,7 +136,7 @@ void PrefillGenerateContext::markRequestEnd() {
         auto& prefill_worker = prefill_workers[i];
         auto connect_status = resource->rpc_pool.getConnection(prefill_worker);
         if (!connect_status.ok()) {
-            FT_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
+            RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
                             request_id, prefill_worker.c_str());
             continue;
         }
@@ -145,7 +145,7 @@ void PrefillGenerateContext::markRequestEnd() {
         EmptyPB       response;
         auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
-            FT_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
+            RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                             request_id, prefill_worker.c_str());
             continue;
         }

@@ -224,9 +224,9 @@ class WeightsQuantizer:
         if not dataset_type:
             raise TypeError(f'not support this dataset:{dataset}]')
 
-        if dataset_type == DatasetType.FT_ACCESS_LOG:
+        if dataset_type == DatasetType.RTP_LLM_ACCESS_LOG:
             return self._encode_ft_access_log(dataset)
-        elif dataset_type == DatasetType.FT_ACCESS_LOG_JSON_STR:
+        elif dataset_type == DatasetType.RTP_LLM_ACCESS_LOG_JSON_STR:
             return self._encode_ft_acccess_log_json_str(dataset)
         elif dataset_type == DatasetType.TEXT:
             return self._encode_text(dataset)

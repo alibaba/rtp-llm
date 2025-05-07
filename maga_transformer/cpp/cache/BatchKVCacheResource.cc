@@ -19,7 +19,7 @@ void BatchKVCacheResource::resize(size_t batch_size) {
 }
 
 void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, bool clear) {
-    FT_CHECK(batch_block_id.size() > batch_id);
+    RTP_LLM_CHECK(batch_block_id.size() > batch_id);
     batch_block_id[batch_id].resize(reserver_blocks);
     if (clear) {
         batch_block_id[batch_id].assign(batch_block_id[batch_id].size(), 0);
@@ -27,7 +27,7 @@ void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, bool cle
 }
 
 void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {
-    FT_CHECK(batch_block_id.size() > batch_id && batch_block_id[batch_id].size() >= size_t(reserver_blocks));
+    RTP_LLM_CHECK(batch_block_id.size() > batch_id && batch_block_id[batch_id].size() >= size_t(reserver_blocks));
     batch_block_id[batch_id].resize(reserver_blocks);
 }
 
@@ -50,7 +50,7 @@ void BatchKVCacheResource::append(const std::vector<KVCacheResource>& resource) 
 }
 
 void BatchKVCacheResource::append(size_t batch_id, const KVCacheResource& addr) {
-    FT_CHECK(batch_block_id.size() > batch_id);
+    RTP_LLM_CHECK(batch_block_id.size() > batch_id);
     batch_block_id[batch_id].insert(batch_block_id[batch_id].end(), addr.block_id.begin(), addr.block_id.end());
 }
 
@@ -63,7 +63,7 @@ int BatchKVCacheResource::maxBlockSize() const {
 }
 
 const std::vector<int>& BatchKVCacheResource::blocks(int batch_id) const {
-    FT_CHECK(batch_block_id.size() > batch_id);
+    RTP_LLM_CHECK(batch_block_id.size() > batch_id);
     return batch_block_id[batch_id];
 }
 
@@ -72,10 +72,10 @@ void BatchKVCacheResource::clear() {
 }
 
 void BatchKVCacheResource::check() const {
-    FT_CHECK(!batch_block_id.empty());
+    RTP_LLM_CHECK(!batch_block_id.empty());
     size_t block_size = batch_block_id[0].size();
     for (const auto& blocks : batch_block_id) {
-        FT_CHECK(blocks.size() == block_size);
+        RTP_LLM_CHECK(blocks.size() == block_size);
     }
 }
 

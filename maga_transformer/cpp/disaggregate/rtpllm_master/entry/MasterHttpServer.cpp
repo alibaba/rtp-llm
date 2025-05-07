@@ -8,27 +8,27 @@ namespace rtp_llm_master {
 
 bool MasterHttpServer::start() {
     if (!tokenize_service_ || !load_balancer_) {
-        FT_LOG_ERROR("MasterHttpServer start failed, tokenize service or load balancer is null.");
+        RTP_LLM_LOG_ERROR("MasterHttpServer start failed, tokenize service or load balancer is null.");
         return false;
     }
     http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr, 64, 64));
     if (!registerServices()) {
-        FT_LOG_ERROR("MasterHttpServer start failed, register services failed");
+        RTP_LLM_LOG_ERROR("MasterHttpServer start failed, register services failed");
         return false;
     }
 
     if (!http_server_->Start(address_)) {
-        FT_LOG_ERROR("MasterHttpServer start failed, start http server failed, address is %s.", address_.c_str());
+        RTP_LLM_LOG_ERROR("MasterHttpServer start failed, start http server failed, address is %s.", address_.c_str());
         return false;
     }
 
     is_stopped_.store(false);
-    FT_LOG_INFO("MasterHttpServer start success, listen address is %s.", address_.c_str());
+    RTP_LLM_LOG_INFO("MasterHttpServer start success, listen address is %s.", address_.c_str());
     return true;
 }
 
 void MasterHttpServer::stop() {
-    FT_LOG_WARNING("master http api server stopped");
+    RTP_LLM_LOG_WARNING("master http api server stopped");
     is_stopped_.store(true);
 
     if (health_service_) {
@@ -87,7 +87,7 @@ void MasterHttpServer::handleRequest(const http_server::HttpRequest&            
 
 bool MasterHttpServer::registerServices() {
     if (!http_server_) {
-        FT_LOG_ERROR("HttpApiServer register services failed, http server is null.");
+        RTP_LLM_LOG_ERROR("HttpApiServer register services failed, http server is null.");
         return false;
     }
     return registerHealthService() && registerHandleService();

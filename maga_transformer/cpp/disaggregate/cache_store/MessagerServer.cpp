@@ -35,7 +35,7 @@ MessagerServer::~MessagerServer() {
 
 bool MessagerServer::init(uint32_t listen_port, uint32_t rdma_listen_port, bool enable_metric) {
     if (!initTcpServer(listen_port, enable_metric)) {
-        FT_LOG_INFO("messager server init failed, tcp server init failed");
+        RTP_LLM_LOG_INFO("messager server init failed, tcp server init failed");
         return false;
     }
     return true;
@@ -61,7 +61,7 @@ bool MessagerServer::initTcpServer(uint32_t listen_port, bool enable_metric) {
         metricConfig.arpcConfig.enableArpcMetric = true;
         auto metricReporter = std::make_shared<arpc::KMonitorANetServerMetricReporter>(metricConfig);
         if (!metricReporter->init(rpc_server_transport_.get())) {
-            FT_LOG_WARNING("init anet metric reporter failed");
+            RTP_LLM_LOG_WARNING("init anet metric reporter failed");
             return false;
         }
         rpc_server_->SetMetricReporter(metricReporter);
@@ -70,18 +70,18 @@ bool MessagerServer::initTcpServer(uint32_t listen_port, bool enable_metric) {
     std::shared_ptr<autil::ThreadPoolBase> rpc_worker_threadpool(
         new autil::LockFreeThreadPool(3, 100, nullptr, "messager_server_rpc_threadpool", false));
     if (!rpc_worker_threadpool->start()) {
-        FT_LOG_WARNING("messager server init failed, start rpc worker threadpool failed");
+        RTP_LLM_LOG_WARNING("messager server init failed, start rpc worker threadpool failed");
         return false;
     }
     rpc_server_->RegisterService(rpc_service_.get(), rpc_worker_threadpool);
 
     std::string listen_spec = "tcp:0.0.0.0:" + std::to_string(listen_port);
     if (!rpc_server_->Listen(listen_spec)) {
-        FT_LOG_WARNING("messager server init failed, listen %s failed", listen_spec.c_str());
+        RTP_LLM_LOG_WARNING("messager server init failed, listen %s failed", listen_spec.c_str());
         return false;
     }
 
-    FT_LOG_INFO("messager server init success, listen on %s", listen_spec.c_str());
+    RTP_LLM_LOG_INFO("messager server init success, listen on %s", listen_spec.c_str());
     return true;
 }
 

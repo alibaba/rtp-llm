@@ -26,7 +26,7 @@ public:
         LoadKVCacheContext(int64_t request_id, const std::string& request_key, const std::vector<std::string>& peer_addrs,
                             const std::vector<int64_t>& cache_keys, const std::vector<int32_t>& block_ids,
                             int64_t reuse_block_size, int64_t timeout_ms, int partition_count, int partition_id, grpc::ServerContext* server_context,
-                            ft::BufferPtr hidden_states) :
+                            rtp_llm::BufferPtr hidden_states) :
                             request_id(request_id), request_key(request_key), peer_addrs(peer_addrs),
                             cache_keys(cache_keys), block_ids(block_ids), reuse_block_size(reuse_block_size),
                             timeout_ms(timeout_ms), partition_count(partition_count), partition_id(partition_id),
@@ -42,7 +42,7 @@ public:
         int partition_id;
 
         grpc::ServerContext* server_context;
-        ft::BufferPtr hidden_states_;
+        rtp_llm::BufferPtr hidden_states_;
     };
 
 private:

@@ -52,7 +52,7 @@ void CacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std
         }
 
         if (unloaded_block_info->len() != block->len / partition_count_) {
-            FT_LOG_WARNING(
+            RTP_LLM_LOG_WARNING(
                 "cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
                 block->key.c_str(),
                 unloaded_block_info->len(),
@@ -100,7 +100,7 @@ bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<Bloc
 
     auto block_len = block->len / partition_count_;
     if (block_len != peer_block->len()) {
-        FT_LOG_WARNING("cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
+        RTP_LLM_LOG_WARNING("cache store service load block not match exepct block len, key: %s, len %d vs %d, peer is %s",
                        block->key.c_str(),
                        block_len,
                        peer_block->len(),
@@ -120,7 +120,7 @@ bool CacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<Bloc
 }
 
 void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
-    FT_LOG_DEBUG("request [%s] run success", request_id_.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] run success", request_id_.c_str());
     bool expected = false;
     if (!done_run_.compare_exchange_strong(expected, true)) {
         return;
@@ -158,13 +158,13 @@ void CacheStoreServiceImplContext::runFailed(KvCacheStoreServiceErrorCode error_
 
     auto request_block_buffer_store = request_block_buffer_store_.lock();
     if (request_block_buffer_store) {
-        FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is %s",
+        RTP_LLM_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is %s",
                        request_id_.c_str(),
                        peer_ip_.c_str(),
                        error_code,
                        request_block_buffer_store->debugInfoOnRequest(request_id_).c_str());
     } else {
-        FT_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is null",
+        RTP_LLM_LOG_WARNING("cache store service load failed, request %s from [%s], error code is %d, block buffer is null",
                        request_id_.c_str(),
                        peer_ip_.c_str(),
                        error_code);

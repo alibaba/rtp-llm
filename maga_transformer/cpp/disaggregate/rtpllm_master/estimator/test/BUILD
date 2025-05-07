@@ -5,7 +5,7 @@ cc_test(
     ],
     deps = [
         "//maga_transformer/cpp/disaggregate/rtpllm_master/estimator",
-        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
     ],
     data = [
         "testdata/config.json"

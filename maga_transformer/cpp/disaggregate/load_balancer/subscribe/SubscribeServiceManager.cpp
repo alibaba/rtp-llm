@@ -9,7 +9,7 @@ SubscribeServiceManager::~SubscribeServiceManager() {}
 
 bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
     if (!config.validate()) {
-        FT_LOG_ERROR("subscribe service config is invalid, config is [%s]",
+        RTP_LLM_LOG_ERROR("subscribe service config is invalid, config is [%s]",
                      autil::legacy::ToJsonString(config).c_str());
         return false;
     }
@@ -45,7 +45,7 @@ bool SubscribeServiceManager::init(const SubscribeServiceConfig& config) {
         }
         subscribe_service_vec_.push_back(service);
     }
-    FT_LOG_INFO("subscribe service manager init success, config is [%s]",
+    RTP_LLM_LOG_INFO("subscribe service manager init success, config is [%s]",
                 autil::legacy::ToJsonString(config, true).c_str());
     return true;
 }

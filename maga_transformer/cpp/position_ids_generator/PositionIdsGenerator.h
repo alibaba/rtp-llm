@@ -5,10 +5,10 @@
 #include <random>
 #include <optional>
 #include <vector>
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -23,16 +23,16 @@ typedef enum
 // TODO: not same -> implement different interface here and BatchStreamProcessor
 class PositionIdsGenerator {
 public:
-    static ft::BufferPtr generatePositionIds(ft::DeviceBase* device, 
+    static rtp_llm::BufferPtr generatePositionIds(rtp_llm::DeviceBase* device, 
                                              int32_t input_len, 
                                              PositionIdsStyle style = PositionIdsStyle::DEFAULT, 
-                                             std::optional<ft::BufferPtr> mm_locs = std::nullopt,
-                                             std::optional<std::vector<ft::BufferPtr>> mm_position_ids = std::nullopt);
+                                             std::optional<rtp_llm::BufferPtr> mm_locs = std::nullopt,
+                                             std::optional<std::vector<rtp_llm::BufferPtr>> mm_position_ids = std::nullopt);
 
     static void generateNextPositionId(int32_t* now_pos,
                                      int32_t  now_len,
                                      PositionIdsStyle style = PositionIdsStyle::DEFAULT,
-                                     ft::BufferPtr context_pos_ids = nullptr);
+                                     rtp_llm::BufferPtr context_pos_ids = nullptr);
 };
 
 } // namespace rtp_llm

@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/models/BaseLogitsProcessor.h"
 #include "maga_transformer/cpp/utils/DFAUtil.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -11,7 +11,7 @@ class StreamThinkInfo;
 
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor {
 public:
-    ThinkModeLogitsProcessor(ft::DeviceBase* device, std::vector<StreamThinkInfo> think_infos);
+    ThinkModeLogitsProcessor(rtp_llm::DeviceBase* device, std::vector<StreamThinkInfo> think_infos);
     virtual ~ThinkModeLogitsProcessor() {}
 
 public:
@@ -20,7 +20,7 @@ public:
 
 private:
     void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr, 
-        ft::BufferPtr new_tokens_logits, int num_new_tokens, 
+        rtp_llm::BufferPtr new_tokens_logits, int num_new_tokens, 
         std::vector<int> template_token_ids, size_t vocab_size, bool enforce);
 
 public:

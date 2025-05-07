@@ -1,10 +1,10 @@
 #pragma once
 
-#include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/core/Types.h"
 #include <sstream>
 #include <string>
 
-namespace ft = fastertransformer;
+
 namespace rtp_llm {
 
 struct KVCacheParam {
@@ -13,7 +13,7 @@ struct KVCacheParam {
     uint         local_head_num_kv;
     uint         size_per_head;
     uint         seq_size_per_block = 1;
-    ft::DataType dtype;
+    rtp_llm::DataType dtype;
 };
 
 struct MlaCacheParam {
@@ -22,7 +22,7 @@ struct MlaCacheParam {
     uint         kv_lora_rank;
     uint         rope_head_dim;
     uint         seq_size_per_block = 1;
-    ft::DataType dtype;
+    rtp_llm::DataType dtype;
 };
 
 struct CacheConfig {
@@ -31,7 +31,7 @@ struct CacheConfig {
     uint32_t     local_head_num_kv      = 0;
     uint32_t     size_per_head          = 0;
     uint32_t     seq_size_per_block     = 1;
-    ft::DataType dtype                  = ft::TYPE_INVALID;
+    rtp_llm::DataType dtype                  = rtp_llm::TYPE_INVALID;
 
     size_t       block_size             = 0;
     size_t       k_block_size           = 0;
@@ -61,8 +61,8 @@ struct CacheConfig {
         seq_size_per_block(param.seq_size_per_block),
         dtype(param.dtype) {
 
-        auto dtype_size = ft::getTypeSize(dtype);
-        if (dtype == ft::TYPE_INT8 || dtype == ft::TYPE_FP8_E4M3) {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
             scale_size = 4;
         }
 
@@ -87,7 +87,7 @@ struct CacheConfig {
         kv_lora_rank = param.kv_lora_rank;
         rope_head_dim = param.rope_head_dim;
 
-        auto dtype_size = ft::getTypeSize(dtype);
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
         block_size = layer_num * local_head_num_kv * (kv_lora_rank + rope_head_dim + scale_size * 2) * seq_size_per_block * dtype_size;
 
         k_block_stride = local_head_num_kv * (kv_lora_rank + scale_size) * seq_size_per_block * dtype_size;
@@ -134,11 +134,11 @@ struct CacheConfig {
     }
 
     size_t getKeyShape() const {
-        return getKeyBlockStride() / ft::getTypeSize(dtype);
+        return getKeyBlockStride() / rtp_llm::getTypeSize(dtype);
     }
 
     size_t getValueShape() const {
-        return getValueBlockStride() / ft::getTypeSize(dtype);
+        return getValueBlockStride() / rtp_llm::getTypeSize(dtype);
     }
 
     std::string debugString() const {

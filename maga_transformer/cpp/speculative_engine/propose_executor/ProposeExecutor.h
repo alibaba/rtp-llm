@@ -15,7 +15,7 @@ namespace rtp_llm {
 
 class ProposeExecutor {
 public:
-    ProposeExecutor(ft::DeviceBase* device): device_(device) {}
+    ProposeExecutor(rtp_llm::DeviceBase* device): device_(device) {}
     virtual ~ProposeExecutor(){};
 
     virtual absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams)       = 0;
@@ -24,13 +24,13 @@ public:
     virtual absl::Status                  normalProcess(const std::list<GenerateStreamPtr>& streams) = 0;
 
 protected:
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
 };
 
 std::unique_ptr<ProposeExecutor>
 createProposeExecutor(const EngineInitParams&                        score_model_engine_init_params,
                       std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                      ft::DeviceBase*                                device,
+                      rtp_llm::DeviceBase*                                device,
                       const std::shared_ptr<CacheManager>&           cache_manager,
                       const std::vector<std::shared_ptr<CacheManager>>&           mtp_cache_managers,
                       const std::shared_ptr<lora::LoraManager>&      lora_manager);

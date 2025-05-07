@@ -4,12 +4,12 @@
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/dataclass/LoadBalance.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
 #include "maga_transformer/cpp/lora/LoraManager.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -38,11 +38,11 @@ public:
     virtual ~EngineBase();
 
     void initDevices(const EngineInitParams& params);
-    ft::DeviceBase* getDevice() {
+    rtp_llm::DeviceBase* getDevice() {
         return device_;
     }
 
-    void addLora(const std::string& adapter_name, ft::lora::loraLayerWeightsMap lora_a, ft::lora::loraLayerWeightsMap lora_b);
+    void addLora(const std::string& adapter_name, rtp_llm::lora::loraLayerWeightsMap lora_a, rtp_llm::lora::loraLayerWeightsMap lora_b);
 
     void removeLora(const std::string& adapter_name);
 
@@ -75,7 +75,7 @@ public:
     virtual bool isMTP() { return false; }
 
 protected:
-    ft::DeviceBase*                      device_;
+    rtp_llm::DeviceBase*                      device_;
     ResourceContext                      resource_context_;
     std::shared_ptr<lora::LoraManager>   lora_manager_;
     std::unique_ptr<SchedulerBase>       scheduler_ = nullptr;

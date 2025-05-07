@@ -53,8 +53,8 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
         advice_token_num -= begin_propose_offset;
         size_t propose_len    = std::min(max_new_tokens,
                                       std::min(propose_step_, advice_token_num - sp_edit_search_index));
-        stream_output->tokens = std::make_shared<fastertransformer::Buffer>(fastertransformer::MemoryType::MEMORY_CPU,
-                                                                            ft::DataType::TYPE_INT32,
+        stream_output->tokens = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                                            rtp_llm::DataType::TYPE_INT32,
                                                                             std::vector{1, propose_len},
                                                                             advice_token_ids + begin_propose_offset);
         stream->setSpEditFirstTime(false);
@@ -79,9 +79,9 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
                     size_t propose_len =
                         std::min(max_new_tokens,
                                  std::min(propose_step_, advice_token_num - start_propose_index));
-                    stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
-                        fastertransformer::MemoryType::MEMORY_CPU,
-                        ft::DataType::TYPE_INT32,
+                    stream_output->tokens = std::make_shared<rtp_llm::Buffer>(
+                        rtp_llm::MemoryType::MEMORY_CPU,
+                        rtp_llm::DataType::TYPE_INT32,
                         std::vector{1, propose_len},
                         advice_token_ids + start_propose_index);
                     stream->setSpEditRun(true);
@@ -128,9 +128,9 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
                     size_t propose_len =
                         std::min(max_new_tokens,
                                  std::min(propose_step_, advice_token_num - start_propose_index));
-                    stream_output->tokens = std::make_shared<fastertransformer::Buffer>(
-                        fastertransformer::MemoryType::MEMORY_CPU,
-                        ft::DataType::TYPE_INT32,
+                    stream_output->tokens = std::make_shared<rtp_llm::Buffer>(
+                        rtp_llm::MemoryType::MEMORY_CPU,
+                        rtp_llm::DataType::TYPE_INT32,
                         std::vector{1, propose_len},
                         advice_token_ids + start_propose_index);
                     postProcess(stream, stream_output);
@@ -143,7 +143,7 @@ void DeterministicExecutor::PromptLookUpTokenSelector(const GenerateStreamPtr&  
 
 void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stream,
                                         SpeculativeExecutorStreamOutputPtr& stream_output) {
-    FT_LOG_DEBUG("RuleBasedTokenSelector select tokens %d num",
+    RTP_LLM_LOG_DEBUG("RuleBasedTokenSelector select tokens %d num",
                  stream_output->tokens == nullptr ? 0 : stream_output->tokens->size());
     if (!stream_output->tokens) {
         return;

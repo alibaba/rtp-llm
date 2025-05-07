@@ -1,16 +1,16 @@
 #include "maga_transformer/cpp/models/Sampler.h"
-#include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/devices/utils/DebugUtils.h"
 #include <unordered_set>
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params)
     : device_(params.device)
     {
-        FT_LOG_INFO("sampler max_batch_size: %ld", params.max_batch_size);
+        RTP_LLM_LOG_INFO("sampler max_batch_size: %ld", params.max_batch_size);
         const auto max_batch_size = params.max_batch_size;
         eos_ids_host_ = device_->allocateBuffer(
             {DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});
@@ -21,7 +21,7 @@ Sampler::Sampler(const SamplerInitParams& params)
     };
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     size_t from_batch_idx = 0;
     size_t sample_to_batch_idx = 0;
     size_t from_seq_idx = 0; // accumulates batch_size * num_beams
@@ -97,9 +97,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             }
         } else {
             size_t beam_batch_size = (size_t)(sample_batch_size / current_beam_size);
-            FT_LOG_DEBUG("current_beam_size is %d", current_beam_size);
-            FT_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
-            FT_CHECK_WITH_INFO((sample_batch_size % current_beam_size == 0),
+            RTP_LLM_LOG_DEBUG("current_beam_size is %d", current_beam_size);
+            RTP_LLM_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
+            RTP_LLM_CHECK_WITH_INFO((sample_batch_size % current_beam_size == 0),
                 "sample_batch_size[%d] must devide by current_beam_size[%d]");
             auto beam_search_sequence_lengths = inputs.beam_search_sequence_lengths->view(from_batch_idx, sample_batch_size);
             auto beam_index = inputs.beam_index->view(from_batch_idx, sample_batch_size);

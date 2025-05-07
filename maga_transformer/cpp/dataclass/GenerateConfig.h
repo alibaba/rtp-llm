@@ -7,10 +7,10 @@
 
 #include "maga_transformer/cpp/utils/StringUtil.h"
 #include "maga_transformer/cpp/tokenizer/Tokenizer.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -76,7 +76,7 @@ public:
         return top_k == 1;
     }
 
-    void addSpecialTokens(const ft::SpecialTokens& special_tokens) {
+    void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list_) {
             std::vector<int> tmpVec;
             for (int64_t val: vec) {

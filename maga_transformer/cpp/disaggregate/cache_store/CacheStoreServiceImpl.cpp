@@ -22,7 +22,7 @@ void CacheStoreServiceImpl::load(::google::protobuf::RpcController* controller,
                                  ::CacheLoadResponse*               response,
                                  ::google::protobuf::Closure*       done) {
     if (request_block_buffer_store_ == nullptr) {
-        FT_LOG_WARNING(
+        RTP_LLM_LOG_WARNING(
             "cache store service has no block cache store, request failed, request from [%s], request id [%s]",
             request->client_ip().c_str(),
             request->requestid().c_str());
@@ -58,7 +58,7 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
     auto context =
         std::make_shared<CacheStoreServiceImplContext>(request, response, collector, done, request_block_buffer_store_);
     if (!context) {
-        FT_LOG_WARNING("cache store service new context failed, request id is %s, request from %s",
+        RTP_LLM_LOG_WARNING("cache store service new context failed, request id is %s, request from %s",
                        request->requestid().c_str(),
                        request->client_ip().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
@@ -70,7 +70,7 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
 
     auto timer = timer_manager_->addTimer(request->timeout_ms(), std::move(timer_callback));
     if (timer == nullptr) {
-        FT_LOG_WARNING("cache store service add timer failed, request id is %s, request from %s",
+        RTP_LLM_LOG_WARNING("cache store service add timer failed, request id is %s, request from %s",
                        request->requestid().c_str(),
                        request->client_ip().c_str());
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
@@ -85,7 +85,7 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
     };
 
     if (!request_block_buffer_store_->setRequestBlockBufferWatchFunc(request->requestid(), std::move(watch_func))) {
-        FT_LOG_WARNING("cache store service set request block buffer watch func failed, request id %s, request from %s",
+        RTP_LLM_LOG_WARNING("cache store service set request block buffer watch func failed, request id %s, request from %s",
                        request->requestid().c_str(),
                        request->client_ip().c_str());
         context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);

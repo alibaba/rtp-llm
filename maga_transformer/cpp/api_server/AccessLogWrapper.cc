@@ -119,9 +119,9 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request,
 
     try {
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        FT_QUERY_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
+        RTP_LLM_QUERY_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
     } catch (const std::exception& e) {
-        FT_LOG_ERROR("AccessLogWrapper logQueryAccess ToJsonString failed, error: %s", e.what());
+        RTP_LLM_LOG_ERROR("AccessLogWrapper logQueryAccess ToJsonString failed, error: %s", e.what());
     }
 }
 
@@ -224,9 +224,9 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
         AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_us);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        FT_ACCESS_LOG_INFO("%s", removeQuotesAroundBraces(removeEscapedQuotes(access_log_info_str)).c_str());
+        RTP_LLM_ACCESS_LOG_INFO("%s", removeQuotesAroundBraces(removeEscapedQuotes(access_log_info_str)).c_str());
     } catch (const std::exception& e) {
-        FT_LOG_ERROR("AccessLogWrapper logSuccessAccess failed, error: %s", e.what());
+        RTP_LLM_LOG_ERROR("AccessLogWrapper logSuccessAccess failed, error: %s", e.what());
     }
 }
 
@@ -246,9 +246,9 @@ void AccessLogWrapper::logSuccessAccess(const std::string&              raw_requ
 
     try {
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        FT_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
+        RTP_LLM_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
     } catch (const std::exception& e) {
-        FT_LOG_ERROR("AccessLogWrapper logSuccessAccess ToJsonString failed, error: %s", e.what());
+        RTP_LLM_LOG_ERROR("AccessLogWrapper logSuccessAccess ToJsonString failed, error: %s", e.what());
     }
 }
 
@@ -264,7 +264,7 @@ bool isPrivate(const std::string& raw_request) {
         FromJson(private_request, it->second);
         return private_request;
     } catch (const std::exception& e) {
-        FT_LOG_ERROR("AccessLogWrapper private_request field failed, error: %s", e.what());
+        RTP_LLM_LOG_ERROR("AccessLogWrapper private_request field failed, error: %s", e.what());
     }
     return private_request;
 }
@@ -282,9 +282,9 @@ void AccessLogWrapper::logExceptionAccess(const std::string& raw_request,
         AccessLogInfo access_log_info(request, response, request_id);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        FT_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
+        RTP_LLM_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
     } catch (const std::exception& e) {
-        FT_LOG_ERROR("AccessLogWrapper logExceptionAccess failed, error: %s", e.what());
+        RTP_LLM_LOG_ERROR("AccessLogWrapper logExceptionAccess failed, error: %s", e.what());
     }
 }
 

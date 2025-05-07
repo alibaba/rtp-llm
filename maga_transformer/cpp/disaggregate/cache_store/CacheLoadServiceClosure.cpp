@@ -21,20 +21,20 @@ void CacheLoadServiceClosure::Run() {
     CacheStoreClientLoadMetricsCollector::setResponseReceiveCost(
         collector_, autil::TimeUtility::currentTimeInMicroSeconds() - response_->response_send_start_time_us());
     if (controller_->Failed()) {
-        FT_LOG_WARNING("cache load request failed, controller err is %d", controller_->GetErrorCode());
+        RTP_LLM_LOG_WARNING("cache load request failed, controller err is %d", controller_->GetErrorCode());
         end(false, fromArpcErrorCode(controller_->GetErrorCode()));
         return;
     }
 
     if (response_->error_code() != KvCacheStoreServiceErrorCode::EC_SUCCESS) {
-        FT_LOG_WARNING("cache load request failed, response err is %d", response_->error_code());
+        RTP_LLM_LOG_WARNING("cache load request failed, response err is %d", response_->error_code());
         end(false, fromResponseErrorCode(response_->error_code()));
         return;
     }
 
     // TCP Mode 下需要Copy数据
     if (response_->blocks_size() != request_block_buffer_->getBlocksCount()) {
-        FT_LOG_WARNING("cache load response block count not equal to request block buffer");
+        RTP_LLM_LOG_WARNING("cache load response block count not equal to request block buffer");
         end(false, CacheStoreErrorCode::LoadBufferTimeout);
         return;
     }
@@ -44,7 +44,7 @@ void CacheLoadServiceClosure::Run() {
         auto        unload_block = request_block_buffer_->getBlock(block.key());
 
         if (unload_block == nullptr || block.len() != unload_block->len) {
-            FT_LOG_WARNING(
+            RTP_LLM_LOG_WARNING(
                       "can not find match block %s from response, request is %s",
                       block.key().c_str(),
                       request_block_buffer_->getRequestId().c_str());
@@ -53,9 +53,9 @@ void CacheLoadServiceClosure::Run() {
         }
 
         auto dst_buffer = unload_block->toDeviceBuffer();
-        auto src_buffer = fastertransformer::Buffer(
-            fastertransformer::MemoryType::MEMORY_CPU,
-            fastertransformer::DataType::TYPE_UINT8,
+        auto src_buffer = rtp_llm::Buffer(
+            rtp_llm::MemoryType::MEMORY_CPU,
+            rtp_llm::DataType::TYPE_UINT8,
             {block.len()}, block.content().data());
         device_->noBlockCopy({dst_buffer, src_buffer});
     }

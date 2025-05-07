@@ -19,7 +19,7 @@ std::shared_ptr<TimeEstimatorBase> createPrefillTimeEstimator(const EstimatorCon
         }
         return estimator;
     }
-    FT_LOG_WARNING("unknown estimator type: [%s]", config.estimator_type.c_str());
+    RTP_LLM_LOG_WARNING("unknown estimator type: [%s]", config.estimator_type.c_str());
     return nullptr;
 }
 

@@ -93,7 +93,7 @@ public:
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {
             auto buffer = cum_log_probs.value();
-            json.Jsonize("cum_log_probs", ft::buffer2vector<float>(*buffer));
+            json.Jsonize("cum_log_probs", rtp_llm::buffer2vector<float>(*buffer));
         }
     }
     AuxInfoAdapter() {

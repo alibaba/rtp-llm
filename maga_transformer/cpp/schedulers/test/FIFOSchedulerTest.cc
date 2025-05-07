@@ -5,11 +5,11 @@
 #include "gtest/gtest.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -19,7 +19,7 @@ public:
 };
 
 TEST_F(FIFOSchedulerTest, testSimple) {
-    KVCacheParam param = {1, 4, 1, 4, 8, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 3);
@@ -54,7 +54,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
 }
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
-    KVCacheParam param = {1, 2, 1, 4, 2, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
@@ -84,7 +84,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
 }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
-    KVCacheParam param = {1, 3, 1, 4, 2, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
@@ -123,7 +123,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
 }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
-    KVCacheParam param = {1, 5, 1, 4, 2, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 5, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
@@ -190,7 +190,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
 }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
-    KVCacheParam param = {1, 6, 1, 4, 2, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 6, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 5);
@@ -262,7 +262,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
 }
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
-    KVCacheParam param = {1, 11, 1, 4, 2, fastertransformer::DataType::TYPE_FP16};
+    KVCacheParam param = {1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16};
     CacheConfig                   cache_config(param);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);

@@ -64,7 +64,7 @@ void StepRecorder::registerStep(size_t step_time_us, size_t batch_avg_gen_num) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!step_records_.empty()) {
         if (step_time_us < step_records_.back().time_us) {
-            FT_LOG_ERROR("step time not in order");
+            RTP_LLM_LOG_ERROR("step time not in order");
             return;
         }
         min_step_latency_ = std::min(

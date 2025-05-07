@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//src/fastertransformer/devices:device_defs.bzl",
+load("//maga_transformer/cpp/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs", "device_linkopts")
 
 test_copts = [
@@ -18,7 +18,7 @@ test_copts = [
 # )
 
 test_deps = [
-    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//maga_transformer/cpp/devices/testing:device_test_utils",
     "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     "@com_google_googletest//:gtest",
@@ -53,9 +53,9 @@ cc_test(
         "//:gpt_init_params",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:dataclass",
-        "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//src/fastertransformer/devices/testing:device_test_utils",
+        "//maga_transformer/cpp/devices:devices_base",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/testing:device_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main"
     ] + torch_deps(),

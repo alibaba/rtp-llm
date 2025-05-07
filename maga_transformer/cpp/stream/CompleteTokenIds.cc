@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-CompleteTokenIds::CompleteTokenIds(ft::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block)
+CompleteTokenIds::CompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block)
     : device_(device)
     , batch_size_(batch_size)
     , max_seq_len_(max_seq_len)
@@ -21,14 +21,14 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
     , start_check_seq_length_(other.start_check_seq_length_)
     , first_token_time_us_(other.first_token_time_us_)
     , first_token_latency_us_(other.first_token_latency_us_) {
-    complete_token_ids_ = device_->clone({*(other.complete_token_ids_), ft::AllocationType::HOST});
+    complete_token_ids_ = device_->clone({*(other.complete_token_ids_), rtp_llm::AllocationType::HOST});
 }
 
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input) {
-    FT_CHECK(device_ != nullptr && generate_input != nullptr);
+    RTP_LLM_CHECK(device_ != nullptr && generate_input != nullptr);
 
     seq_length_ = generate_input->inputLength();
-    FT_CHECK_WITH_INFO((seq_length_ <= max_seq_len_),
+    RTP_LLM_CHECK_WITH_INFO((seq_length_ <= max_seq_len_),
         "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
     common_len_ = seq_length_;
@@ -36,7 +36,7 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     init_seq_size_ = seq_length_;
 
     complete_token_ids_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
 
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
     for (int i = 0; i < batch_size_; ++i) {
@@ -45,36 +45,36 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
                generate_input->input_ids->sizeBytes());
     }
 
-    FT_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+    RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
 }
 
-const ft::BufferPtr& CompleteTokenIds::completeTokenIds() {
+const rtp_llm::BufferPtr& CompleteTokenIds::completeTokenIds() {
     return complete_token_ids_;
 }
 
 std::vector<int> CompleteTokenIds::completeTokenIdsVec(int batch_idx) {
-    FT_CHECK(batch_idx < batch_size_);
-    return fastertransformer::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), seq_length_);
+    RTP_LLM_CHECK(batch_idx < batch_size_);
+    return rtp_llm::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), seq_length_);
 }
 
 std::vector<int> CompleteTokenIds::commonCompleteTokenIdsVec(int batch_idx) {
-    FT_CHECK(batch_idx < batch_size_);
-    return fastertransformer::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), common_len_);
+    RTP_LLM_CHECK(batch_idx < batch_size_);
+    return rtp_llm::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), common_len_);
 }
 
 std::vector<int> CompleteTokenIds::currentExecuteTokens(int batch_idx) {
-    FT_CHECK(batch_idx < batch_size_);
+    RTP_LLM_CHECK(batch_idx < batch_size_);
     return {*(*complete_token_ids_)[batch_idx].dataWithOffset<int>(seq_length_ - 1)};
 }
 
 std::vector<int> CompleteTokenIds::contextTokens(int batch_idx, int prefix_length, int context_length) {
-    FT_CHECK(batch_idx < batch_size_);
-    return fastertransformer::buffer2vector<int>(
+    RTP_LLM_CHECK(batch_idx < batch_size_);
+    return rtp_llm::buffer2vector<int>(
             (*complete_token_ids_)[batch_idx].view(prefix_length, context_length));
 }
 
 std::vector<int> CompleteTokenIds::getLatestTokens(size_t token_num) {
-    FT_CHECK(seq_length_ >= token_num);
+    RTP_LLM_CHECK(seq_length_ >= token_num);
     std::vector<int> latest_tokens(token_num);
     memcpy(latest_tokens.data(),
         complete_token_ids_->dataWithOffset<int32_t>(seq_length_ - token_num), sizeof(int32_t) * token_num);
@@ -111,7 +111,7 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int> &
     return false;
 }
 
-bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
+bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens, int64_t begin_time_us, int num_new_tokens, int input_length, int max_token_num, int vocab_size, int num_beams, int64_t stream_id, int& error_token_id) {
     if (seq_length_ == input_length) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
@@ -125,7 +125,7 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
-    FT_CHECK(new_tokens->dim() == 2);
+    RTP_LLM_CHECK(new_tokens->dim() == 2);
 
     for (size_t i = 0; i < batch_size_; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
@@ -144,12 +144,12 @@ bool CompleteTokenIds::update(const ft::BufferPtr& new_tokens, int64_t begin_tim
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
-    FT_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
+    RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
     return true;
 }
 
 void CompleteTokenIds::setSeqLength(int seq_length) {
-    FT_CHECK(seq_length <= max_seq_len_);
+    RTP_LLM_CHECK(seq_length <= max_seq_len_);
     if (seq_length > seq_length_) {
         start_check_seq_length_ = seq_length_ + 1;
     } else {
@@ -171,7 +171,7 @@ void CompleteTokenIds::copyTokensTo(int batch_id, void *dst, int offset, size_t 
                sizeof(int32_t) * token_num);
 }
 
-void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const ft::Buffer &src) {
+void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer &src) {
     if (src.dim() == 2 && src.shape()[0] == 1) {
         device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num),
                         src[0].view(0, token_num)});

@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include <memory>
 #include <optional>
 
@@ -8,7 +8,7 @@
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
 using namespace std;
 namespace rtp_llm {
@@ -70,8 +70,8 @@ TEST_F(QueryConverterTest, testTransInput) {
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
-    auto device           = ft::DeviceFactory::getDefaultDevice();
-    auto output_token_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {1, 3}, ft::AllocationType::HOST}, {});
+    auto device           = rtp_llm::DeviceFactory::getDefaultDevice();
+    auto output_token_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 3}, rtp_llm::AllocationType::HOST}, {});
     auto data             = (int*)output_token_ids->data();
     for (int i = 0; i < 3; ++i) {
         data[i] = i;
@@ -84,7 +84,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     res.aux_info.iter_count   = 9;
     res.aux_info.input_len    = 8;
     res.aux_info.output_len   = 7;
-    auto hidden_states        = device->allocateBuffer({ft::DataType::TYPE_FP32, {3, 2}, ft::AllocationType::HOST}, {});
+    auto hidden_states        = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {3, 2}, rtp_llm::AllocationType::HOST}, {});
     auto hidden_states_data   = (float*)hidden_states->data();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;

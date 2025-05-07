@@ -20,7 +20,7 @@ namespace rtp_llm {
 class ScoreExecutor {
 public:
     explicit ScoreExecutor(const EngineInitParams&                   params,
-                           ft::DeviceBase*                           device,
+                           rtp_llm::DeviceBase*                           device,
                            const std::shared_ptr<CacheManager>&      cache_manager,
                            const std::shared_ptr<lora::LoraManager>& lora_manager,
                            bool                                      warm_up = false):
@@ -45,7 +45,7 @@ public:
                                          const std::list<GenerateStreamPtr>& prefill_streams);
 
 private:
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
     NormalExecutor  score_normal_executor_;
     NormalExecutor  normal_executor_;
 };

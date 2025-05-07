@@ -19,7 +19,7 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         if (!prefill_server_) {
             auto error_msg = "server not implememt GenerateStreamCall";
-            FT_LOG_ERROR(error_msg);
+            RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return prefill_server_->GenerateStreamCall(context, request, writer);
@@ -29,7 +29,7 @@ public:
                               const RemoteFinishRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_) {
             auto error_msg = "server not implememt RemoteFinish";
-            FT_LOG_ERROR(error_msg);
+            RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return prefill_server_->RemoteFinish(context, request, response);
@@ -40,7 +40,7 @@ public:
                             BroadcastLoadResponsePB* response) override {
         if (!decode_server_) {
             auto error_msg = "server not implememt RemoteLoad";
-            FT_LOG_ERROR(error_msg);
+            RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return decode_server_->RemoteLoad(context, request, response);
@@ -49,7 +49,7 @@ public:
     grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
         if (!decode_server_) {
             auto error_msg = "server not implememt RemoteGenerate";
-            FT_LOG_ERROR(error_msg);
+            RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return decode_server_->RemoteGenerate(context, stream);

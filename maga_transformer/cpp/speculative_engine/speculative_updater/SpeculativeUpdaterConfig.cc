@@ -9,7 +9,7 @@ SpeculativeUpdaterConfig createSpeculativeUpdaterConfig(std::unique_ptr<ProposeM
     } else if (sp_type == "deterministic") {
         return {false, true, false};
     } else {
-        FT_FAIL("Invalid sp_type: %s", sp_type);
+        RTP_LLM_FAIL("Invalid sp_type: %s", sp_type);
     }
     return SpeculativeUpdaterConfig();
 }

@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams,
                                         const ProposeOutput&                proposer_output) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::list<GenerateStreamPtr> score_streams;
 
@@ -23,16 +23,16 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
     }
 
     for (auto& stream: score_streams) {
-        FT_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RETURN_IF_STATUS_ERROR(score_normal_executor_.process(score_streams));
 
     for (auto& stream: score_streams) {
-        FT_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    FT_LOG_DEBUG("score done");
+    RTP_LLM_LOG_DEBUG("score done");
     return score_output;
 }
 
@@ -40,7 +40,7 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
 absl::StatusOr<ScoreOutput> ScoreExecutor::mtpScore(const std::list<GenerateStreamPtr>& streams,
                                                   const ProposeOutput&                proposer_output,
                                                   const std::list<GenerateStreamPtr>& prefill_streams) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::list<GenerateStreamPtr> score_streams;
 
@@ -65,16 +65,16 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::mtpScore(const std::list<GenerateStre
     }
 
     for (auto& stream: score_streams) {
-        FT_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RETURN_IF_STATUS_ERROR(score_normal_executor_.process(score_streams));
 
     for (auto& stream: score_streams) {
-        FT_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    FT_LOG_DEBUG("score done");
+    RTP_LLM_LOG_DEBUG("score done");
     return score_output;
 }
 

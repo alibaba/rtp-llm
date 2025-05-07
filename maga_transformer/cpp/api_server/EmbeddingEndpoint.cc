@@ -46,10 +46,10 @@ EmbeddingEndpoint::handle(const std::string& body,
     py::gil_scoped_acquire gil_after_deocde;
     py::object batch_output;
     if (results->output.isTensor) {
-        FT_CHECK_WITH_INFO(results->output.t.has_value(), "embedding output has null tensor value");
+        RTP_LLM_CHECK_WITH_INFO(results->output.t.has_value(), "embedding output has null tensor value");
         batch_output = rtp_llm::convertTensorToObject(results->output.t.value());
     } else {
-        FT_CHECK_WITH_INFO(results->output.map.has_value(), "embedding output has null map value");
+        RTP_LLM_CHECK_WITH_INFO(results->output.map.has_value(), "embedding output has null map value");
         batch_output = rtp_llm::convertTensorMapVectorToObject(results->output.map.value());
     }
 
@@ -90,11 +90,11 @@ std::optional<MultimodalFeature> EmbeddingEndpoint::getMultimodalFeature(py::obj
     }
     std::optional<MultimodalFeature> multimodal_features = std::nullopt;
     if (mm_processor_ != nullptr && !mm_inputs.empty()) {
-        auto mm_res = mm_processor_->getMultimodalFeatures(ft::torchTensor2Buffer(token_ids), mm_inputs);
+        auto mm_res = mm_processor_->getMultimodalFeatures(rtp_llm::torchTensor2Buffer(token_ids), mm_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.status().ToString());
         }
-        token_ids = ft::Buffer2torchTensor(mm_res.value().expanded_ids, true);
+        token_ids = rtp_llm::Buffer2torchTensor(mm_res.value().expanded_ids, true);
         multimodal_features.emplace(mm_res.value());
     }
     return multimodal_features;

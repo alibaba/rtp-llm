@@ -17,7 +17,7 @@ void SyncContext::call(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
     auto cache_store = cache_store_.lock();
     if (cache_store == nullptr) {
         error_info_ = ErrorInfo(ErrorCode::UNKNOWN_ERROR, ErrorCodeToString(ErrorCode::UNKNOWN_ERROR));
-        FT_LOG_WARNING("load failed, cache store is nullptr");
+        RTP_LLM_LOG_WARNING("load failed, cache store is nullptr");
         return;
     }
 
@@ -54,13 +54,13 @@ void SyncContext::updateResult(bool                                       succes
     if (!success) {
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
-        FT_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
+        RTP_LLM_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
                        request_block_buffer->getRequestKey().c_str(),
                        success ? "success" : "failed",
                        CacheStoreErrorCodeToString(ec).c_str(),
                        autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
     } else {
-        FT_LOG_DEBUG("request %s call finished, state:[%s], cost time %ldms",
+        RTP_LLM_LOG_DEBUG("request %s call finished, state:[%s], cost time %ldms",
                      request_block_buffer->getRequestKey().c_str(),
                      success ? "success" : "failed",
                      autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
@@ -82,14 +82,14 @@ void SyncContext::waitDone() {
         if (autil::TimeUtility::currentTimeInMilliSeconds() >= deadline_ms_) {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
-            FT_LOG_INFO("load context wait done on timeout");
+            RTP_LLM_LOG_INFO("load context wait done on timeout");
             return;
         }
 
         if (check_cancel_func_ != nullptr && check_cancel_func_()) {
             auto error_code = ErrorCode::CANCELLED;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
-            FT_LOG_INFO("load context wait done on cancelled");
+            RTP_LLM_LOG_INFO("load context wait done on cancelled");
             return;
         }
 

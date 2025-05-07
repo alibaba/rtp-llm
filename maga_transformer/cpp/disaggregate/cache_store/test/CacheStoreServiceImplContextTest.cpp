@@ -8,7 +8,7 @@
 #include "maga_transformer/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/MessagerClient.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 class MockCacheLoadServiceClosure: public CacheLoadServiceClosure {

@@ -8,15 +8,15 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 #include <chrono>
 #include <memory>
 #include <thread>
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -40,9 +40,9 @@ protected:
         generate_config->num_beams = 2;
         auto vec = vector<int>{1, 2, 3, 4, 5, 6};
         std::vector<size_t> shape = {6};
-        generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
+        generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
         generate_input->generate_config = generate_config;
-        ft::GptInitParameter params;
+        rtp_llm::GptInitParameter params;
         params.max_seq_len_ = 2048;
         stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
         stream_->setRunning();
@@ -317,13 +317,13 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     generate_config->num_beams = 2;
     auto vec = vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 11};
     std::vector<size_t> shape = {9};
-    generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
+    generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
 
     ResourceContext resource_context;
     resource_context.reuse_cache = true;
     resource_context.cache_manager = cache_manager_;
-    ft::GptInitParameter params;
+    rtp_llm::GptInitParameter params;
     params.max_seq_len_ = 2048;
     stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();
@@ -377,13 +377,13 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     generate_config->num_beams = 2;
     auto vec = vector<int>{1, 2, 30, 40, 50, 60, 90};
     std::vector<size_t> shape = {7};
-    generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
+    generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
 
     ResourceContext resource_context;
     resource_context.reuse_cache = true;
     resource_context.cache_manager = cache_manager_;
-    ft::GptInitParameter params;
+    rtp_llm::GptInitParameter params;
     params.max_seq_len_ = 2048;
     stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();

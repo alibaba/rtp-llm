@@ -4,7 +4,7 @@
 #include "maga_transformer/cpp/utils/StatusUtil.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "torch/csrc/autograd/profiler_kineto.h"
 
 using namespace std;
@@ -46,7 +46,7 @@ size_t CudaProfiler::count = 0;
 
 NormalExecutor::NormalExecutor(const EngineInitParams& params,
                                const std::shared_ptr<CacheManager>& cache_manager,
-                               ft::DeviceBase* device,
+                               rtp_llm::DeviceBase* device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
                                bool warm_up):
     Executor(device),
@@ -110,9 +110,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     bool gen_timeline = stream_groups.genTimeline();
     if (gen_timeline_sync_) {
         auto gen_timeline_buffer = device_->allocateBuffer(
-                {ft::DataType::TYPE_BOOL, {device_->getDeviceProperties().dp_size}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_BOOL, {device_->getDeviceProperties().dp_size}, rtp_llm::AllocationType::HOST});
         *(gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_rank)) = gen_timeline;
-        device_->allGather({{gen_timeline_buffer}, fastertransformer::ParallelMode::DP_AND_TP});
+        device_->allGather({{gen_timeline_buffer}, rtp_llm::ParallelMode::DP_AND_TP});
         device_->syncCommunication();
         gen_timeline = std::any_of(gen_timeline_buffer->data<bool>(), gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_size), [](auto s) { return s;});
     }
@@ -144,11 +144,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                                                          model_input.lora_input_lengths);
     }
     {
-        FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
+        RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        FT_LOG_DEBUG("model forward done");
+        RTP_LLM_LOG_DEBUG("model forward done");
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -162,7 +162,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
         sampler_output = std::move(sampler_->forward(sampler_input));
-        FT_LOG_DEBUG("sampler forward done");
+        RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {

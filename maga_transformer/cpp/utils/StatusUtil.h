@@ -13,7 +13,7 @@
     do {                                                                                                               \
         auto&& _status_or = (status_or);                                                                               \
         if (ABSL_PREDICT_FALSE(!_status_or.ok())) {                                                                    \
-            FT_LOG_ERROR("error msg: %s", _status_or.status().ToString().c_str());                                     \
+            RTP_LLM_LOG_ERROR("error msg: %s", _status_or.status().ToString().c_str());                                     \
             return _status_or.status();                                                                                \
 	} \
     } while (0)
@@ -29,14 +29,14 @@
     do {                                                                                                               \
         ::absl::Status _status = (status);                                                                             \
         if (ABSL_PREDICT_FALSE(!_status.ok()))                                                                         \
-            FT_FAIL(_status.ToString());                                                                     \
+            RTP_LLM_FAIL(_status.ToString());                                                                     \
     } while (0)
 
 #define THROW_IF_STATUSOR_ERROR(status_or)                                                                             \
     do {                                                                                                               \
         ::absl::Status _status = (status_or.status());                                                                 \
         if (ABSL_PREDICT_FALSE(!_status.ok()))                                                                         \
-            FT_FAIL(_status.ToString());                                                                     \
+            RTP_LLM_FAIL(_status.ToString());                                                                     \
     } while (0)
 
 #define CHECK_AND_RETURN_REF(result_var, call) \

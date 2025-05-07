@@ -67,12 +67,12 @@ public:
             std::string source = getSource(body);
             int error_code = -1;
             if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-                FT_LOG_WARNING("dynamic_cast succ");
+                RTP_LLM_LOG_WARNING("dynamic_cast succ");
                 error_code = he->getType();
             }
             metric_reporter->reportErrorQpsMetric(source, error_code);
         }
-        FT_LOG_WARNING("found exception: [%s]", e.what());
+        RTP_LLM_LOG_WARNING("found exception: [%s]", e.what());
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
         WriteExceptionResponse(writer, e);
     }
@@ -87,7 +87,7 @@ public:
             std::string source = getSource(body);
             int error_code = Type::UNKNOWN_ERROR;
             if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-                FT_LOG_WARNING("dynamic_cast succ");
+                RTP_LLM_LOG_WARNING("dynamic_cast succ");
                 error_code = he->getType();
             }
             std::map<std::string, std::string> tag_map;
@@ -96,7 +96,7 @@ public:
             auto tags = kmonitor::MetricsTags(tag_map);
             metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
         }
-        FT_LOG_WARNING("found exception: [%s]", e.what());
+        RTP_LLM_LOG_WARNING("found exception: [%s]", e.what());
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
         WriteExceptionResponse(writer, e);
     }
@@ -130,7 +130,7 @@ inline std::string getSource(const std::string& raw_request) {
         autil::legacy::FromJson(source, it->second);
         return source;
     } catch (const std::exception& e) {
-        FT_LOG_DEBUG("getSource failed, error: %s", e.what());
+        RTP_LLM_LOG_DEBUG("getSource failed, error: %s", e.what());
     }
     return source;
 }

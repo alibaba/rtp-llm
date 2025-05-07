@@ -23,13 +23,13 @@ void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
 std::pair<MultiSeqsResponse, bool>
 GenerateStreamWrapper::generateResponse() {
     if (stream_->finished() && stream_->hasOutput() == false) {
-        FT_LOG_INFO("stream finished.");
+        RTP_LLM_LOG_INFO("stream finished.");
         return std::make_pair(MultiSeqsResponse(), true);
     }
 
     const auto result = stream_->nextOutput();
     if (!result.ok()) {
-        FT_LOG_INFO("stream nextOutput failed.");
+        RTP_LLM_LOG_INFO("stream nextOutput failed.");
         return std::make_pair(MultiSeqsResponse(), true);
     }
     auto outputs = result.value();
@@ -73,13 +73,13 @@ MultiSeqsResponse
 GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        generate_texts,
                                       const GenerateOutputs&                 generate_outputs,
                                       const std::shared_ptr<GenerateConfig>& generate_config,
-                                      ft::BufferPtr                          input_ids) {
+                                      rtp_llm::BufferPtr                          input_ids) {
     if (generate_texts.size() == 0) {
-        FT_LOG_WARNING("generate_texts is empty!");
+        RTP_LLM_LOG_WARNING("generate_texts is empty!");
         return MultiSeqsResponse();
     }
     if (generate_outputs.generate_outputs.size() == 0) {
-        FT_LOG_WARNING("generate_outputs is empty!");
+        RTP_LLM_LOG_WARNING("generate_outputs is empty!");
         return MultiSeqsResponse();
     }
 
@@ -114,11 +114,11 @@ GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        gen
 
         if (generate_config->return_logits && logits.has_value()) {
             auto buffer = logits.value();
-            res.logits.value().push_back(ft::buffer2vector<float>(*buffer));
+            res.logits.value().push_back(rtp_llm::buffer2vector<float>(*buffer));
         }
         if (generate_config->calculate_loss && loss.has_value()) {
             auto buffer = loss.value();
-            res.loss.value().push_back(ft::buffer2vector<float>(*buffer));
+            res.loss.value().push_back(rtp_llm::buffer2vector<float>(*buffer));
         }
         if (generate_config->return_hidden_states && hidden_states.has_value()) {
             auto buffer = hidden_states.value();
@@ -131,10 +131,10 @@ GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        gen
             res.hidden_states.value().push_back(hidden_states_vec);
         }
         if (generate_config->return_output_ids) {
-            res.output_ids.value().push_back(ft::buffer2vector<int32_t>(*output_ids));
+            res.output_ids.value().push_back(rtp_llm::buffer2vector<int32_t>(*output_ids));
         }
         if (generate_config->return_input_ids) {
-            res.input_ids.value().push_back(ft::buffer2vector<int32_t>(*input_ids));
+            res.input_ids.value().push_back(rtp_llm::buffer2vector<int32_t>(*input_ids));
         }
     }
 

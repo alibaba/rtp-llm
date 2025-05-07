@@ -1,20 +1,20 @@
 #include "maga_transformer/cpp/models/GptModel.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/devices/utils/DebugUtils.h"
-#include "src/fastertransformer/models/W.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/OpData.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/models_weight/W.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
-#include "src/fastertransformer/devices/utils/DevicePerfWrapper.h"
+#include "maga_transformer/cpp/devices/utils/DevicePerfWrapper.h"
 #include <algorithm>
 #include <memory>
 
 
 using namespace std;
-using namespace fastertransformer;
+
 using namespace rtp_llm;
 
 namespace rtp_llm {
@@ -138,10 +138,10 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
     return ret;
 }
 
-ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
+rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
-        ft::DataType attn_dtype,
-        ft::BufferPtr combo_position_ids)
+        rtp_llm::DataType attn_dtype,
+        rtp_llm::BufferPtr combo_position_ids)
 {
     AttentionCommonInputs attention_inputs({
         device_->clone({*inputs.input_lengths}),
@@ -150,7 +150,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
     attention_inputs.position_ids = combo_position_ids;
     attention_inputs.warmup = inputs.warmup;
     if (!inputs.warmup && inputs.pd_separation) {
-        FT_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id, "failed to get information for pd seperation store cache");
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id, "failed to get information for pd seperation store cache");
         CacheStoreInputs cache_store_inputs({inputs.input_lengths, inputs.prefix_lengths, inputs.kv_cache_block_id});
         attention_inputs.cache_store_inputs = cache_store_inputs;
     }
@@ -170,7 +170,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
     const auto max_context_seq_len = context_batch_size ? *std::max_element(
         input_lengths->data<int32_t>() + decoder_batch_size,
         input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
-    FT_CHECK_WITH_INFO(!prefix_lengths || prefix_lengths->size() == context_batch_size, "prefix_lengths size %d is not equal to context batch size %d.", prefix_lengths->size(), context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(!prefix_lengths || prefix_lengths->size() == context_batch_size, "prefix_lengths size %d is not equal to context batch size %d.", prefix_lengths->size(), context_batch_size);
     attention_inputs.max_prefix_length = context_batch_size && prefix_lengths ? *std::max_element(
         prefix_lengths->data<int32_t>(),
         prefix_lengths->data<int32_t>() + prefix_lengths->size()) : 0;
@@ -222,7 +222,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
 
-    FT_LOG_DEBUG("prepare model run sequence lengths: %s, input_lengths: %s, kv cache: %s, context batch size: %ld, decoder batch size: %ld",
+    RTP_LLM_LOG_DEBUG("prepare model run sequence lengths: %s, input_lengths: %s, kv cache: %s, context batch size: %ld, decoder batch size: %ld",
                 inputs.sequence_lengths->debugStringWithData<int32_t>().c_str(),
                 inputs.input_lengths->debugStringWithData<int32_t>().c_str(),
                 inputs.kv_cache_block_id ? inputs.kv_cache_block_id->debugString().c_str() : "NULL",
@@ -242,7 +242,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
             (bool)weights_.linear_bias_slopes
         });
     if (inputs.cache_keys) {
-        vector<int64_t> cache_keys_vec = ft::buffer2vector<int64_t>(*inputs.cache_keys);
+        vector<int64_t> cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
         attention_inputs.cache_keys = transVectorToString(cache_keys_vec);
     }
     attention_inputs.decode_flash_infer_attn_params.swap(prep_output.decode_flash_infer_attn_params);
@@ -259,7 +259,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
                 inputs.input_lengths->view(decoder_batch_size, context_batch_size),
                 *inputs.prefix_lengths,
                 attn_dtype,
-                description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
+                description_.attention_conf.mask_type == rtp_llm::AttentionMaskType::causalMask
             });
     }
 
@@ -268,7 +268,7 @@ ft::AttentionCommonInputs GptModel::prepareAttentionInputs(
 
 MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
-        FT_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
         return {false, {}};
     }
 
@@ -282,7 +282,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
 
     if (decoder_batch_size + context_batch_size < 2) {
-        FT_LOG_DEBUG("micro batch disable when batch size %ld is less than 2", decoder_batch_size + context_batch_size);
+        RTP_LLM_LOG_DEBUG("micro batch disable when batch size %ld is less than 2", decoder_batch_size + context_batch_size);
         return {false, {}};
     }
 
@@ -290,7 +290,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
 
     // disable micro batching if both context and decoder query exists.
     if (context_batch_size && decoder_batch_size) {
-        FT_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
+        RTP_LLM_LOG_INFO("split context in micro batch 0, decode in micro batch 1 disabled!");
         return {false, {}};
     }
 
@@ -298,7 +298,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto micro_batch_0_size = (batch_size_to_split + 1) / 2;
     const auto micro_batch_1_size = batch_size_to_split - micro_batch_0_size;
 
-    FT_LOG_DEBUG("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
+    RTP_LLM_LOG_INFO("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
     return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}}
                               : MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
 }
@@ -307,7 +307,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     const GptModelInputs& inputs,
     const BufferPtr& hidden,
     const BufferPtr& pre_decoder_residual,
-    const ft::DataType attn_dtype,
+    const rtp_llm::DataType attn_dtype,
     const MicroBatchPlan& micro_batch_plan)
 {
     vector<LayerMicroBatchInputs> micro_batch_inputs;
@@ -317,7 +317,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     size_t prefill_batch_idx = 0; // for lm_output_indexes and prefix_lengths
 
     if (!micro_batch_plan.enable) {
-        FT_LOG_DEBUG("micro batch disable when enable is false, use fake");
+        RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
         // we put everything into the first micro batch, and send empty query to the second micro batch
         auto attention_common_inputs = prepareAttentionInputs(inputs, attn_dtype, nullptr);
         micro_batch_inputs.push_back({hidden, pre_decoder_residual, attention_common_inputs});
@@ -342,12 +342,12 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
             RUNTIME_ASSERT_OP_ARG(!(p_micro_batch_size && d_micro_batch_size),
                 "one micro batch can not contain both p and d tokens, but got %ld and %ld",
                 p_micro_batch_size, d_micro_batch_size);
-            FT_LOG_DEBUG("micro batch index %ld, prefill size %ld, decode size %ld",
+            RTP_LLM_LOG_DEBUG("micro batch index %ld, prefill size %ld, decode size %ld",
                         i, p_micro_batch_size, d_micro_batch_size);
 
             if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
-                FT_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
+                RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, d_micro_batch_size);
                 micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(decode_batch_idx, d_micro_batch_size);
@@ -361,11 +361,11 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 sliced_token_idx += d_micro_batch_size;
                 sliced_batch_idx += d_micro_batch_size;
                 decode_batch_idx += d_micro_batch_size;
-                FT_LOG_DEBUG("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
+                RTP_LLM_LOG_DEBUG("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
                             i, sliced_batch_idx, sliced_token_idx);
             } else {
                 GptModelInputs micro_model_inputs = inputs;
-                FT_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
+                RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(prefill_batch_idx, p_micro_batch_size);
@@ -388,7 +388,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 sliced_token_idx += slice_token_num;
                 sliced_batch_idx += p_micro_batch_size;
                 prefill_batch_idx += p_micro_batch_size;
-                FT_LOG_DEBUG("micro batch %ld sliced context, batch idx %ld, token idx %ld",
+                RTP_LLM_LOG_DEBUG("micro batch %ld sliced context, batch idx %ld, token idx %ld",
                             i, sliced_batch_idx, sliced_token_idx);
             }
         }
@@ -396,7 +396,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     return micro_batch_inputs;
 }
 
-ft::BufferPtr GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {
+rtp_llm::BufferPtr GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {
     return hidden_states;
 };
 
@@ -489,7 +489,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     if (device_props_.overlap_comm_type == 2) {
         const auto& layer0 = weights_.layers[0];
-        FT_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken || description_.act_qscheme == Qfp8PerTensor,
+        RTP_LLM_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken || description_.act_qscheme == Qfp8PerTensor,
                 "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
         const size_t max_batch_seq_len = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1) * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden = layer0.self_attention_weights.output_weight->kernel->shape()[1];
@@ -591,7 +591,7 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             if (combine_out.comm_barrier_hook) {
                 last_comm_hook_ = move(combine_out.comm_barrier_hook);
             } else {
-                FT_LOG_DEBUG("no combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
+                RTP_LLM_LOG_DEBUG("no combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
             }
 
             auto output = combine_out.all_output;
@@ -618,9 +618,9 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                 auto ffn_layernorm_output = device_->layernorm({
                     output,
                     nullptr,
-                    ft::mayGetRef(layer.post_ffn_layernorm),
-                    ft::mayGetRef(batch_ep_input.residual),
-                    ft::mayGetRef(batch_ep_input.shared_expert_output),
+                    rtp_llm::mayGetRef(layer.post_ffn_layernorm),
+                    rtp_llm::mayGetRef(batch_ep_input.residual),
+                    rtp_llm::mayGetRef(batch_ep_input.shared_expert_output),
                     nullopt,
                     1.0f,
                     description_.layernorm_eps,
@@ -678,7 +678,7 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
                 last_layer_defered_params.combine_output = nullopt;
             }
             last_layer_defered_params.combine_output = last_layer_moe_ret
-                    ? std::optional<ft::MoeCombineOutput>(last_layer_moe_ret->combine_output)
+                    ? std::optional<rtp_llm::MoeCombineOutput>(last_layer_moe_ret->combine_output)
                     : nullopt;
 
             auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx);
@@ -720,9 +720,9 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
         auto ffn_layernorm_output = device_->layernorm({
             output,
             nullptr,
-            ft::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
-            ft::mayGetRef(last_layer_defered_params.residual),
-            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+            rtp_llm::mayGetRef(last_layer_defered_params.post_ffn_layernorm_weights),
+            rtp_llm::mayGetRef(last_layer_defered_params.residual),
+            rtp_llm::mayGetRef(last_layer_defered_params.shared_expert_output),
             nullopt,
             1.0f,
             description_.layernorm_eps,
@@ -781,7 +781,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
 GptLayerOutputs GptModel::forwardGptLayer(
     GptLayerInputs inputs,
     const int32_t layer_id,
-    ft::lora::LoraModelInputPtr lora_model_input)
+    rtp_llm::lora::LoraModelInputPtr lora_model_input)
 {
     auto pre_decoder_residual = inputs.pre_decoder_residual;
     auto attention_block_output = forwardAttentionBlock(inputs, layer_id, lora_model_input);
@@ -830,10 +830,10 @@ GptLayerOutputs GptModel::forwardGptLayer(
     // TODO: maybe move this layernorm to ffn layer
     auto ffn_layernorm_output = device_->layernorm(LayernormParams(hidden,
                                                                     pre_decoder_residual,
-                                                                    ft::mayGetRef(layer.post_ffn_layernorm),
+                                                                    rtp_llm::mayGetRef(layer.post_ffn_layernorm),
                                                                     device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                                                                     (residual2 == nullptr) ? nullopt : (OptionalConstBufferRef)*residual2,
-                                                                    ft::mayGetRef(WEIGHT_MAY_GET_BIAS(layer.ffn_weights.down_weight)),
+                                                                    rtp_llm::mayGetRef(WEIGHT_MAY_GET_BIAS(layer.ffn_weights.down_weight)),
                                                                     1.0f,
                                                                     description_.layernorm_eps,
                                                                     true,
@@ -849,7 +849,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
 AttentionBlockOutputs GptModel::forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
-        ft::lora::LoraModelInputPtr lora_model_input,
+        rtp_llm::lora::LoraModelInputPtr lora_model_input,
         const LastLayerDeferedParams& last_layer_defered_params)
 {
     auto hidden = inputs.hidden;
@@ -888,8 +888,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
                                                                         residual,
                                                                         *layer.pre_layernorm,
-                                                                        ft::mayGetRef(last_layer_defered_params.residual),
-                                                                        ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+                                                                        rtp_llm::mayGetRef(last_layer_defered_params.residual),
+                                                                        rtp_llm::mayGetRef(last_layer_defered_params.shared_expert_output),
                                                                         std::nullopt,
                                                                         0.f,
                                                                         description_.layernorm_eps,
@@ -932,8 +932,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
             hidden,
             nullptr,
             std::nullopt, // post_ffn_layernorm_weights
-            ft::mayGetRef(last_layer_defered_params.residual),
-            ft::mayGetRef(last_layer_defered_params.shared_expert_output),
+            rtp_llm::mayGetRef(last_layer_defered_params.residual),
+            rtp_llm::mayGetRef(last_layer_defered_params.shared_expert_output),
         });
         hidden = std::move(prev_ffn_layernorm_output.output);
     }
@@ -963,7 +963,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
             enable_sp,
             inputs.pad_token_num
     });
-    if (description_.attention_conf.use_mla && device_->mla_ops_type != ft::MlaOpsType::MHA) {
+    if (description_.attention_conf.use_mla && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
     } else {
         attn_output = device_->attentionLayer(attn_params);
@@ -986,10 +986,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         printBufferData(*residual, "before post layernorm residual");
         auto post_layernorm_params = LayernormParams(attn_hidden,
                                                         attn_hidden,
-                                                        ft::mayGetRef(layer.post_layernorm),
+                                                        rtp_llm::mayGetRef(layer.post_layernorm),
                                                         device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                                                         nullopt,
-                                                        ft::mayGetRef(layer.self_attention_weights.output_weight->bias),
+                                                        rtp_llm::mayGetRef(layer.self_attention_weights.output_weight->bias),
                                                         0.f,
                                                         description_.layernorm_eps,
                                                         false,
@@ -1040,7 +1040,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
     prepareExpertStats(layer_id, ffn_layer_params);
 
     MoeGateSelectOutput gate_output = device_->moeGateSelect(ffn_layer_params);
-    FT_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
+    RTP_LLM_LOG_DEBUG("call layer %ld micro batch ep dispatch batch size = %ld", layer_id, hidden->shape()[0]);
 
     BufferPtr shared_expert_output = nullptr;
 
@@ -1079,13 +1079,13 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         ffn_layer_params.expert_stats
     });
     printBufferData(*dispatched_output.hidden, "layer_" + to_string(layer_id) + "_dispatch_output");
-    FT_LOG_DEBUG("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
+    RTP_LLM_LOG_DEBUG("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
 
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
         if (dispatched_output.comm_barrier_hook) {
             last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
         } else {
-            FT_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
+            RTP_LLM_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
         }
     }
 
@@ -1097,10 +1097,10 @@ GptLayerOutputs GptModel::forwardMoeFfn(const GptLayerOutputs& inputs, const int
 }
 
 GptModelOutputs GptModel::forwardPostLayers(
-    ft::BufferPtr input,
+    rtp_llm::BufferPtr input,
     const bool has_context_request,
     const bool need_all_logits,
-    const ft::BufferPtr lm_output_indexes,
+    const rtp_llm::BufferPtr lm_output_indexes,
     bool enable_sp,
     size_t token_num,
     const GptModelInputs& inputs)
@@ -1144,7 +1144,7 @@ GptModelOutputs GptModel::forwardPostLayers(
     if (weights_.final_layernorm) {
         auto final_layernorm = device_->layernorm(LayernormParams(hidden,
                                                                   nullptr,
-                                                                  ft::mayGetRef(weights_.final_layernorm),
+                                                                  rtp_llm::mayGetRef(weights_.final_layernorm),
                                                                   nullopt,
                                                                   nullopt,
                                                                   nullopt,
@@ -1184,13 +1184,13 @@ GptModelOutputs GptModel::forwardPostLayers(
 
         auto logits = device_->gemm(GemmParams(
             *last_hidden, *(lm_head->kernel), nullopt, nullptr,
-            ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
+            rtp_llm::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
         printBufferData(*logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
         // TODO(xinfei.sxf) calculate softmax_result
-        ft::BufferPtr softmax_result;
+        rtp_llm::BufferPtr softmax_result;
         // logits is too big, tmp not print default
         // printBufferData(*logits, "logits");
         if (need_all_logits) {
@@ -1235,7 +1235,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 }
 
 void GptModel::prepareExpertStats(const size_t        layer_id,
-                                  ft::FfnLayerParams& ffn_layer_params) {
+                                  rtp_llm::FfnLayerParams& ffn_layer_params) {
     OptionalExpertStats layer_expert_stats = nullopt;
     if (overall_expert_stats_.log_exp_num != 0) {
         layer_expert_stats = ExpertStats({layer_id,
@@ -1253,12 +1253,12 @@ void GptModel::cleanExpertStats() {
     }
 }
 
-void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
+void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto shape_hints = device->allocateBuffer({ft::DataType::TYPE_INT32, {shape_hints_size}, ft::AllocationType::HOST});
+    auto shape_hints = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {shape_hints_size}, rtp_llm::AllocationType::HOST});
     auto shape_hints_ptr = shape_hints->data<int32_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
@@ -1282,13 +1282,13 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     device->syncAndCheck();
 
     // multimodal features shape broadcast
-    ft::BufferPtr mm_features_shape;
+    rtp_llm::BufferPtr mm_features_shape;
     int32_t* mm_features_shape_ptr = nullptr;
     inputs.need_all_logits = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape =
-            device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]}, ft::AllocationType::HOST});
+            device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]}, rtp_llm::AllocationType::HOST});
         mm_features_shape_ptr = mm_features_shape->data<int32_t>();
         for (auto i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i]->shape()[0] : 0;
@@ -1308,69 +1308,69 @@ void dpAndTpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         inputs.combo_tokens = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]}, rtp_llm::AllocationType::HOST});
         inputs.input_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]}, rtp_llm::AllocationType::HOST});
         inputs.sequence_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, rtp_llm::AllocationType::HOST});
         inputs.prefix_lengths = device->allocateBuffer(
-             {ft::DataType::TYPE_INT32, {context_batch_size}, ft::AllocationType::HOST});
+             {rtp_llm::DataType::TYPE_INT32, {context_batch_size}, rtp_llm::AllocationType::HOST});
         if (max_blocks != 0) {
             inputs.kv_cache_block_id = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT32,
-                    {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, ft::AllocationType::HOST});
+                    {rtp_llm::DataType::TYPE_INT32,
+                    {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks}, rtp_llm::AllocationType::HOST});
             inputs.cache_keys = device->allocateBuffer(
-                    {ft::DataType::TYPE_INT64, {context_batch_size, max_blocks}, ft::AllocationType::HOST});
+                    {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
         }
         inputs.request_id = device->allocateBuffer(
-            {ft::DataType::TYPE_INT64, {context_batch_size}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});
         inputs.request_pd_separation = device->allocateBuffer(
-            {ft::DataType::TYPE_BOOL, {context_batch_size}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_BOOL, {context_batch_size}, rtp_llm::AllocationType::HOST});
         inputs.lm_output_indexes = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, rtp_llm::AllocationType::HOST});
         if (combo_position_ids_size) {
             inputs.combo_position_ids = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)combo_position_ids_size}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size}, rtp_llm::AllocationType::HOST});
         }
         if (shape_hints_ptr[GptModelInputIndex::loraIds]) {
             inputs.lora_ids = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraIds]}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraIds]}, rtp_llm::AllocationType::HOST});
         }
         if (shape_hints_ptr[GptModelInputIndex::loraInputLengths]) {
             inputs.lora_input_lengths = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, rtp_llm::AllocationType::HOST});
         }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
             auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
-            FT_CHECK(hidden_states_size % hidden_states_dim0 == 0);
+            RTP_LLM_CHECK(hidden_states_size % hidden_states_dim0 == 0);
             inputs.last_hidden_states = device->allocateBuffer(
-                {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
+                {(rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
                  {hidden_states_dim0, hidden_states_dim1},
-                 ft::AllocationType::DEVICE});
+                 rtp_llm::AllocationType::DEVICE});
         }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size}, rtp_llm::AllocationType::HOST});
         }
         if (mm_features_locs_size) {
             inputs.mm_features_locs = device->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {(size_t)mm_features_locs_size}, ft::AllocationType::HOST});
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)mm_features_locs_size}, rtp_llm::AllocationType::HOST});
         }
         if (mm_features_num) {
-            std::vector<ft::BufferPtr> mm_features;
+            std::vector<rtp_llm::BufferPtr> mm_features;
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(
                     device->allocateBuffer(
-                        {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
+                        {(rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
                          {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                         ft::AllocationType::DEVICE}));
+                         rtp_llm::AllocationType::DEVICE}));
             }
             inputs.multimodal_features = std::move(mm_features);
         }
     }
 
-    std::vector<ft::BufferPtr> buffers;
+    std::vector<rtp_llm::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
     buffers.emplace_back(inputs.input_lengths);
     buffers.emplace_back(inputs.sequence_lengths);

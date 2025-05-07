@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/utils/SignalUtils.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>
 
@@ -24,13 +24,13 @@ void EngineBase::initDevices(const EngineInitParams& params) {
                       params.gpt_init_parameter.tp_rank_;
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
-    ft::DeviceFactory::initDevices(params.gpt_init_parameter);
-    device_       = ft::DeviceFactory::getDefaultDevice();
+    rtp_llm::DeviceFactory::initDevices(params.gpt_init_parameter);
+    device_       = rtp_llm::DeviceFactory::getDefaultDevice();
 }
 
 void EngineBase::addLora(const std::string&            adapter_name,
-                         ft::lora::loraLayerWeightsMap lora_a,
-                         ft::lora::loraLayerWeightsMap lora_b) {
+                         rtp_llm::lora::loraLayerWeightsMap lora_a,
+                         rtp_llm::lora::loraLayerWeightsMap lora_b) {
     lora_manager_->addLora(adapter_name, lora_a, lora_b);
 }
 

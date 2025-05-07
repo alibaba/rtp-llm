@@ -49,7 +49,7 @@ void InferenceParsedRequest::extractRequestUrls(const RawRequest& req, Inference
 }
 
 void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, InferenceParsedRequest& pr,
-        const ft::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
+        const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
     if (req.generate_config.has_value()) {
         auto& config = req.generate_config.value();
         if (req.yield_generator == false && config.return_incremental == true) {
@@ -85,7 +85,7 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, Infe
 }
 
 InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string& body,
-        const ft::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
+        const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
     RawRequest req;
     FromJsonString(req, body);
 
@@ -107,7 +107,7 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                                    const std::shared_ptr<TokenProcessor>&          token_processor,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
-                                   const ft::GptInitParameter&                     params,
+                                   const rtp_llm::GptInitParameter&                     params,
                                    const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
     engine_(engine),
     mm_processor_(mm_processor),
@@ -121,13 +121,13 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
 void checkMasterWorker(bool isInternal) {
     if (isInternal) {
         if (!ParallelInfo::globalParallelInfo().isWorker()) {
-            FT_LOG_WARNING("gang master should not access /inference_internal api directly");
+            RTP_LLM_LOG_WARNING("gang master should not access /inference_internal api directly");
             throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
                     "gang master should not access /inference_internal api directly");
         }
     } else {
         if (!ParallelInfo::globalParallelInfo().isMaster()) {
-            FT_LOG_WARNING("gang worker should not access /inference api directly");
+            RTP_LLM_LOG_WARNING("gang worker should not access /inference api directly");
             throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
                     "gang worker should not access /inference api directly");
         }
@@ -139,7 +139,7 @@ void InferenceService::inference(const std::unique_ptr<http_server::HttpResponse
                                  bool                                                    isInternal) {
     int64_t request_id = -1;
     if (request_counter_ == nullptr) {
-        FT_LOG_WARNING("inference failed, request_counter is null");
+        RTP_LLM_LOG_WARNING("inference failed, request_counter is null");
         return;
     }
     request_id = request_counter_->incAndReturn();
@@ -231,8 +231,8 @@ InferenceService::fillGenerateInput(int64_t request_id,
     if (metric_reporter_) {
         metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
     }
-    auto device = ft::DeviceFactory::getDefaultDevice();
-    input->input_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {vec.size()}, ft::AllocationType::HOST}, {});
+    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+    input->input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     return input;
@@ -324,7 +324,7 @@ std::string InferenceService::completeResponse(const std::any& response) {
     } else if (response.type() == typeid(BatchResponse)) {
         return ToJsonString(std::any_cast<BatchResponse>(response), /*isCompact=*/true);
     } else {
-        FT_LOG_WARNING("unknown complete response type: %s", response.type().name());
+        RTP_LLM_LOG_WARNING("unknown complete response type: %s", response.type().name());
         return "";
     }
 }
@@ -340,7 +340,7 @@ std::string InferenceService::streamingResponse(const std::any& response) {
                ToJsonString(std::any_cast<BatchResponse>(response), /*isCompact=*/true) +
                "\n\n";
     } else {
-        FT_LOG_WARNING("unknown streaming response type: %s", response.type().name());
+        RTP_LLM_LOG_WARNING("unknown streaming response type: %s", response.type().name());
         return "data:\n\n";
     }
 }

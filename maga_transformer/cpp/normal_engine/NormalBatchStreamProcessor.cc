@@ -7,23 +7,23 @@
 #include "c10/core/DeviceType.h"
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/models/Sampler.h"
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
-#include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/devices/utils/DebugUtils.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 namespace rtp_llm {
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     auto           context_streams = stream_groups.contextStreams();
     auto           decode_streams  = stream_groups.decodeStreams();
-    FT_LOG_DEBUG("context_streams size = %d, decode_streams size = %d", context_streams.size(), decode_streams.size());
+    RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d", context_streams.size(), decode_streams.size());
     GptModelInputs model_input;
     size_t         current_tokens_size      = stream_groups.modelExecuteTokenSize();
     size_t         total_batch_size         = stream_groups.totalModelBatchSize();
@@ -36,38 +36,38 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     model_input.combo_tokens =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {current_tokens_size}, rtp_llm::AllocationType::HOST}, {});
     if (max_block_size) {
         model_input.kv_cache_block_id = device_->allocateBuffer(
-                {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
+                {rtp_llm::DataType::TYPE_INT32, {total_batch_size, max_block_size}, rtp_llm::AllocationType::HOST}, {});
         model_input.cache_keys = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_INT64, {total_context_batch_size, max_block_size}, rtp_llm::AllocationType::HOST}, {});
     }
     model_input.request_id = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT64, {total_context_batch_size}, ft::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_INT64, {total_context_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.request_pd_separation = device_->allocateBuffer(
-            {ft::DataType::TYPE_BOOL, {total_context_batch_size}, ft::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_BOOL, {total_context_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.input_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.lora_ids =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.lora_input_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.sequence_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_decode_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_decode_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.lm_output_indexes =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.prefix_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_context_batch_size}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_context_batch_size}, rtp_llm::AllocationType::HOST}, {});
     if (need_cal_position_id) {
         model_input.combo_position_ids =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size * position_id_len_factor_}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {current_tokens_size * position_id_len_factor_}, rtp_llm::AllocationType::HOST}, {});
     }
     if (has_multimodal_input) {
         model_input.text_tokens_mask =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {current_tokens_size}, rtp_llm::AllocationType::HOST}, {});
         model_input.mm_features_locs =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {multimodal_features_len}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {multimodal_features_len}, rtp_llm::AllocationType::HOST}, {});
     }
     model_input.k_block_size = k_block_size_;
     model_input.v_block_size = v_block_size_;
@@ -97,8 +97,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size = stream->batchSize();
         auto kv_cache = stream->kvCache();
-        FT_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
-        FT_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
+        RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         for (auto i = 0; i < current_batch_size; ++i) {
             auto currentTokens      = stream->currentExecuteTokens(i);
             if (currentTokens[0] >= input_vocab_size) {
@@ -125,7 +125,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         stream->step();
     }
 
-    std::vector<ft::BufferPtr> gathered_mm_features;
+    std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
     int mm_feature_index = 0;
@@ -135,8 +135,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size = stream->batchSize();
         auto kv_cache                 = stream->kvCache();
-        FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
-        FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
+        RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
 
         // TODO(xinfei.sxf) deal with adjusted common seq len.
         for (auto i = 0; i < current_batch_size; ++i) {
@@ -159,7 +159,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
             if (has_multimodal_input) {
                 std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
-                ft::BufferPtr mm_locs = stream->multimodalLocations();
+                rtp_llm::BufferPtr mm_locs = stream->multimodalLocations();
                 if (mm_locs != nullptr) {
                     for (int i = 0;i < mm_locs->size(); ++i) {
                         mm_features_locs[mm_feature_index] = *mm_locs->dataWithOffset<int>(i) + token_idx - stream->reuseLength();
@@ -167,7 +167,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     }
                     for (auto& mm_feature: mm_features) {
                         auto feature_buffer = torchTensor2Buffer(mm_feature);
-                        if (feature_buffer->where() != ft::MemoryType::MEMORY_GPU) {
+                        if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
                             gathered_mm_features.emplace_back(device_->clone({*feature_buffer}));
                         } else {
                             gathered_mm_features.emplace_back(feature_buffer);
@@ -216,8 +216,8 @@ absl::StatusOr<SamplerInputs>
 NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_groups,
                                                const GptModelInputs&  model_inputs,
                                                const GptModelOutputs& model_output) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    FT_CHECK(!stream_groups.empty());
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_CHECK(!stream_groups.empty());
     const auto& context_streams = stream_groups.contextStreams();
     size_t total_decode_batch_size = stream_groups.totalDecodeBatchSize();
     auto all_streams = stream_groups.allStreams();
@@ -246,21 +246,21 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        FT_LOG_DEBUG("stream [%d], complete token ids = [%s]", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        FT_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]", stream->streamId(), sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
+        RTP_LLM_LOG_DEBUG("stream [%d], complete token ids = [%s]", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
+        RTP_LLM_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]", stream->streamId(), sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
 
     auto vocab_size = model_output.logits->shape()[1];
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs) {
-        sampler_inputs.all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+        sampler_inputs.all_probs = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {total_batch_size, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
     }
 
     batch_idx = 0;
     // need copy logits when has tile or return logits
     if (return_logits || calculate_softmax_probs || (context_streams.size() && total_batch_size > all_streams.size())) {
-        sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+        sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
     } else {
         sampler_inputs.logits = model_output.logits;
@@ -276,38 +276,38 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         logits_offset += 1;
     }
 
-    FT_LOG_DEBUG("sampler inputs logits [%s]",
-                device_->clone({*sampler_inputs.logits, ft::AllocationType::HOST})->debugStringWithData<float>(10).c_str());
+    RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
+                device_->clone({*sampler_inputs.logits, rtp_llm::AllocationType::HOST})->debugStringWithData<float>(10).c_str());
 
-    FT_LOG_DEBUG("gatherSamplerInput done");
+    RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
     return std::move(sampler_inputs);
 }
 
-SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const ft::BufferPtr& sequence_lengths) const {
+SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const rtp_llm::BufferPtr& sequence_lengths) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
-    sampler_inputs.sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.sequence_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     sampler_inputs.grammars.clear();
-    sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.beam_index   =  device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.beam_index   =  device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
     // eg: device_->bufMemset(*sampler_inputs.beam_index, 0);
-    sampler_inputs.input_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_UINT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.top_p         = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.temperature   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.random_seeds  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.repetition_penalty = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.min_lengths   = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.no_repeat_ngram_size = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.input_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.num_beams     = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT64, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.top_k         = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.top_p         = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.temperature   = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.random_seeds  = device_->allocateBuffer({rtp_llm::DataType::TYPE_UINT64, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.repetition_penalty = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.min_lengths   = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
+    sampler_inputs.no_repeat_ngram_size = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     if (stream_groups.needReturnCumLogProbs()) {
-        sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+        sampler_inputs.cum_log_probs = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     }
     sampler_inputs.token_ids = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST}, {});
     return sampler_inputs;
 }
 
@@ -373,26 +373,26 @@ void NormalBatchStreamProcessor::setThinkModeLogitsProcessorInputs(SamplerInputs
         const std::vector<StreamThinkInfo> streamThinkInfo = stream->streamThinkInfo();
         think_infos.insert(think_infos.end(), streamThinkInfo.begin(), streamThinkInfo.end());
     }
-    FT_CHECK(think_infos.size() == sampler_inputs.batch_size);
+    RTP_LLM_CHECK(think_infos.size() == sampler_inputs.batch_size);
     BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_infos);
     sampler_inputs.grammars.push_back(processor_ptr);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
                                                   const MergedOutput& merge_outputs) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto& model_output      = merge_outputs.model_output;
     const auto& sampler_output    = merge_outputs.sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
-    FT_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
     const size_t step = new_all_token_ids->shape()[1];
     size_t total_batch_size  = stream_groups.totalSamplerBatchSize();
-    FT_CHECK(total_batch_size == new_all_token_ids->shape()[0]);
+    RTP_LLM_CHECK(total_batch_size == new_all_token_ids->shape()[0]);
     int batch_idx = 0;
     int offset = 0;
     int token_offset = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
-    ft::BufferPtr new_tokens_all = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)total_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
+    rtp_llm::BufferPtr new_tokens_all = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)total_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST}, {});
 
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
@@ -414,7 +414,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto tokens = stream->currentExecuteTokens(0);
-            ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
+            rtp_llm::BufferPtr label = device_->clone({{rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
             loss = device_->loss({all_logits, *label});
         }
         BufferPtr all_hidden_states = nullptr;
@@ -424,7 +424,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         BufferPtr batch_softmax_result;
         BufferPtr current_softmax_result;
         if (stream->calculateSoftmaxProbs()) {
-            current_softmax_result = device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
+            current_softmax_result = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {(size_t)current_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST}, {});
             batch_softmax_result = device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
         }
         for (int i = 0; i < current_batch_size; ++i) {
@@ -437,7 +437,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             }
             batch_idx += 1;
         }
-        FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+        RTP_LLM_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         if (stream->numBeams() > 1 && beam_index != nullptr) {
             StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
                     current_softmax_result, batch_cum_log_probs, all_probs, loss, all_hidden_states};
@@ -450,7 +450,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         offset += batch;
         token_offset += token_size;
     }
-    FT_LOG_DEBUG("dispatch done");
+    RTP_LLM_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
 }
 

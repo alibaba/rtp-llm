@@ -3,34 +3,34 @@
 #include <pybind11/pytypes.h>
 #include <tuple>
 
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/Weights.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/devices/Weights.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace th = torch;
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
 using TensorMap  = std::unordered_map<std::string, th::Tensor>;
 using TensorMaps = std::vector<TensorMap>;
-using ConstBufferPtrMap  = std::unordered_map<std::string, ft::ConstBufferPtr>;
+using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
 
 struct EngineInitParams: public th::jit::CustomClassHolder {
     EngineInitParams() {};
    // This class is the only one that holds gpt_weights object globally.
-    EngineInitParams(const ft::GptInitParameter&    gpt_init_parameter,
-                     ft::Weights&&                  gpt_weights) :
+    EngineInitParams(const rtp_llm::GptInitParameter&    gpt_init_parameter,
+                     rtp_llm::Weights&&                  gpt_weights) :
                      gpt_init_parameter(gpt_init_parameter),
                      gpt_weights(std::move(gpt_weights)) {}
 
 
-    ft::GptInitParameter         gpt_init_parameter;
-    ft::Weights                  gpt_weights;
+    rtp_llm::GptInitParameter         gpt_init_parameter;
+    rtp_llm::Weights                  gpt_weights;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 };
@@ -41,8 +41,8 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     // Constructor for vanilla propose model
     ProposeModelEngineInitParams(std::string sp_type,
                      size_t gen_num_per_circle,
-                     const ft::GptInitParameter&    gpt_init_parameter,
-                     ft::Weights&&                  gpt_weights) :
+                     const rtp_llm::GptInitParameter&    gpt_init_parameter,
+                     rtp_llm::Weights&&                  gpt_weights) :
                      sp_type(sp_type),
                      gen_num_per_circle(gen_num_per_circle),
                      vanilla_model_params(new EngineInitParams(gpt_init_parameter, std::move(gpt_weights))) {}
@@ -72,15 +72,15 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         return sp_type == "mtp";
     }
 
-    const ft::GptInitParameter& getGptInitParameter() {
+    const rtp_llm::GptInitParameter& getGptInitParameter() {
         if (sp_type == "vanilla") {
             return vanilla_model_params->gpt_init_parameter;
         } else if (sp_type == "mtp") {
-            FT_CHECK(!mtp_model_params_->empty());
-            FT_CHECK(mtp_model_params_->at(0) != nullptr);
+            RTP_LLM_CHECK(!mtp_model_params_->empty());
+            RTP_LLM_CHECK(mtp_model_params_->at(0) != nullptr);
             return mtp_model_params_->at(0)->gpt_init_parameter;
         } else {
-            FT_FAIL("error sp type[%s] do not have GptInitParameter", sp_type.c_str());
+            RTP_LLM_FAIL("error sp type[%s] do not have GptInitParameter", sp_type.c_str());
         }
     }
 
@@ -103,31 +103,31 @@ struct WarmUpResult {
 class WeightsConverter {
 public:
     WeightsConverter(bool need_copy,
-                     ft::QuantAlgo quant_alog = ft::QuantAlgo()) :
+                     rtp_llm::QuantAlgo quant_alog = rtp_llm::QuantAlgo()) :
                      need_copy_(need_copy),
                      quant_algo_(quant_alog)
     {
         if (need_copy_) {
-            device_ = ft::DeviceFactory::getDefaultDevice();
+            device_ = rtp_llm::DeviceFactory::getDefaultDevice();
         }
     };
 
     // Here include three interface to create gpt weights,
-    // 1st. interface is to convert py::object to ft::weights,
+    // 1st. interface is to convert py::object to rtp_llm::weights,
     // this used for python lib.
-    // 2ed. interface is to convert torch::Tensor to ft::weights,
+    // 2ed. interface is to convert torch::Tensor to rtp_llm::weights,
     // this used for cpp unittest.
-    // 3rd. interface is to convert BufferPtr to ft::weights,
+    // 3rd. interface is to convert BufferPtr to rtp_llm::weights,
     // this is the core impl, above 2 interface invoke this interface.
-    std::unique_ptr<ft::Weights>
+    std::unique_ptr<rtp_llm::Weights>
     createGptWeights(py::object layer_weights,
                      py::object  global_weight);
 
-    std::unique_ptr<ft::Weights>
+    std::unique_ptr<rtp_llm::Weights>
     createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
                      std::unique_ptr<TensorMap>  global_weight);
 
-    std::unique_ptr<ft::Weights>
+    std::unique_ptr<rtp_llm::Weights>
     createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
                      std::unique_ptr<ConstBufferPtrMap>  global_weight);
 
@@ -150,42 +150,42 @@ private:
 
     // helper function
 
-    ft::ConstBufferPtr mayFindBuffer(const ConstBufferPtrMap& map,
+    rtp_llm::ConstBufferPtr mayFindBuffer(const ConstBufferPtrMap& map,
                                      const std::string& key);
 
-    ft::DenseWeightsPtr mayCreateDenseWeights(const ConstBufferPtrMap& map,
+    rtp_llm::DenseWeightsPtr mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                               const std::string& kernel_key,
                                               const std::string& bias_key = "",
                                               const std::string& scales_key = "",
                                               const std::string& zeros_key = "");
 
-    ft::LayerNormWeightsPtr
+    rtp_llm::LayerNormWeightsPtr
     mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                               const std::string& gamma_key,
                               const std::string& beta_key = "",
                               const std::string& scale_key = "",
                               const std::string& scale_reciprocal_key = "");
 
-    ft::FfnLayerWeights
+    rtp_llm::FfnLayerWeights
     createFfnWeights(const ConstBufferPtrMap& map);
 
-    ft::AttentionLayerWeights
+    rtp_llm::AttentionLayerWeights
     createAttentionWeights(const ConstBufferPtrMap& map);
 
-    ft::ConstBufferPtr CopyTensorToBufferPtr(const torch::Tensor& tensor);
+    rtp_llm::ConstBufferPtr CopyTensorToBufferPtr(const torch::Tensor& tensor);
 
 private:
     bool            need_copy_;
-    ft::QuantAlgo   quant_algo_;
-    ft::DeviceBase* device_;
+    rtp_llm::QuantAlgo   quant_algo_;
+    rtp_llm::DeviceBase* device_;
     bool use_linear_bias_slopes_;
 };
 
-std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
+std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
 
 // extract mtp model weights list from model in python world.
 // Note: keep mtp sequence.
-std::deque<std::unique_ptr<ft::Weights>> prepareMTPModelWeights(py::object model);
+std::deque<std::unique_ptr<rtp_llm::Weights>> prepareMTPModelWeights(py::object model);
 
 std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::object model);
 

@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/disaggregate/rtpllm_master/estimator/LookupMapImpl.h"
 
 namespace rtp_llm {

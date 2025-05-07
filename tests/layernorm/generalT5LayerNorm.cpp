@@ -1,7 +1,7 @@
-#include "src/fastertransformer/kernels/rmsnormKernels.h"
+#include "maga_transformer/cpp/kernels/rmsnormKernels.h"
 
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
+#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -31,7 +31,7 @@ torch::Tensor T5LayerNormOp::forward(torch::Tensor input, torch::Tensor gamma) {
     auto d_model    = input.size(1);
 
     torch::Tensor output = torch::zeros_like(input);
-    fastertransformer::invokeGeneralRmsNorm<float, int8_t>((float*)output.data_ptr(), 
+    rtp_llm::invokeGeneralRmsNorm<float, int8_t>((float*)output.data_ptr(), 
             (float*)input.data_ptr(), (float*)gamma.data_ptr(), (float*)nullptr, (float)eps, (int)batch_size, (int)d_model, stream);
     return output;
 }
@@ -48,7 +48,7 @@ torch::Tensor T5LayerNormOp::forward_fp8(torch::Tensor input, torch::Tensor inpu
     torch::Tensor output = torch::zeros_like(input);
 #ifdef ENABLE_FP8
     __nv_fp8_e4m3 *quant_output = reinterpret_cast<__nv_fp8_e4m3*>(output.data_ptr());
-    fastertransformer::invokeGeneralRmsNorm<float, __nv_fp8_e4m3>((float*)output.data_ptr(), 
+    rtp_llm::invokeGeneralRmsNorm<float, __nv_fp8_e4m3>((float*)output.data_ptr(), 
             (float*)input.data_ptr(), (float*)gamma.data_ptr(), (float*)nullptr, (float)eps, (int)batch_size, (int)d_model, stream, scale, nullptr, quant_output);
 #endif
     return output;
@@ -61,7 +61,7 @@ torch::Tensor T5LayerNormOp::stride_forward(torch::Tensor input, torch::Tensor g
 
     auto batch_size = input.size(0);
     auto norm_size = gamma.size(0);    
-    fastertransformer::invokeRmsNormWithStride((float*)input.data_ptr() + offset,
+    rtp_llm::invokeRmsNormWithStride((float*)input.data_ptr() + offset,
                                                 (int)stride,
                                                 (float*)input.data_ptr() + offset,
                                                 (int)stride,

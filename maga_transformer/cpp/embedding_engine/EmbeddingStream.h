@@ -5,16 +5,16 @@
 #include <optional>
 #include <queue>
 #include <condition_variable>
-#include "src/fastertransformer/core/Buffer.h"
+#include "maga_transformer/cpp/core/Buffer.h"
 #include "autil/TimeUtility.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQuery.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
 #include "absl/status/statusor.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -61,7 +61,7 @@ public:
     }
 
 protected:
-    ft::DeviceBase*                  device_;
+    rtp_llm::DeviceBase*                  device_;
     std::shared_ptr<EmbeddingInput>  embedding_input_;
     std::shared_ptr<EmbeddingOutput> embedding_output_;
     int64_t                          begin_time_;

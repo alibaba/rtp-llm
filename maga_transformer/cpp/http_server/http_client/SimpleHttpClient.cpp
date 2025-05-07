@@ -54,7 +54,7 @@ bool SimpleHttpClient::send(const std::string&    address,
             break;
         }
         default: {
-            FT_LOG_WARNING("send data failed, unknown http method: %d", (int)methodType);
+            RTP_LLM_LOG_WARNING("send data failed, unknown http method: %d", (int)methodType);
             return false;
         }
     }
@@ -68,17 +68,17 @@ bool SimpleHttpClient::sendPacketAsync(const std::string&  address,
                                        const HttpCallBack& http_call_back) {
     auto conn = connection_pool_->makeHttpConnection(address);
     if (!conn) {
-        FT_LOG_WARNING("send packet failed, connection is null, address: %s", address.c_str());
+        RTP_LLM_LOG_WARNING("send packet failed, connection is null, address: %s", address.c_str());
         return false;
     }
     if (conn->isClosed()) {
-        FT_LOG_WARNING("send packet failed, connection is closed, address: %s", address.c_str());
+        RTP_LLM_LOG_WARNING("send packet failed, connection is closed, address: %s", address.c_str());
         connection_pool_->recycleHttpConnection(address, conn, true);
         return false;
     }
     HandlePacketInfo* handle_packet_info = new HandlePacketInfo(address, connection_pool_, conn, http_call_back);
     if (!conn->postPacket(packet, handler_.get(), (void*)(handle_packet_info))) {
-        FT_LOG_WARNING("post packet failed, address: %s", address.c_str());
+        RTP_LLM_LOG_WARNING("post packet failed, address: %s", address.c_str());
         packet->free();
         delete handle_packet_info;
         connection_pool_->recycleHttpConnection(address, conn, true);

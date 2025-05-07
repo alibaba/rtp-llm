@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 class RejectionSampler: public SpeculativeSampler {
 public:
-    RejectionSampler(ft::DeviceBase* device): SpeculativeSampler(device) {}
+    RejectionSampler(rtp_llm::DeviceBase* device): SpeculativeSampler(device) {}
     absl::StatusOr<SpeculativeSamplerOutput> sample(const std::list<GenerateStreamPtr>& streams,
                                                     const ProposeOutput&                proposer_output,
                                                     const ScoreOutput&                  scorer_output) const override;

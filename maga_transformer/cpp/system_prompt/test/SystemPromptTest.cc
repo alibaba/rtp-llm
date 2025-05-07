@@ -4,7 +4,7 @@
 #define private public
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 
 #include <memory>
 #include <thread>

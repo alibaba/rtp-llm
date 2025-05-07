@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//src/fastertransformer/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
+load("//maga_transformer/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
  
 test_copts = [
     "-fno-access-control",
@@ -22,7 +22,7 @@ cc_library(
 )
  
 test_deps = [
-    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//maga_transformer/cpp/devices/testing:device_test_utils",
     "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     ":test_headers",

@@ -11,28 +11,28 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
 struct StreamUpdateInfo {
-    const ft::BufferPtr new_tokens;
+    const rtp_llm::BufferPtr new_tokens;
     int                 num_new_tokens;
-    const ft::BufferPtr hidden_states;
-    const ft::BufferPtr logits;
-    const ft::BufferPtr softmax_probs;
-    const ft::BufferPtr cum_log_probs;
-    const ft::BufferPtr all_probs;
-    const ft::BufferPtr loss;
+    const rtp_llm::BufferPtr hidden_states;
+    const rtp_llm::BufferPtr logits;
+    const rtp_llm::BufferPtr softmax_probs;
+    const rtp_llm::BufferPtr cum_log_probs;
+    const rtp_llm::BufferPtr all_probs;
+    const rtp_llm::BufferPtr loss;
     // for mtp
-    const ft::BufferPtr all_hidden_states;
+    const rtp_llm::BufferPtr all_hidden_states;
 };
 
 class GenerateStream {
 public:
-    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ft::GptInitParameter& params,
+    GenerateStream(const std::shared_ptr<GenerateInput>& query, const rtp_llm::GptInitParameter& params,
                    const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter);
     virtual ~GenerateStream() {
         reportMetric();
@@ -73,7 +73,7 @@ public:
     int64_t streamId() const;
     int loraId() const;
     std::string adapterName() const;
-    ft::SpecialTokens specialTokens() const;
+    rtp_llm::SpecialTokens specialTokens() const;
 
     int tileNum() const;
     int batchSize() const;
@@ -111,9 +111,9 @@ public:
 
     bool isContextStream() const;
     bool isChunkStream() const;
-    const ft::BufferPtr& cumLogProbs() const;
+    const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const ft::BufferPtr& completeTokenIds();
+    const rtp_llm::BufferPtr& completeTokenIds();
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
     std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int currentExecuteTokenSize();
@@ -123,7 +123,7 @@ public:
 
     std::vector<torch::Tensor> multimodalFeatures() const;
     int multimodalFeaturesLength() const;
-    ft::BufferPtr multimodalLocations() const;
+    rtp_llm::BufferPtr multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;
 
     int64_t getTimeoutMs() const;
@@ -151,8 +151,8 @@ public:
 
     const ResourceContext& resourceContext() const;
     void setKVCache(const BatchKVCacheResource &kv_cache_resource);
-    void setLoss(const ft::Buffer& loss);
-    void setSoftmaxProbs(const ft::Buffer& softmax_probs, int start_pos);
+    void setLoss(const rtp_llm::Buffer& loss);
+    void setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
     size_t maxBlockSize() const;
 
@@ -171,12 +171,12 @@ public:
 
     // for test
     void setIsContextStream(bool is_context_stream);
-    ft::BufferPtr getLoss();
-    ft::BufferPtr getLastHiddenStates();
-    void setLastHiddenStates(ft::BufferPtr hidden_states) {
+    rtp_llm::BufferPtr getLoss();
+    rtp_llm::BufferPtr getLastHiddenStates();
+    void setLastHiddenStates(rtp_llm::BufferPtr hidden_states) {
         last_hidden_states_ = hidden_states;
     };
-    ft::BufferPtr getSoftmaxProbs();
+    rtp_llm::BufferPtr getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void setPerfTest(bool perf_test_);
 
@@ -204,9 +204,9 @@ public:
         return acceped_bouns_token_;
     }
 
-    void beamSearchKvCacheUpdate(ft::BufferPtr beam_idx);
+    void beamSearchKvCacheUpdate(rtp_llm::BufferPtr beam_idx);
 
-    ft::BufferPtr generateContextPositionIds(ft::DeviceBase* device);
+    rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
 
     void generateNextPositionId(int32_t* now_pos);
 
@@ -260,11 +260,11 @@ public:
         mtp_token_index_ = mtp_token_index;
     }
 
-    ft::BufferPtr returnEmptyHiddenStates() {
-        FT_CHECK(last_hidden_states_ == nullptr);
-        FT_CHECK(seqLength() > 0);
+    rtp_llm::BufferPtr returnEmptyHiddenStates() {
+        RTP_LLM_CHECK(last_hidden_states_ == nullptr);
+        RTP_LLM_CHECK(seqLength() > 0);
         last_hidden_states_ = device_->allocateBuffer(
-            {dtype_, {(size_t)seqLength(), hidden_size_}, ft::AllocationType::DEVICE});
+            {dtype_, {(size_t)seqLength(), hidden_size_}, rtp_llm::AllocationType::DEVICE});
         return last_hidden_states_;
     }
 
@@ -289,7 +289,7 @@ public:
     bool queryPdSep() const;
 
 protected:
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
@@ -337,23 +337,23 @@ protected:
     int32_t                             batch_with_prefill_len_ = 0;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_;
-    ft::SpecialTokens                   special_tokens_;
-    ft::BufferPtr                       cum_log_probs_;
-    ft::BufferPtr                       all_probs_;
-    ft::BufferPtr                       softmax_probs_;
-    ft::BufferPtr                       loss_;
-    ft::BufferPtr                       last_hidden_states_;
+    rtp_llm::SpecialTokens                   special_tokens_;
+    rtp_llm::BufferPtr                       cum_log_probs_;
+    rtp_llm::BufferPtr                       all_probs_;
+    rtp_llm::BufferPtr                       softmax_probs_;
+    rtp_llm::BufferPtr                       loss_;
+    rtp_llm::BufferPtr                       last_hidden_states_;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;
 
     bool return_all_hidden_states_ = false;
     int mtp_token_index_ = 0;
 
-    std::optional<ft::BufferPtr>        context_position_ids_;
+    std::optional<rtp_llm::BufferPtr>        context_position_ids_;
     PositionIdsStyle                    mm_position_ids_style_;
 
     std::vector<StreamThinkInfo>        think_infos_;
-    ft::DataType dtype_;
+    rtp_llm::DataType dtype_;
     size_t hidden_size_;
 
     // just for bool test

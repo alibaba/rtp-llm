@@ -10,13 +10,13 @@
 #include "maga_transformer/cpp/cache/BlockRefCounter.h"
 #include "maga_transformer/cpp/cache/CacheConfig.h"
 #include "maga_transformer/cpp/cache/KVCacheResource.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/DeviceBase.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/DeviceBase.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
 
-namespace ft = fastertransformer;
+
 namespace rtp_llm {
 
 struct KVCacheInfo {
@@ -33,10 +33,10 @@ public:
     };
 
     struct KVCacheBuffer {
-        ft::BufferPtr k_blocks;
-        ft::BufferPtr v_blocks;
-        ft::BufferPtr k_scale;
-        ft::BufferPtr v_scale;
+        rtp_llm::BufferPtr k_blocks;
+        rtp_llm::BufferPtr v_blocks;
+        rtp_llm::BufferPtr k_scale;
+        rtp_llm::BufferPtr v_scale;
     };
 
     struct MatchInfo {
@@ -97,7 +97,7 @@ public:
     };
 
 public:
-    CacheManager(const CacheConfig& config, ft::DeviceBase* device,
+    CacheManager(const CacheConfig& config, rtp_llm::DeviceBase* device,
                  bool warmup = false,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
     ~CacheManager();
@@ -119,16 +119,16 @@ public:
     void freeWithCache(FreeInfo& free_info);
     void insertResidentCache(FreeInfo& free_info);
 
-    virtual void setKVBlockValue(int block_index, int layer_id, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
-    virtual void setKVBlockValue(int block_index, ft::Buffer& k_buffer, ft::Buffer& v_buffer);
-    std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index, int layer_id);
-    std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index);
+    virtual void setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    virtual void setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> getKVBlockValue(int block_index, int layer_id);
+    std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> getKVBlockValue(int block_index);
     void blockCopy(int src_block_index, int dest_block_index);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 
-    void beamSearchKvUpdate(ft::BufferPtr src_block_offset,
-                            ft::BufferPtr target_block_offset);
+    void beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset,
+                            rtp_llm::BufferPtr target_block_offset);
 
     void                                    regUserMr();
 
@@ -137,7 +137,7 @@ protected:
     size_t                                  cacheItemNum() const;
     uint32_t                                totalBlocks() const;
     void                                    initFreeBlock();
-    ft::BufferPtr                           tryAllocateMaxBuffer();
+    rtp_llm::BufferPtr                           tryAllocateMaxBuffer();
     void                                    allocateAndSync();
     void                                    initFakeKVCache();
     void                                    initKvCache();
@@ -176,9 +176,9 @@ protected:
     int             available_blocks_;
     BlockCache      block_cache_;
     KVCacheBuffer   kv_cache_;
-    ft::DeviceBase* device_;
+    rtp_llm::DeviceBase* device_;
 
-    ft::BufferPtr   cache_aligned_buffer_;
+    rtp_llm::BufferPtr   cache_aligned_buffer_;
     void*           cache_base_ptr_;
 
     bool            stop_ = false;

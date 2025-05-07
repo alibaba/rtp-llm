@@ -1,10 +1,10 @@
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/devices/utils/DebugUtils.h"
 #include "maga_transformer/cpp/embedding_engine/handlers/LinearSoftmaxHandler.h"
 #include <cstdlib>
 #include <stdlib.h>
 
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 

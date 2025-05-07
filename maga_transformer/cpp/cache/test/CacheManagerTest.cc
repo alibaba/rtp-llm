@@ -1,14 +1,14 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/core/BufferHelper.h"
+#include "maga_transformer/cpp/core/Types.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
 
 #include <chrono>
 #include <memory>
 #include <thread>
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -16,7 +16,7 @@ class CacheManagerTest: public DeviceTestBase {
 protected:
     CacheConfig initConfig() {
         // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-        CacheConfig config(KVCacheParam({1, 4, 1, 1, 1, ft::TYPE_INT8}));
+        CacheConfig config(KVCacheParam({1, 4, 1, 1, 1, rtp_llm::TYPE_INT8}));
         return config;
     }
 
@@ -517,14 +517,14 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
 
 TEST_F(CacheManagerTest, testSetBlockValue) {
     // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-    CacheConfig  cache_config(KVCacheParam({2, 4, 1, 1, 2, ft::TYPE_INT8}));
+    CacheConfig  cache_config(KVCacheParam({2, 4, 1, 1, 2, rtp_llm::TYPE_INT8}));
     CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
     vector<int8_t> k_vec(cache_config.kv_block_size, 1);
     vector<int8_t> v_vec(cache_config.kv_block_size, 1);
-    auto           k_buffer = ft::vector2Buffer(k_vec);
-    auto           v_buffer = ft::vector2Buffer(v_vec);
+    auto           k_buffer = rtp_llm::vector2Buffer(k_vec);
+    auto           v_buffer = rtp_llm::vector2Buffer(v_vec);
     cache_manager.setKVBlockValue(1, *k_buffer, *v_buffer);
 
     auto testFunc = [&](int block_index, int block_value) {
@@ -558,7 +558,7 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
 
 TEST_F(CacheManagerTest, testBlockCacheHoldBlockNums) {
     // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
-    CacheConfig  cache_config(KVCacheParam({2, 10, 1, 1, 1, ft::TYPE_INT8}));
+    CacheConfig  cache_config(KVCacheParam({2, 10, 1, 1, 1, rtp_llm::TYPE_INT8}));
     CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 0);
     ASSERT_EQ(cache_manager.availableBlockNums(), 9);

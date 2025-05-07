@@ -4,9 +4,9 @@ using namespace std;
 
 namespace rtp_llm {
 
-EmbeddingInput::EmbeddingInput(const std::shared_ptr<ft::Buffer>& token_ids,
-                               const std::shared_ptr<ft::Buffer>& token_type_ids,
-                               const std::shared_ptr<ft::Buffer>& input_lengths,
+EmbeddingInput::EmbeddingInput(const std::shared_ptr<rtp_llm::Buffer>& token_ids,
+                               const std::shared_ptr<rtp_llm::Buffer>& token_type_ids,
+                               const std::shared_ptr<rtp_llm::Buffer>& input_lengths,
                                const int64_t                      total_length,
                                int64_t request_id,
                                std::optional<MultimodalFeature> multimodal_features)

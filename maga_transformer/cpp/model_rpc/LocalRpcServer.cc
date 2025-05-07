@@ -8,7 +8,7 @@
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 
 using namespace std;
-using namespace fastertransformer;
+
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
@@ -18,12 +18,12 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
 
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
-        FT_LOG_INFO("init speculative engine");
+        RTP_LLM_LOG_INFO("init speculative engine");
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Multimodal processing is not supported for speculative engine");
         }
         pybind11::gil_scoped_release release;
-        FT_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
+        RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
         std::unique_ptr<SpeculativeEngine> sp_engine = std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
         auto status = sp_engine->init();
         if (!status.ok()) {
@@ -31,10 +31,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
         }
         engine_ = std::move(sp_engine);
     } else {
-        FT_LOG_INFO("init normal engine");
+        RTP_LLM_LOG_INFO("init normal engine");
         {
             pybind11::gil_scoped_release release;
-            FT_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
+            RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(), "running engine init with gil held may cause program hang, please check");
             engine_.reset(new NormalEngine(maga_init_params));
         }
         if (!mm_process_engine.is_none()) {
@@ -55,7 +55,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams& maga_init_params, py::
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
     const auto& error_msg = error_info.ToString();
-    FT_LOG_WARNING("request [%s], error code [%s], error message [%s]",
+    RTP_LLM_LOG_WARNING("request [%s], error code [%s], error message [%s]",
               request_key.c_str(), ErrorCodeToString(error_info.code()).c_str(), error_msg.c_str());
     auto grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
@@ -65,7 +65,7 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     if (error_details.SerializeToString(&error_details_serialized)) {
         return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        FT_LOG_WARNING("request [%s] error details serialize to string failed", request_key.c_str());
+        RTP_LLM_LOG_WARNING("request [%s] error details serialize to string failed", request_key.c_str());
         return grpc::Status(grpc_error_code, error_msg);
     }
 }
@@ -83,24 +83,24 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                 break;
             }
         }
-        FT_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
+        RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(&outputs_pb, &(result.value()));
         if (context->IsCancelled()) {
             stream->cancel();
-            FT_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
+            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
-            FT_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
+            RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->needRemoteGenerate()) {
             break;
         }
     }
-    FT_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
 }
@@ -110,7 +110,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 grpc::ServerWriter<GenerateOutputsPB>*  writer) {
     AtomicGuard request_guard(onflight_requests_);
     auto request_id = request->request_id();
-    FT_LOG_DEBUG("receive request %ld", request_id);
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context = GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_);
     auto input = QueryConverter::transQuery(request);
 
@@ -125,9 +125,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
-    FT_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     generate_context.setStream(engine_->enqueue(input));
-    FT_LOG_DEBUG("request [%ld] enqueue success", request_id);
+    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
     generate_context.error_status = pollStreamOutput(
             context, generate_context.request_key, writer, generate_context.getStream());
@@ -139,8 +139,8 @@ LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo() {
 }
 
 void LocalRpcServer::addLora(const std::string& adapter_name,
-                             const ft::lora::loraLayerWeightsMap& lora_a_weights,
-                             const ft::lora::loraLayerWeightsMap& lora_b_weights)
+                             const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
+                             const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights)
 {
     engine_->addLora(adapter_name, lora_a_weights, lora_b_weights);
 }

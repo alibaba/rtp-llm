@@ -9,7 +9,7 @@ void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseW
     writer->AddHeader("Content-Type", "application/json");
 
     if (is_stopped_.load()) {
-        FT_LOG_WARNING("called health route, but server has been shutdown");
+        RTP_LLM_LOG_WARNING("called health route, but server has been shutdown");
         writer->SetStatus(503, "Service Unavailable");
         writer->Write(R"({"detail":"this server has been shutdown"})");
         return;
@@ -23,7 +23,7 @@ void HealthService::healthCheck2(const std::unique_ptr<http_server::HttpResponse
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->AddHeader("Content-Type", "application/json");
     if (is_stopped_.load()) {
-        FT_LOG_WARNING("called root route, but server has been shutdown");
+        RTP_LLM_LOG_WARNING("called root route, but server has been shutdown");
         writer->SetStatus(503, "Service Unavailable");
         writer->Write(R"({"detail":"this server has been shutdown"})");
         return;

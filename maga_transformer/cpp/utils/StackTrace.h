@@ -1,6 +1,6 @@
 #pragma once
 
-namespace fastertransformer {
+namespace rtp_llm {
     std::string getStackTrace();
     void printStackTrace();
 }

@@ -7,11 +7,11 @@
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
 #include "maga_transformer/cpp/utils/ErrorCode.h"
 #include "maga_transformer/cpp/position_ids_generator/PositionIdsGenerator.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -48,9 +48,9 @@ class MultimodalFeature {
 public:
     std::vector<torch::Tensor>   features;
     std::vector<MultimodalInput> inputs;
-    ft::BufferPtr                text_tokens_mask; // text part for 1 and multimodal part for 0
-    ft::BufferPtr                locs; // multimodal input locations
-    ft::BufferPtr                expanded_ids;
+    rtp_llm::BufferPtr                text_tokens_mask; // text part for 1 and multimodal part for 0
+    rtp_llm::BufferPtr                locs; // multimodal input locations
+    rtp_llm::BufferPtr                expanded_ids;
     MultimodalFeature() {}
 };
 
@@ -58,7 +58,7 @@ public:
 class GenerateInput {
 public:
     int inputLength() {
-        FT_CHECK(input_ids->shape().size() == 1);
+        RTP_LLM_CHECK(input_ids->shape().size() == 1);
         return input_ids->shape()[0];
     }
 
@@ -77,22 +77,22 @@ public:
 
     void updatePrefix(const std::vector<int>& prefix_prompt) {
         prefix_length   = prefix_prompt.size();
-        auto device     = ft::DeviceFactory::getDefaultDevice();
-        input_ids = device->concat({{ft::vector2Buffer(prefix_prompt), input_ids}});
+        auto device     = rtp_llm::DeviceFactory::getDefaultDevice();
+        input_ids = device->concat({{rtp_llm::vector2Buffer(prefix_prompt), input_ids}});
     }
 
 public:
     int64_t                         request_id              = 0;
     std::shared_ptr<GenerateConfig> generate_config;
-    ft::BufferPtr                   input_ids;
+    rtp_llm::BufferPtr                   input_ids;
     int                             lora_id                 = -1;
     bool                            need_release_resource   = true;
     bool                            fake_query              = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
-    std::optional<ft::BufferPtr>                text_tokens_mask;   // text part for 1 and multimodal part for 0
-    std::optional<ft::BufferPtr>                mm_locs;            // multimodal input locations
+    std::optional<rtp_llm::BufferPtr>                text_tokens_mask;   // text part for 1 and multimodal part for 0
+    std::optional<rtp_llm::BufferPtr>                mm_locs;            // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
     int                             prefix_length = 0;
@@ -113,22 +113,22 @@ public:
     int                                              fallback_times  = 0;
     int                                              step_output_len = 0;
     bool                                             pd_sep          = false;
-    std::optional<ft::ConstBufferPtr>                cum_log_probs;
-    std::optional<ft::ConstBufferPtr>                all_probs;
-    std::optional<ft::ConstBufferPtr>                softmax_probs;
+    std::optional<rtp_llm::ConstBufferPtr>                cum_log_probs;
+    std::optional<rtp_llm::ConstBufferPtr>                all_probs;
+    std::optional<rtp_llm::ConstBufferPtr>                softmax_probs;
 };
 
 
 class GenerateOutput {
 public:
-    ft::ConstBufferPtr              output_ids;
+    rtp_llm::ConstBufferPtr              output_ids;
     bool                            finished;
     AuxInfo                         aux_info;
     ErrorInfo                       error_info;
 
-    std::optional<ft::ConstBufferPtr> hidden_states;
-    std::optional<ft::ConstBufferPtr> logits;
-    std::optional<ft::ConstBufferPtr> loss;
+    std::optional<rtp_llm::ConstBufferPtr> hidden_states;
+    std::optional<rtp_llm::ConstBufferPtr> logits;
+    std::optional<rtp_llm::ConstBufferPtr> loss;
 };
 
 class GenerateOutputs {

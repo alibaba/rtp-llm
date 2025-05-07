@@ -9,7 +9,7 @@
 #include <sstream>
 
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 static constexpr int kMaxStackDepth = 64;
 
@@ -32,7 +32,7 @@ std::string getStackTrace() {
 }
 
 void printStackTrace() {
-    FT_STACKTRACE_LOG_INFO("%s", getStackTrace().c_str());
+    RTP_LLM_STACKTRACE_LOG_INFO("%s", getStackTrace().c_str());
     fflush(stdout);
     fflush(stderr);
 }

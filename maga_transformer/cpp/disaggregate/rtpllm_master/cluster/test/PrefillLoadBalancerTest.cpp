@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/disaggregate/rtpllm_master/cluster/PrefillLoadBalancer.h"
 #include "maga_transformer/cpp/disaggregate/rtpllm_master/cluster/test/FakeServer.h"
 #include "maga_transformer/cpp/http_server/http_server/HttpServer.h"
@@ -111,7 +111,7 @@ TEST_F(PrefillLoadBalancerTest, testChangeWeight) {
         ASSERT_TRUE(ret_host.status() == absl::OkStatus());
         auto host    = ret_host.value().host;
         auto address = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
-        FT_LOG_INFO("i : %d, addr: %s", i, address.c_str());
+        RTP_LLM_LOG_INFO("i : %d, addr: %s", i, address.c_str());
         std::unique_lock<std::shared_mutex> lock(load_balancer_->host_load_balance_info_map_mutex_);
         ASSERT_EQ(load_balancer_->worker_map_[address].running_task_list().size(), 1);
         ASSERT_EQ(load_balancer_->worker_map_[address].pending_task_list().size(), 1);

@@ -1,23 +1,23 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "maga_transformer/cpp/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/utils/Logger.h"
 #include <mutex>
 
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const fastertransformer::GptInitParameter& config,
+EmbeddingScheduler::EmbeddingScheduler(const rtp_llm::GptInitParameter& config,
                                        const kmonitor::MetricsReporterPtr         metrics_reporter):
     config_(config), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();
-    FT_LOG_INFO("destory EmbeddingScheduler");
+    RTP_LLM_LOG_INFO("destory EmbeddingScheduler");
 }
 
 absl::Status EmbeddingScheduler::stop() {
-    FT_LOG_INFO("stop EmbeddingScheduler");
+    RTP_LLM_LOG_INFO("stop EmbeddingScheduler");
     lock_guard<mutex> lock(lock_);
     stop_ = true;
     cond_.notify_all();

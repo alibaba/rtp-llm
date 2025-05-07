@@ -41,7 +41,7 @@ protected:
         auto iter    = finished_streams_.begin();
         while (iter != finished_streams_.end()) {
             if (iter->first > current) {
-                FT_LOG_WARNING("find task: %ld end time: %d bigger than current time: %d",
+                RTP_LLM_LOG_WARNING("find task: %ld end time: %d bigger than current time: %d",
                                iter->second.request_id,
                                iter->first,
                                current);

@@ -11,8 +11,8 @@ WRRLoadBalancer::WRRLoadBalancer() {
     available_ratio_ = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
     // rank factor: 0: KV_CACHE, 1: ONFLIGHT_REQUESTS
     rank_factor_ = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
-    FT_CHECK_WITH_INFO(rank_factor_ == 0 || rank_factor_ == 1, "rank factor should be 0 or 1");
-    FT_LOG_INFO("wrr load balance avaiable ratio %lu, rank factor = %ld", available_ratio_, rank_factor_);
+    RTP_LLM_CHECK_WITH_INFO(rank_factor_ == 0 || rank_factor_ == 1, "rank factor should be 0 or 1");
+    RTP_LLM_LOG_INFO("wrr load balance avaiable ratio %lu, rank factor = %ld", available_ratio_, rank_factor_);
 }
 
 WRRLoadBalancer::~WRRLoadBalancer() {
@@ -42,14 +42,14 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz, 
 
     if (global_counter != -1) {
         auto& host = biz_hosts->hosts[global_counter % biz_hosts->hosts.size()];
-        FT_LOG_DEBUG("global counter = %lu, min_spec = %s",
+        RTP_LLM_LOG_DEBUG("global counter = %lu, min_spec = %s",
             global_counter, ("tcp:" + ((host)->ip) + ":" + std::to_string((host)->http_port)).c_str());
         return host;
     }
 
     auto current_host = chooseHostByWeight(biz_hosts);
     if (current_host == nullptr) {
-        FT_LOG_WARNING("choose host by concurrency failed");
+        RTP_LLM_LOG_WARNING("choose host by concurrency failed");
         return biz_hosts->hosts[(*(biz_hosts->index))++ % biz_hosts->hosts.size()];  // choose host by RR
     }
     return current_host;
@@ -123,7 +123,7 @@ void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::
 
     if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
         if (part_success_times == wait_success_times) {
-            FT_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
+            RTP_LLM_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
             part_success_times = 0;
             HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
             std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
@@ -132,7 +132,7 @@ void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::
             part_success_times++;
         }
     } else {
-        FT_LOG_ERROR("worker status is failed, error msg is [%s]", ErrorCodeToString(result.status().code()).c_str());
+        RTP_LLM_LOG_ERROR("worker status is failed, error msg is [%s]", ErrorCodeToString(result.status().code()).c_str());
     }
 }
 

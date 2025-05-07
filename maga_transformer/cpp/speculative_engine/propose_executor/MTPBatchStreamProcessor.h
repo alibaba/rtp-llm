@@ -5,7 +5,7 @@ namespace rtp_llm {
 
 class MTPBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
-    MTPBatchStreamProcessor(const ft::GptInitParameter& params,
+    MTPBatchStreamProcessor(const rtp_llm::GptInitParameter& params,
                                const CacheConfig& cache_config, bool warm_up)
             : NormalBatchStreamProcessor(params, cache_config, warm_up) {};
 

@@ -10,7 +10,7 @@
 #include "maga_transformer/cpp/api_server/ApiServerMetrics.h"
 #include "maga_transformer/cpp/api_server/InferenceDataType.h"
 
-namespace ft = fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -32,7 +32,7 @@ private:
     formatResponse(const std::vector<std::string>&        generate_texts,
                    const GenerateOutputs&                 generate_outputs,
                    const std::shared_ptr<GenerateConfig>& generate_config,
-                   ft::BufferPtr                          input_ids);
+                   rtp_llm::BufferPtr                          input_ids);
 private:
     GenerateStreamPtr                        stream_;
     std::shared_ptr<GenerateConfig>          generate_config_;
@@ -42,7 +42,7 @@ private:
     std::shared_ptr<lora::LoraResourceGuard> lora_guard_;
     std::vector<int>                         output_lens_;
     GenerateOutputs                          outputs_cache_;
-    ft::BufferPtr                            input_ids_;
+    rtp_llm::BufferPtr                            input_ids_;
 };
 
 }  // namespace rtp_llm

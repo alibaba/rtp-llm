@@ -45,8 +45,8 @@ protected:
         ON_CALL(*mock_weights_loader_, loadLoraWeights(::testing::_, ::testing::_))
             .WillByDefault(::testing::Invoke([](const std::string&, const std::string&) {
                         return std::make_pair(
-                                std::make_unique<ft::lora::loraLayerWeightsMap>(),
-                                std::make_unique<ft::lora::loraLayerWeightsMap>()
+                                std::make_unique<rtp_llm::lora::loraLayerWeightsMap>(),
+                                std::make_unique<rtp_llm::lora::loraLayerWeightsMap>()
                                 );
                         }));
 

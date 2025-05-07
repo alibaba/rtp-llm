@@ -1,12 +1,12 @@
 #include <torch/script.h>
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
-#include "src/fastertransformer/models/W.h"
+#include "maga_transformer/cpp/models_weight/W.h"
 
 #include <filesystem>
 
 using namespace std;
-using namespace fastertransformer;
+
 
 namespace rtp_llm {
 
@@ -76,9 +76,9 @@ unique_ptr<const Weights> loadWeightsFromDirViaTorchScript(std::string dir_path)
         try {
             auto tensor = py_tensors_container.attr(key).toTensor();
             model_global_weights_[key] = tensor;
-            FT_LOG_INFO("model Tensor [%s] loaded: %s", key.c_str(), tensor.toString().c_str());
+            RTP_LLM_LOG_INFO("model Tensor [%s] loaded: %s", key.c_str(), tensor.toString().c_str());
         } catch (const exception& e) {
-            FT_LOG_INFO("Tensor [%s] skipped: %s", key.c_str(), e.what());
+            RTP_LLM_LOG_INFO("Tensor [%s] skipped: %s", key.c_str(), e.what());
             continue;
         }
     }
@@ -103,9 +103,9 @@ unique_ptr<const Weights> loadWeightsFromDirViaTorchScript(std::string dir_path)
             try {
                 auto tensor = layer_container.attr(key).toTensor();
                 layer_weights[key] = tensor;
-                FT_LOG_INFO("layer %d Tensor [%s] loaded: %s", i, key.c_str(), tensor.toString().c_str());
+                RTP_LLM_LOG_INFO("layer %d Tensor [%s] loaded: %s", i, key.c_str(), tensor.toString().c_str());
             } catch (const exception& e) {
-                FT_LOG_INFO("layer %d Tensor [%s] skipped: %s", i, key.c_str(), e.what());
+                RTP_LLM_LOG_INFO("layer %d Tensor [%s] skipped: %s", i, key.c_str(), e.what());
                 continue;
             }
         }
@@ -131,7 +131,7 @@ unique_ptr<const Weights> loadWeightsFromDir(std::string dir_path) {
 
 unique_ptr<GptModel> createGptModel(const GptModelInitParams& params) {
     // TODO(yitian team): create own model implementation and return.
-    if (params.device->getDeviceProperties().type == ft::DeviceType::Yitian) {
+    if (params.device->getDeviceProperties().type == rtp_llm::DeviceType::Yitian) {
         return make_unique<GptModel>(params);
     }
     return make_unique<GptModel>(params);

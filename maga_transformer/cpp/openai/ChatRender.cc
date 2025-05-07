@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/openai/ChatRender.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -29,11 +29,11 @@ getArgs(const GenerateOutputs& outputs) {
         output_len_list.push_back(aux_info.output_len);
         reuse_len_list.push_back(aux_info.reuse_len);
         if (aux_info.all_probs.has_value()) {
-            all_probs_list.push_back(ft::Buffer2torchTensor(aux_info.all_probs.value(), true));
+            all_probs_list.push_back(rtp_llm::Buffer2torchTensor(aux_info.all_probs.value(), true));
         } else {
             all_probs_list.push_back(th::empty({0}));
         }
-        output_ids_list.push_back(ft::Buffer2torchTensor(output.output_ids, true));
+        output_ids_list.push_back(rtp_llm::Buffer2torchTensor(output.output_ids, true));
     }
     return std::make_tuple(input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list);
 }

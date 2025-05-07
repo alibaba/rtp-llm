@@ -43,11 +43,11 @@ def load_cutlass_gemm_config(quant_algo):
                 for s in contents:
                     configs = split_config(s)
                     if quant_info == "int8":
-                        torch.ops.fastertransformer.insert_fp16_int8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
+                        torch.ops.rtp_llm.insert_fp16_int8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
                     elif quant_info == "int4":
-                        torch.ops.fastertransformer.insert_fp16_int4_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
+                        torch.ops.rtp_llm.insert_fp16_int4_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
                     elif quant_info == "w8a8":
-                        torch.ops.fastertransformer.insert_w8a8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
+                        torch.ops.rtp_llm.insert_w8a8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
     except Exception as e:
         logging.warn("load cutlass gemm config failed: " + str(e))
 

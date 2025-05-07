@@ -17,7 +17,7 @@ namespace rtp_llm {
         int request_id = 0;
         py::gil_scoped_release release;
         th::Tensor out = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id);
-        FT_CHECK_WITH_INFO(out.dim() == 3, "all embedding out should be 3-dim");
+        RTP_LLM_CHECK_WITH_INFO(out.dim() == 3, "all embedding out should be 3-dim");
         fill(writer, out);        
         return grpc::Status::OK;
     }

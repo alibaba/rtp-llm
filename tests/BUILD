@@ -31,11 +31,11 @@ cc_library(
     }) + [":fa"],
     deps = torch_deps() + [
         ":fa_hdrs",
-        "//src/fastertransformer/cuda:allocator_torch",
-        "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/kernels:kernels",
+        "//maga_transformer/cpp/cuda:allocator_torch",
+        "//maga_transformer/cpp/cuda:cuda",
+        "//maga_transformer/cpp/kernels:kernels",
         "//:th_utils",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
         "//:gpt_init_params",
     ],
     copts = cuda_copts(),
@@ -289,7 +289,7 @@ cc_test(
     copts = cuda_copts(),
     deps = [
         "@com_google_googletest//:gtest",
-        "//src/fastertransformer/kernels:kernels_cu"
+        "//maga_transformer/cpp/kernels:kernels_cu"
     ],
     data = [
     ],

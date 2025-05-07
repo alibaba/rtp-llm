@@ -8,7 +8,7 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
+FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&          params,
                              const std::shared_ptr<CacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
     cache_manager_(cache_manager),
@@ -26,7 +26,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
 
 FIFOScheduler::~FIFOScheduler() {
     (void)stop();
-    FT_LOG_INFO("destory FIFOScheduler");
+    RTP_LLM_LOG_INFO("destory FIFOScheduler");
 }
 
 bool FIFOScheduler::empty() {
@@ -34,7 +34,7 @@ bool FIFOScheduler::empty() {
 }
 
 absl::Status FIFOScheduler::stop() {
-    FT_LOG_INFO("stop FIFOScheduler");
+    RTP_LLM_LOG_INFO("stop FIFOScheduler");
     {
         lock_guard<mutex> lock(lock_);
         stop_ = true;
@@ -48,7 +48,7 @@ void FIFOScheduler::evaluateRunningRemote() {
         if ((*it)->needRemoteGenerate()) {
             (*it)->setRemoteGenerate();
             remote_running_streams_.emplace_back(*it);
-            FT_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
+            RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
             it = running_streams_.erase(it);
         } else {
             ++it;
@@ -67,7 +67,7 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
-            FT_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
+            RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
             it = streams.erase(it);
         } else {
             ++it;
@@ -105,7 +105,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
                 break;
             }
             if (stream->maxBlockSize()) {
-                FT_LOG_INFO("lack mem, stream [%ld] in watting queue try release blocks, "
+                RTP_LLM_LOG_INFO("lack mem, stream [%ld] in watting queue try release blocks, "
                     "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                     stream->streamId(), stream->inputLength(), stream->seqLength(), stream->maxBlockSize(), need_block_num);
                 stream->tryReleaseKVBlock(need_block_num);
@@ -122,7 +122,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             }
             auto& last_stream = *(running_streams_.rbegin());
             int need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
-            FT_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
+            RTP_LLM_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                 last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength(), last_stream->maxBlockSize(), need_release_blocks);
             last_stream->tryReleaseKVBlock(need_release_blocks);
             last_stream->setPaused();
@@ -134,20 +134,20 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
     if (enable_fast_gen_) {
         token_capacity_ = fast_gen_max_context_len_;
-        FT_LOG_DEBUG("initial token_capacity is %d", token_capacity_);
+        RTP_LLM_LOG_DEBUG("initial token_capacity is %d", token_capacity_);
     }
 
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         auto result = (*it)->incrKVBlock(token_capacity_, reserve_step);
         if (!result.ok()) {
             (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
-            FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
+            RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
             error_streams++;
         } else {
             if (enable_fast_gen_) {
                 token_capacity_ -= result.value();
-                FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
+                RTP_LLM_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
             }
             it++;
         }
@@ -182,7 +182,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     auto result = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
-        FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
+        RTP_LLM_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
     return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
 }
@@ -192,19 +192,19 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
-            FT_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
+            RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);
             } else {
-                FT_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
+                RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
                 stream->releaseResource();
                 it++;
             }
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
-            FT_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
+            RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxSeqLen()) {
                 stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                     "input len " + std::to_string(stream->inputLength()) +

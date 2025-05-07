@@ -16,18 +16,18 @@
 #include "maga_transformer/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
 #include "maga_transformer/cpp/utils/Cm2Config.h"
 
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/Buffer.h"
+#include "maga_transformer/cpp/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
-namespace ft = fastertransformer;
+
 namespace py = pybind11;
 
 namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(py::object mm_process_engine, ft::GptInitParameter params): 
+    RemoteMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params): 
     MultimodalProcessor(mm_process_engine, params) {
         initLoadBalancer();    
     }
@@ -40,8 +40,8 @@ private:
     void initLoadBalancer() {
         auto config = makeConfig();
         load_balancer_ = std::make_shared<RRLoadBalancer>();
-        FT_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
-        FT_LOG_INFO("load balancer init success");
+        RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
+        RTP_LLM_LOG_INFO("load balancer init success");
     }
 
     LoadBalancerInitParams makeConfig() {
@@ -50,10 +50,10 @@ private:
         if (use_local_env) {
             // fake test
             char* remote_vit_server_ip_env = std::getenv("REMOTE_VIT_SERVER_IP");
-            FT_CHECK_WITH_INFO(remote_vit_server_ip_env, "multimodal server ip must be not empty");
+            RTP_LLM_CHECK_WITH_INFO(remote_vit_server_ip_env, "multimodal server ip must be not empty");
             std::string remote_ip = std::string(remote_vit_server_ip_env);
             uint32_t remote_port = gpt_init_parameter_.remote_rpc_server_port_;
-            FT_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
+            RTP_LLM_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
 
             vit_cluster_name_ = "LOCAL";
             LocalNodeJsonize node1(vit_cluster_name_, remote_ip, remote_port);
@@ -62,14 +62,14 @@ private:
             subscribe_config.local_configs.push_back(local_config);
         } else {
             char* vit_cm2_config_env = std::getenv("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG");
-            FT_CHECK_WITH_INFO(vit_cm2_config_env, "vit_cm2_config_env must be not empty");
+            RTP_LLM_CHECK_WITH_INFO(vit_cm2_config_env, "vit_cm2_config_env must be not empty");
             std::string vit_cm2_config_str = std::string(vit_cm2_config_env);
 
             Cm2ClusterConfig vit_cm2_config;
             try {
                 FromJsonString(vit_cm2_config, vit_cm2_config_str);
             } catch (autil::legacy::ExceptionBase &e) {
-                FT_CHECK_WITH_INFO("create json from str[%s] failed", vit_cm2_config_str.c_str());
+                RTP_LLM_CHECK_WITH_INFO("create json from str[%s] failed", vit_cm2_config_str.c_str());
             }
             vit_cluster_name_ = vit_cm2_config.cluster_name;
             CM2SubscribeServiceConfig cm2_service_config;
