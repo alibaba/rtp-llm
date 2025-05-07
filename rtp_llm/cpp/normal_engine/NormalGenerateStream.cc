@@ -38,9 +38,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.iter_count      = iter_count_;
         generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
         generate_output.aux_info.fallback_times  = fallback_times_;
+        generate_output.output_ids = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
 
-        generate_output.output_ids =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1lu, output_len}, rtp_llm::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
         if (returnLogits() && update_info.logits) {
@@ -94,9 +93,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.step_output_len    = output_len;
         generate_output.aux_info.reuse_len          = reuse_length_;
         generate_output.aux_info.pd_sep             = queryPdSep();
-
-        generate_output.aux_info.cum_log_probs =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {1lu}, rtp_llm::AllocationType::HOST}, {});
+        generate_output.aux_info.cum_log_probs = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
 
         if (update_info.cum_log_probs) {
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
@@ -112,18 +109,18 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 {all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
         }
 
-        generate_results.generate_outputs.push_back(generate_output);
+        generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
     return generate_results;
 }
 
-void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs generate_results) {
+void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs &&generate_results) {
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         setStop(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
-        generate_outputs_queue_.push(generate_results);
+        generate_outputs_queue_.push(std::move(generate_results));
     }
 }
 

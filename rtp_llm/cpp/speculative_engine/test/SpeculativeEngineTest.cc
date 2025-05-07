@@ -41,7 +41,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 2);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 1);
@@ -101,7 +101,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 2);
@@ -120,7 +120,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
@@ -140,7 +140,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
@@ -168,7 +168,7 @@ TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
@@ -188,7 +188,7 @@ TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
 
         ASSERT_TRUE(stream != nullptr);
         auto output1 = stream->nextOutput();
-        ASSERT_TRUE(output1.ok());
+        ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);

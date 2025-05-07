@@ -95,6 +95,11 @@ private:
                  int64_t stream);
 
     static bool sameQLength(const BufferPtr &input_lengths_host, int context_batch_size, int &q_length);
+
+    static bool isDecode(int input_token_num);
+    static void recycle(void* p);
+    static FlashInferAttnParams* get(int batch_size, int input_token_num);
+
 };
 
 }

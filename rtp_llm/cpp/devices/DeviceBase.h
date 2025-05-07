@@ -10,6 +10,60 @@
 
 namespace rtp_llm {
 
+#define CACHED_BUF(dtype, atype, ...)                                   \
+    [&]() {                                                             \
+        static std::deque<rtp_llm::BufferPtr> buffers;                  \
+        rtp_llm::BufferPtr buffer;                                      \
+        std::vector<size_t> shape = __VA_ARGS__;                        \
+        auto size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>()); \
+        if (!buffers.empty()) {                                         \
+            buffer = std::move(buffers.back());                         \
+            buffers.pop_back();                                         \
+            if (buffer->size() < size) {                                \
+                buffer = nullptr;                                       \
+            }                                                           \
+        }                                                               \
+        if (!buffer) {                                                  \
+            buffer = device_->allocateBuffer({rtp_llm::DataType::dtype, shape, atype}, {}); \
+        }                                                               \
+        return std::make_shared<rtp_llm::Buffer>(buffer->where(), buffer->type(), shape, buffer->data(), [buffer](rtp_llm::Buffer *buf) { \
+            buffers.emplace_back(std::move(buffer));                    \
+        });                                                             \
+    }()
+
+#define CACHED_HOST_BUF(dtype, ...)                                     \
+    CACHED_BUF(dtype, rtp_llm::AllocationType::HOST, __VA_ARGS__)
+
+#define CACHED_DEVICE_BUF(dtype, ...)                                   \
+    CACHED_BUF(dtype, rtp_llm::AllocationType::DEVICE, __VA_ARGS__)
+
+#define SAFE_CACHED_HOST_BUF(dtype, ...)                                \
+    [&]() {                                                             \
+        static std::deque<rtp_llm::BufferPtr> buffers;                  \
+        static std::mutex mu;                                           \
+        rtp_llm::BufferPtr buffer;                                      \
+        std::vector<size_t> shape = __VA_ARGS__;                        \
+        auto size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>()); \
+        {                                                               \
+            std::unique_lock lock(mu);                                  \
+            if (!buffers.empty()) {                                     \
+                buffer = std::move(buffers.back());                     \
+                buffers.pop_back();                                     \
+                if (buffer->size() < size) {                            \
+                    buffer = nullptr;                                   \
+                }                                                       \
+            }                                                           \
+        }                                                               \
+        if (!buffer) {                                                  \
+            auto atype = rtp_llm::AllocationType::HOST;                 \
+            buffer = device_->allocateBuffer({rtp_llm::DataType::dtype, shape, atype}, {}); \
+        }                                                               \
+        return std::make_shared<rtp_llm::Buffer>(buffer->where(), buffer->type(), shape, buffer->data(), [buffer](rtp_llm::Buffer *buf){ \
+            std::unique_lock lock(mu);                                  \
+            buffers.emplace_back(std::move(buffer));                    \
+        });                                                             \
+    }()
+
 class DeviceBase : public DeviceOps {
 public:
     DeviceBase(const DeviceInitParams& params);

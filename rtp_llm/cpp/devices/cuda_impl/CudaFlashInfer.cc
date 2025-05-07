@@ -21,13 +21,39 @@ namespace rtp_llm {
 using Slice = torch::indexing::Slice;
 constexpr auto TNone = torch::indexing::None;
 
-static std::deque<FlashInferAttnParams*> PARAMS_CACHE;
-static int MIN_CACHE_BATCH_SIZE = 256;
-static int MIN_CACHE_INPUT_TOKEN_NUM = 512;
-static int MIN_CACHE_PAGE_NUM = 48 * 1024;
+static std::deque<FlashInferAttnParams*> DECODE_PARAMS_CACHE;
+static std::deque<FlashInferAttnParams*> PREFILL_PARAMS_CACHE;
 
-void FlashInferAttnParamsDel(void* p) {
-    PARAMS_CACHE.push_back((FlashInferAttnParams *)p);
+static const int MIN_CACHE_BATCH_SIZE = 256;
+static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
+static const int MIN_CACHE_PAGE_NUM = 48 * 1024;
+
+bool FlashInferAttnParams::isDecode(int input_token_num) {
+    return input_token_num <= MIN_CACHE_INPUT_TOKEN_NUM * 2;
+}
+
+void FlashInferAttnParams::recycle(void* p) {
+    auto flashinfer = (FlashInferAttnParams *)p;
+    if (isDecode(flashinfer->input_token_num)) {
+        DECODE_PARAMS_CACHE.push_back(flashinfer);
+    } else {
+        PREFILL_PARAMS_CACHE.push_back(flashinfer);
+    }
+}
+
+FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num) {
+    auto cache = isDecode(input_token_num) ? &DECODE_PARAMS_CACHE : &PREFILL_PARAMS_CACHE;
+    if (!cache->empty()) {
+        auto params = cache->back();
+        cache->pop_back();
+        if (batch_size <= params->batch_size &&
+            input_token_num <= params->input_token_num)
+        {
+            return params;
+        }
+        delete params;
+    }
+    return nullptr;
 }
 
 tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer(
@@ -59,17 +85,11 @@ tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer
 }
 
 FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch_size, int input_token_num, int page_num) {
-    if (!PARAMS_CACHE.empty()) {
-        auto params = PARAMS_CACHE.back();
-        PARAMS_CACHE.pop_back();
-        if (batch_size < params->batch_size &&
-            input_token_num < params->input_token_num)
-        {
-            return params;
-        }
-        delete params;
+    if (auto params = get(batch_size, input_token_num)) {
+        return params;
     }
 
+    RTP_LLM_LOG_INFO("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);
     auto params = make_unique<FlashInferAttnParams>();
     params->batch_size = batch_size;
     params->input_token_num = input_token_num;
@@ -96,8 +116,8 @@ FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch
                 {page_num}},      /* page_indice */             \
             type);                                              \
                                                                 \
-        params->buf_##suffix = get<0>(alloc_ret);               \
-        auto &tensors = get<1>(alloc_ret);                      \
+        params->buf_##suffix = std::get<0>(alloc_ret);          \
+        auto &tensors = std::get<1>(alloc_ret);                 \
         params->page_indptr_##suffix = tensors[0];              \
         params->qo_indptr_##suffix = tensors[1];                \
         params->batch_indice_##suffix = tensors[2];             \
@@ -250,8 +270,6 @@ void FlashInferAttnParams::genPlan(int batch_size,
                     true,
                     stream);
         } else if (mla_ops_type == MlaOpsType::FLASH_MLA) {
-            RTP_LLM_LOG_TRACE("batch_size = %zu", batch_size);
-            RTP_LLM_LOG_TRACE("local_head_num = %zu", local_head_num);
             flash_mla_plan = get_mla_metadata(kvlen_d, local_head_num * q_length, 1);
         } else {
             RTP_LLM_FAIL("unexpected mla ops type: %d", int(mla_ops_type));
@@ -378,7 +396,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*      
                                                max(MIN_CACHE_BATCH_SIZE, batch_size),
                                                max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
                                                MIN_CACHE_PAGE_NUM);
-    FlashInferAttnParamsPtr ret(params, FlashInferAttnParamsDel);
+    FlashInferAttnParamsPtr ret(params, recycle);
 
     if (kv_cache_block_id_device) {
         params->kv_cache_block_id_d = Buffer2torchTensor(kv_cache_block_id_device, false);

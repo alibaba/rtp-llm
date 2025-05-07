@@ -872,7 +872,7 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
 GptLayerOutputs GptModel::forwardGptLayer(
     GptLayerInputs inputs,
     const int32_t layer_id,
-    rtp_llm::lora::LoraModelInputPtr lora_model_input)
+    const rtp_llm::lora::LoraModelInputPtr &lora_model_input)
 {
     DevicePerfWrapper wrapper(device_, "forwardGptLayer_token_num_%d", inputs.hidden ? inputs.hidden->shape()[0]: 0);
     auto pre_decoder_residual = inputs.pre_decoder_residual;
@@ -905,7 +905,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     prepareExpertStats(layer_id, ffn_layer_params);
 
     if (lora_model_input) {
-        ffn_layer_params.lora_input =  lora_model_input->getFfnLayerLoraInput(layer_id);
+        ffn_layer_params.lora_input = lora_model_input->getFfnLayerLoraInput(layer_id);
     }
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     device_->checkError();
@@ -944,7 +944,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
 AttentionBlockOutputs GptModel::forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
-        rtp_llm::lora::LoraModelInputPtr lora_model_input,
+        const rtp_llm::lora::LoraModelInputPtr &lora_model_input,
         const LastLayerDeferedParams& last_layer_defered_params)
 {
     auto hidden = inputs.hidden;

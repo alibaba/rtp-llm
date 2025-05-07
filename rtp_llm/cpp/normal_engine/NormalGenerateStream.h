@@ -31,7 +31,7 @@ public:
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
-    void            enqueueGenerateOutput(GenerateOutputs generate_results);
+    void            enqueueGenerateOutput(GenerateOutputs &&generate_results);
 
     int64_t                                   request_id_{0};
     bool                                      finished_{false};

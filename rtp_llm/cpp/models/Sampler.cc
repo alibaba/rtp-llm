@@ -31,7 +31,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto beam_sizes = inputs.num_beams->data<uint64_t>();
 
     const auto& input_tokens = *inputs.token_ids;
-    auto success = device_->allocateBuffer({DataType::TYPE_BOOL, {inputs.batch_size}, AllocationType::HOST});
+    auto success = CACHED_HOST_BUF(TYPE_BOOL, {inputs.batch_size});
     preprocessLogits(inputs);
 
     do {

@@ -107,9 +107,14 @@ rtp_llm::lora::LoraModelInputPtr LoraManager::makeLoraModelInput(rtp_llm::Buffer
     std::vector<rtp_llm::lora::LoraModelPtr> result(batch_size);
     int32_t* lora_ids_ptr = lora_ids->data<int32_t>();
     bool use_same_lora = true;
+    bool has_lora = false;
     for (int i = 0; i < batch_size; i++) {
         result[i] = getLora(lora_ids_ptr[i]);
+        has_lora = result[i] || has_lora;
         use_same_lora = use_same_lora && (lora_ids_ptr[i] == lora_ids_ptr[0]);
+    }
+    if (!has_lora) {
+        return nullptr;
     }
     return std::make_shared<rtp_llm::lora::LoraModelInput>(lora_input_lengths, result, use_same_lora);
 }

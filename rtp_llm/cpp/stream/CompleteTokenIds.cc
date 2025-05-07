@@ -64,7 +64,7 @@ std::vector<int> CompleteTokenIds::commonCompleteTokenIdsVec(int batch_idx) {
 
 std::vector<int> CompleteTokenIds::currentExecuteTokens(int batch_idx) {
     RTP_LLM_CHECK(batch_idx < batch_size_);
-    return {*(*complete_token_ids_)[batch_idx].dataWithOffset<int>(seq_length_ - 1)};
+    return {*(data(batch_idx) + seq_length_ - 1)};
 }
 
 std::vector<int> CompleteTokenIds::contextTokens(int batch_idx, int prefix_length, int context_length) {
@@ -82,7 +82,7 @@ std::vector<int> CompleteTokenIds::getLatestTokens(size_t token_num) {
 }
 
 bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
-    int* token_ids = (int*)complete_token_ids_->view(batch_id, 1).data();
+    int* token_ids = data(batch_id);
     for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
         if (token_id == token_ids[i - 1]) {
             seq_length_ = i;
@@ -93,7 +93,7 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
 }
 
 bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int> &stop_words) {
-    int* token_ids = (int*)complete_token_ids_->view(batch_id, 1).data();
+    int* token_ids = data(batch_id);
     for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
         bool match_one   = true;
         size_t begin_index = i - stop_words.size();
@@ -127,19 +127,21 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens, int64_t begi
     // # which needs to update all the generated tokens each update.
     RTP_LLM_CHECK(new_tokens->dim() == 2);
 
+    auto new_tokens_ptr = new_tokens->data<int>(); // [batch_size, max_num_new_tokens]
+    auto max_num_new_tokens = new_tokens->shape()[1];
+
     for (size_t i = 0; i < batch_size_; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
+            auto current_token_id = (new_tokens_ptr + num_new_tokens * i)[j];
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) { // check tokenid
                 error_token_id = current_token_id;
                 return false;
             }
         }
         if (num_beams > 1) {
-            auto new_tokens_num = (*new_tokens)[i].shape()[0];
-            device_->copy({(*complete_token_ids_)[i].view(0, new_tokens_num), (*new_tokens)[i]});
+            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
         } else {
-            device_->copy({(*complete_token_ids_)[i].view(seq_length_, num_new_tokens), (*new_tokens)[i].view(0, num_new_tokens)});
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
     setSeqLength(seq_length_ + num_new_tokens);
@@ -167,8 +169,7 @@ int CompleteTokenIds::seqLength() const {
 }
 
 void CompleteTokenIds::copyTokensTo(int batch_id, void *dst, int offset, size_t token_num) {
-    memcpy(dst, complete_token_ids_->view(batch_id, 1).dataWithOffset<int32_t>(offset),
-               sizeof(int32_t) * token_num);
+    memcpy(dst, data(batch_id) + offset, sizeof(int32_t) * token_num);
 }
 
 void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer &src) {
@@ -197,7 +198,8 @@ std::string CompleteTokenIds::toString(int batch_id) const {
 
 int32_t* CompleteTokenIds::data(int batch_id) {
     // eq to (*comple_token_ids).[batch_id].data<int32_t>();
-    return complete_token_ids_->view(batch_id, 1).data<int32_t>();
+    // avoid construct Buffer to reduce overhead
+    return complete_token_ids_->data<int32_t>() + batch_id * complete_token_ids_->shape()[1];
 }
 
 std::string CompleteTokenIds::showStatus(int batch_id) {
