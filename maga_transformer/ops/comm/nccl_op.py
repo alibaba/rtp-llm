@@ -15,7 +15,7 @@ def singleton(cls):
 class NcclOp():
     def __init__(self):
         super().__init__()
-        self.ft_op_ = torch.classes.FasterTransformer.NcclOp( # type: ignore
+        self.ft_op_ = torch.classes.RtpLlm.NcclOp( # type: ignore
             g_parallel_info.tp_size,
             g_parallel_info.pp_size,
             g_master_info.ip,

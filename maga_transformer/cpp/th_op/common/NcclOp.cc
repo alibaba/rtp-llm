@@ -43,11 +43,11 @@ void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root, bool ti
 
 }  // namespace torch_ext
 
-static auto fasterTransformerNcclTHS =
+static auto rtpLlmNcclTHS =
 #ifdef LEGACY_THS
-    torch::jit::class_<torch_ext::NcclOp>("FasterTransformerNcclOp")
+    torch::jit::class_<torch_ext::NcclOp>("RtpLlmNcclOp")
 #else
-    torch::jit::class_<torch_ext::NcclOp>("FasterTransformer", "NcclOp")
+    torch::jit::class_<torch_ext::NcclOp>("RtpLlm", "NcclOp")
 #endif
         .def(torch::jit::init<int64_t, int64_t, std::string, int64_t>())
         .def("broadcast_tp", &torch_ext::NcclOp::broadcast_tp);
