@@ -23,6 +23,7 @@ def scale_reshape(ts):
 class QWenV2Weight(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
         self.prefix: str = kwargs.pop('prefix', "")
+        self.bias = True
         super().__init__(*args, **kwargs)
 
     @property
@@ -80,12 +81,6 @@ class QWenV2Weight(ModelDeployWeightInfo):
         layer_weights = [
             AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight', identity)],
                        identity),
-            AttnAtomicWeight(W.attn_qkv_b, [
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.bias', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.bias', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.bias', identity)
-                ],
-                functools.partial(merge_qkv_b), config=attn_config),
             AttnAtomicWeight(W.attn_qkv_w, [
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight', identity),
                     CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight', identity),
@@ -104,6 +99,15 @@ class QWenV2Weight(ModelDeployWeightInfo):
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
                        identity, config=attn_config),
         ]
+        
+        if self.bias:
+            layer_weights.append(
+                AttnAtomicWeight(W.attn_qkv_b, [
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.bias', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.bias', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.bias', identity)
+                ],
+                functools.partial(merge_qkv_b), config=attn_config))
 
         if self._use_qk_norm:
             layer_weights.extend([

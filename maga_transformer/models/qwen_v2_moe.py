@@ -62,7 +62,7 @@ class Qwen2Moe(QWenV2):
         config.moe_k = config_json['num_experts_per_tok']
         config.expert_num = config_json['num_experts']
         config.moe_inter_padding_size=config_json['moe_intermediate_size']
-        config.inter_size = config_json['shared_expert_intermediate_size']
+        config.inter_size = config_json.get('shared_expert_intermediate_size', 0)
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.has_moe_norm = config_json.get("norm_topk_prob", False)
         # step for moe layer

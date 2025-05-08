@@ -11,6 +11,7 @@ from .chat_glm_v3 import ChatGlmV3
 from .chat_glm_v4 import ChatGlmV4
 from .qwen import QWen_7B, QWen_13B, QWen_1B8
 from .qwen_v2 import QWenV2
+from .qwen_v3 import QwenV3
 from .falcon import Falcon
 from .mpt import Mpt
 from .phi import Phi
@@ -34,6 +35,7 @@ from .bert import Bert
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .qwen_v2_moe import Qwen2Moe
+from .qwen_v3_moe import Qwen3Moe
 
 import logging
 try:

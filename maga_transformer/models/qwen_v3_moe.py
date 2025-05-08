@@ -1,17 +1,18 @@
 import os
 import json
-
+from typing import Any
 from maga_transformer.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
 from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, stack_, stack_moe_w1
 from maga_transformer.model_loader.ffn_weight import FfnConfig, MoeConfig, MoeAtomicWeight, MoeWeight
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 
-
-
 class QWenV3MoeWeight(QWenV2MoeWeight):
-    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.bias = False        
 
+    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
             inter_padding_size=self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size,
@@ -33,6 +34,11 @@ class Qwen3Moe(Qwen2Moe):
     @staticmethod
     def get_weight_cls():
         return QWenV3MoeWeight
-
+    
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        config.use_qk_norm = True
+        return config
 
 register_model('qwen_3_moe', Qwen3Moe, ["Qwen3MoeForCausalLM"])

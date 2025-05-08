@@ -9,6 +9,7 @@ from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, kv_
     multipy_identity, pad, transpose_slice_k, transpose_slice_v,\
         pad_w13
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
+from maga_transformer.utils.util import check_with_info
 
 
 W_SUFFIX = '.weight'
@@ -98,7 +99,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
-            kernel, scale = self._get_attn_out_quant_weight(src_weight_info, self.group_size)
+            if isinstance(src_weight_info, MlaAttnAtomicWeight):
+                kernel, scale = self._get_mla_attn_out_quant_weight(src_weight_info, self.group_size)
+            else:
+                kernel, scale = self._get_mha_attn_out_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name in [W.mla_k_nope_w, W.mla_v_w]:
             kernel, scale = self._get_mla_kv_nope_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name in [W.mla_kc, W.mla_vc]:
@@ -128,15 +132,26 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         qkv_w_list = [CkptWeightInfo(sub_w.name[:-len(W_SUFFIX)] + QW_SUFFIX, sub_w.merge_fun) for sub_w in weights]
         qkv_s_list = [CkptWeightInfo(sub_w.name[:-len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun) for sub_w in weights]
         kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_qkv_w,
-                                                  [qkv_w_list], concat_0, data_type=torch.float8_e4m3fn, config=src_weight_info.config)
+                                                  qkv_w_list, concat_0, data_type=torch.float8_e4m3fn, config=src_weight_info.config)
 
         scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_qkv_s,
                                                  qkv_s_list, concat_0, data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
+    def _get_mha_attn_out_quant_weight(self, src_weight_info: AttnAtomicWeight, group_size: int):
+        check_with_info(src_weight_info.name == W.attn_o_w, "src_weight_info.name != W.attn_o_w, actual: {}".format(src_weight_info.name))
+        check_with_info(isinstance(src_weight_info, AttnAtomicWeight), "src_weight_info is not AttnAtomicWeight, actual: {}".format(src_weight_info))
+        w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
 
-    def _get_attn_out_quant_weight(self, src_weight_info: MlaAttnAtomicWeight, group_size: int):
-        assert src_weight_info.name == W.attn_o_w
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_w, [CkptWeightInfo(w_name + QW_SUFFIX)],
+                                 data_type=torch.float8_e4m3fn, config=src_weight_info.config)
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_s,
+                                                 [CkptWeightInfo(w_name + QS_SUFFIX)], identity, data_type=torch.float32, config=src_weight_info.config)
+        return [kernel, scale]
+
+    def _get_mla_attn_out_quant_weight(self, src_weight_info: MlaAttnAtomicWeight, group_size: int):
+        check_with_info(src_weight_info.name == W.attn_o_w, "src_weight_info.name != W.attn_o_w, actual: {}".format(src_weight_info.name))
+        check_with_info(isinstance(src_weight_info, MlaAttnAtomicWeight), "src_weight_info is not MlaAttnAtomicWeight, actual: {}".format(src_weight_info))
         w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
         kernel = MlaAttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                     functools.partial(mla_pad, head_num=src_weight_info.config.head_num, nope_head_dim=src_weight_info.nope_head_dim, rope_head_dim=0),
