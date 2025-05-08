@@ -36,21 +36,6 @@ class DataClassBase:
 mc_sim_7b_63 = [[0], [0, 0], [1], [0, 1], [2], [0, 0, 0], [1, 0], [0, 2], [3], [0, 3], [4], [0, 4], [2, 0], [0, 5], [0, 0, 1], [5], [0, 6], [6], [0, 7], [0, 1, 0], [1, 1], [7], [0, 8], [0, 0, 2], [3, 0], [0, 9], [8], [9], [1, 0, 0], [0, 2, 0], [1, 2], [0, 0, 3], [4, 0], [2, 1], [0, 0, 4], [0, 0, 5], [0, 0, 0, 0], [0, 1, 1], [0, 0, 6], [0, 3, 0], [5, 0], [1, 3], [0, 0, 7], [0, 0, 8], [0, 0, 9], [6, 0], [0, 4, 0], [1, 4], [7, 0], [0, 1, 2], [2, 0, 0], [3, 1], [2, 2], [8, 0], [0, 5, 0], [1, 5], [1, 0, 1], [0, 2, 1], [9, 0], [0, 6, 0], [0, 0, 0, 1], [1, 6], [0, 7, 0]]
 
 @dataclass
-class MedusaConfig(DataClassBase):
-    medusa_num_heads: int = 0
-    medusa_num_layers: int = 0
-    medusa_choices: List[List[int]] = field(default_factory=lambda: mc_sim_7b_63)
-    top_k: int = 10
-    posterior_threshold: float = 0.09
-    posterior_alpha: float = 0.3
-
-    def check(self) -> bool:
-        if self.medusa_num_heads <= 0 or self.medusa_num_layers <= 0 or len(self.medusa_choices) <= 0:
-            logging.info(f"medusa config error: {self}")
-            return False
-        return True
-
-@dataclass
 class SparseConfig(DataClassBase):
     layer_num: int = 0
     layer_head_num: List[int] = field(default_factory=lambda: [])
@@ -98,7 +83,6 @@ class GptInitModelParameters:
         "mm_related_params",
         "lora_infos",
         "multi_task_prompt",
-        "medusa_config",
         "normalize_lm_head_weight",
         "ref_module",
         "ref_dict",
@@ -259,7 +243,6 @@ class GptInitModelParameters:
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_logn_attn: bool
-    use_medusa: bool
     use_mla: bool
     use_norm_attn_out_residual: bool
     use_norm_input_residual: bool
@@ -295,7 +278,6 @@ class GptInitModelParameters:
         self.normalize_lm_head_weight = False
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
-        self.medusa_config = None
 
         self.ptuning_path = None
         self.multi_task_prompt = None

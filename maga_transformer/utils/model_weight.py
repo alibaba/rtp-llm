@@ -734,8 +734,6 @@ class W:
     post_ffn_ln_static_quant = "post_ffn_layernorm_weights.static_quant"
     post_ffn_ln_static_quant_reciprocal = "post_ffn_layernorm_weights.static_quant_reciprocal"
 
-    # medusa lm_head
-    medusa_head = 'medusa_head'
 
     # rotary embedding cos sin cache
     rope_cos_sin_cache = 'rotary_embedding.cos_sin_cache'

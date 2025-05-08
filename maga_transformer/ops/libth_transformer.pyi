@@ -268,7 +268,6 @@ class GptInitParameter:
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_logn_attn: bool
-    use_medusa: bool
     use_mla: bool
     use_norm_attn_out_residual: bool
     use_norm_input_residual: bool

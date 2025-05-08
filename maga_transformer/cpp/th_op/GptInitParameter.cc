@@ -317,7 +317,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(warm_up_with_loss, warm_up_with_loss_)                 \
     DEF_PROPERTY(fast_gen_max_context_len, fast_gen_max_context_len_)   \
     DEF_PROPERTY(is_causal, is_causal_)                                 \
-    DEF_PROPERTY(use_medusa, use_medusa_)                               \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                     \
     DEF_PROPERTY(tp_nccl_port, tp_nccl_port_)                           \
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                     \

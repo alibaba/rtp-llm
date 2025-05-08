@@ -151,7 +151,6 @@ class ModelDeployWeightInfo:
         self._src_quantization_bit = config.src_quantization_bit
         self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
 
-        self._is_medusa_model = config.gpt_init_params.use_medusa
 
         self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
@@ -238,8 +237,6 @@ class ModelDeployWeightInfo:
         if self._is_sparse_head:
             logging.info("Skiping load empty weight for head_num == 0")
             weight_info = self._process_sparse_weight(weight_info)
-        if self._is_medusa_model:
-            raise NotImplementedError("Medusa model is not supported yet")
 
         return weight_info
 

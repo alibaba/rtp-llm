@@ -151,7 +151,6 @@ struct Weights {
     std::shared_ptr<const LayerNormWeights> final_layernorm;
     std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
-    std::shared_ptr<const DenseWeights>     medusa_head;
 
 };
 

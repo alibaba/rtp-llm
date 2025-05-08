@@ -75,8 +75,6 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle);
         } else if (sp_type == "eagle") {
             RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
-        } else if (sp_type == "medusa") {
-            RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
         } else {
             RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
         }

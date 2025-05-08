@@ -123,17 +123,12 @@ template<typename T>
 static bool CheckUseFMHA(const rtp_llm::GptInitParameter& params) {
     char* fmha_env        = std::getenv("ENABLE_FMHA");
     bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
-    bool use_medusa = params.use_medusa_;
     if (!fmha_enable){
         RTP_LLM_LOG_INFO("FMHA is not enbaled");
         return false;
     }
     if(std::is_same<T, float>::value){
         RTP_LLM_LOG_INFO("FMHA not support float");
-        return false;
-    }
-    if (use_medusa) {
-        RTP_LLM_LOG_INFO("FMHA not support medusa model");
         return false;
     }
     return true;

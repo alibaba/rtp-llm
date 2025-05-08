@@ -45,7 +45,6 @@ class FakeModel(BaseModel):
         config.lora_infos = None
         config.multi_task_prompt = None
         config.is_sparse_head = False
-        config.use_medusa = False
         config.tokenizer_path = model_config.tokenizer_path
         return config
 

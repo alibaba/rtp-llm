@@ -90,8 +90,6 @@ class ModelFactory:
             model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
         elif model_config.sp_type == "eagle":
             raise NotImplementedError
-        elif model_config.sp_type == "medusa":
-            raise NotImplementedError
         return model
 
     #TODO: remove model_config, get all info from gpt_config
@@ -103,7 +101,6 @@ class ModelFactory:
             "max_seq_len": config.max_seq_len,
             "use_sparse_head": config.is_sparse_head,
             "use_multi_task_prompt": config.multi_task_prompt,
-            "use_medusa": config.use_medusa,
             "lora_infos": config.lora_infos
         }
         return config_json
@@ -211,9 +208,6 @@ class ModelFactory:
             logging.info("use deterministic speculative model")
         elif sp_type == "eagle":
             logging.info("use eagle speculative model")
-            raise NotImplementedError
-        elif sp_type == "medusa":
-            logging.info("use medusa speculative model")
             raise NotImplementedError
 
         return propose_model_config

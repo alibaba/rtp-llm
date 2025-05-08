@@ -91,7 +91,6 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params_;
     py::object                        eagle_model;
-    py::object                        medusa_model;
     kmonitor::MetricsReporterPtr      metrics_reporter = nullptr;
 };
 
