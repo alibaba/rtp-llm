@@ -76,16 +76,16 @@ namespace rtp_llm {
         torch::Tensor plan;
     
         static FlashInferAttnParamsPtr prepareDecodeFlashInferAttnParams(
-            fastertransformer::DeviceBase *device,
-            const fastertransformer::AttentionConfigs &attn_configs,
+            rtp_llm::DeviceBase *device,
+            const rtp_llm::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,
             const BufferPtr &input_lengths_host,
             const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
     
         static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
-            fastertransformer::DeviceBase *device,
-            const fastertransformer::AttentionConfigs &attn_configs,
+            rtp_llm::DeviceBase *device,
+            const rtp_llm::AttentionConfigs &attn_configs,
             const BufferPtr &prefix_lengths_host,
             const BufferPtr &sequence_lengths_host,
             const BufferPtr &input_lengths_host,
@@ -125,6 +125,7 @@ public:
     MultiplyOutput multiply(const MultiplyParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
+    LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
@@ -155,6 +156,10 @@ public:
     void mlaAbsorbAttention(const MlaAttentionModuleParams& params);
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     SliceOutput slice(const SliceParams& params) override;
+
+protected:
+    void InvokeROCmDeepGemm(const GemmParams& params,
+                            BufferPtr         output);
 
 public:
     hipStream_t getStream() {return stream_;}

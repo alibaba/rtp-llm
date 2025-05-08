@@ -246,14 +246,28 @@ cc_library(
     srcs = glob([
         "mla/mla_rotary_kvcache_test.cc",
         "mla/mla_decoder_attention.cc",
-        "mla/rocm_mla_context_attention.cc"
-    ]),
+        "mla/mla_context_attention.cc",        
+        "gemm/gemm_op_test.cc"
+    ]) + select({
+        "@//:using_cuda11": glob([
+            "fp8_gemm/*.cc",
+            "gemm_dequantize/*.cc",
+            "int8_gemm/*.cc",
+        ]),
+        "@//:using_cuda12": glob([
+            "fp8_gemm/*.cc",
+            "gemm_dequantize/*.cc",
+            "int8_gemm/*.cc",
+        ]),
+        "//conditions:default": [],
+    }),
     deps = torch_deps() + [
-        "//src/fastertransformer/devices/rocm_impl:rocm_impl",        
+        "//maga_transformer/cpp/devices/rocm_impl:rocm_impl",        
     ],
     copts = rocm_copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
+	tags = ["rocm"],
 )
 
 cc_binary(
@@ -261,6 +275,28 @@ cc_binary(
     deps = [":rocm_test_ops_libs"],
     linkshared = 1,
     visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+py_test(
+    name = "rocm_gemm_op_test",
+    srcs = [
+        "gemm/rocm_gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+        "//maga_transformer:maga_transformer_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "rocm",
+    ],
 )
 
 py_test(
@@ -280,7 +316,9 @@ py_test(
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
     },
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "rocm",
+    ],
 )
 
 
@@ -342,8 +380,8 @@ py_test(
     },
     tags = [
         "manual",
+		"rocm",
     ], 
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -360,6 +398,9 @@ py_test(
     deps = [
         "//maga_transformer:torch",
         "//maga_transformer:maga_transformer_lib",
+    ],
+    tags = [
+        "rocm",
     ],
 )
 

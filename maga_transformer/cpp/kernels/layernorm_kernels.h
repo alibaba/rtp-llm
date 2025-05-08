@@ -16,7 +16,6 @@
 
 #pragma once
 
-
 #include "maga_transformer/cpp/utils/layernorm_types.h"
 #include <assert.h>
 #if USING_CUDA

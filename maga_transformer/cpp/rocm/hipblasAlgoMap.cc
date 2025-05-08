@@ -65,6 +65,8 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
             return HIP_R_16F;
         } else if (field == "bf16_r") {
             return HIP_R_16BF;
+        } else if (field == "f8_e4m3_fnuz_r") {
+            return HIP_R_8F_E4M3_FNUZ;
         } else {
             return absl::InvalidArgumentError("Invalid hipDataType value: " + std::string(field));
         }
@@ -261,6 +263,8 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
                 return "f16_r";
             case HIP_R_16BF:
                 return "bf16_r";
+            case HIP_R_8F_E4M3_FNUZ:
+                return "f8_e4m3_fnuz_r";
             default:
                 return "<?>";
         }

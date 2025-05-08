@@ -111,10 +111,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipblasLtCreate(&hipblaslt_handle_));
 
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_, hipblaslt_handle_, stream_, allocator_ptr));
-    hipblas_mm_wrapper_->setGemmConfig(hipblasDatatype_t::HIPBLAS_R_16F,
-                                       hipblasDatatype_t::HIPBLAS_R_16F,
-                                       hipblasDatatype_t::HIPBLAS_R_16F,
-                                       hipblasDatatype_t::HIPBLAS_R_32F);
+    hipblas_mm_wrapper_->setGemmConfig(hipDataType::HIP_R_16F,
+                                       hipDataType::HIP_R_16F,
+                                       hipDataType::HIP_R_16F,
+                                       hipDataType::HIP_R_32F);
 
     hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());

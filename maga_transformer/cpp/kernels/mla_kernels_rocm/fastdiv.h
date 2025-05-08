@@ -21,7 +21,7 @@
 #define FLASHINFER_FASTDIV_CUH_
 #include <cstdint>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 struct uint_fastdiv {
   uint32_t d;

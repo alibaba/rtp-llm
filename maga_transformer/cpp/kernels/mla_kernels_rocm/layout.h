@@ -20,7 +20,7 @@
 #include <string>
 #include <tuple>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 /*!
  * \brief The Layout of QKV matrices

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "amd_bfloat16.h"
 #include <hip/hip_fp16.h>
+#include <hip/hip_fp8.h>
 #include <hip/hip_runtime.h>
 #include <hiprand/hiprand_kernel_rocm.h>
 

@@ -495,7 +495,11 @@ def kv_split2(
 def mla_pad(ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_head_dim: int) -> torch.Tensor:
     t = ts[0]
     t = t.reshape(-1, head_num, nope_head_dim)
-    z = torch.zeros(t.shape[0], head_num, rope_head_dim, device=t.device, dtype=t.dtype)
+    if t.dtype in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]:
+        # compatible with torch versions
+        z = torch.zeros((t.shape[0], head_num, rope_head_dim), device=t.device, dtype=torch.uint8).view(t.dtype)
+    else:
+        z = torch.zeros((t.shape[0], head_num, rope_head_dim), device=t.device, dtype=t.dtype)
     t = torch.cat([t, z], dim=-1)
     t = t.reshape(-1, head_num * (nope_head_dim + rope_head_dim))
     return t.contiguous()

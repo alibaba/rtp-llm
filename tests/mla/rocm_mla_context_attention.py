@@ -1,11 +1,18 @@
+
+import logging
+
+logging.basicConfig(
+    level="INFO",
+    format='%(message)s')
+
 import math
 import os
 import unittest
 import torch
 
 from dataclasses import dataclass
-from test_util import MlaOpsType, compare_tensor_diff_with_ratio
 #from flash_attn import flash_attn_varlen_func
+from test_util import MlaOpsType, compare_tensor_diff_with_ratio
 import random
 
 os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
@@ -16,8 +23,8 @@ def set_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-os.environ["ENABLE_TRTV1_FMHA"] = "OFF"
-os.environ["ENABLE_TRT_FMHA"] = "OFF"
+# os.environ["ENABLE_TRTV1_FMHA"] = "OFF"
+# os.environ["ENABLE_TRT_FMHA"] = "OFF"
 os.environ["DISABLE_FLASH_INFER"]="1"
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1):
@@ -40,63 +47,65 @@ class DeepSeekConfig:
     softmax_scale = 192**-0.5 * mscale * mscale
 
 
-# def torch_attention(
-#     q: torch.Tensor,
-#     kv_a: torch.Tensor,
-#     k_rope: torch.Tensor,
-#     k_nope_weight: torch.Tensor,
-#     v_weight: torch.Tensor,
-#     seq_len: torch.Tensor,
-#     config: DeepSeekConfig,
-# ):
-#     head_num = config.head_num
-#     nope_head_size = config.nope_head_size
-#     rope_head_size = config.rope_head_size
-#     nope_rope_size = config.nope_rope_size
-#     v_head_size = config.v_head_size
-#     # [token, kv_lora] [kv_lora, head * nope_size] -> [token, nope_size]
-#     k_nope = kv_a @ k_nope_weight
-#     # [token, kv_lora] [kv_lora, head * nope_size] -> [token, nope_size]
-#     v = kv_a @ v_weight
-#     token_num = q.shape[0]
-
-#     k_nope_tensor = k_nope.reshape(1, token_num, head_num, nope_head_size).permute(
-#         0, 2, 1, 3
-#     )
-#     k_rope_tensor = k_rope.reshape(1, token_num, 1, rope_head_size).permute(0, 2, 1, 3)
-
-#     query_states = q.reshape(1, token_num, head_num, nope_rope_size).permute(0, 2, 1, 3)
-#     key_states = query_states.new_empty(1, head_num, token_num, nope_rope_size)
-#     key_states[:, :, :, :nope_head_size] = k_nope_tensor
-#     key_states[:, :, :, nope_head_size:] = k_rope_tensor
-#     value_states = v.reshape(1, token_num, head_num, v_head_size).permute(0, 2, 1, 3)
-
-#     # call flash attn
-#     zero_paded = torch.zeros(1, head_num, token_num, rope_head_size, dtype=query_states.dtype, device=query_states.device)
-#     value_states = torch.cat([value_states, zero_paded], dim=-1)
-#     query_states = query_states.transpose(1, 2).squeeze(0).contiguous()
-#     key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
-#     value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
-
-#     batch_size = seq_len.shape[0]
-#     cu_seq_len = torch.zeros((batch_size + 1,), dtype=torch.int32, device=query_states.device)
-#     total_seq_len = 0
-#     for i in range(batch_size):
-#         total_seq_len += seq_len[i]
-#         cu_seq_len[i + 1] = total_seq_len
-#     max_seq_len = int(torch.max(seq_len).item())
-
-#     attn_output: torch.Tensor = flash_attn_varlen_func(query_states, key_states, value_states, cu_seq_len, cu_seq_len, max_seq_len, max_seq_len, softmax_scale=config.softmax_scale, causal=True) # type: ignore
-
-#     attn_output = attn_output.reshape(1, token_num, head_num, -1)
-
-#     return attn_output
+#def torch_attention(
+#    q: torch.Tensor,
+#    kv_a: torch.Tensor,
+#    k_rope: torch.Tensor,
+#    k_nope_weight: torch.Tensor,
+#    v_weight: torch.Tensor,
+#    seq_len: torch.Tensor,
+#    config: DeepSeekConfig,
+#):
+#    head_num = config.head_num
+#    nope_head_size = config.nope_head_size
+#    rope_head_size = config.rope_head_size
+#    nope_rope_size = config.nope_rope_size
+#    v_head_size = config.v_head_size
+#    # [token, kv_lora] [kv_lora, head * nope_size] -> [token, nope_size]
+#    k_nope = kv_a @ k_nope_weight
+#    # [token, kv_lora] [kv_lora, head * nope_size] -> [token, nope_size]
+#    v = kv_a @ v_weight
+#    token_num = q.shape[0]
+#
+#    k_nope_tensor = k_nope.reshape(1, token_num, head_num, nope_head_size).permute(
+#        0, 2, 1, 3
+#    )
+#    k_rope_tensor = k_rope.reshape(1, token_num, 1, rope_head_size).permute(0, 2, 1, 3)
+#
+#    query_states = q.reshape(1, token_num, head_num, nope_rope_size).permute(0, 2, 1, 3)
+#    key_states = query_states.new_empty(1, head_num, token_num, nope_rope_size)
+#    key_states[:, :, :, :nope_head_size] = k_nope_tensor
+#    key_states[:, :, :, nope_head_size:] = k_rope_tensor
+#    value_states = v.reshape(1, token_num, head_num, v_head_size).permute(0, 2, 1, 3)
+#
+#    # call flash attn
+#    zero_paded = torch.zeros(1, head_num, token_num, rope_head_size, dtype=query_states.dtype, device=query_states.device)
+#    value_states = torch.cat([value_states, zero_paded], dim=-1)
+#    query_states = query_states.transpose(1, 2).squeeze(0).contiguous()
+#    key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
+#    value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
+#
+#    batch_size = seq_len.shape[0]
+#    cu_seq_len = torch.zeros((batch_size + 1,), dtype=torch.int32, device=query_states.device)
+#    total_seq_len = 0
+#    for i in range(batch_size):
+#        total_seq_len += seq_len[i]
+#        cu_seq_len[i + 1] = total_seq_len
+#    max_seq_len = int(torch.max(seq_len).item())
+#
+#    attn_output: torch.Tensor = flash_attn_varlen_func(query_states, key_states, value_states, cu_seq_len, cu_seq_len, max_seq_len, max_seq_len, softmax_scale=config.softmax_scale, causal=True) # type: ignore
+#
+#    attn_output = attn_output.reshape(1, token_num, head_num, -1)
+#
+#    return attn_output
 
 class TestRope(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/librocm_test_ops.so")
         self.config = DeepSeekConfig()
+        
+        # self.mla_ops_type = MlaOpsType.FLASH_MLA
         self.mla_ops_type = MlaOpsType.FLASH_INFER
         self.mla_context_attn_op = torch.classes.unittest.MlaContextAttnOp(
             self.mla_ops_type,
@@ -112,6 +121,7 @@ class TestRope(unittest.TestCase):
 
     def test_mla_context_attn(self):
         set_seed(0)
+
         with torch.no_grad():
             config = self.config
             head_num = config.head_num
@@ -138,25 +148,16 @@ class TestRope(unittest.TestCase):
             k_nope_weight = torch.randn(kv_lora, head_num * nope_head_size, dtype=dtype, device=device)
             v_weight = torch.randn(kv_lora, head_num * v_head_size, dtype=dtype, device=device)
 
-            # seq_len = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/seq_len.pt")
-            # # print(f"seq_len type is {seq_len.dtype}, seq_len device is {seq_len.device}")
-            # q = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/q.pt")
-            # fused_qkv = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/fused_qkv.pt")
-            # cos_sin_cache = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/cos_sin_cache.pt")
-            # # kv_a = torch.load("/mnt/raid0/zhiqchen/download/context_attn/kv_a.pt")
-            # # k_rope = torch.load("/mnt/raid0/zhiqchen/download/context_attn/k_rope.pt")
-            # k_nope_weight = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/k_nope_weight.pt")
-            # v_weight = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/v_weight.pt")
-            # attn_output_expect = torch.load("/mnt/raid0/zhiqchen/download/context_attn_v2/attn_output_expect.pt")
-
             # [1, token_num, head_num, nope_size]
-            # attn_output_expect = torch_attention(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len, config)
-            # print(attn_output_expect.shape)
+            #attn_output_expect = torch_attention(q, kv_a, k_rope, k_nope_weight, v_weight, seq_len, config)
+            #attn_output_expect = attn_output_expect[:, :, :, :v_head_size].contiguous()
+            #print(attn_output_expect.shape)
             
             attn_output = self.mla_context_attn_op.forward(q, fused_qkv, q_lora, k_nope_weight, v_weight, cos_sin_cache, seq_len)
             attn_output = attn_output.reshape(1, token_nums, head_num, v_head_size)
-
-            # torch.testing.assert_close(attn_output_expect, attn_output_expect, atol=1e-2, rtol=2e-3)
+            #compare_tensor_diff_with_ratio(attn_output, attn_output_expect, 1e-2, 2e-3)
+            torch.cuda.synchronize()
 
 if __name__ == '__main__':
+    logging.info("cwd: %s", os.getcwd())
     unittest.main()

@@ -1,0 +1,13 @@
+--- aiter/jit/core.py
++++ aiter/jit/core.py
+@@ -73,8 +73,8 @@ bd_dir = f'{get_user_jit_dir()}/build'
+ # copy ck to build, thus hippify under bd_dir
+ if multiprocessing.current_process().name == 'MainProcess':
+     shutil.copytree(CK_DIR, f'{bd_dir}/ck', dirs_exist_ok=True)
+-    if os.path.exists(f'{bd_dir}/ck/library'):
+-        shutil.rmtree(f'{bd_dir}/ck/library')
++    # if os.path.exists(f'{bd_dir}/ck/library'):
++    #     shutil.rmtree(f'{bd_dir}/ck/library')
+ CK_DIR = f'{bd_dir}/ck'
+ 
+ 

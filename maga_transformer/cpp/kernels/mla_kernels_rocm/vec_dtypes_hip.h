@@ -47,7 +47,7 @@
 
 #include <type_traits>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 #if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 900))
 #define FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED

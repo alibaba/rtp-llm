@@ -19,7 +19,7 @@
 #include <exception>
 #include <sstream>
 
-namespace fastertransformer {
+namespace rtp_llm {
 
 class Error : public std::exception {
  private:

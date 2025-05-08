@@ -75,14 +75,14 @@ struct ROCmGemmActArguments {
     }
 };
 
-static hipblasDatatype_t dtypeConvert(DataType dtype) {
+static hipDataType dtypeConvert(DataType dtype) {
     switch (dtype) {
         case DataType::TYPE_BF16: 
-            return hipblasDatatype_t::HIPBLAS_R_16B;
+            return hipDataType::HIP_R_16BF;
         case DataType::TYPE_FP16:
-            return hipblasDatatype_t::HIPBLAS_R_16F;
+            return hipDataType::HIP_R_16F;
         case DataType::TYPE_FP32:
-            return hipblasDatatype_t::HIPBLAS_R_32F;
+            return hipDataType::HIP_R_32F;
         default:
             ROCM_FAIL("[GEMM]: Other DataType not implemented");
     }
@@ -130,13 +130,10 @@ BufferPtr ROCmDevice::loraLinearWithActivation(const LoraLinearWithActivationPar
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
     auto D_data_type = dtypeConvert(arguments.DDtype);
-    auto computeType = HIPBLAS_R_32F;
 
     if (gemm_params.compute_type == DataType::TYPE_INVALID) {
-        computeType = HIPBLAS_R_32F;
-        hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, HIPBLAS_R_32F);
+        hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, HIP_R_32F);
     } else {
-        computeType = dtypeConvert(arguments.DDtype);
         hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, dtypeConvert(gemm_params.compute_type));
     }
 

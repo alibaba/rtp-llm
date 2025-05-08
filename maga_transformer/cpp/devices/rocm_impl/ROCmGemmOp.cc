@@ -9,9 +9,14 @@
 #include "maga_transformer/cpp/cuda/Dispatch.h"
 #include "maga_transformer/cpp/rocm/quantizePreprocessors.h"
 #include "maga_transformer/cpp/kernels/rocm/quantization_rocm.h"
+#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 
 #include <numeric>
 #include <utility>
+
+// aiter kenels
+#include "gemm_a8w8_blockscale.h"
+#include "quant.h"
 
 using namespace std;
 
@@ -29,14 +34,16 @@ hipblasOperation_t opConvert(TransposeOperation op) {
     }
 };
 
-static hipblasDatatype_t dtypeConvert(DataType dtype) {
+static hipDataType dtypeConvert(DataType dtype) {
     switch (dtype) {
         case DataType::TYPE_BF16: 
-            return hipblasDatatype_t::HIPBLAS_R_16B;
+            return hipDataType::HIP_R_16BF;
         case DataType::TYPE_FP16:
-            return hipblasDatatype_t::HIPBLAS_R_16F;
+            return hipDataType::HIP_R_16F;
         case DataType::TYPE_FP32:
-            return hipblasDatatype_t::HIPBLAS_R_32F;
+            return hipDataType::HIP_R_32F;
+        case DataType::TYPE_FP8_E4M3:
+            return hipDataType::HIP_R_8F_E4M3_FNUZ;
         default:
             ROCM_FAIL("[GEMM]: Other DataType not implemented");
     }
@@ -57,10 +64,11 @@ struct ROCmGemmDispatch {
             return GemmImplementType::invalid;
         }
         if (dim == 2 && params.A.isFloat() && params.B.isFloat()) {
-
+            return GemmImplementType::hipblas_basic_gemm;
+        } else if (dim == 2 && params.A.type() == DataType::TYPE_FP8_E4M3 && 
+                   params.B.type() == DataType::TYPE_FP8_E4M3) {
             return GemmImplementType::hipblas_basic_gemm;
         } else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
-
             return GemmImplementType::hipblas_batch_gemm;
         } else if (dim == 2 && (params.A.type() == DataType::TYPE_FP16 || params.A.type() == DataType::TYPE_BF16)
                    && params.B.type() == DataType::TYPE_QINT8) {
@@ -80,6 +88,7 @@ struct ROCmGemmArguments {
     DataType BDtype;
     DataType CDtype;
     DataType DDtype;
+    DataType compute_type;
 
     size_t dim;
     size_t batch_size;
@@ -119,7 +128,12 @@ struct ROCmGemmArguments {
         if (params.C != std::nullopt) {
             CDtype = params.C.value().get().type();
         }
-        DDtype = (params.compute_type == DataType::TYPE_INVALID) ? params.A.type() : params.compute_type;
+        compute_type = (params.compute_type == DataType::TYPE_INVALID) ? DataType::TYPE_FP32 : params.compute_type;
+        if (params.D) {
+          DDtype = params.D->type();
+        } else {
+          DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
+        }
 
         dim        = params.A.dim();
         batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2, (size_t)1, std::multiplies<size_t>());
@@ -137,6 +151,16 @@ struct ROCmGemmArguments {
         stride_b = k * n;
         ldc      = n;
         stride_c = m * n;
+
+        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
+            float input_scale = getRocmValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
+            float weight_scale = getRocmValue(reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
+            alpha = params.alpha * input_scale * weight_scale;
+        } else {
+            alpha = params.alpha;
+        }
+        
+        beta = params.beta;
     }
 
     void dump() {
@@ -158,6 +182,50 @@ struct ROCmGemmArguments {
                   << std::endl;
     }
 };
+
+void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params,
+                                    BufferPtr         output) {
+    constexpr size_t BLOCK_SCALE_K = 128;
+    RTP_LLM_LOG_DEBUG("use rocm deep gemm.");
+    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "rocm deep gemm activation type should be identity");
+    RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "rocm deep gemm bias should be nullopt");
+    BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
+    BufferPtr W_scales = reinterpret_cast<const QBuffer&>(params.B).scalesPtr();
+    
+    const size_t m = params.A.shape()[0];
+    const size_t k = params.A.shape()[1];
+    const size_t n = W_kernel->shape()[1];
+    
+    BufferPtr A_quant = allocateBuffer({DataType::TYPE_FP8_E4M3, {m, k}}, {"rocm_A_quant"});
+    BufferPtr A_quant_scale = allocateBuffer({DataType::TYPE_FP32, {m, k / BLOCK_SCALE_K, (size_t)1}}, {"rocm_A_quant_scale"});
+    
+    torch::Tensor A_tensor = Buffer2torchTensor(params.A, false);
+    torch::Tensor A_quant_tensor = Buffer2torchTensor(A_quant, false);
+    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(A_quant_scale, false);
+
+    A_tensor = A_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K, (int)BLOCK_SCALE_K});
+    A_quant_tensor = A_quant_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K, (int)BLOCK_SCALE_K});
+    
+    dynamic_per_token_scaled_fp8_quant(
+        /*out=*/A_quant_tensor,
+        /*input=*/A_tensor,
+        /*scales=*/A_quant_scale_tensor,
+        /*scale_ub=*/nullopt
+    );
+
+    torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
+    torch::Tensor W_scale_tensor = Buffer2torchTensor(W_scales, false);
+
+    W_kernel_tensor = W_kernel_tensor.view({(int)W_kernel->shape()[1],(int)W_kernel->shape()[0]});
+    W_scale_tensor = W_scale_tensor.view({(int)W_scales->shape()[1],(int)W_scales->shape()[0]});
+    
+    torch::Tensor output_tensor = Buffer2torchTensor(output, false);
+
+    A_quant_tensor = A_quant_tensor.view({(int)m, (int)k}).contiguous();
+    A_quant_scale_tensor = A_quant_scale_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K}).contiguous();
+    
+    gemm_a8w8_blockscale(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor);
+  }
 
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C
@@ -243,7 +311,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             auto A_data_type = dtypeConvert(arguments.ADtype);
             auto B_data_type = dtypeConvert(fpB.get()->type());
             auto D_data_type = dtypeConvert(arguments.DDtype);
-            auto computeType = dtypeConvert(arguments.DDtype);
+            auto computeType = dtypeConvert(arguments.compute_type);
 
             hipblas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                     a_op,
@@ -267,53 +335,35 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                     arguments.batch_size,
                                                     computeType);
 #endif
-            return move(output);
+            return std::move(output);
+        } else if(params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3){
+            InvokeROCmDeepGemm(params, output);
+            return std::move(output);
         } else {
             ROCM_FAIL("[GEMM]: Other weight quantization not implemented");
         }
-    }
+    } 
 
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
     auto D_data_type = dtypeConvert(arguments.DDtype);
-    auto computeType = HIPBLAS_R_32F;
+    auto computeType = dtypeConvert(arguments.compute_type);
+    
+    const auto A    = params.A.data();
+    const auto B    = params.B.data();
+    auto       D    = output->data();
+    auto       a_op = opConvert(params.transA);
+    auto       b_op = opConvert(params.transB);
 
-    if (params.compute_type == DataType::TYPE_INVALID) {
-        computeType = HIPBLAS_R_32F;
-        hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, HIPBLAS_R_32F);
-    } else {
-        computeType = dtypeConvert(arguments.DDtype);
-        hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, dtypeConvert(params.compute_type));
-    }
+    hipblas_mm_wrapper_->setGemmConfig(A_data_type, B_data_type, D_data_type, computeType);
+    hipblas_mm_wrapper_->setStream(current_stream_);
 
     if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_basic_gemm) {
-
-        const auto A    = params.A.data();
-        const auto B    = params.B.data();
-        auto       D    = output->data();
-        auto       a_op = opConvert(params.transA);
-        auto       b_op = opConvert(params.transB);
-        
-        hipblas_mm_wrapper_->setStream(current_stream_);
         hipblas_mm_wrapper_->Gemm(
-            b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, A, arguments.lda, D, arguments.ldc);
+            b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, A, arguments.lda, D, arguments.ldc, arguments.alpha, arguments.beta);
 
         return std::move(output);
-    } else if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_batch_gemm) {
-
-        // convert buffers to ptrs
-        const auto A = params.A.data();
-        const auto B = params.B.data();
-        auto       D = output->data();
-
-        auto a_op = opConvert(params.transA);
-        auto b_op = opConvert(params.transB);
-
-        auto A_data_type = dtypeConvert(arguments.ADtype);
-        auto B_data_type = dtypeConvert(arguments.BDtype);
-        auto D_data_type = dtypeConvert(arguments.DDtype);
-        auto computeType = dtypeConvert(arguments.DDtype);
-            
+    } else if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_batch_gemm) {            
         hipblas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                 a_op,
                                                 arguments.n,

@@ -44,3 +44,25 @@ TEST_F(LayerNormTest, testSimpleLayernorm) {
         }
     }
 }
+
+TEST_F(LayerNormTest, testSimpleLayernormStride) {
+    const auto test_m = vector<uint16_t>({1, 2, 4, 8, 10, 20});
+    const auto test_n = vector<uint16_t>({128, 256, 1024});
+    for (const auto& m: test_m) {
+        for (const auto& n: test_n) {
+            printf("testing m = %d, n = %d \n", m, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::layernorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::rmsnorm, m, n, n);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::layernorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP16, NormType::rmsnorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_BF16, NormType::rmsnorm, m, n, n / 2);
+            testGeneralLayernormStride(DataType::TYPE_FP32, NormType::rmsnorm, m, n, n / 2);
+        }
+    }
+}

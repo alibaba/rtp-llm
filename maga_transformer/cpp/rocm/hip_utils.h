@@ -40,6 +40,18 @@ template<typename T>
 void check(T result, const char* const file, int const line);
 void sync_and_check(const char* const file, int const line);
 
+template<typename T>
+T getRocmValue(const T* ptr, int index) {
+    T tmp;
+    ROCM_CHECK(hipMemcpy(&tmp, ptr + index, sizeof(T), hipMemcpyDeviceToHost));
+    return tmp;
+}
+
+template<typename T>
+void setRocmValue(T* ptr, int index, T value) {
+  ROCM_CHECK(hipMemcpy(ptr + index, &value, sizeof(T), hipMemcpyHostToDevice));
+}
+
 enum FtHipDataType {
     FP32 = 0,
     FP16 = 1,

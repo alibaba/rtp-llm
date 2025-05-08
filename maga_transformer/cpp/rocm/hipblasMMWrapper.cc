@@ -31,52 +31,52 @@ hipblasMMWrapper::~hipblasMMWrapper() {
     allocator_->free((void**)(&hipblas_workspace_));
 }
 
-hipDataType hipblasMMWrapper::getHipDataType(hipblasDatatype_t data_type) {
-    if (data_type == HIPBLAS_R_16F) {
-        return HIP_R_16F;
-    } else if (data_type == HIPBLAS_R_32F) {
-        return HIP_R_32F;
+hipblasDatatype_t hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
+    if (data_type == HIP_R_16F) {
+        return HIPBLAS_R_16F;
+    } else if (data_type == HIP_R_32F) {
+        return HIPBLAS_R_32F;
     }
 #ifdef ENABLE_BF16
-    else if (data_type == HIPBLAS_R_16B) {
-        return HIP_R_16BF;
+    else if (data_type == HIP_R_16BF) {
+        return HIPBLAS_R_16B;
     }
 #endif
-    return HIP_R_32F;
+    return HIPBLAS_R_32F;
 }
-hipblasComputeType_t hipblasMMWrapper::getHipblasLtComputeType(hipblasDatatype_t data_type) {
-    if (data_type == HIPBLAS_R_16F) {
+hipblasComputeType_t hipblasMMWrapper::getHipblasLtComputeType(hipDataType data_type) {
+    if (data_type == HIP_R_16F) {
         return HIPBLAS_COMPUTE_16F;
-    } else if (data_type == HIPBLAS_R_32F) {
+    } else if (data_type == HIP_R_32F) {
         return HIPBLAS_COMPUTE_32F;
     }
     return HIPBLAS_COMPUTE_32F;
 }
 
 void hipblasMMWrapper::setFP32GemmConfig() {
-    Atype_       = HIPBLAS_R_32F;
-    Btype_       = HIPBLAS_R_32F;
-    Ctype_       = HIPBLAS_R_32F;
-    computeType_ = HIPBLAS_R_32F;
+    Atype_       = HIP_R_32F;
+    Btype_       = HIP_R_32F;
+    Ctype_       = HIP_R_32F;
+    computeType_ = HIP_R_32F;
 }
 void hipblasMMWrapper::setFP16GemmConfig() {
-    Atype_       = HIPBLAS_R_16F;
-    Btype_       = HIPBLAS_R_16F;
-    Ctype_       = HIPBLAS_R_16F;
-    computeType_ = HIPBLAS_R_32F;
+    Atype_       = HIP_R_16F;
+    Btype_       = HIP_R_16F;
+    Ctype_       = HIP_R_16F;
+    computeType_ = HIP_R_32F;
 }
 #ifdef ENABLE_BF16
 void hipblasMMWrapper::setBF16GemmConfig() {
-    Atype_       = HIPBLAS_R_16B;
-    Btype_       = HIPBLAS_R_16B;
-    Ctype_       = HIPBLAS_R_16B;
-    computeType_ = HIPBLAS_R_32F;
+    Atype_       = HIP_R_16BF;
+    Btype_       = HIP_R_16BF;
+    Ctype_       = HIP_R_16BF;
+    computeType_ = HIP_R_32F;
 }
 #endif
-void hipblasMMWrapper::setGemmConfig(hipblasDatatype_t aType,
-                                     hipblasDatatype_t bType,
-                                     hipblasDatatype_t cType,
-                                     hipblasDatatype_t computeType) {
+void hipblasMMWrapper::setGemmConfig(hipDataType aType,
+                                     hipDataType bType,
+                                     hipDataType cType,
+                                     hipDataType computeType) {
     Atype_       = aType;
     Btype_       = bType;
     Ctype_       = cType;
@@ -93,15 +93,16 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                             const void*        B,
                             const int          ldb,
                             void*              C,
-                            const int          ldc) {
+                            const int          ldc,
+                            float              alpha_,
+                            float              beta_) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    float f_alpha(1.0);
-    float f_beta(0.0);
+    float f_alpha = alpha_;
+    float f_beta = beta_;
     half  h_alpha = (half)(f_alpha);
     half  h_beta  = (half)(f_beta);
 
-    int  is_fp16_computeType = computeType_ == HIPBLAS_R_16F ? 1 : 0;
-    bool using_hipblasLt     = (Atype_ == HIPBLAS_R_16F) ? true : false;
+    int  is_fp16_computeType = computeType_ == HIP_R_16F ? 1 : 0;
     int  batch_count         = 1;
 
     const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
@@ -115,13 +116,13 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                                  m,
                                                  n,
                                                  k,
-                                                 getHipDataType(Atype_),
+                                                 Atype_,
                                                  lda,
                                                  0,
-                                                 getHipDataType(Btype_),
+                                                 Btype_,
                                                  ldb,
                                                  0,
-                                                 getHipDataType(Ctype_),
+                                                 Ctype_,
                                                  ldc,
                                                  0,
                                                  HIPBLAS_COMPUTE_32F,
@@ -146,36 +147,46 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                         stream_));
     } else {
         hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
         hipblasLtMatmulDesc_t matmul;
-        ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, getHipDataType(computeType_)));
+        ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, computeType_));
         hipblasOperation_t trans_a = transa;
         hipblasOperation_t trans_b = transb;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
+        
+        const int                        request_solutions = 1;
+        hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
+        int                              returnedAlgoCount = 0;
+        ROCM_CHECK(hipblasLtMatmulAlgoGetHeuristic(
+          hipblaslt_handle_, matmul, ADesc, BDesc, CDesc, CDesc, blasLtPrefer, request_solutions,
+          heuristicResult, &returnedAlgoCount));
+        
+        hipblasStatus_t                  blaslt_status;
+        if (returnedAlgoCount > 0) {
+            blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
+                                                            matmul,
+                                                            alpha,
+                                                            A,
+                                                            ADesc,
+                                                            B,
+                                                            BDesc,
+                                                            beta,
+                                                            C,
+                                                            CDesc,
+                                                            C,
+                                                            CDesc,
+                                                            &heuristicResult[0].algo,
+                                                            workSpace,
+                                                            workspaceSize,
+                                                            stream_);
+        } 
 
-        hipblasStatus_t blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
-                                                        matmul,
-                                                        alpha,
-                                                        A,
-                                                        ADesc,
-                                                        B,
-                                                        BDesc,
-                                                        beta,
-                                                        C,
-                                                        CDesc,
-                                                        C,
-                                                        CDesc,
-                                                        NULL,
-                                                        workSpace,
-                                                        workspaceSize,
-                                                        stream_);
-
-        if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
-            RTP_LLM_LOG_WARNING("[BLAS] blaslt failed, back to blas.");
+        if (blaslt_status != HIPBLAS_STATUS_SUCCESS || returnedAlgoCount == 0) {
+            RTP_LLM_LOG_WARNING("[BLAS] blaslt failed, back to blas, which is no longer used in AITER.");
             RTP_LLM_LOG_WARNING("[BLAS] trans = %c%c, mnk = [%d,%d,%d], ld = [%d,%d,%d]",
                            transa == HIPBLAS_OP_N ? 'N' : 'T',
                            transb == HIPBLAS_OP_N ? 'N' : 'T',
@@ -193,16 +204,16 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                      k,
                                      alpha,
                                      A,
-                                     Atype_,
+                                     getHipBlasDataType(Atype_),
                                      lda,
                                      B,
-                                     Btype_,
+                                     getHipBlasDataType(Btype_),
                                      ldb,
                                      beta,
                                      C,
-                                     Ctype_,
+                                     getHipBlasDataType(Ctype_),
                                      ldc,
-                                     computeType_,
+                                     getHipBlasDataType(computeType_),
                                      HIPBLAS_GEMM_DEFAULT));
         }
 
@@ -220,24 +231,24 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
                                           const int          k,
                                           const float        f_alpha,
                                           const void*        A,
-                                          hipblasDatatype_t  AType,
+                                          hipDataType        AType,
                                           const int          lda,
                                           const int64_t      strideA,
                                           const void*        B,
-                                          hipblasDatatype_t  BType,
+                                          hipDataType        BType,
                                           const int          ldb,
                                           const int64_t      strideB,
                                           const float        f_beta,
                                           void*              C,
-                                          hipblasDatatype_t  CType,
+                                          hipDataType        CType,
                                           const int          ldc,
                                           const int64_t      strideC,
                                           const int          batch_count,
-                                          hipblasDatatype_t  computeType) {
+                                          hipDataType        computeType) {
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 
-    int         is_fp16_computeType = computeType == HIPBLAS_R_16F ? 1 : 0;
+    int         is_fp16_computeType = computeType == HIP_R_16F ? 1 : 0;
     const void* alpha =
         is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<const void*>(&f_alpha);
     const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
@@ -250,20 +261,20 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
                                                 k,
                                                 alpha,
                                                 A,
-                                                AType,
+                                                getHipBlasDataType(AType),
                                                 lda,
                                                 strideA,
                                                 B,
-                                                BType,
+                                                getHipBlasDataType(BType),
                                                 ldb,
                                                 strideB,
                                                 beta,
                                                 C,
-                                                CType,
+                                                getHipBlasDataType(CType),
                                                 ldc,
                                                 strideC,
                                                 batch_count,
-                                                computeType,
+                                                getHipBlasDataType(computeType),
                                                 HIPBLAS_GEMM_DEFAULT));
 }
 
@@ -286,8 +297,7 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
     half  h_alpha = (half)(f_alpha);
     half  h_beta  = (half)(f_beta);
 
-    int  is_fp16_computeType = computeType_ == HIPBLAS_R_16F ? 1 : 0;
-    bool using_hipblasLt     = (Atype_ == HIPBLAS_R_16F) ? true : false;
+    int  is_fp16_computeType = computeType_ == HIP_R_16F ? 1 : 0;
     int  batch_count         = 1;
 
     void* workSpace     = hipblas_workspace_;
@@ -301,13 +311,13 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
                                                  m,
                                                  n,
                                                  k,
-                                                 getHipDataType(Atype_),
+                                                 Atype_,
                                                  lda,
                                                  0,
-                                                 getHipDataType(Btype_),
+                                                 Btype_,
                                                  ldb,
                                                  0,
-                                                 getHipDataType(Ctype_),
+                                                 Ctype_,
                                                  ldc,
                                                  0,
                                                  HIPBLAS_COMPUTE_32F,
@@ -338,9 +348,9 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
     else
     {
         hipblasLtMatrixLayout_t ADesc, BDesc, CDesc;
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, getHipDataType(Atype_), m, k, lda));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, getHipDataType(Btype_), k, n, ldb));
-        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, getHipDataType(Ctype_), m, n, ldc));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc, Atype_, m, k, lda));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc, Btype_, k, n, ldb));
+        ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, Ctype_, m, n, ldc));
 
         hipblasLtMatmulDesc_t matmul;
         ROCM_CHECK(hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F));
@@ -351,7 +361,7 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
 
         hipblasLtEpilogue_t epilogue_ = epilogue;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_)));
-        int32_t bias_data_type = getHipDataType(Ctype_);
+        int32_t bias_data_type = Ctype_;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
         

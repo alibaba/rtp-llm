@@ -11,6 +11,8 @@ cc_library(
     ]),
     deps = [
         "@aiter//:decode_mla",
+        "@aiter//:module_quant",
+        "@aiter//:module_gemm_a8w8_blockscale",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "@local_config_rocm//rocm:rocblas",
@@ -24,6 +26,7 @@ cc_library(
         "//maga_transformer/cpp/rocm:rocm_utils",
         "//maga_transformer/cpp/kernels:hello_kernel",
         "//maga_transformer/cpp/kernels:gpt_kernels_rocm",
+        "//maga_transformer/cpp/kernels:mla_kernels_rocm",
         "//maga_transformer/cpp/cuda:nccl_util",
         "//:th_utils",
         "//maga_transformer/cpp/devices/torch_impl:torch_beam_search_op_impl",

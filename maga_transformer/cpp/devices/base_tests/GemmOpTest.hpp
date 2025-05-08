@@ -72,6 +72,17 @@ public:
         device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*D)});
     }
+    
+    GemmOpTestOutput BasicFP8GemmOpRun(GemmOpTestInput& input, float scaleA = 1.0f, float scaleB = 1.0f, DataType dDtype = DataType::TYPE_FP32)
+    {
+        auto A = tensorToBuffer(input.A);
+        auto B = tensorToBuffer(input.B);
+        auto D = device_->allocateBuffer({dDtype, {A->shape()[0], B->shape()[1]}});
+        float alpha = scaleA * scaleB;
+        GemmParams params {*A, *B, std::nullopt, D, DataType::TYPE_FP32,  TransposeOperation::NONE,  TransposeOperation::NONE, ActivationType::Identity, alpha, 0.0f};
+        device_->gemm(params);
+        return GemmOpTestOutput({bufferToTensor(*D)});
+    }
 
     GemmOpTestOutput BatchGemmOpRun(GemmOpTestInput& input)
     {
@@ -108,12 +119,12 @@ public:
         return GemmOpTestOutput({bufferToTensor(*C)});
     }
 
-    GemmOpTestOutput BasicGemmTorchRefRun(GemmOpTestInput& input)
+    GemmOpTestOutput BasicGemmTorchRefRun(GemmOpTestInput& input, float alpha = 1.0f)
     {
         auto A = input.A;
         auto B = input.B;
         return GemmOpTestOutput(
-            {torch::matmul(A.to(torch::kFloat), B.to(torch::kFloat))}
+            {torch::mul(torch::matmul(A.to(torch::kFloat), B.to(torch::kFloat)), alpha)}
         );
     }
 
@@ -141,6 +152,34 @@ public:
         );
     }
 
+
+    void BasicFP8GemmOpTest(size_t m,
+                            size_t n,
+                            size_t k,
+                            DataType dDtype)
+    {
+        auto input = PrepareGemmOpInput(m, n, k, DataType::TYPE_FP16);
+
+        // quant
+        const float FP8_E4M3_FNUZ_MAX = 240.0f; 
+        const float min_scaling_factor = 1.0f / (FP8_E4M3_FNUZ_MAX * 512.0f);
+
+        float maxA = input.A.abs().max().item<float>();
+        float scaling_factorA = maxA / FP8_E4M3_FNUZ_MAX;
+        scaling_factorA = std::max(min_scaling_factor, scaling_factorA);
+        auto qA = torch::div(input.A, scaling_factorA).to(dataTypeToTorchType(DataType::TYPE_FP8_E4M3));
+        
+        float maxB = input.B.abs().max().item<float>();
+        float scaling_factorB = maxB / FP8_E4M3_FNUZ_MAX;
+        scaling_factorB = std::max(min_scaling_factor, scaling_factorB);
+        auto qB = torch::div(input.B, scaling_factorB).to(dataTypeToTorchType(DataType::TYPE_FP8_E4M3));
+
+        GemmOpTestInput qinput({qA, qB});
+
+        auto result = BasicFP8GemmOpRun(qinput, scaling_factorA, scaling_factorB, dDtype);
+        auto result_ref = BasicGemmTorchRefRun(qinput, scaling_factorA * scaling_factorB);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
+    }
 
     void BasicGemmOpTest(size_t m,
                          size_t n,

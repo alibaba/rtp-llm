@@ -154,6 +154,21 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
     auto decode_batch_size = sequence_length.sizes()[0];
     auto context_batch_size = input_length.sizes()[0] - decode_batch_size;
     attn_configs.tokens_per_block = page_size;
+#ifdef USING_ROCM
+    auto params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
+                                        attn_configs,
+                                        torchTensor2Buffer(prefix_length),
+                                        torchTensor2Buffer(sequence_length),
+                                        torchTensor2Buffer(input_length),
+                                        torchTensor2Buffer(block_id_map),
+                                        DataType::TYPE_FP16);
+    auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
+    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_t,
+                                                 flash_infer_attn_params->positions_t,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_1_t,
+                                                 flash_infer_attn_params->page_indptr_t,
+                                                 flash_infer_attn_params->page_indice_t);
+#else
     auto params = FlashInferAttnParams::prepare(device_,
                                                 attn_configs,
                                                 torchTensor2Buffer(prefix_length),
@@ -168,6 +183,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                  flash_infer_attn_params->paged_kv_last_page_len_d,
                                                  flash_infer_attn_params->page_indptr_d,
                                                  flash_infer_attn_params->page_indice_d);
+#endif
 }
 
 c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferParams(
@@ -178,6 +194,20 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
 {
     attn_configs.tokens_per_block = page_size;
     auto decode_batch_size = sequence_length.sizes()[0];
+#ifdef USING_ROCM
+    auto params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
+                                                attn_configs,
+                                                torchTensor2Buffer(sequence_length),
+                                                torchTensor2Buffer(input_length),
+                                                torchTensor2Buffer(block_id_map),
+                                                DataType::TYPE_FP16);
+    auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
+    return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_t,
+                                                 flash_infer_attn_params->positions_t,
+                                                 flash_infer_attn_params->paged_kv_last_page_len_1_t,
+                                                 flash_infer_attn_params->page_indptr_t,
+                                                 flash_infer_attn_params->page_indice_t);
+#else
     auto params = FlashInferAttnParams::prepare(device_,
                                                 attn_configs,
                                                 nullptr,
@@ -192,6 +222,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
                                                  flash_infer_attn_params->paged_kv_last_page_len_d,
                                                  flash_infer_attn_params->page_indptr_d,
                                                  flash_infer_attn_params->page_indice_d);
+#endif
 }
 
 torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
@@ -210,6 +241,14 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
         BufferPtr kvcache_block_id_device   = device_->clone({*kvcache_block_id_host});
+#ifdef USING_ROCM
+        auto      flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
+                                                                        attn_configs,
+                                                                        sequence_lengths_host,
+                                                                        sequence_lengths_host,
+                                                                        kvcache_block_id_host,
+                                                                        DataType::TYPE_BF16);
+#else
         auto      flash_infer_attn_params = FlashInferAttnParams::prepare(device_,
                                                                           attn_configs,
                                                                           nullptr,
@@ -218,6 +257,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
                                                                           kvcache_block_id_host,
                                                                           kvcache_block_id_device,
                                                                           DataType::TYPE_BF16);
+#endif
 
         size_t token_num     = q.size(0);
         auto   kc_weight_b   = torchTensor2Buffer(kc_t_weight);

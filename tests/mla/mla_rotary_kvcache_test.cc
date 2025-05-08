@@ -1,23 +1,14 @@
-<<<<<<< HEAD
+#ifdef USING_ROCM
+#include "maga_transformer/cpp/devices/rocm_impl/ROCmDevice.h"
+#else
 #include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#endif
 #include "maga_transformer/cpp/devices/OpData.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/core/BufferHelper.h"
 #include "maga_transformer/cpp/devices/DeviceFactory.h"
 using namespace rtp_llm;
-=======
-#ifdef USING_ROCM
-#include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
-#else
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#endif
-#include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-using namespace fastertransformer;
->>>>>>> 0d702f4fa (mla kernels v3)
 
 namespace unittest {
 
@@ -87,7 +78,21 @@ void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequenc
     attn_configs.tokens_per_block = page_size;
     context_batch_size_ = input_length.size(0) - sequence_length.size(0);
     decoder_batch_size_ = sequence_length.size(0);
-
+#ifdef USING_ROCM
+    context_params_ = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
+                                                    attn_configs,
+                                                    torchTensor2Buffer(prefix_length),
+                                                    torchTensor2Buffer(sequence_length),
+                                                    torchTensor2Buffer(input_length),
+                                                    torchTensor2Buffer(block_id_map),
+                                                    DataType::TYPE_FP16);
+    decode_params_ = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
+                                                    attn_configs,
+                                                    torchTensor2Buffer(sequence_length),
+                                                    torchTensor2Buffer(input_length),
+                                                    torchTensor2Buffer(block_id_map),
+                                                    DataType::TYPE_FP16);
+#else
     context_params_ = FlashInferAttnParams::prepare(device_,
                                                     attn_configs,
                                                     torchTensor2Buffer(prefix_length),
@@ -104,6 +109,7 @@ void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequenc
                                                    torchTensor2Buffer(block_id_map)->slice(0, decoder_batch_size_, false),
                                                    torchTensor2Buffer(block_id_map_device)->slice(0, decoder_batch_size_, false),
                                                    DataType::TYPE_FP16);
+#endif
 }
 
 void MlaRotaryKVCacheOp::applyRotaryKVCache(

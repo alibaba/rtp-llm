@@ -54,6 +54,12 @@ inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
     return tensor_shape;
 }
 
+#if USING_ROCM 
+#define TORCH_FP8_E4M3_TYPE torch::kFloat8_e4m3fnuz 
+#else 
+#define TORCH_FP8_E4M3_TYPE torch::kFloat8_e4m3fn 
+#endif
+
 #define FOREACH_BUFFER_TORCH_TYPE_MAP(F)    \
     F(TYPE_UINT8, torch::kByte)             \
     F(TYPE_INT8, torch::kChar)              \
@@ -65,7 +71,7 @@ inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
     F(TYPE_FP64, torch::kDouble)            \
     F(TYPE_BOOL, torch::kBool)              \
     F(TYPE_BF16, torch::kBFloat16)          \
-    F(TYPE_FP8_E4M3, torch::kFloat8_e4m3fn)
+    F(TYPE_FP8_E4M3, TORCH_FP8_E4M3_TYPE)
 
 inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
 #define TYPE_CASE(type, torch_type) \

@@ -210,10 +210,11 @@ FfnLayerOutput ROCmDevice::ffnLayer(const FfnLayerParams& params) {
             up_output = loraLinearWithActivation({lora_linear_params, activation_params});
         }
 
-        if (params.qscheme != QScheme::NoQuantize) {
+        if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock) {
+	        DataType quant_out_data_type = params.qscheme == QScheme::Qfp8PerTensor ||  params.qscheme == QScheme::Qfp8PerTokenBlock ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
             auto quant_params = QuantizeParams(
                 *up_output,
-                DataType::TYPE_QINT8,
+                quant_out_data_type,
                 1,
                 params.qscheme,
                 params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :

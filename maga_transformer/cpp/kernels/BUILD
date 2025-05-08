@@ -169,7 +169,7 @@ cc_library(
         "mla_kernels_rocm/*.h",
     ]),
     deps = [
-        "//src/fastertransformer/cuda:cuda_utils_rocm",
+        "//maga_transformer/cpp/cuda:cuda_utils_rocm",
     ],
     copts = rocm_copts(),
     include_prefix = "src",

@@ -209,7 +209,7 @@ py_library(
     }) + select({
         "@//:using_cuda11": [],
         "@//:using_arm": [],
-        "@//:using_rocm": ["pyrsmi", "amdsmi"],
+	"@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "//conditions:default": ["flash_attn"]
     }),

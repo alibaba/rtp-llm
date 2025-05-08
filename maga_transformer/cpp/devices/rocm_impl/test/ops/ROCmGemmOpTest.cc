@@ -66,6 +66,32 @@ TEST_F(ROCmGemmOpTest, BasicGemmOpTest) {
     BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP32);
 }
 
+TEST_F(ROCmGemmOpTest, BasicFP8GemmOpTest) {
+  BasicFP8GemmOpTest(1, 48, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(2, 1024, 2048, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(8, 1024, 2048, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1024, 1024, 2048, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(4096, 1024, 2048, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 48, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 64, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 144, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 192, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 13056, 4352, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(1, 17408, 4352, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 48, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 64, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 144, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 192, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 13056, 4352, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(3, 17408, 4352, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 48, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 64, 16, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 144, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 192, 48, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 13056, 4352, DataType::TYPE_FP32);
+  BasicFP8GemmOpTest(48, 17408, 4352, DataType::TYPE_FP32);
+}
+
 TEST_F(ROCmGemmOpTest, TransposeGemmOpTest) {
     auto   tran = TransposeOperation::TRANSPOSE;
     auto   none = TransposeOperation::NONE;

@@ -17,14 +17,14 @@ void flashInferAttnParamsDeleter(void* p) {
 }
 
 void prepareDecodeFlashInferAttnParamsImpl(FlashInferAttnParams* params,
-                                     fastertransformer::DeviceBase *device,
-                                     const fastertransformer::AttentionConfigs &attn_configs,
+                                     rtp_llm::DeviceBase *device,
+                                     const rtp_llm::AttentionConfigs &attn_configs,
                                      const BufferPtr &sequence_lengths_host,
                                      const BufferPtr &kv_cache_block_id_host,
                                      const uint64_t batch_size,
                                      const uint64_t tokens_per_block,
                                      const uint64_t max_batch_blocks){
-    FT_CHECK_WITH_INFO(max_batch_blocks > 0 && kv_cache_block_id_host, "max_batch_blocks and kv_cache_block_id_host must be set for decode");
+    RTP_LLM_CHECK_WITH_INFO(max_batch_blocks > 0 && kv_cache_block_id_host, "max_batch_blocks and kv_cache_block_id_host must be set for decode");
     params->float_workspace = device->allocateBuffer({DataType::TYPE_INT8, {128 * 1024 *1024}, AllocationType::DEVICE}, {"float_workspace"});
     params->int_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 * 1024 *1024}, AllocationType::DEVICE}, {"int_workspace"});
     params->int_host_workspace = device->allocateBuffer({DataType::TYPE_INT8, {8 *1024 *1024}, AllocationType::HOST}, {"int_host_workspace"});
@@ -96,8 +96,8 @@ void prepareDecodeFlashInferAttnParamsImpl(FlashInferAttnParams* params,
  
  // for mla, we need to prepare additional params for write kvcache and de rotary embedding
 void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*                      params,
-                                     fastertransformer::DeviceBase*             device,
-                                     const fastertransformer::AttentionConfigs& attn_configs,
+                                     rtp_llm::DeviceBase*             device,
+                                     const rtp_llm::AttentionConfigs& attn_configs,
                                      const BufferPtr&                           sequence_lengths_host,
                                      const BufferPtr&                           input_lengths_host,
                                      const BufferPtr&                           kv_cache_block_id_host,
@@ -160,13 +160,13 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
  
  
  FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(
-         fastertransformer::DeviceBase *device,
-         const fastertransformer::AttentionConfigs &attn_configs,
+         rtp_llm::DeviceBase *device,
+         const rtp_llm::AttentionConfigs &attn_configs,
          const BufferPtr &prefix_lengths_host,
          const BufferPtr &sequence_lengths_host,
          const BufferPtr &input_lengths_host,
          const BufferPtr &kv_cache_block_id_host,
-         fastertransformer::DataType dtype)
+         rtp_llm::DataType dtype)
  {    
      const size_t batch_size         = sequence_lengths_host->shape()[0];
      const size_t context_batch_size = input_lengths_host->shape()[0] - batch_size;
@@ -188,15 +188,15 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
  
  
  FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
-         fastertransformer::DeviceBase *device,
-         const fastertransformer::AttentionConfigs &attn_configs,
+         rtp_llm::DeviceBase *device,
+         const rtp_llm::AttentionConfigs &attn_configs,
          const BufferPtr &sequence_lengths_host,
          const BufferPtr &input_lengths_host,
          const BufferPtr &kv_cache_block_id_host,
-         fastertransformer::DataType dtype)
+         rtp_llm::DataType dtype)
  {
      const char* disable_flash_infer_env = getenv("DISABLE_FLASH_INFER");
-     if (fastertransformer::rocm::get_sm() < 80 || (disable_flash_infer_env && strcmp(disable_flash_infer_env, "1") == 0)) {
+     if (rtp_llm::rocm::get_sm() < 80 || (disable_flash_infer_env && strcmp(disable_flash_infer_env, "1") == 0)) {
          return nullptr;
      }
  

@@ -37,7 +37,6 @@ from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, Mod
 from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight, MoeAtomicWeight, MoeConfig, MoeWithSharedWeight
 from maga_transformer.model_loader.attn_weight import MlaConfig, MlaAttnAtomicWeight
 
-
 class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
     has_e_score_correction_bias = False
