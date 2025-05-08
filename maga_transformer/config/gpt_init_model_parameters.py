@@ -316,7 +316,6 @@ class GptInitModelParameters:
         self.world_size = g_parallel_info.world_size
         self.phy2log: List[List[int]] = []
 
-        self.enable_eplb = self.eplb_mode != EplbMode.NONE
         
         self.is_mtp = False
         self.use_qk_norm = False
@@ -478,6 +477,7 @@ class GptInitModelParameters:
 
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
         self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]
+        self.enable_eplb = self.eplb_mode != EplbMode.NONE
 
         self.phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.expert_num
         self.enable_merge_w13 = os.getenv('ENABLE_MERGE_W13', '0').lower() == '1'

@@ -4,11 +4,12 @@ import json
 import random
 import torch
 import logging
+import traceback
 
 from queue import Queue
 from enum import Enum
 from collections import deque
-from typing import Deque, Sequence
+from typing import Deque, Sequence, Any
 
 from maga_transformer.utils.database import BaseDatabase
 from maga_transformer.utils.model_weight import W
@@ -46,6 +47,7 @@ class ExpertBalancer:
         self,
         weights_info: ModelDeployWeightInfo, 
         compute_dtype: torch.dtype, 
+        phy2log: Any,
         database: BaseDatabase, 
     ):
         self.database: BaseDatabase = database
@@ -189,15 +191,17 @@ class ExpertBalancer:
         layer_id = int(layer_id_tensor.item())
         # Notice now that the phy2log is updated in load_config, not support multi thread
         self._load_config.udpate_layer_experts(layer_id, phy2log)
-        choose_expert_id = self._load_config.get_selected_experts(layer_id)
+        choose_expert_id = self._load_config.get_selected_experts(layer_id, self.num_experts)
         moe_weight = self._model_weight_info.get_layer_weight_info(layer_id, W.moe)
         assert moe_weight is not None
         logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}")
-
-        res = moe_weight.load(self.database, layer_id, "cpu", self._load_config)
+        try:
+            res = moe_weight.load(self.database, layer_id, "cpu", self._load_config)
+        except:
+            logging.error(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}")
 
         logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done")
-        return layer_id, res.get(W.moe_w1), res.get(W.moe_w2), res.get(W.moe_w1_s), res.get(W.moe_w2_s)
+        return layer_id, res.get(W.moe_w1), res.get(W.moe_w2), res.get(W.moe_s1, torch.empty(0, dtype=torch.float32)), res.get(W.moe_s2, torch.empty(0, dtype=torch.float32))
 
     @torch.inference_mode()
     def dump_stats(self):

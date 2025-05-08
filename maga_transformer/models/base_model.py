@@ -499,6 +499,7 @@ class BaseModel(object):
             self.ep_balancer = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
+                phy2log=self.config.phy2log,
                 database=ep_lb_database
             )
             self.config.py_eplb = self.ep_balancer

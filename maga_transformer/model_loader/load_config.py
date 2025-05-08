@@ -85,7 +85,7 @@ class LoadConfig(BaseModel):
         return self
     
 
-    def get_selected_experts(self, layer_id: int, expert_num: int):
+    def get_selected_experts(self, layer_id: int, expert_num):
         selected_experts = range(expert_num)
         if self.phy2log:
             selected_experts = self.phy2log[layer_id]
@@ -98,8 +98,8 @@ class LoadConfig(BaseModel):
     def udpate_layer_experts(self, layer_id_tensor: Union[int, torch.Tensor], layer_phy2log: Union[List[int], torch.Tensor]):
         layer_id: int = int(layer_id_tensor.item()) if isinstance(layer_id_tensor, torch.Tensor) else layer_id_tensor
         experts: List[int] = layer_phy2log.tolist() if isinstance(layer_phy2log, torch.Tensor) else layer_phy2log
-        check_with_info(layer_id < self.num_layers and self.phy2log and len(self.phy2log[layer_id]) == self.num_layers, 
-                        f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.num_layers}")
+        check_with_info(layer_id < self.num_layers and self.phy2log and len(self.phy2log[layer_id]) == self.phy_exp_num, 
+                        f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.phy_exp_num}")
         self.phy2log[layer_id] = experts
         logging.debug(f"update layer {layer_id} phy2log {layer_phy2log}")
 
