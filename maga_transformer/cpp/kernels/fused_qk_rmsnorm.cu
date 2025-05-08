@@ -142,4 +142,4 @@ INSTANTIATE_FUSED_QK_RMSNORM(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_FUSED_QK_RMSNORM
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm

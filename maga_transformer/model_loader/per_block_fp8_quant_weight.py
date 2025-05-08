@@ -146,7 +146,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_w, [CkptWeightInfo(w_name + QW_SUFFIX)],
                                  data_type=torch.float8_e4m3fn, config=src_weight_info.config)
         scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_s,
-                                                 [CkptWeightInfo(w_name + QS_SUFFIX)], identity, data_type=torch.float32, config=src_weight_info.config)
+                                                 [CkptWeightInfo(w_name + QS_SUFFIX)], data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
     def _get_mla_attn_out_quant_weight(self, src_weight_info: MlaAttnAtomicWeight, group_size: int):
