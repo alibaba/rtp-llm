@@ -48,7 +48,6 @@ Applied in numerous LLM scenarios, such as:
 * Contextual Prefix Cache for multi-turn dialogues
 * System Prompt Cache
 * Speculative Decoding
-* Medusa for advanced parallelization strategies
 
 ## How to Use
 ### Requirements
@@ -141,7 +140,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [Benchmark&Performance](benchmark/README.md)
 
 ## Acknowledgments
-Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/FasterTransformer), and on this basis, we have integrated some kernel implementations from [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM). FasterTransformer and TensorRT-LLM have provided us with reliable performance guarantees. [Flash-Attention2](https://github.com/Dao-AILab/flash-attention) and [cutlass](https://github.com/NVIDIA/cutlass) have also provided a lot of help in our continuous performance optimization process. Our continuous batching and increment decoding draw on the implementation of [vllm](https://github.com/vllm-project/vllm); sampling draws on [transformers](https://github.com/huggingface/transformers), with speculative sampling integrating [Medusa](https://github.com/FasterDecoding/Medusa)'s implementation, and the multimodal part integrating implementations from [llava](https://github.com/haotian-liu/LLaVA) and [qwen-vl](https://github.com/QwenLM/Qwen-VL). We thank these projects for their inspiration and help.
+Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/FasterTransformer), and on this basis, we have integrated some kernel implementations from [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM). FasterTransformer and TensorRT-LLM have provided us with reliable performance guarantees. [Flash-Attention2](https://github.com/Dao-AILab/flash-attention) and [cutlass](https://github.com/NVIDIA/cutlass) have also provided a lot of help in our continuous performance optimization process. Our continuous batching and increment decoding draw on the implementation of [vllm](https://github.com/vllm-project/vllm); sampling draws on [transformers](https://github.com/huggingface/transformers), the multimodal part integrating implementations from [llava](https://github.com/haotian-liu/LLaVA) and [qwen-vl](https://github.com/QwenLM/Qwen-VL). We thank these projects for their inspiration and help.
 ## External Application Scenarios (Continuously Updated)
 * Taobao Wenda
 * Alibaba's International AI Platform [Aidge](https://aidc-ai.com/)

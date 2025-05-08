@@ -1,5 +1,5 @@
 # 背景
-rtp-llm框架目前集成了两种投机采样模式，分别是草稿模型和Medusa,接下来是它们的使用方式
+rtp-llm框架目前集成草稿模型投机采样模式, 接下来是它的使用方式
 ## Speculative Decoding
 使用草稿模型进行投机采样，需要指定大小模型，具体例子如下:
 
@@ -47,25 +47,3 @@ pipeline.stop()
 - SP_CHECKPOINT_PATH: 草稿模型的checkpoint路径
 - GEN_NUM_PER_CIRCLE： 每轮最大生成token数
 - SP_WEIGHT_TYPE：草稿模型的量化类型
-## Medusa Decoding
-使用medusa投机采样，不需要在构造模型或者起服务时进行额外的配置，但需要在config.json里配置如下内容:
-``` python
-{
-  "medusa_config": {
-    "medusa_num_heads": int,
-    "medusa_num_layers": int,
-    "medusa_choices": Optional[List[List[int]]],
-    "top_k": Optional[int],
-    "posterior_threshold": Optional[float],
-    "posterior_alpha": Optional[float]
-  }
-}
-```
-其中medusa_num_heads和medusa_num_layers为必填项，其余内容有默认配置可以不填, 具体默认配置参考`maga_transformer/config/gpt_init_parameter.py:MedusaConfig`
-同时需要确保ckpt里的medusa weight格式是`medusa_head.{head}.{layer}.linear.weight`, `medusa_head.{head}.{layer}.linear.bias`, `medusa_head.{head}.{self._medusa_layer_num}.weight`，与medusa官方repo保持一致
-
-medusa模型启动的log类似如下：
-
-<img src="pics/medusa_image.png" width = "500" height = "300" alt="图片名称"/>
-
-
