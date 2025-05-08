@@ -130,7 +130,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_qkv_w,
                                                   [qkv_w_list], concat_0, data_type=torch.float8_e4m3fn, config=src_weight_info.config)
 
-        scale = create_w8a8_fp8_per_block_weight(W.attn_qkv_s,
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_qkv_s,
                                                  qkv_s_list, concat_0, data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
