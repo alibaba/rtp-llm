@@ -109,7 +109,7 @@ using MaskType = uint32_t;
 #endif
 
 #ifndef USE_INPUT_KV
-#define USE_INPUT_KV 1
+#define USE_INPUT_KV 0
 #endif
 
 #if USE_INPUT_KV

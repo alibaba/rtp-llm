@@ -317,15 +317,6 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     if (params.output.isQBuffer()) {
         params.output.updateTypeAndShape(DataType::TYPE_FP8_E4M3, params.output.shape());
     }
-    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
-    if (flash_infer && flash_infer->plan.numel() > 0) {
-        BufferPtr f16_out;
-        if (use_fp8_fmha_) {
-            f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
-        }
-        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_));
-        return;
-    }
 
     auto datatype = params.input.type();
     size_t max_seq_len_tile = 0;
@@ -372,8 +363,17 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto       kv_cache_block_id      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_block_id"});
     KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, use_fp8_fmha_);
+    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
+    if (flash_infer && flash_infer->plan.numel() > 0) {
+        BufferPtr f16_out;
+        if (use_fp8_fmha_) {
+            f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
+        }
+        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_), this, device_prop_, kv_block_array);
+        return;
+    }
     if (use_xqa) {
-        FT_LOG_WARNING("enter xqa");
+        RTP_LLM_LOG_INFO("enter xqa");
         size_t max_seq_len = round_up(params.common.decoder_max_seq_len, params.configs.tokens_per_block);
         float one = 1.;
         BufferPtr kv_cache_scale = allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});

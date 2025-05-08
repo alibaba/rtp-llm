@@ -514,15 +514,15 @@ void CudaDevice::checkUseTrtV2FMHA() {
 void CudaDevice::checkUseXQA() {
     int sm = get_sm();
     if (sm < 89) {
-        FT_LOG_WARNING("XQA is disabled for sm %d", sm);
+        RTP_LLM_LOG_WARNING("XQA is disabled for sm %d", sm);
         return;
     }
     char* xqa_env = std::getenv("ENABLE_XQA");
     if (xqa_env && std::string(xqa_env) == "OFF") {
-        FT_LOG_WARNING("XQA is disabled for by env");
+        RTP_LLM_LOG_WARNING("XQA is disabled for by env");
         return;
     }
-    FT_LOG_INFO("use xqa");
+    RTP_LLM_LOG_INFO("use xqa");
     use_xqa = true;
 }
 

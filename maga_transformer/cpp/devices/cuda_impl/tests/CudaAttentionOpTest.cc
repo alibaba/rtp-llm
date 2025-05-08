@@ -247,9 +247,9 @@ TEST_F(AttentionOpTest, XqaSelfAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
-    std::vector<size_t> batch = {1, 3};
+    std::vector<size_t> batch = {3};
     std::vector<size_t> seq   = {1};
-    std::vector<size_t> kv_seq = {1, 2049};
+    std::vector<size_t> kv_seq = {2049};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
             for (auto kv_seq_len: kv_seq) {

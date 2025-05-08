@@ -11,6 +11,7 @@
 #include "maga_transformer/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "3rdparty/xqa/mha.h"
 #include "flashmla/flashmla.h"
 
 using namespace std;
@@ -28,6 +29,34 @@ static int MIN_CACHE_PAGE_NUM = 48 * 1024;
 
 void FlashInferAttnParamsDel(void* p) {
     PARAMS_CACHE.push_back((FlashInferAttnParams *)p);
+}
+
+BufferPtr get_kv_cache_scale(CudaDevice *device) {
+    float one = 1.;
+    BufferPtr kv_cache_scale = device->allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});
+    cudaMemcpy(kv_cache_scale->data(), &one, sizeof(float), cudaMemcpyHostToDevice);
+
+    return kv_cache_scale;
+}
+
+BufferPtr get_semaphores(CudaDevice *device, size_t kv_head_num) {
+    // max decoder_batch_size: 256
+    size_t sem_size = kv_head_num * 256;
+    size_t real_sem_size = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
+    BufferPtr semaphores = device->allocateBuffer({DataType::TYPE_UINT32, {real_sem_size}, AllocationType::DEVICE}, {"semaphores"});
+    device->bufMemset(*semaphores, 0);
+
+    return semaphores;
+}
+
+void* get_scratch(CudaDevice *device, size_t head_num, size_t kv_head_num) {
+    size_t scratch_size = (256u << 20);
+    static BufferPtr scratch = device->allocateBuffer({DataType::TYPE_BYTES, {scratch_size}, AllocationType::DEVICE}, {"scratch"});
+    device->bufMemset(*scratch, 0);
+    size_t group_size = head_num / kv_head_num;
+    auto real_scratch = reinterpret_cast<void*>(round_up<uintptr_t>(reinterpret_cast<uintptr_t>(scratch->data()), ioHeadBytes * group_size));
+
+    return real_scratch;
 }
 
 tuple<BufferPtr, vector<torch::Tensor>> FlashInferAttnParams::allocateManyBuffer(
@@ -416,7 +445,10 @@ void FlashInferAttnParams::run(
         const AttentionModuleParams& params,
         const BufferPtr &f16_out,
         std::function<void()> moe_insertion_callback,
-        int64_t stream)
+        int64_t stream,
+        CudaDevice *device,
+        const cudaDeviceProp& prop,
+        KVBlockArray kv_block_array)
 {
     const int local_head_num = params.configs.head_num;
     const int local_head_num_kv = params.configs.kv_head_num;
@@ -474,6 +506,34 @@ void FlashInferAttnParams::run(
     moe_insertion_callback();
 
     sync_check_cuda_error();
+
+    // RTP_LLM_LOG_INFO("enter xqa");
+    size_t max_seq_len = round_up(params.common.decoder_max_seq_len + 1, params.configs.tokens_per_block);
+
+    static BufferPtr kv_cache_scale = get_kv_cache_scale(device);
+
+    static BufferPtr semaphores = get_semaphores(device, local_head_num_kv);
+
+    static void* scratch = get_scratch(device, local_head_num, local_head_num_kv);
+
+    launchHopperF8MHA(prop,
+                      static_cast<uint32_t>(local_head_num_kv),
+                      1.f,
+                      reinterpret_cast<OutputHead*>(params.output.data()),
+                      reinterpret_cast<InputHead*>(q.data_ptr()),
+                      reinterpret_cast<GMemCacheHead*>(kv_block_array.mPrimaryPoolPtr),
+                      reinterpret_cast<KVCachePageIndex*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+                      static_cast<uint32_t>(max_seq_len),
+                      reinterpret_cast<uint32_t*>(kvlen_d.data_ptr()),
+                      static_cast<uint32_t>(params.common.decoder_batch_size),
+                      kv_cache_scale->data<float>(),
+                      semaphores->data<uint32_t>(),
+                      scratch,
+                      reinterpret_cast<cudaStream_t>(stream));
+
+    sync_check_cuda_error();
+
+    return;
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

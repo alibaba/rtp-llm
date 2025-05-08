@@ -164,7 +164,7 @@ bool cufmha::initOpenSourceFmhaAndCheckSupport()
 
 bool cufmha::initXqaAndCheckSupport() {
     if (get_sm() < tensorrt_llm::kernels::kSM_89) {
-        FT_LOG_INFO("cuda sm %d < 89, not support xqa", get_sm());
+        RTP_LLM_LOG_INFO("cuda sm %d < 89, not support xqa", get_sm());
         return false;
     }
     return true;

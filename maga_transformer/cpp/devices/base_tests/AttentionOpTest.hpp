@@ -394,9 +394,9 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP8_E4M3}));
+    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16}));
     cache_manager_ = nullptr;
-    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_u8);
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     auto common_inputs = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
