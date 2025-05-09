@@ -314,9 +314,8 @@ class QwenRenderer(CustomChatRenderer):
             query = f'{instruction}\n\nQuestion: {query}'
         return query, history, system
     
-    def in_think_mode(self, request: ChatCompletionRequest):        
-        chat_template_kwargs = request.chat_template_kwargs
-        if chat_template_kwargs is not None and chat_template_kwargs.get('enable_thinking', True) is False:
+    def in_think_mode(self, request: ChatCompletionRequest):
+        if request.disable_thinking():
             return False
         return super().in_think_mode(request)
 
@@ -542,3 +541,5 @@ register_renderer('qwen_13b', QwenRenderer)
 register_renderer('qwen_1b8', QwenRenderer)
 register_renderer('qwen_2', QwenRenderer)
 register_renderer('qwen_2_moe', QwenRenderer)
+register_renderer('qwen_3', QwenRenderer)
+register_renderer('qwen_3_moe', QwenRenderer)

@@ -404,9 +404,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.endpoint.stop_words_str_list, ['<|user|>', '<|observation|>'])
 
     async def test_think_label(self):
-        custom_renderer.think_mode = 1
-        custom_renderer.think_end_tag = 'ulaire'    # id = 73675
-        custom_renderer.think_end_tag_len = len('ulaire')
+        custom_renderer.THINK_MODE = 1
+        custom_renderer.THINK_END_TAG = 'ulaire'    # id = 73675
         os.environ['MODEL_TYPE'] = 'qwen'
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
@@ -455,9 +454,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
     async def test_think_label_more_than_one_token(self):
-        custom_renderer.think_mode = 1
-        custom_renderer.think_start_tag = '我可以'
-        custom_renderer.think_end_tag = '可以ulaire'
+        custom_renderer.THINK_MODE = 1
+        custom_renderer.THINK_START_TAG = '我可以'
+        custom_renderer.THINK_END_TAG = '可以ulaire'
         os.environ['MODEL_TYPE'] = 'qwen'
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
@@ -506,9 +505,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         
     async def test_think_label_real_situation_union(self):     
-        custom_renderer.think_mode = 1
-        custom_renderer.think_start_tag = '<think>\n'
-        custom_renderer.think_end_tag = '</think>\n'
+        custom_renderer.THINK_MODE = 1
+        custom_renderer.THINK_START_TAG = '<think>\n'
+        custom_renderer.THINK_END_TAG = '</think>\n'
         os.environ['MODEL_TYPE'] = 'qwen_2'
         tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer")
         self.model.tokenizer = tokenizer

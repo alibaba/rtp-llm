@@ -81,4 +81,4 @@ class Qwen2Moe(QWenV2):
         return QWenV2MoeWeight
 
 
-register_model('qwen_2_moe', Qwen2Moe, ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"])
+register_model('qwen_2_moe', Qwen2Moe, ["Qwen2MoeForCausalLM"])

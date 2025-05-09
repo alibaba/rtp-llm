@@ -136,6 +136,18 @@ class ChatCompletionRequest(BaseModel):
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
         return 'messages' in request
+    
+    def get_chat_template_kwargs(self):
+        if self.extend_fields is not None and 'chat_template_kwargs' in self.extend_fields:
+            return self.extend_fields['chat_template_kwargs']
+        else:
+            return self.chat_template_kwargs
+    
+    def disable_thinking(self):
+        if self.get_chat_template_kwargs() is not None and self.get_chat_template_kwargs().get('enable_thinking', True) is False:
+            return True
+        else:
+            return False
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None

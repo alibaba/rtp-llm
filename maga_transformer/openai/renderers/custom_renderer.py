@@ -379,6 +379,7 @@ class CustomChatRenderer():
         
         if isinstance(item.output_str, str):
             processing_index, output_len = 0, len(item.output_str)
+            
             if output_len == 0:
                 return DeltaMessage(content="")
             
@@ -863,7 +864,7 @@ class CustomChatRenderer():
         def split_think_tag(text: Optional[str]):
             if text is None:
                 return None, None
-            text_results = text.split(think_end_tag, 1)
+            text_results = text.split(THINK_END_TAG, 1)
             reasoning_content = text_results[0] if len(text_results) == 2 else None
             content = text_results[1] if len(text_results) == 2 else text
             return content, reasoning_content

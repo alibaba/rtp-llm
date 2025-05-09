@@ -139,6 +139,12 @@ class QwenToolRenderer(CustomChatRenderer):
         if request.messages[-1].role != RoleEnum.assistant:
             context["add_generation_prompt"] = True
 
+        if request.chat_template_kwargs is not None:
+            context.update(request.chat_template_kwargs)
+        if request.extend_fields is not None and 'chat_template_kwargs' in request.extend_fields and \
+            isinstance(request.extend_fields['chat_template_kwargs'], dict):
+            context.update(request.extend_fields['chat_template_kwargs'])
+
         env = Environment(loader=BaseLoader())
         # 重写tojson过滤器, 这里存在三个注意点
         # 1. tojson过滤器默认会排序, 导致生成的json字符串不符合预期
@@ -159,6 +165,11 @@ class QwenToolRenderer(CustomChatRenderer):
         except Exception as e:
             raise ValueError(f"Error rendering prompt template: {str(e)}")
 
+    def in_think_mode(self, request: ChatCompletionRequest):
+        if request.disable_thinking():
+            return False
+        return super().in_think_mode(request)
+    
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -500,3 +511,4 @@ class QwenToolRenderer(CustomChatRenderer):
 
 
 register_renderer("qwen_tool", QwenToolRenderer)
+register_renderer("qwen_3_tool", QwenToolRenderer)

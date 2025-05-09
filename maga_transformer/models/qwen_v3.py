@@ -24,3 +24,4 @@ class QwenV3(QWenV2):
         return config
     
 register_model('qwen_3', QwenV3, ["Qwen3ForCausalLM"])
+register_model("qwen_3_tool", QwenV3)
