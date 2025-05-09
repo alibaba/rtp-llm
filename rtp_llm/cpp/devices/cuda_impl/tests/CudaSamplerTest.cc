@@ -46,7 +46,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
         nullopt, nullopt, nullopt,
     });
     auto greedy_output = device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     ASSERT_EQ(output_token_ids_host[5], 5);
     ASSERT_EQ(output_token_ids_host[11], 2);
@@ -89,7 +89,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
         nullopt, nullopt, nullopt,
     });
     auto greedy_output = device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
     ASSERT_TRUE(greedy_output.success != nullptr);
     ASSERT_EQ(greedy_output.success->size(), 4);
     // printbuffer<int32_t>(*output_token_ids, "output_token_ids");
@@ -141,7 +141,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
         nullopt, nullopt, nullopt,
     });
     auto greedy_output = device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
     ASSERT_TRUE(greedy_output.success != nullptr);
     ASSERT_EQ(greedy_output.success->size(), 4);
 
@@ -197,7 +197,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
         nullopt, nullopt, nullopt,
     });
     auto greedy_output = device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
     ASSERT_TRUE(greedy_output.success != nullptr);
     ASSERT_EQ(greedy_output.success->size(), 4);
 
@@ -252,7 +252,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
         nullopt, nullopt, nullopt,
     });
     auto greedy_output = device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     ASSERT_TRUE(greedy_output.success != nullptr);
     ASSERT_EQ(greedy_output.success->size(), 4);
@@ -306,7 +306,7 @@ TEST_F(CudaSamplerTest, testFlashInferTopKAllProbs) {
         nullopt, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -362,7 +362,7 @@ TEST_F(CudaSamplerTest, testFlashInferTopPAllProb) {
         nullopt, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -420,7 +420,7 @@ TEST_F(CudaSamplerTest, testFlashInferTopKTopPBatchAllProb) {
         nullopt, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -479,7 +479,7 @@ TEST_F(CudaSamplerTest, testTopK) {
         *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     printBuffer<float>(*cum_log_probs, "cum_log_probs");
@@ -539,7 +539,7 @@ TEST_F(CudaSamplerTest, testTopP) {
         *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     printBuffer<float>(*cum_log_probs, "cum_log_probs");
@@ -605,7 +605,7 @@ TEST_F(CudaSamplerTest, testTopKTopPBatch) {
         *cum_log_probs, nullopt, *output_all_probs,
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     printBuffer<float>(*cum_log_probs, "cum_log_probs");
@@ -665,7 +665,7 @@ TEST_F(CudaSamplerTest, testRandom) {
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -744,7 +744,7 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
     const auto cuda_device = dynamic_cast<CudaDevice*>(device_);
     const auto stream = cuda_device->getStream();
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     std::vector<uint64_t> output_ids_ptrs(batch_size);
     for (int i = 0; i < batch_size; i++) {
@@ -767,7 +767,7 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
         vocab_size,
         step,
         stream);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     std::vector<int32_t> expcted_ban_token_ids = {3, 3, 1, 6};
     const auto logits_tensor = bufferToTensor(*logits, device_);

@@ -100,7 +100,7 @@ void invokeStopWordsCriterion(const int*   output_ids,
 
     stop_words_criterion<<<grid, block, 0, stream>>>(
         output_ids, parent_ids, stop_words, finished, id_offset, stop_words_len, batch_size, beam_width, step);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 __global__ void length_criterion(bool*           finished,
@@ -151,7 +151,7 @@ void invokeLengthCriterion(bool*           finished,
     length_criterion<<<grid, block, 0, stream>>>(
         finished, should_stop, h_pinned_finished_sum_, sequence_limit_length, batch_size, beam_width, step);
     // while (((volatile size_t*)h_pinned_finished_sum_)[0] == -1) {};
-    sync_check_cuda_error();
+    check_cuda_error();
 
     *should_stop = h_pinned_finished_sum_[0] == batch_size * beam_width;
 }

@@ -331,7 +331,7 @@ void sm90_generic_moe_gemm_kernelLauncher(HopperGroupedGemmInput hopper_input, i
         auto run_status = gemm.run(stream);
         TLLM_CHECK_WITH_INFO(run_status == cutlass::Status::kSuccess,
             "Failed to run cutlass SM90 grouped gemm. Error: " + std::string(cutlassGetStatusString(run_status)));
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else
     {

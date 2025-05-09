@@ -245,7 +245,7 @@ void invokeAddQKVBiasIA3Transpose(T*           q_buf,
                                                            head_num,
                                                            size_per_head);
         }
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else {
         using T2 = typename TypeConverter<T>::Type;  // fp16 to half2, bf16 to bf162
@@ -283,7 +283,7 @@ void invokeAddQKVBiasIA3Transpose(T*           q_buf,
                                                             head_num,
                                                             size_per_head / 2);
         }
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 }
 

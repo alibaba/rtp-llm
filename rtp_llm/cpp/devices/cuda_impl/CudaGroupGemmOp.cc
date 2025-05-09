@@ -62,7 +62,7 @@ GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
                                alpha,
                                beta,
                                num);
-    sync_check_cuda_error();
+    check_cuda_error();
     return GroupedGemmOutput({std::move(output)});
 }
 

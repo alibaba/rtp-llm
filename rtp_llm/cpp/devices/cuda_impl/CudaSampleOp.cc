@@ -202,7 +202,7 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
     }
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
-    sync_check_cuda_error();
+    check_cuda_error();
     return {success};
 }
 
@@ -474,7 +474,7 @@ void CudaDevice::completeSampleGreedy(const GreedyParams& params, const BufferPt
     auto output_tokens = transpose({*transposed_tokens});
 
     copy({params.token_ids, *output_tokens});
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 

@@ -116,7 +116,7 @@ void invokeBanBadWords(T*           logits,
                                               id_offset,
                                               vocab_size_padded,
                                               step);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template void invokeBanBadWords(half*        logits,

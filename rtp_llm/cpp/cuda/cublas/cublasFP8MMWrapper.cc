@@ -546,7 +546,7 @@ void cublasFP8MMWrapper::Conv1x1Gemm(__nv_fp8_e4m3*       res,
 
     qgmmaLauncher.invokeQgmma1x1<RELU, GELU>(
         res, m, n, k, input, kernel, bias, input_scale, kernel_scale, output_scale, cublas_workspace_qgemm_, stream);
-    sync_check_cuda_error();
+    check_cuda_error();
     mu_->unlock();
 }
 

@@ -157,8 +157,8 @@ template<typename T>
 void check(T result, const char* const file, int const line);
 #define check_cuda_value(val) rtp_llm::check((val), __FILE__, __LINE__)
 
-void syncAndCheck(const char* const file, int const line);
-#define sync_check_cuda_error() rtp_llm::syncAndCheck(__FILE__, __LINE__)
+void syncAndCheckInDebug(const char* const file, int const line);
+#define check_cuda_error() rtp_llm::syncAndCheckInDebug(__FILE__, __LINE__)
 
 int get_sm();
 bool is_sm70();

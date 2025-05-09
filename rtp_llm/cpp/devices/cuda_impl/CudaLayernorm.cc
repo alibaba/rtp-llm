@@ -51,7 +51,7 @@ LayernormOutput CudaDevice::layernormWithStride(const LayernormWithStrideParams&
                                         params.norm_group_size,
                                         norm_weight->get().gamma.get()->shape()[0],
                                         stream_);
-        sync_check_cuda_error();
+        check_cuda_error();
         return LayernormOutput({norm_output, nullptr});
     } else if (params.norm_type == NormType::rmsnorm) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
@@ -67,7 +67,7 @@ LayernormOutput CudaDevice::layernormWithStride(const LayernormWithStrideParams&
                                         params.norm_group_size,
                                         norm_weight->get().gamma.get()->shape()[0],
                                         stream_);
-        sync_check_cuda_error();
+        check_cuda_error();
         return LayernormOutput({norm_output, nullptr});
     } else {
         throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
@@ -226,7 +226,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else if (params.alpha != 0.f) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidual,
@@ -238,7 +238,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 m,
                 n,
                 stream_);
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, nullptr});
         }
     }
@@ -265,11 +265,11 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 quant_output, // out_quant
                 params.return_normed_output
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
 	        RTP_LLM_LOG_DEBUG("quant_data_type: %d, params.norm_type is layernorm\n", quant_data_type);
-            sync_check_cuda_error();
+            check_cuda_error();
             DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralLayerNorm,
                 params.before_norm_output == nullptr ? nullptr: params.before_norm_output->data(),
                 norm_output->data(),
@@ -286,7 +286,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 quant_output, // out_quant
                 params.return_normed_output
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         }
     }
@@ -312,7 +312,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                             scales_ptr, // dynamic_scale
                                             quant_output // out_quant
                                         );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
             DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type, quant_data_type, invokeGeneralRmsNorm,
@@ -328,7 +328,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 scales_ptr, // dynamic_scale
                 quant_output // out_quant
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         }
     }

@@ -276,10 +276,14 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
     }
 }
 
+void  ROCmDevice::checkError() {
+    ROCM_CHECK_ERROR();
+}
+
 void ROCmDevice::syncAndCheck() {
     syncCommunication();
     ROCM_CHECK(hipDeviceSynchronize());
-    ROCM_SYNC_AND_CHECK();
+    ROCM_CHECK_ERROR();
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {

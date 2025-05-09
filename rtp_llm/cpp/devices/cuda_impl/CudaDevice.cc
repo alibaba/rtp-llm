@@ -246,12 +246,16 @@ void CudaDevice::initNcclParam(size_t             rank,
     NCCLCHECK(ncclGroupEnd());
 }
 
+void CudaDevice::checkError() {
+    check_cuda_error();
+}
+
 void CudaDevice::syncAndCheck() {
     syncCommunication();
     cudaStreamSynchronize(stream_);
     cudaStreamSynchronize(communication_stream_);
     cudaStreamSynchronize(no_block_copy_stream_);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void CudaDevice::syncDeviceStream(DeviceStream stream) {
@@ -646,7 +650,7 @@ CudaEvent::~CudaEvent() {
 void CudaEvent::synchronize() const {
     check_cuda_value(cudaEventSynchronize(event_));
     check_cuda_value(cudaStreamSynchronize(stream_));
-    sync_check_cuda_error();
+    check_cuda_error();
     cudaDeviceSynchronize();
 }
 
@@ -761,7 +765,7 @@ void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
                 throw std::runtime_error("Unsupported balance method");
                 break;
         }
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 }
 }; // namespace rtp_llm

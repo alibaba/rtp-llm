@@ -281,7 +281,7 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                                         max_blocks_per_batch,
                                         kv_block_offset,
                                         stream);
-    sync_check_cuda_error();
+    check_cuda_error();
     if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
                               "v scale buffer should has value when use k scale buffer has value");
@@ -300,7 +300,7 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
         cache_type = KvCacheDataType::INT8;
     }
     kv_cache_buffer.cache_type = cache_type;
-    sync_check_cuda_error();
+    check_cuda_error();
     return kv_cache_buffer;
 }
 
@@ -419,7 +419,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             store_cache,
             stream_
         );
-        sync_check_cuda_error();
+        check_cuda_error();
         
         writeCacheStore(params);
     }
@@ -622,7 +622,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         kv_block_array,
         stream);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModuleParams& params) {

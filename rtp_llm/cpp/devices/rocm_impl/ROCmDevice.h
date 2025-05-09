@@ -118,6 +118,7 @@ public:
     void noBlockCopy(const CopyParams& params) override;
     void bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput transpose(const TransposeParams& params) override;
+    void checkError() override;
     void syncAndCheck() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;

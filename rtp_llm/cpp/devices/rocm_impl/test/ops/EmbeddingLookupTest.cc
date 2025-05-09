@@ -32,5 +32,5 @@ TEST_F(EmbeddingLookupTest, testEmbeddingLookup) {
 
     ASSERT_TRUE(torch::allclose(expected_values, output_tensor, 1e-03, 1e-03));
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }

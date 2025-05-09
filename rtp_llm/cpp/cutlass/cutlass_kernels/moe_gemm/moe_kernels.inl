@@ -888,19 +888,19 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
         hopper_input = computeStridesHopper(expert_first_token_offset, hopper_input, fc1_out_size, hidden_size,
             num_experts_per_node, input, fc1_expert_weights, fc1_fp8_dequant, nullptr,
             static_cast<UnfusedGemmOutputType*>(gemm_output), stream);
-        sync_check_cuda_error();
+        check_cuda_error();
 
         gemm_runner.moeGemm(input, nullptr, nullptr, nullptr, group_size, nullptr, total_tokens_including_expert,
             hopper_input, expanded_num_rows, fc1_out_size, hidden_size, num_experts_per_node, false,
             alpha_scale_ptr_array, stream, config);
 
-        sync_check_cuda_error();
+        check_cuda_error();
         // TODO: when bias_is_broadcast is false, fuse bias to gemm
         doActivation<T, UnfusedGemmOutputType>(output, static_cast<UnfusedGemmOutputType const*>(gemm_output),
             fc2_fp8_quant, fc1_expert_biases, bias_is_broadcast, expert_first_token_offset, num_experts_per_node,
             inter_size, expanded_num_rows, fc1_activation_type, stream);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else if (use_fp8)
     {
@@ -919,7 +919,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             fc2_fp8_quant, fc1_expert_biases, bias_is_broadcast, expert_first_token_offset, num_experts_per_node,
             inter_size, expanded_num_rows, fc1_activation_type, stream);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else if (!is_gated_activation)
     {
@@ -930,7 +930,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             expanded_num_rows, fc1_out_size, hidden_size, num_experts_per_node, fc1_activation_type, false,
             alpha_scale_ptr_array, stream, config);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else
     {
@@ -947,7 +947,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             expanded_num_rows, fc1_out_size, hidden_size, num_experts_per_node, activation_type,
             use_ampere_activation_fusion, alpha_scale_ptr_array, stream, config);
 
-        sync_check_cuda_error();
+        check_cuda_error();
 
         if (!use_ampere_activation_fusion)
         {
@@ -955,7 +955,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
                 static_cast<UnfusedGemmOutputType const*>(intermediate_result), num_valid_tokens_ptr, inter_size,
                 expanded_num_rows, fc1_activation_type, stream);
 
-            sync_check_cuda_error();
+            check_cuda_error();
         }
     }
 }
@@ -998,7 +998,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             num_experts_per_node, input, fc2_expert_weights, fc2_fp8_dequant, nullptr,
             static_cast<UnfusedGemmOutputType*>(gemm_output), stream);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else if (use_fp8)
     {
@@ -1012,7 +1012,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
         fuse_lora_bias ? static_cast<ScaleBiasType const*>(fc2_lora) : nullptr, false, gemm_output,
         total_tokens_including_expert, hopper_input, expanded_num_rows, hidden_size, inter_size, num_experts_per_node,
         ActivationType::Identity, false, alpha_scale_ptr_array, stream, config);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     if (use_lora && !fuse_lora_bias)
     {
@@ -1021,7 +1021,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             static_cast<UnfusedGemmOutputType const*>(gemm_output), nullptr,
             static_cast<ScaleBiasType const*>(fc2_lora), false, expert_first_token_offset, num_experts_per_node,
             hidden_size, expanded_num_rows, ActivationType::Identity, stream);
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 
     bool has_different_output_type_ampere = use_fp8 && !using_hopper_gemm2;
@@ -1042,7 +1042,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             MOEExpertScaleNormalizationMode::NONE, stream);
     }
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template<class T,
@@ -1181,13 +1181,13 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
     int const end_expert = start_expert + num_experts_per_node;
 
     genSourceRow(expert_for_source_row, source_rows_, num_rows, k, num_experts, start_expert, end_expert, stream);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     sortAndScanSoftmaxOutput(expert_for_source_row, source_rows_, permuted_experts_, permuted_rows_,
         expert_first_token_offset_, num_rows, num_experts, num_experts_per_node, k, sorter_,
         static_cast<void*>(sorter_ws_), stream);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     int64_t const expanded_num_rows = k * num_rows;
     bool is_gated_activation = isGatedActivation(fc1_activation_type);
@@ -1212,14 +1212,14 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
         permuted_rows_, expanded_source_row_to_expanded_dest_row, num_rows, num_valid_tokens_ptr, hidden_size, k,
         stream);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     Self::gemm1(moe_gemm_runner_, permuted_data_, fc1_result_, glu_inter_result_, expert_first_token_offset_,
         hopper_grouped_gemm_input_, fc1_expert_weights, fc1_expert_biases, num_valid_tokens_ptr, fc1_int_scales,
         fc1_int_zeros, group_size, fc1_fp8_dequant, fc2_fp8_quant, expanded_num_rows, hidden_size, inter_size,
         num_experts_per_node, fc1_activation_type, alpha_scale_ptr_array_, !use_lora, stream, *gemm1_config_);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     Self::gemm2(moe_gemm_runner_, fc1_result_, fc2_result_, final_output, expert_first_token_offset_,
         hopper_grouped_gemm_input_, fc2_expert_weights, fc2_expert_biases, fc2_int_scales, fc2_int_zeros, group_size,
@@ -1228,7 +1228,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
         inter_size, num_experts_per_node, k, !use_deterministic_hopper_reduce_, alpha_scale_ptr_array_, use_lora,
         lora_fc2_result_, stream, parallelism_config, *gemm2_config_);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template <class T, class WeightType, cutlass::WeightOnlyQuantOp QuantOp, class OutputType, class ScaleBiasType,

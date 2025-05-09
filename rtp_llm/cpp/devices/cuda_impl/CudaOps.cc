@@ -62,7 +62,7 @@ void CudaDevice::copy(const CopyParams& params) {
         check_cuda_value(cudaGetLastError());
     }
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void CudaDevice::noBlockCopy(const CopyParams& params) {
@@ -71,7 +71,7 @@ void CudaDevice::noBlockCopy(const CopyParams& params) {
     const auto& dst = params.dst;
     cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), cudaMemcpyDefault, no_block_copy_stream_);
     cudaStreamSynchronize(no_block_copy_stream_);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 TransposeOutput CudaDevice::transpose(const TransposeParams& params) {

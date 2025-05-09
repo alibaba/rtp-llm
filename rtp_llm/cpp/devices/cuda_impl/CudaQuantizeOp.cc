@@ -190,7 +190,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
         RTP_LLM_CHECK_WITH_INFO(false, "params qscheme type unknown: %d", int(params.qscheme));
     }
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     auto zeros_type = scales->where();
     return BufferPtr(new QBuffer(std::move(kernel),

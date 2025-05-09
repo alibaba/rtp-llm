@@ -64,7 +64,7 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
             ROCM_FAIL("other quantize not implemented");
         }
 
-        ROCM_SYNC_AND_CHECK();
+        ROCM_CHECK_ERROR();
         return BufferPtr(new QBuffer(std::move(kernel), std::move(scales), std::move(zeros)));
 
     } else {
@@ -94,7 +94,7 @@ BufferPtr ROCmDevice::dequantize(const QuantizeParams& params) {
                                              QB.zeros().data<half>(),
                                              stream_);
 
-            ROCM_SYNC_AND_CHECK();
+            ROCM_CHECK_ERROR();
             return fpB;
         } else {
             ROCM_FAIL("other dequantize not implemented");

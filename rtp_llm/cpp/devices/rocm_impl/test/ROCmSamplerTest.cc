@@ -50,7 +50,7 @@ TEST_F(CudaSamplerTest, testTopK) {
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     //printBuffer<float>(*cum_log_probs, "cum_log_probs");
@@ -101,7 +101,7 @@ TEST_F(CudaSamplerTest, testTopP) {
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     //printBuffer<float>(*cum_log_probs, "cum_log_probs");
@@ -153,7 +153,7 @@ TEST_F(CudaSamplerTest, testRandom) {
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);

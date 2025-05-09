@@ -30,7 +30,7 @@ void invokeHelloWorld(const T* a, const T* b, T* c, const int vector_len, cudaSt
 
     vector_add<<<grid, block, 0, stream>>>(vector_len, a, b, c);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template void invokeHelloWorld(const float* a, const float* b, float* c, const int vector_len, cudaStream_t stream);

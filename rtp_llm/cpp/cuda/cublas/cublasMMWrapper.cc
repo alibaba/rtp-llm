@@ -252,7 +252,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
                     stream,
                     /* find_best = */false));
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void cublasMMWrapper::Gemm(cublasOperation_t transa,
@@ -358,7 +358,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                                         computeType,
                                         static_cast<cublasGemmAlgo_t>(cublasAlgo)));
         }
-        sync_check_cuda_error();
+        check_cuda_error();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("cublasMMWrapper::Gemm exception %s", e.what());
         throw;
@@ -540,7 +540,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     check_cuda_value(cublasLtMatmul(cublaslt_handle_, operationDesc, alpha, A,
                                     Adesc, B, Bdesc, beta, C, Cdesc, C, Cdesc,
                                     (findAlgo == 1 ? (&algo) : NULL), workSpace, workspaceSize, stream_));
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 #endif
 void cublasMMWrapper::setStream(cudaStream_t stream) {
@@ -972,7 +972,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     void* workSpace = cublas_workspace_;
     uint64_t workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
 
-    sync_check_cuda_error();
+    check_cuda_error();
     auto ret = cublasLtMatmulWrapper(cublaslt_handle_,
                                      operationDesc,
                                      alpha,
@@ -990,7 +990,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
                                      workspaceSize,
                                      stream_);
     check_cuda_value(ret);
-    sync_check_cuda_error();
+    check_cuda_error();
 #endif
 }
 

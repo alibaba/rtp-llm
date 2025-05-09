@@ -38,7 +38,7 @@ void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root, bool ti
     if (tensor_para_.rank_ == root){
         rtp_llm::ftNcclStreamSynchronize(tensor_para_, stream, timeout);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 }  // namespace torch_ext

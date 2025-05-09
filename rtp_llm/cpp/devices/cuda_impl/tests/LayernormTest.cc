@@ -49,7 +49,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                     );
                 }
                 cudaDeviceSynchronize();
-                sync_check_cuda_error();
+                check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
                 const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -83,7 +83,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                     );
                 }
                 cudaDeviceSynchronize();
-                sync_check_cuda_error();
+                check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
                 const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -113,7 +113,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         );
                     }
                     cudaDeviceSynchronize();
-                    sync_check_cuda_error();
+                    check_cuda_error();
 
                     const auto end = chrono::high_resolution_clock::now();
                     const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -144,7 +144,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         );
                     }
                     cudaDeviceSynchronize();
-                    sync_check_cuda_error();
+                    check_cuda_error();
 
                     const auto end = chrono::high_resolution_clock::now();
                     const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();

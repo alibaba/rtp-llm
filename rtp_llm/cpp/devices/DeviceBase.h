@@ -38,6 +38,7 @@ public:
     BufferPtr allocateBufferLike(const Buffer& buffer,
                                  const AllocationType atype = AllocationType::DEVICE,
                                  const BufferHints& hints = {});
+    virtual void checkError();
     virtual void syncAndCheck();
     virtual void syncDeviceStream(DeviceStream stream);
     virtual void syncCommunication(bool timeout = true);

@@ -111,7 +111,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                          nullptr, // scale_out_ptr,
                                          0, //int8_mode,
                                          stream_);
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
@@ -154,7 +154,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             store_kv,
             store_cache,
             stream_);
-        sync_check_cuda_error();
+        check_cuda_error();
 
         if (!qkv_buf_fp8) {
             printBufferData(params.input, "after invoke transpse");
@@ -163,7 +163,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             RTP_LLM_LOG_DEBUG("now print qkv_buf_fp8");
             printBufferData(*qkv_buf_fp8.get(), "after invoke transpse fp8");
         }
-        sync_check_cuda_error();
+        check_cuda_error();
 
         if (store_cache) {
             writeCacheStore(params);
@@ -271,11 +271,11 @@ void selfAttentionwrapper(const AttentionModuleParams params,
             params.configs.softmax_extra_scale,
             kv_block_array,
             stream);
-    sync_check_cuda_error();
+    check_cuda_error();
     if (f16_out) {
         cudaMemcpyAsync(output.data(), f16_out->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {

@@ -314,7 +314,7 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
 
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
-    sync_check_cuda_error();
+    check_cuda_error();
     return GreedyOutput{};
 }
 

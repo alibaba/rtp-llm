@@ -807,7 +807,7 @@ void invokeSelectExpertsForTokens(float const* input, float const* input_with_bi
         topkKernelLauncher(input, input_with_bias, output, softmax_temp_output, (int *)indices, source_row, num_rows, num_experts, k, 0, k,
             start_expert, end_expert, norm_mode, stream);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template
@@ -1077,7 +1077,7 @@ void makeLoadBalancedRoutingConfiguration(
     int gridDim = tensorrt_llm::common::ceilDiv(num_tokens, blockDim);
     initRoutingKernelDiagonal<float><<<gridDim, blockDim, 0, stream>>>(data_void, num_experts, num_tokens, k, stride);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 __global__ void prepareFakeRouterBuffers(int* unpermuted_source_rows, int* unpermuted_expert_selection,
@@ -1206,7 +1206,7 @@ void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int*
     sorter.run((void*) sorter_ws, sorter_ws_size_bytes, expert_for_source_row, permuted_experts, source_rows,
         permuted_rows, expanded_num_rows, stream);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     // Upper bound on number of expanded rows
     computeExpertFirstTokenOffset(
@@ -1236,7 +1236,7 @@ void GemmProfilerBackend::prepare(int num_tokens, char* workspace, cudaStream_t 
     dim3 grid_dim{(num_tokens + num_threads - 1) / num_threads, NUM_ROUTING_SAMPLES, 1};
     prepareFakeRouterBuffers<<<grid_dim, num_threads, 0, stream>>>(
         unpermuted_source_rows_base, unpermuted_expert_selection_base, num_tokens, mK, mNumExperts, mNumExpertsPerNode);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     for (int64_t i = 0; i < NUM_ROUTING_SAMPLES; i++)
     {
@@ -1249,7 +1249,7 @@ void GemmProfilerBackend::prepare(int num_tokens, char* workspace, cudaStream_t 
         sortAndScanSoftmaxOutput(unpermuted_expert_selection, unpermuted_source_rows, permuted_experts, dest_to_source,
             expert_first_token_offset, num_tokens, mNumExperts, mNumExpertsPerNode, mK, mSorter, sorter_ws, stream);
 
-        sync_check_cuda_error();
+        check_cuda_error();
 
         int grid_dim = (num_expanded_tokens + num_threads - 1) / num_threads;
         buildReverseMap<<<grid_dim, num_threads, 0, stream>>>(source_to_dest, dest_to_source, num_expanded_tokens);
@@ -1451,7 +1451,7 @@ void GemmProfilerBackend::runProfiler(
     }
     mInterface->is_profiler = false;
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 } // namespace tensorrt_llm::kernels

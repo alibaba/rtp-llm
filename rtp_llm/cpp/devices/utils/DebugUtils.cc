@@ -260,6 +260,11 @@ void printBuffer6d(const std::string&  hint,
 }
 
 void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool show_stats_only) {
+    if (!device) {
+        device = DeviceFactory::getDefaultDevice();
+    }
+    device->checkError();
+
     const auto log_level = alog::LOG_LEVEL_INFO;
 
     if (buffer.isQBuffer()) {
@@ -270,10 +275,6 @@ void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase*
             printBufferData_(q_buffer->zeros(), hint + "_zeros");
         }
         return;
-    }
-
-    if (!device) {
-        device = DeviceFactory::getDefaultDevice();
     }
 
     auto host_buffer = device->allocateBuffer({buffer.type(), buffer.shape(), AllocationType::HOST});

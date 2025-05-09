@@ -60,7 +60,7 @@ LayernormOutput ROCmDevice::layernormWithStride(const LayernormWithStrideParams&
                                         params.norm_group_size,
                                         norm_weight->get().gamma.get()->shape()[0],
                                         stream_);
-        sync_check_cuda_error();
+        ROCM_CHECK_ERROR();
         return LayernormOutput({norm_output, nullptr});
     } else if (params.norm_type == NormType::rmsnorm) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
@@ -76,7 +76,7 @@ LayernormOutput ROCmDevice::layernormWithStride(const LayernormWithStrideParams&
                                         params.norm_group_size,
                                         norm_weight->get().gamma.get()->shape()[0],
                                         stream_);
-        sync_check_cuda_error();
+        ROCM_CHECK_ERROR();
         return LayernormOutput({norm_output, nullptr});
     } else {
         throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
@@ -126,7 +126,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                             m,
                                             n,
                                             stream_);
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else if (params.alpha != 0.f) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
@@ -141,7 +141,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              m,
                                              n,
                                              stream_);
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
@@ -203,7 +203,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                     quant_output,  // out_quant
                     params.return_normed_output);
             }
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else if (params.norm_type == NormType::rmsnorm) {
             DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(
@@ -226,7 +226,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                 scales_ptr,   // dynamic_scale
                 quant_output  // out_quant
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         }
     } else {
@@ -273,7 +273,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                                  quant_output,  // out_quant
                                                  params.return_normed_output);
             }
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else if (params.norm_type == NormType::rmsnorm) {
             DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type,
@@ -291,7 +291,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                                        scales_ptr,   // dynamic_scale
                                                        quant_output  // out_quant
             );
-            sync_check_cuda_error();
+            check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         }
     }

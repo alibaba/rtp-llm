@@ -37,7 +37,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         hidden_size,
         stream_
     );
-    sync_check_cuda_error();
+    check_cuda_error();
     return embeddings;
 }
 

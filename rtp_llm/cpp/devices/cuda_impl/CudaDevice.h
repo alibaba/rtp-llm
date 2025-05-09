@@ -74,6 +74,7 @@ public:
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 
+    void checkError() override;
     void syncAndCheck() override;
     void printDebugInfo() override;
     void syncDeviceStream(DeviceStream stream) override;

@@ -105,7 +105,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     printBufferData(*permuted_experts, "permuted_experts");
     printBufferData(*permuted_rows, "permuted_rows");
     printBufferData(*expert_first_token_offset, "expert_first_token_offset");
-    sync_check_cuda_error();
+    check_cuda_error();
 
     const auto expert_first_token_offset_host     = clone({*expert_first_token_offset, AllocationType::HOST});
     int64_t*   expert_first_token_offset_host_ptr = expert_first_token_offset_host->data<int64_t>();
@@ -155,7 +155,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                                                            hidden_size,
                                                            top_k,
                                                            stream_);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     BufferPtr fc1_result;
     if (is_gated_activation) {
@@ -177,7 +177,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                                              padding_group_index_device->view(0, total_padding_num),
                                              stream_);
     printBufferData(*fc1_result, "fc1_result");
-    sync_check_cuda_error();
+    check_cuda_error();
     using GemmOutputType = __nv_bfloat16;
     using ScaleBiasType  = __nv_bfloat16;
     BufferPtr fc1_activation =
@@ -199,7 +199,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
         stream_);
     fc1_result.reset();
 
-    sync_check_cuda_error();
+    check_cuda_error();
     const auto fc2_result = allocateBuffer({DataType::TYPE_BF16, {total_padding_num, hidden_size}}, {"fc2_result"});
     BufferPtr  fc1_activation_fp8(
         new QBuffer(std::move(fc1_activation),
@@ -212,7 +212,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                                              padding_group_index_device->view(0, total_padding_num),
                                              stream_);
     printBufferData(*fc2_result, "fc2_result");
-    sync_check_cuda_error();
+    check_cuda_error();
     using OutputType = __nv_bfloat16;
 
     trt::MOEParallelismConfig parallel_config(1, 0, moe_conf.ep_size, moe_conf.ep_rank);
@@ -234,7 +234,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 
     printBufferData(*output, "moe_ffn_out");
 
-    sync_check_cuda_error();
+    check_cuda_error();
     return {output};
 #else
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
@@ -306,7 +306,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     DeepGemmPlugin::groupedGemmFp8Masked(
         *quantize_hidden, *weights.moe_gate_weight->kernel, *fc1_result, *masked_m, token_num, stream_);
 
-    sync_check_cuda_error();
+    check_cuda_error();
     using GemmOutputType     = __nv_bfloat16;
     using ScaleBiasType      = __nv_bfloat16;
     BufferPtr fc1_activation = allocateBuffer(
@@ -329,7 +329,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
         stream_);
     fc1_result.reset();
 
-    sync_check_cuda_error();
+    check_cuda_error();
     const auto fc2_result =
         allocateBuffer({DataType::TYPE_BF16, {num_experts_per_node, token_num, hidden_size}}, {"fc2_result"});
     BufferPtr fc1_activation_fp8(
@@ -339,7 +339,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     DeepGemmPlugin::groupedGemmFp8Masked(
         *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, token_num, stream_);
 
-    sync_check_cuda_error();
+    check_cuda_error();
     return {fc2_result};
 #else
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

@@ -78,12 +78,12 @@ void check(T result, const char* const file, int const line) {
 template void check<cudaError_t>(cudaError_t result, const char* const file, int const line);
 template void check<cublasStatus_t>(cublasStatus_t result, const char* const file, int const line);
 
-void syncAndCheck(const char* const file, int const line) {
+void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         cudaDeviceSynchronize();
         cudaError_t result = cudaGetLastError();
         check(result, file, line);
-        RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
+        RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheckInDebug at %s:%d", file, line));
     }
 }
 

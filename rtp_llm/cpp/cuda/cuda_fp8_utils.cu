@@ -78,7 +78,7 @@ void invokeQuantizeMatrix(T_OUT* output, T_S const* input_scale, T_IN const* inp
     {
         scaleMatrix<QuantizeMode::PER_TENSOR, true><<<grid, block, 0, stream>>>(output, input_scale, input, numel, lda);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template <typename T_OUT, typename T_S, typename T_IN>
@@ -101,7 +101,7 @@ void invokeDequantizeMatrix(T_OUT* output, T_S const* input_scale, T_IN const* i
         scaleMatrix<QuantizeMode::PER_TENSOR, false>
             <<<grid, block, 0, stream>>>(output, input_scale, input, numel, lda);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template <typename T_FAKE, typename T_OUT, typename T_IN>
@@ -118,7 +118,7 @@ template <typename T_FAKE, typename T_OUT, typename T_IN>
 void invokeFakeQuantize(T_OUT* dst, const T_IN* src, const int64_t numel, cudaStream_t stream)
 {
     fakeQuantize<T_FAKE><<<1024, CTA_SIZE, 0, stream>>>(dst, src, numel);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template void invokeFakeQuantize<__nv_fp8_e4m3, float, float>(
@@ -298,7 +298,7 @@ void invokeComputeFP8QuantizeScale(T_S* quant_ptr, const T_W* weights, const int
         dim3 block(CTA_SIZE);
         dim3 grid((lda + CTA_SIZE - 1) / CTA_SIZE);
         cudaMemsetAsync(quant_ptr, 0, lda * sizeof(T_S), stream);
-        sync_check_cuda_error();
+        check_cuda_error();
         computeFP8QuantizeScale<QuantizeMode::PER_CHANNEL><<<grid, block, 0, stream>>>(quant_ptr, weights, numel, lda);
     }
     else if (quantize_mode == QuantizeMode::PER_TENSOR)
@@ -306,10 +306,10 @@ void invokeComputeFP8QuantizeScale(T_S* quant_ptr, const T_W* weights, const int
         dim3 block(1024);
         dim3 grid(1024);
         cudaMemsetAsync(quant_ptr, 0, sizeof(T_S), stream);
-        sync_check_cuda_error();
+        check_cuda_error();
         computeFP8QuantizeScale<QuantizeMode::PER_TENSOR><<<grid, block, 0, stream>>>(quant_ptr, weights, numel, lda);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 #define DEFINE_INVOKE_COMPUTE_FP8_QUANTIZE_SCALE(type_scale, type_in)                                                  \
@@ -381,7 +381,7 @@ void invokeComputeScalesAndQuantizeMatrix(T_OUT* output, T_S* quant_ptr, const T
         {
             dim3 block(CTA_SIZE);
             computeFP8QuantizeScale<QuantizeMode::PER_TOKEN><<<grid, block, 0, stream>>>(quant_ptr, input, numel, lda);
-            sync_check_cuda_error();
+            check_cuda_error();
             invokeQuantizeMatrix(output, quant_ptr, input, numel, lda, quantize_mode, stream);
         }
     }
@@ -390,9 +390,9 @@ void invokeComputeScalesAndQuantizeMatrix(T_OUT* output, T_S* quant_ptr, const T
         dim3 block(CTA_SIZE);
         dim3 grid((lda + CTA_SIZE - 1) / CTA_SIZE);
         cudaMemsetAsync(quant_ptr, 0, lda * sizeof(T_S), stream);
-        sync_check_cuda_error();
+        check_cuda_error();
         computeFP8QuantizeScale<QuantizeMode::PER_CHANNEL><<<grid, block, 0, stream>>>(quant_ptr, input, numel, lda);
-        sync_check_cuda_error();
+        check_cuda_error();
         invokeQuantizeMatrix(output, quant_ptr, input, numel, lda, quantize_mode, stream);
     }
     else if (quantize_mode == QuantizeMode::PER_TENSOR)
@@ -400,12 +400,12 @@ void invokeComputeScalesAndQuantizeMatrix(T_OUT* output, T_S* quant_ptr, const T
         dim3 block(1024);
         dim3 grid(1024);
         cudaMemsetAsync(quant_ptr, 0, sizeof(T_S), stream);
-        sync_check_cuda_error();
+        check_cuda_error();
         computeFP8QuantizeScale<QuantizeMode::PER_TENSOR><<<grid, block, 0, stream>>>(quant_ptr, input, numel, lda);
-        sync_check_cuda_error();
+        check_cuda_error();
         invokeQuantizeMatrix(output, quant_ptr, input, numel, lda, quantize_mode, stream);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 #define DEFINE_INVOKE_QUANTIZE_MATRIX(type_out, type_scale, type_in)                                                   \

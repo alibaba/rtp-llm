@@ -450,7 +450,7 @@ void FlashInferAttnParams::run(
                        params.configs.rope_config.scale,
                        params.configs.rope_config.base,
                        stream);
-    sync_check_cuda_error();
+    check_cuda_error();
 
     auto append_v = torch::from_blob(params.input.dataWithOffset((local_head_num + local_head_num_kv) * size_per_head),
                                      {bs, local_head_num_kv, size_per_head},
@@ -476,7 +476,7 @@ void FlashInferAttnParams::run(
 
     moe_insertion_callback();
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

@@ -99,7 +99,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     float avg_time = total_time_ms / float(iterations);
     printf("m=%d n=%d k=%d time=%.6f\n", m, n, k, avg_time);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 
     deviceFree(in_ptr);
     deviceFree(w_ptr);

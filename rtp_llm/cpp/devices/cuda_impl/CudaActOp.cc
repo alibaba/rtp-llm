@@ -102,7 +102,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
             } else {
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
             }
-            sync_check_cuda_error();
+            check_cuda_error();
             auto out_qbuffer = std::make_shared<QBuffer>(std::move(act_output), std::move(act_scale), std::move(act_zeros));
             return std::move(out_qbuffer);
         } else 
@@ -117,7 +117,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
             } else {
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
             }
-            sync_check_cuda_error();
+            check_cuda_error();
             return params.output_buffer;
         }
     } else {
@@ -128,7 +128,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
             act_scale,
             stream_
         );
-        sync_check_cuda_error();
+        check_cuda_error();
         return states;
     }
 }

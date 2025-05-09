@@ -202,7 +202,7 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                             nullptr,
                             output,
                             stream_);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void cufmha::runTrtV2Fmha(void* input,
@@ -245,7 +245,7 @@ void cufmha::runTrtV2Fmha(void* input,
                             output,
                             stream_);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     } else {
         trtv2_sm70_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
                                         mRemovePadding,
@@ -265,7 +265,7 @@ void cufmha::runTrtV2Fmha(void* input,
                                     output,
                                     stream_);
 
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 }
 
@@ -341,7 +341,7 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
         throw;
     }
     rtp_llm::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void cufmha::runOpenSourceFmha(void* q,
@@ -380,7 +380,7 @@ void cufmha::runOpenSourceFmha(void* q,
         throw;
     }
     rtp_llm::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 Flash_fwd_params cufmha::genFlashFwdParams(void* q,

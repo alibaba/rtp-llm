@@ -280,7 +280,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
                                  params.math_sm_count,
                                  0,
                                  params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
-        sync_check_cuda_error();
+        check_cuda_error();
     } else
 #endif
     if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
@@ -395,7 +395,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     } else { 
         InvokeGeneralGemm(params, arguments, output);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
     return output;
 }
 

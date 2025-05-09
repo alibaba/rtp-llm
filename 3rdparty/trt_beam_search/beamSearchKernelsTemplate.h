@@ -458,10 +458,10 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     dim3 gridSize(nBS, nBM, nVPart);
     beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize><<<gridSize, nBlockSize, dyn_smem_size, stream>>>(
         logits, pTemp, nV, nVocabChunk, dyn_smem_size);
-    sync_check_cuda_error();
+    check_cuda_error();
     beamStage2KernelLauncher<T, 2 * PAD_K>(
         pTemp, bh.cumLogProbs, pTempId, pTempVal, nBS, nBM, nVPart, nV, max_smem_per_block, stream);
-    sync_check_cuda_error();
+    check_cuda_error();
     // Keep top 2K candidates in case of k candidates finishes in one iteration
     size_t const nShareMemory = sizeof(T) * nBM * nBM * 2;
     size_t constexpr nBlockSizeStage3 = (PAD_K + 31) / 32 * 32; // can not use `roundUp()`
@@ -472,7 +472,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     }
     beamStage3Kernel<T, PAD_K * 2, nBlockSizeStage3>
         <<<nBS, nBlockSizeStage3, nShareMemory, stream>>>(pTempId, pTempVal, bh);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 #define INSTANTIATE_BEAMSEARCH_K(T, PAD_K)                                                                             \
     template void topKSoftMaxKernelLauncher<T, PAD_K>(                                                                 \

@@ -1569,7 +1569,7 @@ void invokeGetPaddingOffsetAndCuSeqLens(int*         padding_offset,
                                         cudaStream_t stream) {
     getPaddingOffsetAndCuSeqLensKernel<<<1, 1, 0, stream>>>(
         padding_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 void invokeGetCuSeqLens(int* cu_seqlens,
@@ -1579,7 +1579,7 @@ void invokeGetCuSeqLens(int* cu_seqlens,
                         cudaStream_t stream) {
     getCuSeqLensKernel<<<1, 1, 0, stream>>>(
         cu_seqlens, sequence_length, prefix_length, batch_size);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template<typename T, int ELEM_PER_THREAD>

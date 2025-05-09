@@ -56,7 +56,7 @@ void invokeMaskLogits(T* logits, const uint8_t* __restrict__ mask, const int vec
 
     mask_logits<<<grid, block, 0, stream>>>(vector_len, logits, mask);
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template void invokeMaskLogits<float>(float* logits, const uint8_t* __restrict__ mask, const int vector_len, cudaStream_t stream);

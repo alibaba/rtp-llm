@@ -25,7 +25,7 @@ namespace rocm {
 #define ROCM_RUNTIME_MEM_SIZE  (HIPBLAS_WORKSPACE_SIZE + 512L*1024L*1024L)
 
 #define ROCM_CHECK(val) rocm::check((val), __FILE__, __LINE__)
-#define ROCM_SYNC_AND_CHECK() rocm::sync_and_check(__FILE__, __LINE__)
+#define ROCM_CHECK_ERROR() rocm::syncAndCheckInDebug(__FILE__, __LINE__)
 #define ROCM_CHECK_VALUE(val, info, ...)                              \
 do {                                                                \
     bool is_valid_val = (val);                                      \
@@ -38,7 +38,7 @@ do {                                                                \
 void throwRocmError(const char* const file, int const line, std::string const& info = "");
 template<typename T>
 void check(T result, const char* const file, int const line);
-void sync_and_check(const char* const file, int const line);
+void syncAndCheckInDebug(const char* const file, int const line);
 
 template<typename T>
 T getRocmValue(const T* ptr, int index) {

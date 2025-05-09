@@ -69,11 +69,11 @@ void check(T result, const char* const file, int const line)
     }
 }
 
-void sync_and_check(const char* const file, int const line) {
+void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
         ROCM_CHECK(hipDeviceSynchronize());
         check(hipGetLastError(), file, line);
-        RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheck at %s:%d", file, line));
+        RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheckInDebug at %s:%d", file, line));
     }
 }
 

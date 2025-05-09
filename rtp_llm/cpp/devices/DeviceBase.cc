@@ -102,6 +102,10 @@ BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer,
     return allocateBuffer({buffer.type(), buffer.shape(), atype}, hints);
 }
 
+void DeviceBase::checkError() {
+    return;
+}
+
 void DeviceBase::syncAndCheck() {
     return;
 }
