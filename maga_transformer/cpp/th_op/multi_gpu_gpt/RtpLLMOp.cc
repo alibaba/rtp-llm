@@ -173,6 +173,13 @@ void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
     model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
 }
 
+bool RtpLLMOp::updateEplbConfig(const rtp_llm::EplbConfig& config) {
+    if (model_rpc_service_) {
+        return model_rpc_service_->getEngine()->updateEplbConfig(config);
+    }
+    return false;
+}
+
 void RtpLLMOp::stop() {
     int64_t STOP_TIMEOUT_MS = 60 * 1000;
     if (!is_server_shutdown_) {
@@ -235,7 +242,8 @@ void registerRtpLLMOp(const py::module& m) {
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop)
-        .def("ready", &torch_ext::RtpLLMOp::ready);
+        .def("ready", &torch_ext::RtpLLMOp::ready)
+        .def("update_eplb_config", &torch_ext::RtpLLMOp::updateEplbConfig, py::arg("config"));
 }
 
 }  // namespace torch_ext

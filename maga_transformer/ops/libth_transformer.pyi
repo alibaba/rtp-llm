@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__ = ['DeviceExporter', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbMode', 'GptInitParameter', 'LoadBalanceInfo', 'MlaOpsType', 'MultimodalInput', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SpecialTokens', 'create_linear_softmax_handler', 'get_device']
+__all__ = ['DeviceExporter', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbConfig', 'EplbMode', 'GptInitParameter', 'LoadBalanceInfo', 'MlaOpsType', 'MultimodalInput', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SpecialTokens', 'create_linear_softmax_handler', 'get_device']
 class DeviceExporter:
     def get_device_id(self) -> int:
         ...
@@ -84,6 +84,18 @@ class EngineTaskInfo:
     prefix_length: int
     request_id: int
     def __init__(self) -> None:
+        ...
+class EplbConfig:
+    __hash__: typing.ClassVar[None] = None
+    mode: EplbMode
+    update_time: int
+    def __eq__(self, arg0: EplbConfig) -> bool:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __ne__(self, arg0: EplbConfig) -> bool:
+        ...
+    def __str__(self) -> str:
         ...
 class EplbMode:
     """
@@ -256,6 +268,7 @@ class GptInitParameter:
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
+    sync_status_interval_ms: int
     tokenizer_path: str
     tp_nccl_port: int
     tp_rank: int
@@ -300,14 +313,12 @@ class GptInitParameter:
     def setTaskType(self, task: str) -> None:
         ...
 class LoadBalanceInfo:
-    onflight_requests: int
     available_kv_cache: int
     iterate_count: int
+    onflight_requests: int
     step_latency_us: int
     step_per_minute: int
     total_kv_cache: int
-    onflight_requests: int
-    
     def __init__(self) -> None:
         ...
 class MlaOpsType:
@@ -424,6 +435,8 @@ class RtpLLMOp:
     def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, gang_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
+        ...
+    def update_eplb_config(self, config: EplbConfig) -> bool:
         ...
     def update_scheduler_info(self, arg0: str) -> None:
         ...

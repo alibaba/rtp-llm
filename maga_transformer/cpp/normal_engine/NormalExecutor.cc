@@ -200,4 +200,12 @@ void NormalExecutor::reportMetrics(const StreamGroups& stream_groups,
     }
 }
 
+bool NormalExecutor::updateEplbConfig(const EplbConfig& config)
+{
+    if (expert_balancer_) {
+        return expert_balancer_->updateEplbConfig(config);
+    }
+    return true;
+}
+
 }  // namespace rtp_llm

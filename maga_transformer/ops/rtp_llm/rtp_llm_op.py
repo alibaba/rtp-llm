@@ -1,10 +1,11 @@
-from typing import Optional, Tuple
+import logging
+from typing import Dict, Optional, Tuple
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.utils.token_processor import TokenProcessor
-from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo
+from maga_transformer.ops import LoadBalanceInfo, EngineScheduleInfo, EplbConfig, EplbMode
 
 
 class RtpLLMOp():
@@ -44,3 +45,13 @@ class RtpLLMOp():
 
     def update_scheduler_info(self, scheduler_info: str):
         self.ft_op.update_scheduler_info(scheduler_info) # type: ignore
+
+    def update_eplb_config(self, req: Dict[str, str]) -> bool:
+        try:
+            config = EplbConfig()
+            config.mode = EplbMode.__members__[req.get("mode", "NONE")]
+            config.update_time = int(req.get("update_time", 1000))
+            return self.ft_op.update_eplb_config(config)
+        except Exception as e:
+            logging.error(f"update eplb config error: {e}")
+            return False

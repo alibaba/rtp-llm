@@ -62,7 +62,7 @@ class FrontendApp(object):
         self.frontend_server = FrontendServer()
 
     def start(self):
-        self.frontend_server.start()        
+        self.frontend_server.start()
         app = self.create_app()
 
         loop = "auto"
@@ -81,7 +81,7 @@ class FrontendApp(object):
 
         config = Config(
             app,
-            fd=fd,  
+            fd=fd,
             loop=loop,
             log_config=UVICORN_LOGGING_CONFIG,
             timeout_keep_alive=timeout_keep_alive,
@@ -149,6 +149,11 @@ class FrontendApp(object):
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
             return request_server("post", g_worker_info.backend_server_port, "set_log_level", req)
+
+        # request format: {"mode": "NONE", "update_time": 5000}
+        @app.post("/update_eplb_config")
+        async def update_eplb_config(req: Dict[Any, Any]):
+            return request_server("post", g_worker_info.backend_server_port, "update_eplb_config", req)
 
         @app.post("/")
         async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):

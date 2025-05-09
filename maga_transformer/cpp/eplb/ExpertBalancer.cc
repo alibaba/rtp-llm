@@ -5,17 +5,16 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
-void EplbPlanBuffers::init(size_t          log_exp_num,
-                           size_t          phy_exp_num,
-                           size_t          hidden_size,
-                           size_t          moe_size,
-                           size_t          ep_size,
-                           rtp_llm::DataType    dtype,
-                           rtp_llm::QuantAlgo   quant_algo,
-                           rtp_llm::DeviceBase* device) {
+void EplbPlanBuffers::init(size_t      log_exp_num,
+                           size_t      phy_exp_num,
+                           size_t      hidden_size,
+                           size_t      moe_size,
+                           size_t      ep_size,
+                           DataType    dtype,
+                           QuantAlgo   quant_algo,
+                           DeviceBase* device) {
     layer_id_buf     = device->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::DEVICE}, {"eplb_layer_id"});
     logic_expert_cnt = device->allocateBuffer({DataType::TYPE_INT32, {log_exp_num}, AllocationType::DEVICE},
                                               {"eplb_logic_expert_cnt"});
@@ -54,17 +53,15 @@ void EplbPlanBuffers::init(size_t          log_exp_num,
     }
 }
 
-void BalanceStatsBuffers::init(int layer_num, int log_exp_num, int ep_size, rtp_llm::DeviceBase* device) {
+void BalanceStatsBuffers::init(int layer_num, int log_exp_num, int ep_size, DeviceBase* device) {
     // device tensor
     log_stats = torch::zeros({layer_num, log_exp_num}, torch::kInt32);
     gpu_loads = torch::zeros({layer_num, ep_size}, torch::kInt32);
 
     log_stats_buf = device->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)layer_num, (size_t)log_exp_num}, rtp_llm::AllocationType::DEVICE},
-        {"eplb_log_stats"});
+        {DataType::TYPE_INT32, {(size_t)layer_num, (size_t)log_exp_num}, AllocationType::DEVICE}, {"eplb_log_stats"});
     gpu_loads_buf = device->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)layer_num, (size_t)ep_size}, rtp_llm::AllocationType::DEVICE},
-        {"eplb_gpu_loads"});
+        {DataType::TYPE_INT32, {(size_t)layer_num, (size_t)ep_size}, AllocationType::DEVICE}, {"eplb_gpu_loads"});
 
     log_stats_gpu = Buffer2torchTensor(log_stats_buf, false);
     gpu_loads_gpu = Buffer2torchTensor(gpu_loads_buf, false);
@@ -77,25 +74,86 @@ void BalanceStatsBuffers::reset() {
     gpu_loads_gpu.zero_();
 }
 
-void LoadFlags::init(rtp_llm::DeviceBase* device) {
-    flag_gpu  = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::DEVICE}, {"flag_gpu"});
-    flag_sync = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::DEVICE}, {"flag_sync"});
-    flag_host = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::HOST}, {"flag_host"});
+void LoadFlags::init(DeviceBase* device) {
+    flag_gpu  = device->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::DEVICE}, {"flag_gpu"});
+    flag_sync = device->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::DEVICE}, {"flag_sync"});
+    flag_host = device->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST}, {"flag_host"});
 }
 
-void LoadFlags::setReady(bool ready, rtp_llm::DeviceBase* device) {
+void LoadFlags::setReady(bool ready, DeviceBase* device) {
     int value = ready ? 0 : -1;
     device->bufMemset(*flag_gpu, value);
 }
 
-bool LoadFlags::isReady(rtp_llm::DeviceBase* device) {
+bool LoadFlags::isReady(DeviceBase* device) {
     // sync all ranks load_flag_tensor_
-    flag_sync = device->allReduce({flag_gpu, rtp_llm::ReduceOp::Sum, false, rtp_llm::ParallelMode::DP_AND_TP, flag_sync}).buffer;
+    flag_sync = device->allReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
 
     device->copy({*flag_host, *flag_sync});
 
     // if all load_flag_tensor_ is 0, return true
     return *flag_host->data<int>() == 0;
+}
+
+void EplbController::init(const EplbConfig& eplb_control_data, DeviceBase* device) {
+    this->eplb_control_data = eplb_control_data;
+
+    // load control step from env
+    const char* control_step_env = getenv("EPLB_CONTROL_STEP");
+    if (control_step_env != nullptr) {
+        control_step = atoi(control_step_env);
+    }
+    RTP_LLM_LOG_INFO("EPLB control step: %d", control_step);
+
+    auto eplb_control_data_list = eplb_control_data.toList();
+    eplb_control_data_buf_host  = device->allocateBuffer(
+        {DataType::TYPE_INT32, {eplb_control_data_list.size()}, AllocationType::HOST}, {"eplb_control_data_host"});
+    eplb_control_data_buf_device = device->allocateBuffer(
+        {DataType::TYPE_INT32, {eplb_control_data_list.size()}, AllocationType::DEVICE}, {"eplb_control_data_device"});
+}
+
+void EplbController::setData(const EplbConfig& updated_control_data) {
+    // lock mutex
+    lock_guard<mutex> lock(eplb_control_mutex);
+    eplb_control_data = updated_control_data;
+}
+
+bool EplbController::stepAndCheckSyncStep() {
+    // check if current step is sync step
+    cur_step++;
+    if (cur_step >= control_step) {
+        cur_step = 0;
+        return true;
+    }
+    return false;
+}
+
+EplbConfig EplbController::getAndSyncData(DeviceBase* device) {
+    // copy control data to host buffer
+    EplbConfig cur_data;
+    {
+        lock_guard<mutex> lock(eplb_control_mutex);
+        cur_data = eplb_control_data;
+    }
+    auto eplb_control_data_list     = eplb_control_data.toList();
+    int* eplb_control_data_host_ptr = eplb_control_data_buf_host->data<int>();
+    for (int i = 0; i < eplb_control_data_list.size(); ++i) {
+        eplb_control_data_host_ptr[i] = eplb_control_data_list[i];
+    }
+
+    // copy to device
+    device->copy({*eplb_control_data_buf_device, *eplb_control_data_buf_host, false});
+
+    // broadcast to all ranks
+    device->broadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+
+    // copy to host
+    device->copy({*eplb_control_data_buf_host, *eplb_control_data_buf_device});
+
+    // convert to EplbControlData
+    auto eplb_control_data = EplbConfig::fromList(eplb_control_data_host_ptr);
+
+    return eplb_control_data;
 }
 
 ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
@@ -107,34 +165,20 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       ep_rank,
                                size_t                       ep_size,
                                py::object                   py_eplb,
-                               rtp_llm::DataType                 dtype,
-                               rtp_llm::DeviceBase*              device,
-                               rtp_llm::EplbMode                 eplb_mode,
-                               rtp_llm::QuantAlgo                quant_algo,
+                               DataType                     dtype,
+                               DeviceBase*                  device,
+                               EplbMode                     eplb_mode,
+                               QuantAlgo                    quant_algo,
                                kmonitor::MetricsReporterPtr metrics_reporter):
     device_(device),
     num_logic_experts_(log_exp_num),
     num_physic_experts_(phy_exp_num),
-    update_time_(update_time),
     ep_rank_(ep_rank),
     ep_size_(ep_size),
-    eplb_mode_(eplb_mode),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
-    switch (eplb_mode_) {
-        case EplbMode::NONE:
-            return;  // no need to init
-        case EplbMode::EPLB:
-            enable_eplb_ = true;
-            break;
-        case EplbMode::STATS:
-            enable_stats_ = true;
-            break;
-        case EplbMode::ALL:
-            enable_eplb_  = true;
-            enable_stats_ = true;
-            break;
-    }
+    eplb_control_data_.mode        = eplb_mode;
+    eplb_control_data_.update_time = update_time;
 
     // init memory
     stats_.init(num_layers, log_exp_num, ep_size_, device_);
@@ -142,6 +186,12 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
     load_flags_.init(device_);
     load_flags_.setReady(false, device_);
+    eplb_controller_.init(eplb_control_data_, device);
+
+    const char* eplb_test_mode = getenv("EPLB_TEST_MODE");
+    if (eplb_test_mode) {
+        test_mode_ = strcmp(eplb_test_mode, "0") != 0;
+    }
 
     resetPlan(true);
 }
@@ -149,11 +199,13 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 ExpertBalancer::~ExpertBalancer() {}
 
 void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector) {
-    if (eplb_mode_ == EplbMode::NONE) {
+    syncController();
+
+    if (checkEplbMode(eplb_control_data_.mode, EplbMode::NONE)) {
         return;
     }
 
-    rtp_llm::OverallExpertStats& stats = model.overall_expert_stats_;
+    OverallExpertStats& stats = model.overall_expert_stats_;
 
     // report stats
     reportStats(stats);
@@ -162,13 +214,29 @@ void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector
     excuteEplbPlan(stats, model);
 }
 
-void ExpertBalancer::reportStats(rtp_llm::OverallExpertStats& stats) {
-    if (metrics_reporter_ && enable_stats_) {
+bool ExpertBalancer::updateEplbConfig(const EplbConfig& config) {
+    eplb_controller_.setData(config);
+    return true;
+}
+
+void ExpertBalancer::syncController() {
+    // sync control data
+    if (eplb_controller_.stepAndCheckSyncStep()) {
+        auto eplb_control_data = eplb_controller_.getAndSyncData(device_);
+        if (eplb_control_data != eplb_control_data_) {
+            eplb_control_data_ = eplb_control_data;
+            RTP_LLM_LOG_INFO("EPLB coinfig changed to %s", eplb_control_data_.toString().c_str());
+        }
+    }
+}
+
+void ExpertBalancer::reportStats(OverallExpertStats& stats) {
+    if (metrics_reporter_ && checkEplbMode(eplb_control_data_.mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
         executor_collector_.gpu_loads.resize(layer_num);
         executor_collector_.ep_rank = ep_rank_;
 
-        BufferPtr gpu_loads_cpu = device_->clone({*stats.stats_buf.gpu_loads_buf, rtp_llm::AllocationType::HOST});
+        BufferPtr gpu_loads_cpu = device_->clone({*stats.stats_buf.gpu_loads_buf, AllocationType::HOST});
         int*      gpu_loads     = gpu_loads_cpu->data<int>();
 
         for (int i = 0; i < layer_num; ++i) {
@@ -190,14 +258,14 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
     return status;
 }
 
-void ExpertBalancer::excuteEplbPlan(rtp_llm::OverallExpertStats& stats, GptModel& model) {
-    if (enable_eplb_) {
+void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) {
+    if (checkEplbMode(eplb_control_data_.mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
             case EplbPlanStatus::INIT:
                 update_cnt_++;
                 updateStats(stats);
-                if (update_cnt_ >= update_time_) {
+                if (update_cnt_ >= eplb_control_data_.update_time) {
                     setPlanStatus(EplbPlanStatus::PREPARING);
                 }
                 break;
@@ -208,7 +276,11 @@ void ExpertBalancer::excuteEplbPlan(rtp_llm::OverallExpertStats& stats, GptModel
                     loadPlanWeights();
                     setPlanStatus(EplbPlanStatus::LOADED);
                 });
-                load_thread.detach();
+                if (test_mode_) {
+                    load_thread.join();
+                } else {
+                    load_thread.detach();
+                }
                 break;
             }
             case EplbPlanStatus::LOADING:
@@ -233,20 +305,20 @@ void ExpertBalancer::resetPlan(bool force_clean) {
     stats_.reset();
 }
 
-void ExpertBalancer::copyFromTensor(torch::Tensor& tensor, rtp_llm::BufferPtr& buffer) {
-    auto tensor_buf = rtp_llm::torchTensor2Buffer(tensor);
+void ExpertBalancer::copyFromTensor(torch::Tensor& tensor, BufferPtr& buffer) {
+    auto tensor_buf = torchTensor2Buffer(tensor);
     device_->copy({*buffer, *tensor_buf, false});
 }
 
-void ExpertBalancer::copyToTensor(rtp_llm::BufferPtr& buffer, torch::Tensor& tensor) {
-    auto tensor_buf = rtp_llm::torchTensor2Buffer(tensor);
+void ExpertBalancer::copyToTensor(BufferPtr& buffer, torch::Tensor& tensor) {
+    auto tensor_buf = torchTensor2Buffer(tensor);
     device_->copy({*tensor_buf, *buffer, false});
 }
 
 void ExpertBalancer::createPlan() {
     // pre run
-    device_->allReduce({stats_.log_stats_buf, ReduceOp::Sum, false, rtp_llm::ParallelMode::DP_AND_TP});
-    device_->allReduce({stats_.gpu_loads_buf, ReduceOp::Sum, false, rtp_llm::ParallelMode::DP_AND_TP});
+    device_->allReduce({stats_.log_stats_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    device_->allReduce({stats_.gpu_loads_buf, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
 
     // copy stats buffer(device) to tensor(host) [implicit sync]
     copyToTensor(stats_.log_stats_buf, stats_.log_stats);
@@ -268,7 +340,7 @@ void ExpertBalancer::createPlan() {
                          eplb_plan_buffers_.log2phy,
                          eplb_plan_buffers_.phy2log},
                         0,
-                        rtp_llm::ParallelMode::DP_AND_TP});
+                        ParallelMode::DP_AND_TP});
 
     // copy plan buffer(device) to tensor(host) [inplict sync]
     copyToTensor(eplb_plan_buffers_.layer_id_buf, eplb_plan_tensors_.layer_id_buf);
@@ -280,8 +352,8 @@ void ExpertBalancer::createPlan() {
 void ExpertBalancer::processPlanWeights() {
     eplb_plan_buffers_.layer_id = eplb_plan_tensors_.layer_id;
     if (eplb_plan_buffers_.moe_weight_1->isQBuffer()) {
-        auto moe_buf_1 = static_cast<rtp_llm::QBuffer*>(eplb_plan_buffers_.moe_weight_1.get());
-        auto moe_buf_2 = static_cast<rtp_llm::QBuffer*>(eplb_plan_buffers_.moe_weight_2.get());
+        auto moe_buf_1 = static_cast<QBuffer*>(eplb_plan_buffers_.moe_weight_1.get());
+        auto moe_buf_2 = static_cast<QBuffer*>(eplb_plan_buffers_.moe_weight_2.get());
         auto moe_w1    = moe_buf_1->kernelPtr();
         auto moe_w2    = moe_buf_2->kernelPtr();
         auto moe_s1    = moe_buf_1->scalesPtr();
@@ -324,7 +396,7 @@ bool ExpertBalancer::syncPlanWeightsLoadStatus() {
     return load_flags_.isReady(device_);
 }
 
-void ExpertBalancer::updateStats(rtp_llm::OverallExpertStats& stats) {
+void ExpertBalancer::updateStats(OverallExpertStats& stats) {
     auto log_stats = Buffer2torchTensor(stats.stats_buf.log_stats_buf, false);
     auto gpu_loads = Buffer2torchTensor(stats.stats_buf.gpu_loads_buf, false);
     stats_.log_stats_gpu.add_(log_stats);

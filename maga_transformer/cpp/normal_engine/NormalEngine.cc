@@ -54,7 +54,7 @@ void NormalEngine::initScheduler() {
         scheduler_.reset(new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
-        scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));            
+        scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -97,7 +97,7 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->input_ids                     = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
-    
+
     std::default_random_engine generator;
     size_t token_size = params_.embedding_size_ ? std::min(params_.embedding_size_, params_.vocab_size_) : params_.vocab_size_;
     std::uniform_int_distribution<int> distribution(0, token_size - 1);
@@ -306,6 +306,14 @@ absl::Status NormalEngine::step() {
 
 const rtp_llm::GptInitParameter NormalEngine::gptInitParameter() const {
     return params_;
+}
+
+bool NormalEngine::updateEplbConfig(const EplbConfig& config)
+{
+    if (executor_) {
+        return executor_->updateEplbConfig(config);
+    }
+    return true;
 }
 
 }  // namespace rtp_llm

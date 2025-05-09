@@ -87,6 +87,10 @@ public:
 
     virtual ~Executor(){};
 
+    virtual bool updateEplbConfig(const EplbConfig& config) {
+        return false;
+    }
+
 public:
     rtp_llm::DeviceBase* device_;
 };

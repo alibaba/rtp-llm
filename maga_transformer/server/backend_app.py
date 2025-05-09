@@ -211,7 +211,7 @@ class BackendApp(object):
         @app.post("/update")
         @check_is_master()
         def update(version_info: VersionInfo):
-            try: 
+            try:
                 return self.backend_server.update(version_info)
             except Exception as e:
                 return {"error": f"Failed to update", "details": str(e)}
@@ -224,6 +224,19 @@ class BackendApp(object):
                     return {"status": "ok"}
                 else:
                     return {"status": "set log level failed"}
+            except Exception as e:
+                return {"error": str(e)}
+
+        # request format: {"mode": "NONE", "update_time": 5000}
+        @app.post("/update_eplb_config")
+        async def update_eplb_config(req: Dict[Any, Any]):
+            # TODO(yinzhi): support manual set eplb config
+            try:
+                logging.info(f"update eplb config: {req}")
+                if self.backend_server.update_eplb_config(req):
+                    return {"status": "ok"}
+                else:
+                    return {"status": "set eplb config failed"}
             except Exception as e:
                 return {"error": str(e)}
 

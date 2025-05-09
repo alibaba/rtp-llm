@@ -73,6 +73,8 @@ public:
         return propose_step_;
     }
 
+    bool updateEplbConfig(const EplbConfig& config) override;
+
 private:
     size_t         propose_step_;
     std::vector<std::shared_ptr<NormalExecutor>> mtp_executors_;

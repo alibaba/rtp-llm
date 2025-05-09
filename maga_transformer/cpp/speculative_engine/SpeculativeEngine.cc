@@ -664,4 +664,13 @@ void SpeculativeEngine::reportMetrics(int64_t                         propose_be
                                                                                                        &collector);
 }
 
+bool SpeculativeEngine::updateEplbConfig(const EplbConfig& config)
+{
+    if (score_executor_ && propose_executor_) {
+        return score_executor_->updateEplbConfig(config) &&
+               propose_executor_->updateEplbConfig(config);
+    }
+    return true;
+}
+
 }  // namespace rtp_llm

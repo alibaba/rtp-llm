@@ -31,3 +31,11 @@ class BaseEngine:
     @abstractmethod
     def get_engine_schedule_info(self) -> EngineScheduleInfo:
         raise NotImplementedError()
+
+    @abstractmethod
+    def update_scheduler_info(self, scheduler_info: str) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def update_eplb_config(self, req: Dict[str, str]) -> bool:
+        raise NotImplementedError()

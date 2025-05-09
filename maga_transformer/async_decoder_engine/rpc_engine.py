@@ -52,7 +52,11 @@ class RPCEngine(BaseEngine):
     @override
     def get_engine_schedule_info(self) -> EngineScheduleInfo:
         return self.rtp_llm_op_.get_engine_schedule_info()
-    
+
     @override
     def update_scheduler_info(self, scheduler_info: str) -> None:
         self.rtp_llm_op_.update_scheduler_info(scheduler_info)
+
+    @override
+    def update_eplb_config(self, req: Dict[str, str]) -> bool:
+        return self.rtp_llm_op_.update_eplb_config(req)

@@ -64,7 +64,7 @@ class BackendServer(object):
         self._embedding_endpoint = None
 
     def start(self):
-        self._gang_server.start() 
+        self._gang_server.start()
         if os.environ.get('DEBUG_START_FAKE_PROCESS', None) is not None:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
@@ -236,3 +236,8 @@ class BackendServer(object):
         if isinstance(req, str):
             req = json.loads(req)
         self.model.decoder_engine_.update_scheduler_info(json.dumps(req))
+
+    def update_eplb_config(self, req: Dict[str, str]) -> bool:
+        if self.model is None:
+            return False
+        return self.model.decoder_engine_.update_eplb_config(req)

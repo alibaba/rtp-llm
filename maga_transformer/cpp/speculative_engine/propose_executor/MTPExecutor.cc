@@ -47,4 +47,18 @@ absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStrea
     return propose_output;
 }
 
+bool MTPExecutor::updateEplbConfig(const EplbConfig& config) {
+    for (auto& executor : mtp_executors_) {
+        if (executor) {
+            executor->updateEplbConfig(config);
+        }
+    }
+    for (auto& executor : normal_mtp_executors_) {
+        if (executor) {
+            executor->updateEplbConfig(config);
+        }
+    }
+    return true;
+}
+
 }  // namespace rtp_llm

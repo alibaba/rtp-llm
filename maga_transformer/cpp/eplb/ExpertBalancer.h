@@ -13,23 +13,23 @@ namespace rtp_llm {
 
 struct EplbPlanBuffers {
     int           layer_id = -1;
-    rtp_llm::BufferPtr layer_id_buf;      // [1]
-    rtp_llm::BufferPtr logic_expert_cnt;  // [log_exp_num]
-    rtp_llm::BufferPtr logic_expert_cnt_host;
-    rtp_llm::BufferPtr log2phy;           // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
-    rtp_llm::BufferPtr log2phy_host;
-    rtp_llm::BufferPtr phy2log;           // [layer, phy_exp_num]
-    rtp_llm::BufferPtr moe_weight_1;      // w1 & w3
-    rtp_llm::BufferPtr moe_weight_2;      // w2
+    BufferPtr layer_id_buf;      // [1]
+    BufferPtr logic_expert_cnt;  // [log_exp_num]
+    BufferPtr logic_expert_cnt_host;
+    BufferPtr log2phy;           // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
+    BufferPtr log2phy_host;
+    BufferPtr phy2log;           // [layer, phy_exp_num]
+    BufferPtr moe_weight_1;      // w1 & w3
+    BufferPtr moe_weight_2;      // w2
 
     void init(size_t          log_exp_num,
               size_t          phy_exp_num,
               size_t          hidden_size,
               size_t          moe_size,
               size_t          ep_size,
-              rtp_llm::DataType    dtype,
-              rtp_llm::QuantAlgo   quant_algo,
-              rtp_llm::DeviceBase* device);
+              DataType    dtype,
+              QuantAlgo   quant_algo,
+              DeviceBase* device);
 };
 
 struct BalanceStatsBuffers {
@@ -37,25 +37,25 @@ struct BalanceStatsBuffers {
     torch::Tensor gpu_loads;
 
     // gpu buffer
-    rtp_llm::BufferPtr log_stats_buf;
-    rtp_llm::BufferPtr gpu_loads_buf;
+    BufferPtr log_stats_buf;
+    BufferPtr gpu_loads_buf;
 
     torch::Tensor log_stats_gpu;
     torch::Tensor gpu_loads_gpu;
 
-    void init(int layer_num, int log_exp_num, int ep_size, rtp_llm::DeviceBase* device);
+    void init(int layer_num, int log_exp_num, int ep_size, DeviceBase* device);
     void reset();
 };
 
 struct LoadFlags {
-    rtp_llm::BufferPtr flag_gpu;
-    rtp_llm::BufferPtr flag_sync;
-    rtp_llm::BufferPtr flag_host;
+    BufferPtr flag_gpu;
+    BufferPtr flag_sync;
+    BufferPtr flag_host;
 
-    void init(rtp_llm::DeviceBase* device);
+    void init(DeviceBase* device);
 
-    void setReady(bool ready, rtp_llm::DeviceBase* device);
-    bool isReady(rtp_llm::DeviceBase* device);
+    void setReady(bool ready, DeviceBase* device);
+    bool isReady(DeviceBase* device);
 };
 
 enum class EplbPlanStatus
@@ -64,6 +64,24 @@ enum class EplbPlanStatus
     PREPARING,
     LOADING,
     LOADED
+};
+
+class EplbController {
+private:
+    std::mutex      eplb_control_mutex;
+    EplbConfig eplb_control_data;
+
+    BufferPtr   eplb_control_data_buf_host;
+    BufferPtr   eplb_control_data_buf_device;
+
+    int control_step = 100;
+    int cur_step = 0;
+
+public:
+    void            init(const EplbConfig& eplb_control_data, DeviceBase* device);
+    void            setData(const EplbConfig& updated_control_data);
+    bool            stepAndCheckSyncStep();
+    EplbConfig  getAndSyncData(DeviceBase* device);
 };
 
 class ExpertBalancer {
@@ -78,36 +96,39 @@ public:
                    size_t          ep_rank,
                    size_t          ep_size,
                    py::object      py_eplb,
-                   rtp_llm::DataType    dtype,
-                   rtp_llm::DeviceBase* device,
-                   rtp_llm::EplbMode    eplb_mode,
-                   rtp_llm::QuantAlgo   quant_algo,
+                   DataType    dtype,
+                   DeviceBase* device,
+                   EplbMode    eplb_mode,
+                   QuantAlgo   quant_algo,
                    kmonitor::MetricsReporterPtr metrics_reporter);
     ~ExpertBalancer();
 
     void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);
 
+    bool updateEplbConfig(const EplbConfig& config);
+
 private:
-    void reportStats(rtp_llm::OverallExpertStats& stats);
-    void excuteEplbPlan(rtp_llm::OverallExpertStats& stats, GptModel& model);
+    void syncController();
+    void reportStats(OverallExpertStats& stats);
+    void excuteEplbPlan(OverallExpertStats& stats, GptModel& model);
 
     void setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
 
     void resetPlan(bool force_clean = false);
     void createPlan();
-    void updateStats(rtp_llm::OverallExpertStats& stats);
+    void updateStats(OverallExpertStats& stats);
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();
     void processPlanWeights();
     void applyPlanWeights(GptModel& model);
 
     // helpful functions
-    void copyFromTensor(torch::Tensor& tensor, rtp_llm::BufferPtr& buffer);
-    void copyToTensor(rtp_llm::BufferPtr& buffer, torch::Tensor& tensor);
+    void copyFromTensor(torch::Tensor& tensor, BufferPtr& buffer);
+    void copyToTensor(BufferPtr& buffer, torch::Tensor& tensor);
 
 private:
-    rtp_llm::DeviceBase* device_;
+    DeviceBase* device_;
 
     size_t num_logic_experts_;
     size_t num_physic_experts_;
@@ -115,7 +136,6 @@ private:
     EplbPlanStatus eplb_plan_status_ = EplbPlanStatus::INIT;
 
     size_t update_cnt_  = 0;
-    size_t update_time_ = 0;
 
     size_t eplb_plan_cnt_ = 0;
 
@@ -126,16 +146,17 @@ private:
     EplbPlanBuffers     eplb_plan_buffers_;
     EplbPlanTensors     eplb_plan_tensors_;
     LoadFlags           load_flags_;
-    rtp_llm::EplbMode        eplb_mode_;
+
+    EplbController  eplb_controller_;
+    EplbConfig  eplb_control_data_;
 
     RtpLLmEplbMetricsCollector   executor_collector_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
     ExpertBalancerPythonWrapper  eplb_python_wrapper_;
 
-    bool enable_stats_ = false;
-    bool enable_eplb_ = false;
-
     mutable std::mutex eplb_plan_status_mutex_;
+
+    bool test_mode_ = false;
 };
 
 }  // namespace rtp_llm

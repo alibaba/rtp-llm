@@ -74,6 +74,10 @@ public:
 
     virtual bool isMTP() { return false; }
 
+    virtual bool updateEplbConfig(const EplbConfig& config) {
+        return false;
+    }
+
 protected:
     rtp_llm::DeviceBase*                      device_;
     ResourceContext                      resource_context_;

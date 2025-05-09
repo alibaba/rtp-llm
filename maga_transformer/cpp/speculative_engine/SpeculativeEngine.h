@@ -88,7 +88,7 @@ private:
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
 
-
+    bool updateEplbConfig(const EplbConfig& config) override;
 
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;

@@ -39,6 +39,7 @@ public:
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
+    bool updateEplbConfig(const EplbConfig& config) override;
 
 private:
     void         initScheduler();

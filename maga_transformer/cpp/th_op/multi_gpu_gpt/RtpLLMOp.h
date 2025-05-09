@@ -34,6 +34,7 @@ public:
     rtp_llm::EngineScheduleInfo getEngineScheduleInfo();
     //currently only used in BatchDecodeScheduler
     void updateSchedulerInfo(const std::string& scheduler_info);
+    bool updateEplbConfig(const rtp_llm::EplbConfig& config);
 
 private:
     void _init(int64_t model_rpc_port,

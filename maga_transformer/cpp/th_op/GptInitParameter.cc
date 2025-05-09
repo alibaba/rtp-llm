@@ -163,6 +163,14 @@ void registerGptInitParameter(py::module m) {
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
 
+    pybind11::class_<EplbConfig>(m, "EplbConfig")
+        .def(pybind11::init<>())
+        .def_readwrite("mode", &EplbConfig::mode)
+        .def_readwrite("update_time", &EplbConfig::update_time)
+        .def("__eq__", &EplbConfig::operator==)
+        .def("__ne__", &EplbConfig::operator!=)
+        .def("__str__", &EplbConfig::toString);
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \

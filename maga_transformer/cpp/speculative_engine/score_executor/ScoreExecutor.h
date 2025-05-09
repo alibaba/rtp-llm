@@ -44,6 +44,8 @@ public:
                                          const ProposeOutput&                proposer_output,
                                          const std::list<GenerateStreamPtr>& prefill_streams);
 
+    bool updateEplbConfig(const EplbConfig& config);
+
 private:
     rtp_llm::DeviceBase* device_;
     NormalExecutor  score_normal_executor_;

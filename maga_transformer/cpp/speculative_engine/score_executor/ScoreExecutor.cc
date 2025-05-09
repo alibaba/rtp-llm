@@ -78,5 +78,9 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::mtpScore(const std::list<GenerateStre
     return score_output;
 }
 
-
+bool ScoreExecutor::updateEplbConfig(const EplbConfig& config) {
+    score_normal_executor_.updateEplbConfig(config);
+    normal_executor_.updateEplbConfig(config);
+    return true;
+}
 } // namespace rtp_llm
