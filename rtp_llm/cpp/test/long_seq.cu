@@ -34,7 +34,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     half* out_ptr1 = nullptr;
     deviceMalloc(&out_ptr1, m * n, false);
-    check_cuda_error(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
+    check_cuda_value(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
 
     half* in_ptr2 = nullptr;
     deviceMalloc(&in_ptr2, m * k);
@@ -47,7 +47,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     half* out_ptr2 = nullptr;
     deviceMalloc(&out_ptr2, m * n, false);
-    check_cuda_error(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
+    check_cuda_value(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
 
     Allocator<AllocatorType::CUDA>* allocator_      = nullptr;
     std::mutex*    mutex_           = nullptr;
@@ -60,10 +60,10 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     allocator_->setStream(stream);
 
     cublasHandle_t   cublas_handle_;
-    check_cuda_error(cublasCreate(&cublas_handle_));
+    check_cuda_value(cublasCreate(&cublas_handle_));
     cublasLtHandle_t cublaslt_handle_;
-    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
-    check_cuda_error(cublasSetStream(cublas_handle_, stream));
+    check_cuda_value(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_value(cublasSetStream(cublas_handle_, stream));
 
     cublasMMWrapper* cublas_wrapper_= new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);

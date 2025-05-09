@@ -36,16 +36,16 @@ inline int compute_occupancy_for_kernel()
         cudaFuncAttributes attr;
         int device = 0;
         int max_smem_per_block = 0;
-        check_cuda_error(cudaGetDevice(&device));
-        check_cuda_error(
+        check_cuda_value(cudaGetDevice(&device));
+        check_cuda_value(
             cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
         if constexpr (enable_cutlass_3x)
         {
-            check_cuda_error(cudaFuncGetAttributes(&attr, cutlass::device_kernel<GemmKernel>));
+            check_cuda_value(cudaFuncGetAttributes(&attr, cutlass::device_kernel<GemmKernel>));
         }
         else
         {
-            check_cuda_error(cudaFuncGetAttributes(&attr, cutlass::Kernel<GemmKernel>));
+            check_cuda_value(cudaFuncGetAttributes(&attr, cutlass::Kernel<GemmKernel>));
         }
         if (smem_size + attr.sharedSizeBytes >= static_cast<size_t>(max_smem_per_block))
         {
@@ -58,12 +58,12 @@ inline int compute_occupancy_for_kernel()
 
         if constexpr (enable_cutlass_3x)
         {
-            check_cuda_error(cudaFuncSetAttribute(
+            check_cuda_value(cudaFuncSetAttribute(
                 cutlass::device_kernel<GemmKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
         }
         else
         {
-            check_cuda_error(cudaFuncSetAttribute(
+            check_cuda_value(cudaFuncSetAttribute(
                 cutlass::Kernel<GemmKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
         }
     }
@@ -71,13 +71,13 @@ inline int compute_occupancy_for_kernel()
     int max_active_blocks = -1;
     if constexpr (enable_cutlass_3x)
     {
-        check_cuda_error(
+        check_cuda_value(
             cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_active_blocks, cutlass::device_kernel<GemmKernel>,
                 128 * (GemmKernel::NumLoadWarpGroups + GemmKernel::NumMmaWarpGroups), smem_size));
     }
     else
     {
-        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &max_active_blocks, cutlass::Kernel<GemmKernel>, GemmKernel::kThreadCount, smem_size));
     }
 

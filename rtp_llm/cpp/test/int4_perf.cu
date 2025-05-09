@@ -40,7 +40,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
 
     half* out_ptr1 = nullptr;
     deviceMalloc(&out_ptr1, m * n, false);
-    check_cuda_error(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
+    check_cuda_value(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
 
     half* in_ptr2 = nullptr;
     deviceMalloc(&in_ptr2, m * k);
@@ -56,7 +56,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
 
     half* out_ptr2 = nullptr;
     deviceMalloc(&out_ptr2, m * n, false);
-    check_cuda_error(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
+    check_cuda_value(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
 
     tkc::CutlassFpAIntBGemmRunner<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>
         int4_runner;

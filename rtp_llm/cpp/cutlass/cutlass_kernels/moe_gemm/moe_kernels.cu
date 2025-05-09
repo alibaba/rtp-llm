@@ -1068,7 +1068,7 @@ void makeLoadBalancedRoutingConfiguration(
     void* data_void, int num_experts, int num_tokens, int k, nvinfer1::DataType type, cudaStream_t stream)
 {
     TLLM_CHECK_WITH_INFO(type == nvinfer1::DataType::kFLOAT, "Routing configuration must be float");
-    check_cuda_error(
+    check_cuda_value(
         cudaMemsetAsync(data_void, 0x0, int64_t{num_experts} * int64_t{num_tokens} * sizeof(float), stream));
 
     int stride = tensorrt_llm::common::ceilDiv(num_experts, k);

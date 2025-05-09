@@ -51,10 +51,10 @@ void sm80_generic_fused_moe_gemm_kernelLauncher(ElementType_ const* A, CutlassWe
             cudaFuncAttributes attr{};
             int device = 0;
             int max_smem_per_block = 0;
-            check_cuda_error(cudaGetDevice(&device));
-            check_cuda_error(
+            check_cuda_value(cudaGetDevice(&device));
+            check_cuda_value(
                 cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
-            check_cuda_error(cudaFuncGetAttributes(&attr, fused_moe::run_global<GemmType>));
+            check_cuda_value(cudaFuncGetAttributes(&attr, fused_moe::run_global<GemmType>));
             if (smem_size + attr.sharedSizeBytes >= static_cast<size_t>(max_smem_per_block))
             {
                 // This should mean that
@@ -67,7 +67,7 @@ void sm80_generic_fused_moe_gemm_kernelLauncher(ElementType_ const* A, CutlassWe
         }
 
         int max_active_blocks = -1;
-        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &max_active_blocks, fused_moe::run_global<GemmType>, GemmType::kThreadCount, smem_size));
         *kernel_occupancy = max_active_blocks;
         return;

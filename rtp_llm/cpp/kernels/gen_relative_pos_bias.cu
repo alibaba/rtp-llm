@@ -96,13 +96,13 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
     }
 
     T* relative_position_bias_table;
-    check_cuda_error(cudaMalloc(&relative_position_bias_table,
+    check_cuda_value(cudaMalloc(&relative_position_bias_table,
                                 ((2 * window_size - 1) * (2 * window_size - 1) * head_num) * sizeof(T)));
     T* cpb_mlp_1;
-    check_cuda_error(
+    check_cuda_value(
         cudaMalloc(&cpb_mlp_1, ((2 * window_size - 1) * (2 * window_size - 1) * cpb_mlp_out_dim) * sizeof(T)));
     cublasHandle_t cublas_handle;
-    check_cuda_error(cublasCreate(&cublas_handle));
+    check_cuda_value(cublasCreate(&cublas_handle));
 
     int            m     = (2 * window_size - 1) * (2 * window_size - 1);
     T              alpha = (T)1.0f;
@@ -114,7 +114,7 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
     cudaDataType_t compute_type = std::is_same<float, T>::value ? CUDA_R_32F : CUDA_R_16F;
 #endif
     cublasGemmAlgo_t algo = std::is_same<float, T>::value ? CUBLAS_GEMM_DEFAULT : CUBLAS_GEMM_DEFAULT_TENSOR_OP;
-    check_cuda_error(cublasGemmEx(cublas_handle,
+    check_cuda_value(cublasGemmEx(cublas_handle,
                                   CUBLAS_OP_T,
                                   CUBLAS_OP_N,
                                   cpb_mlp_out_dim,
@@ -137,7 +137,7 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
     invokeGenericActivation<ReluActivation, T, T>(
         cpb_mlp_1, cpb_mlp_bias1, nullptr, nullptr, nullptr, nullptr, m, cpb_mlp_out_dim, 0, nullptr, nullptr, nullptr, stream);
 
-    check_cuda_error(cublasGemmEx(cublas_handle,
+    check_cuda_value(cublasGemmEx(cublas_handle,
                                   CUBLAS_OP_T,
                                   CUBLAS_OP_N,
                                   head_num,
@@ -162,9 +162,9 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
 
     invokeSigmoid(
         relative_position_bias, window_size * window_size * window_size * window_size * head_num, 16.0f, stream);
-    check_cuda_error(cudaFree(relative_position_bias_table));
-    check_cuda_error(cudaFree(cpb_mlp_1));
-    check_cuda_error(cublasDestroy(cublas_handle));
+    check_cuda_value(cudaFree(relative_position_bias_table));
+    check_cuda_value(cudaFree(cpb_mlp_1));
+    check_cuda_value(cublasDestroy(cublas_handle));
 }
 
 /*******************  instantiation  ***********************/

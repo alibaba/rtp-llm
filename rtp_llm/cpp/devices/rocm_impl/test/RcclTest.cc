@@ -21,8 +21,8 @@ struct NcclResponse {
 
 void runTest(const size_t device_id, const size_t world_size, const ncclUniqueId& nccl_id) {
     cudaStream_t stream;
-    check_cuda_error(cudaSetDevice(device_id));
-    check_cuda_error(cudaStreamCreate(&stream));
+    check_cuda_value(cudaSetDevice(device_id));
+    check_cuda_value(cudaStreamCreate(&stream));
     ncclComm_t nccl_comm;
     NCCLCHECK(ncclCommInitRank(&nccl_comm, world_size, nccl_id, device_id));
 
@@ -40,7 +40,7 @@ void runTest(const size_t device_id, const size_t world_size, const ncclUniqueId
 TEST_F(NcclTest, testBasicComm) {
     // query available gpu num
     int device_count;
-    check_cuda_error(cudaGetDeviceCount(&device_count));
+    check_cuda_value(cudaGetDeviceCount(&device_count));
     printf("cuda device_count: %d\n", device_count);
     if (device_count < 2) {
         return;

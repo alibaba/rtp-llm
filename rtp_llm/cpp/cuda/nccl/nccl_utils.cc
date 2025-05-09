@@ -205,7 +205,7 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
     ncclResult_t tensor_ncclErr = ncclSuccess, tensor_ncclAsyncErr = ncclSuccess;
     ncclComm_t tensor_comm             = tensor_para.nccl_comm_;
     if (tensor_para.world_size_ == 1) {
-        check_cuda_error(cudaStreamSynchronize(stream));
+        check_cuda_value(cudaStreamSynchronize(stream));
         return;
     }
     auto opTimeout            = std::chrono::milliseconds(120000);
@@ -388,15 +388,15 @@ std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream) {
     std::vector<int> ranks(para.world_size_);
     size_t* d_sendbuf;
     size_t* d_recvbuf;
-    check_cuda_error(cudaMallocAsync(&d_sendbuf, sizeof(int), stream));
-    check_cuda_error(cudaMallocAsync(&d_recvbuf, sizeof(int) * para.world_size_, stream));
-    check_cuda_error(cudaMemcpyAsync(d_sendbuf, &para.rank_, sizeof(int), cudaMemcpyHostToDevice, stream));
+    check_cuda_value(cudaMallocAsync(&d_sendbuf, sizeof(int), stream));
+    check_cuda_value(cudaMallocAsync(&d_recvbuf, sizeof(int) * para.world_size_, stream));
+    check_cuda_value(cudaMemcpyAsync(d_sendbuf, &para.rank_, sizeof(int), cudaMemcpyHostToDevice, stream));
     NCCLCHECK(ncclAllGather((const void*)d_sendbuf, (void*)d_recvbuf, 1, ncclInt, para.nccl_comm_, stream));
-    check_cuda_error(cudaStreamSynchronize(stream));
-    check_cuda_error(cudaMemcpyAsync(ranks.data(), d_recvbuf, sizeof(int) * para.world_size_, cudaMemcpyDeviceToHost, stream));
-    check_cuda_error(cudaFreeAsync(d_sendbuf, stream));
-    check_cuda_error(cudaFreeAsync(d_recvbuf, stream));
-    check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_value(cudaStreamSynchronize(stream));
+    check_cuda_value(cudaMemcpyAsync(ranks.data(), d_recvbuf, sizeof(int) * para.world_size_, cudaMemcpyDeviceToHost, stream));
+    check_cuda_value(cudaFreeAsync(d_sendbuf, stream));
+    check_cuda_value(cudaFreeAsync(d_recvbuf, stream));
+    check_cuda_value(cudaStreamSynchronize(stream));
     std::vector<size_t> ranks_converted(para.world_size_);
     transform(ranks.begin(), ranks.end(), ranks_converted.begin(), [](int val) { return static_cast<size_t>(val); });
     return ranks_converted;

@@ -155,7 +155,7 @@ inline size_t pad_to_multiple_of_128(const size_t& input) {
 
 template<typename T>
 void check(T result, const char* const file, int const line);
-#define check_cuda_error(val) rtp_llm::check((val), __FILE__, __LINE__)
+#define check_cuda_value(val) rtp_llm::check((val), __FILE__, __LINE__)
 
 void syncAndCheck(const char* const file, int const line);
 #define sync_check_cuda_error() rtp_llm::syncAndCheck(__FILE__, __LINE__)
@@ -183,13 +183,13 @@ bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank);
 template<typename T>
 T getCudaValue(const T* ptr, int index) {
     T tmp;
-    check_cuda_error(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
+    check_cuda_value(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
     return tmp;
 }
 
 template<typename T>
 void setCudaValue(T* ptr, int index, T value) {
-    check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
+    check_cuda_value(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
 }
 
 template<typename T>

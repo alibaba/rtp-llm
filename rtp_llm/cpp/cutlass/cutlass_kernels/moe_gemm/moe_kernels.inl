@@ -991,7 +991,7 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType, Enabl
             hopper_input.setFinalizeFusionParams(final_output, token_topk_permuted_scales, expert_first_token_offset,
                 expanded_dest_row_to_expanded_source_row, apply_bias ? fc2_expert_biases : nullptr, hidden_size,
                 num_rows);
-            check_cuda_error(cudaMemsetAsync(final_output, 0x0, sizeof(OutputType) * num_rows * hidden_size, stream));
+            check_cuda_value(cudaMemsetAsync(final_output, 0x0, sizeof(OutputType) * num_rows * hidden_size, stream));
         }
 
         hopper_input = computeStridesHopper(expert_first_token_offset, hopper_input, hidden_size, inter_size,

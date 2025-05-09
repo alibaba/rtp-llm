@@ -121,14 +121,14 @@ void int8_gemm_test(
     // Tensor{MEMORY_GPU, TYPE_FP16, {(size_t)m, (size_t)n}, get_ptr<T>(y_gpu)}.saveNpy("y_gpu.npy");
     // Tensor{MEMORY_GPU, TYPE_INT32, {(size_t)m, (size_t)n}, get_ptr<int32_t>(y_gpu_int32)}.saveNpy("y_gpu_int32.npy");
 
-    check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_value(cudaStreamSynchronize(stream));
     auto start = high_resolution_clock::now();
 
     for (int i = 0; i < iters; ++i) {
         runner.gemm(get_ptr<int8_t>(x_gpu), get_ptr<int8_t>(w_T_gpu), quant_mode, get_ptr<float>(alpha_col_gpu), get_ptr<float>(alpha_row_gpu), get_ptr<T>(y_gpu), m, n, k, gemmConfig, ws_ptr, wsSize, stream);
     }
 
-    check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_value(cudaStreamSynchronize(stream));
     auto end = high_resolution_clock::now();
 
     auto duration = duration_cast<microseconds>(end - start);

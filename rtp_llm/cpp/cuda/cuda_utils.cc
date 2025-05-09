@@ -90,9 +90,9 @@ void syncAndCheck(const char* const file, int const line) {
 int get_sm() {
     static int sm = []() {
         int device;
-        check_cuda_error(cudaGetDevice(&device));
+        check_cuda_value(cudaGetDevice(&device));
         cudaDeviceProp deviceProp;
-        check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
+        check_cuda_value(cudaGetDeviceProperties(&deviceProp, device));
         return deviceProp.major * 10 + deviceProp.minor;
     }();
     return sm;
@@ -142,20 +142,20 @@ float timing_function(const std::function<void(cudaStream_t)>& operation, int64_
 
 int getDevice() {
     int current_dev_id = 0;
-    check_cuda_error(cudaGetDevice(&current_dev_id));
+    check_cuda_value(cudaGetDevice(&current_dev_id));
     return current_dev_id;
 }
 
 int getDeviceCount() {
     int count = 0;
-    check_cuda_error(cudaGetDeviceCount(&count));
+    check_cuda_value(cudaGetDeviceCount(&count));
     return count;
 }
 
 int currentDeviceId() {
     // Query device from CUDA runtime
     int device_id;
-    check_cuda_error(cudaGetDevice(&device_id));
+    check_cuda_value(cudaGetDevice(&device_id));
     return device_id;
 }
 
@@ -169,12 +169,12 @@ void priorityRange(int *low_priority, int *high_priority, int device_id) {
     auto init = [&]() {
         int ori_dev = currentDeviceId();
         if (device_id != ori_dev) {
-            check_cuda_error(cudaSetDevice(device_id));
+            check_cuda_value(cudaSetDevice(device_id));
         }
         int min_pri, max_pri;
-        check_cuda_error(cudaDeviceGetStreamPriorityRange(&min_pri, &max_pri));
+        check_cuda_value(cudaDeviceGetStreamPriorityRange(&min_pri, &max_pri));
         if (device_id != ori_dev) {
-            check_cuda_error(cudaSetDevice(ori_dev));
+            check_cuda_value(cudaSetDevice(ori_dev));
         }
         cache[device_id] = std::make_pair(min_pri, max_pri);
     };
@@ -197,7 +197,7 @@ std::string getDriverVersion() {
     }
 
     char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-    check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
+    check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
     result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
     if (NVML_SUCCESS != result) {
         throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
@@ -217,7 +217,7 @@ std::string getDriverVersion() {
 
 int getCudaVersion() {
     int cuda_driver_version;
-    check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
+    check_cuda_value(cudaDriverGetVersion(&cuda_driver_version));
     return cuda_driver_version;
 }
 
@@ -229,7 +229,7 @@ bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank) {
             continue;
         }
         int peer_access_available = 0;
-        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
+        check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
         if (peer_access_available == 0) {
             return false;
         }
@@ -252,14 +252,14 @@ bool checkAllNVLinks(std::vector<size_t> device_ids) {
             size_t device_id2 = device_ids[j];
 
             char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
             char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
+            check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
@@ -299,14 +299,14 @@ bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
             size_t device_id2 = device_ids[j];
 
             char pci_bus_id1[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
+            check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
             }
 
             char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-            check_cuda_error(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
+            check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
                 throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
@@ -333,7 +333,7 @@ bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
 
 int getVisibleDeviceNum() {
     int device_count;
-    check_cuda_error(cudaGetDeviceCount(&device_count));
+    check_cuda_value(cudaGetDeviceCount(&device_count));
     return device_count;
 }
 
@@ -362,7 +362,7 @@ std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm)
     else
     {
         size_t free, total;
-        check_cuda_error(cudaMemGetInfo(&free, &total));
+        check_cuda_value(cudaMemGetInfo(&free, &total));
         RTP_LLM_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
             ((double) total / 1e9), ((double) free / 1e9));
         return {free, total};
@@ -375,8 +375,8 @@ bool shared_mem_sufficient(int smem_size) {
     //
     cudaDeviceProp properties;
     int            device_idx;
-    check_cuda_error(cudaGetDevice(&device_idx));
-    check_cuda_error(cudaGetDeviceProperties(&properties, device_idx));
+    check_cuda_value(cudaGetDevice(&device_idx));
+    check_cuda_value(cudaGetDeviceProperties(&properties, device_idx));
 
     if (int(properties.sharedMemPerMultiprocessor) < smem_size) {
         return false;
@@ -422,7 +422,7 @@ void print_bshd(const int   layer_id,
         cudaDeviceSynchronize();
         auto size = batch_size * seq_len * total_num_heads * hidden_size_per_head * sizeof(T);
         cpu_ptr   = reinterpret_cast<T*>(malloc(size));
-        check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
     } else {
         cpu_ptr = const_cast<T*>(ptr);
@@ -472,7 +472,7 @@ void print_bhsd(const int   layer_id,
         cudaDeviceSynchronize();
         auto size = batch_size * seq_len * num_heads * hidden_size_per_head * sizeof(T);
         cpu_ptr   = reinterpret_cast<T*>(malloc(size));
-        check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
     } else {
         cpu_ptr = const_cast<T*>(ptr);
@@ -514,7 +514,7 @@ void print_bhss(const int   layer_id,
         cudaDeviceSynchronize();
         uint64_t size = (uint64_t)batch_size * (uint64_t)num_heads * (uint64_t)seq_len * (uint64_t)seq_len2 * sizeof(T);
         cpu_ptr       = reinterpret_cast<T*>(malloc(size));
-        check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
     } else {
         cpu_ptr = const_cast<T*>(ptr);
@@ -552,7 +552,7 @@ void print_bsd(const int   layer_id,
         cudaDeviceSynchronize();
         auto size = batch_size * hidden_size * seq_len * sizeof(T);
         cpu_ptr   = reinterpret_cast<T*>(malloc(size));
-        check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
     } else {
         cpu_ptr = const_cast<T*>(ptr);
@@ -606,7 +606,7 @@ void print_kv_cache(const int   layer_id,
     T* cpu_ptr = nullptr;
     if (is_device_ptr) {
         cpu_ptr = reinterpret_cast<T*>(malloc(dim1 * dim2 * dim3 * dim4 * dim5 * dim6 * sizeof(T)));
-        check_cuda_error(
+        check_cuda_value(
             cudaMemcpy(cpu_ptr, ptr, dim1 * dim2 * dim3 * dim4 * dim5 * dim6 * sizeof(T), cudaMemcpyDeviceToHost));
     } else {
         cpu_ptr = const_cast<T*>(ptr);
@@ -667,7 +667,7 @@ void print_bsd_sum_and_square(const int   layer_id,
         cudaDeviceSynchronize();
         auto size = batch_size * hidden_size * seq_len * sizeof(T);
         cpu_ptr   = reinterpret_cast<T*>(malloc(size));
-        check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
+        check_cuda_value(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
     } else {
         cpu_ptr = const_cast<T*>(ptr);

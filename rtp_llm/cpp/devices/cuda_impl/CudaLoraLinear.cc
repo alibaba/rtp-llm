@@ -46,14 +46,14 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
             RTP_LLM_LOG_INFO(cudaGetErrorString(cudaGetLastError()));
         }
 
-        check_cuda_error(cudaEventRecord(cb->_start_compute, stream_));
+        check_cuda_value(cudaEventRecord(cb->_start_compute, stream_));
         // Catch up the main stream
         for (size_t i = 0; i < cb->_stream_send.size(); i++) {
-            check_cuda_error(cudaStreamWaitEvent(cb->_stream_send[i], cb->_start_compute, 0));
+            check_cuda_value(cudaStreamWaitEvent(cb->_stream_send[i], cb->_start_compute, 0));
         }
-        check_cuda_error(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_compute, 0));
+        check_cuda_value(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_compute, 0));
         for (size_t i = 0; i < cb->_stream_compute.size(); i++) {
-            check_cuda_error(cudaStreamWaitEvent(cb->_stream_compute[i], cb->_start_compute, 0));
+            check_cuda_value(cudaStreamWaitEvent(cb->_stream_compute[i], cb->_start_compute, 0));
         }
 
         // GEMM and send/recv chunks
@@ -97,9 +97,9 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
                 int recv_offset = comm_bytes * (i + tp_size);
                 int send_rank = (tp_rank + i + 1) % tp_size;
                 int recv_rank = (tp_size + tp_rank - i - 1) % tp_size;
-                check_cuda_error(cudaEventRecord(cb->_start_comm, cb->_stream_compute[cur_stream_id]));
-                check_cuda_error(cudaStreamWaitEvent(cb->_stream_send[cur_stream_id], cb->_start_comm, 0));
-                check_cuda_error(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_comm, 0));
+                check_cuda_value(cudaEventRecord(cb->_start_comm, cb->_stream_compute[cur_stream_id]));
+                check_cuda_value(cudaStreamWaitEvent(cb->_stream_send[cur_stream_id], cb->_start_comm, 0));
+                check_cuda_value(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_comm, 0));
                 RTP_LLM_LOG_DEBUG("comm_bytes %d, output_d->sizeBytes() %d, output_data_type %d i %d send_rank %d", comm_bytes, output_d->sizeBytes(), output_data_type, i, send_rank);
                 userbuffers_send(cb->_ub_reg, send_offset, recv_offset, comm_bytes, comm, send_rank,
                                 cb->_stream_send[cur_stream_id]);
@@ -108,15 +108,15 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
         }
 
         for (size_t i = 0; i < cb->_stream_compute.size(); i++) {
-            check_cuda_error(cudaEventRecord(cb->_stop_compute, cb->_stream_compute[i]));
-            check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_compute, 0));
+            check_cuda_value(cudaEventRecord(cb->_stop_compute, cb->_stream_compute[i]));
+            check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_compute, 0));
         }
         for (size_t i = 0; i < cb->_stream_send.size(); i++) {
-            check_cuda_error(cudaEventRecord(cb->_stop_send, cb->_stream_send[i]));
-            check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_send, 0));
+            check_cuda_value(cudaEventRecord(cb->_stop_send, cb->_stream_send[i]));
+            check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_send, 0));
         }
-        check_cuda_error(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
-        check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_recv, 0));
+        check_cuda_value(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
+        check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_recv, 0));
 
         // Reduce GEMM output chunks
         RTP_LLM_CHECK_WITH_INFO(output_d->type() == DataType::TYPE_FP16 || output_d->type() == DataType::TYPE_BF16, "ReduceScatter only supports BF16/FP16 output.");
@@ -181,11 +181,11 @@ AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLin
             scale_comm_bytes = reinterpret_cast<const QBuffer&>(*params.ag_send_buffer).scales().sizeBytes();
         }
 
-        check_cuda_error(cudaEventRecord(cb->_start_compute, stream_));
-        check_cuda_error(cudaStreamWaitEvent(cb->_stream_send[0], cb->_start_compute, 0));
-        check_cuda_error(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_compute, 0));
+        check_cuda_value(cudaEventRecord(cb->_start_compute, stream_));
+        check_cuda_value(cudaStreamWaitEvent(cb->_stream_send[0], cb->_start_compute, 0));
+        check_cuda_value(cudaStreamWaitEvent(cb->_stream_recv, cb->_start_compute, 0));
         for (size_t i = 0; i < cb->_stream_compute.size(); i++) {
-            check_cuda_error(cudaStreamWaitEvent(cb->_stream_compute[i], cb->_start_compute, 0));
+            check_cuda_value(cudaStreamWaitEvent(cb->_stream_compute[i], cb->_start_compute, 0));
         }
 
         BufferPtr gemm_a = nullptr;
@@ -258,21 +258,21 @@ AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLin
                                     cb->_next_rank, cb->_stream_send[0]);
                     userbuffers_recv(scale_cb->_ub_reg, scale_cb->_comm, cb->_prev_rank, cb->_stream_recv);
                 }
-                check_cuda_error(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
-                check_cuda_error(cudaStreamWaitEvent(cb->_stream_send[0], cb->_stop_recv, 0));
-                check_cuda_error(
+                check_cuda_value(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
+                check_cuda_value(cudaStreamWaitEvent(cb->_stream_send[0], cb->_stop_recv, 0));
+                check_cuda_value(
                     cudaStreamWaitEvent(cb->_stream_compute[(i + 1) % cb->_stream_compute.size()], cb->_stop_recv, 0));
             }
         }
 
         for (size_t i = 0; i < cb->_stream_compute.size(); i++) {
-            check_cuda_error(cudaEventRecord(cb->_stop_compute, cb->_stream_compute[i]));
-            check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_compute, 0));
+            check_cuda_value(cudaEventRecord(cb->_stop_compute, cb->_stream_compute[i]));
+            check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_compute, 0));
         }
-        check_cuda_error(cudaEventRecord(cb->_stop_send, cb->_stream_send[0]));
-        check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_send, 0));
-        check_cuda_error(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
-        check_cuda_error(cudaStreamWaitEvent(stream_, cb->_stop_recv, 0));
+        check_cuda_value(cudaEventRecord(cb->_stop_send, cb->_stream_send[0]));
+        check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_send, 0));
+        check_cuda_value(cudaEventRecord(cb->_stop_recv, cb->_stream_recv));
+        check_cuda_value(cudaStreamWaitEvent(stream_, cb->_stop_recv, 0));
 
         return AllGatherLoraLinearOutput({std::move(output), std::move(gemm_a)});
     }

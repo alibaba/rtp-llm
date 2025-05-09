@@ -30,7 +30,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     half* out_ptr = nullptr;
     deviceMalloc(&out_ptr, m * n, false);
-    check_cuda_error(cudaMemset(out_ptr, 0xdc, m * n * sizeof(half)));
+    check_cuda_value(cudaMemset(out_ptr, 0xdc, m * n * sizeof(half)));
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);

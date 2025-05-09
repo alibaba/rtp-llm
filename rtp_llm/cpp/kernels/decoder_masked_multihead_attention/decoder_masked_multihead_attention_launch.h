@@ -153,7 +153,7 @@ inline void multi_block_grid_setup(dim3&                                        
         RTP_LLM_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
                            "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
     }                                                                                                                  \
-    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(                                                    \
+    check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(                                                    \
         &available_blocks,                                                                                             \
         masked_multihead_attention_kernel<T,                                                                           \
                                           T_cache,                                                                     \
@@ -261,11 +261,11 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
 
     // check smem to decide if force enable multi block mode
     int device;
-    check_cuda_error(cudaGetDevice(&device));
+    check_cuda_value(cudaGetDevice(&device));
 
     // max smem on device
     int max_dsmem_sz_on_device = -1;
-    check_cuda_error(cudaDeviceGetAttribute(
+    check_cuda_value(cudaDeviceGetAttribute(
                              &max_dsmem_sz_on_device,
                              cudaDevAttrMaxSharedMemoryPerMultiprocessor,
                              device));

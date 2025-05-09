@@ -822,7 +822,7 @@ void invokeGeneralLayerNormWithPadding(T*           out,
         size_t maxbytes = real_n * sizeof(T);
         if (maxbytes >= (48 << 10)) {
 #if USING_CUDA
-            check_cuda_error(cudaFuncSetAttribute(
+            check_cuda_value(cudaFuncSetAttribute(
                 generalLayerNormWithPadding<T, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
 #endif
         }

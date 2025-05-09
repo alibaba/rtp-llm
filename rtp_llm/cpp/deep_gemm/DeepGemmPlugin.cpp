@@ -84,8 +84,8 @@ inline int DeepGemmPlugin::getNumSms() {
     }
     cudaDeviceProp properties;
     int            device_idx;
-    check_cuda_error(cudaGetDevice(&device_idx));
-    check_cuda_error(cudaGetDeviceProperties(&properties, device_idx));
+    check_cuda_value(cudaGetDevice(&device_idx));
+    check_cuda_value(cudaGetDeviceProperties(&properties, device_idx));
 
     num_sms = properties.multiProcessorCount;
     RTP_LLM_LOG_INFO("cuda device property has sm num %d", num_sms);
@@ -102,8 +102,8 @@ int getMaxSmem() {
         return max_smem_per_block;
     }
     int device_idx = 0;
-    check_cuda_error(cudaGetDevice(&device_idx));
-    check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_idx));
+    check_cuda_value(cudaGetDevice(&device_idx));
+    check_cuda_value(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_idx));
     return max_smem_per_block;
 }
 

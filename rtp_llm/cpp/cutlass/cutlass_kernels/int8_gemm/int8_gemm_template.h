@@ -335,9 +335,9 @@ CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
 {
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     int device{-1};
-    check_cuda_error(cudaGetDevice(&device));
+    check_cuda_value(cudaGetDevice(&device));
     mSm = rtp_llm::get_sm();
-    check_cuda_error(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
+    check_cuda_value(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
     gemm_lut_ = get_gemm_lut<uint8_t, uint8_t>();
 }
 

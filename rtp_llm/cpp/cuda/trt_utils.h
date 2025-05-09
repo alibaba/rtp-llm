@@ -14,7 +14,7 @@
 
 #define TLLM_CHECK_WITH_INFO RTP_LLM_CHECK_WITH_INFO
 #define TLLM_CHECK RTP_LLM_CHECK
-#define TLLM_CUDA_CHECK check_cuda_error
+#define TLLM_CUDA_CHECK check_cuda_value
 #define TLLM_THROW(...)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \

@@ -273,7 +273,7 @@ public:
 
         params.cu_seqlens = static_cast<int*>(const_cast<void*>(cuSeqlenPtr));
         xmmaKernel->run(params, stream, use_flash_attention);
-        check_cuda_error(cudaPeekAtLastError());
+        check_cuda_value(cudaPeekAtLastError());
     }
 
     void run(const void*  qkvPtr,
@@ -296,7 +296,7 @@ public:
 
         params.cu_seqlens = nullptr;
         xmmaKernel->run(params, stream);
-        check_cuda_error(cudaPeekAtLastError());
+        check_cuda_value(cudaPeekAtLastError());
     }
 
     void run_causal_masked_fmha(const void* qkvPtr, const void* cuSeqlenPtr, void* output, bool causal_mask, cudaStream_t stream)

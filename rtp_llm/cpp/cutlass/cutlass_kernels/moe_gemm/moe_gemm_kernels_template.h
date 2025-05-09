@@ -729,9 +729,9 @@ template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, t
 MoeGemmRunner<T, WeightType, QuantOp, OutputType, ScaleBiasType>::MoeGemmRunner()
 {
     int device{-1};
-    check_cuda_error(cudaGetDevice(&device));
+    check_cuda_value(cudaGetDevice(&device));
     sm_ = rtp_llm::get_sm();
-    check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    check_cuda_value(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
     gemm_lut_ = kernels::cutlass_kernels::get_gemm_lut<T, WeightType, true>();
 }
 

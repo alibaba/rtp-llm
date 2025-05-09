@@ -32,7 +32,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
     : DeviceBase(params)
 {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
-    check_cuda_error(cudaSetDevice(device_id_));
+    check_cuda_value(cudaSetDevice(device_id_));
     if (getenv("NOT_USE_DEFAULT_STREAM") && std::string(getenv("NOT_USE_DEFAULT_STREAM")) == "1") {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     } else {
@@ -42,11 +42,11 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
     at::cuda::setCurrentCUDAStream(*torch_default_stream_);
     stream_ = torch_default_stream_->stream();
     communication_stream_ = torch_comm_stream_->stream();
-    check_cuda_error(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
-    check_cuda_error(cublasCreate(&cublas_handle_));
-    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
-    check_cuda_error(cublasSetStream(cublas_handle_, stream_));
-    check_cuda_error(cudaGetDeviceProperties(&device_prop_, device_id_));
+    check_cuda_value(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
+    check_cuda_value(cublasCreate(&cublas_handle_));
+    check_cuda_value(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_value(cublasSetStream(cublas_handle_, stream_));
+    check_cuda_value(cudaGetDeviceProperties(&device_prop_, device_id_));
 
     weight_only_matmul_plugin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>();
 
@@ -132,7 +132,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
     allocator_ptr->setStream(stream_);
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
-        check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
+        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
         tracker_params.real_allocator     = allocator_ptr;
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
@@ -181,9 +181,9 @@ CudaDevice::~CudaDevice() {
     }
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
-    check_cuda_error(cudaStreamDestroy(no_block_copy_stream_));
-    check_cuda_error(cublasDestroy(cublas_handle_));
-    check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+    check_cuda_value(cudaStreamDestroy(no_block_copy_stream_));
+    check_cuda_value(cublasDestroy(cublas_handle_));
+    check_cuda_value(cublasLtDestroy(cublaslt_handle_));
     if (ffn_tp_nccl_param_ != tp_nccl_param_ && ffn_tp_nccl_param_.nccl_comm_) {
         ncclCommDestroy(ffn_tp_nccl_param_.nccl_comm_);
     }
@@ -197,7 +197,7 @@ CudaDevice::~CudaDevice() {
 }
 
 void CudaDevice::preRun() {
-    check_cuda_error(cudaSetDevice(device_id_));
+    check_cuda_value(cudaSetDevice(device_id_));
     at::cuda::setCurrentCUDAStream(*torch_default_stream_);
 }
 
@@ -256,7 +256,7 @@ void CudaDevice::syncAndCheck() {
 
 void CudaDevice::syncDeviceStream(DeviceStream stream) {
     auto sync_stream = getStream(stream);
-    check_cuda_error(cudaStreamSynchronize(sync_stream));
+    check_cuda_value(cudaStreamSynchronize(sync_stream));
 }
 
 void CudaDevice::syncCommunication(bool timeout) {
@@ -291,10 +291,10 @@ void CudaDevice::overlappedCommBarrier() {
     // we need to ensure the communication has been finished before starting the next computation.
     if (tp_nccl_param_.world_size_ * init_params_.dp_size * ffn_tp_nccl_param_.world_size_ > 1) {
         cudaEvent_t event;
-        check_cuda_error(cudaEventCreate(&event));
-        check_cuda_error(cudaEventRecord(event, communication_stream_));
-        check_cuda_error(cudaStreamWaitEvent(stream_, event, 0));
-        check_cuda_error(cudaEventDestroy(event));
+        check_cuda_value(cudaEventCreate(&event));
+        check_cuda_value(cudaEventRecord(event, communication_stream_));
+        check_cuda_value(cudaStreamWaitEvent(stream_, event, 0));
+        check_cuda_value(cudaEventDestroy(event));
     }
 }
 
@@ -306,10 +306,10 @@ void CudaDevice::overlappedComputeBarrier() {
     // we need to ensure the communication has been finished before starting the next computation.
     if (tp_nccl_param_.world_size_ * init_params_.dp_size * ffn_tp_nccl_param_.world_size_ > 1) {
         cudaEvent_t event;
-        check_cuda_error(cudaEventCreate(&event));
-        check_cuda_error(cudaEventRecord(event, stream_));
-        check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
-        check_cuda_error(cudaEventDestroy(event));
+        check_cuda_value(cudaEventCreate(&event));
+        check_cuda_value(cudaEventRecord(event, stream_));
+        check_cuda_value(cudaStreamWaitEvent(communication_stream_, event, 0));
+        check_cuda_value(cudaEventDestroy(event));
     }
 }
 
@@ -448,7 +448,7 @@ void CudaDevice::bufMemset(Buffer& buf, int val, DeviceStream stream) {
         std::memset(buf.data(), val, buf.sizeBytes());
     } else {
         cudaStream_t cur_stream = getStream(stream);
-        check_cuda_error(cudaMemsetAsync(buf.data(), val, buf.sizeBytes(), cur_stream));
+        check_cuda_value(cudaMemsetAsync(buf.data(), val, buf.sizeBytes(), cur_stream));
     }
 }
 
@@ -635,33 +635,33 @@ DeviceEventPtr CudaDevice::createTorchEvent() {
 }
 
 CudaEvent::CudaEvent(cudaStream_t stream): stream_(stream) {
-    check_cuda_error(cudaEventCreate(&event_));
-    check_cuda_error(cudaEventRecord(event_, stream));
+    check_cuda_value(cudaEventCreate(&event_));
+    check_cuda_value(cudaEventRecord(event_, stream));
 }
 
 CudaEvent::~CudaEvent() {
-    check_cuda_error(cudaEventDestroy(event_));
+    check_cuda_value(cudaEventDestroy(event_));
 }
 
 void CudaEvent::synchronize() const {
-    check_cuda_error(cudaEventSynchronize(event_));
-    check_cuda_error(cudaStreamSynchronize(stream_));
+    check_cuda_value(cudaEventSynchronize(event_));
+    check_cuda_value(cudaStreamSynchronize(stream_));
     sync_check_cuda_error();
     cudaDeviceSynchronize();
 }
 
 CudaCommHook::CudaCommHook(cudaStream_t main_stream, cudaStream_t comm_stream)
     : main_stream_(main_stream), comm_stream_(comm_stream) {
-    check_cuda_error(cudaEventCreate(&hook_event_));
-    check_cuda_error(cudaEventRecord(hook_event_, comm_stream_));
+    check_cuda_value(cudaEventCreate(&hook_event_));
+    check_cuda_value(cudaEventRecord(hook_event_, comm_stream_));
 }
 
 CudaCommHook::~CudaCommHook() {
-    check_cuda_error(cudaEventDestroy(hook_event_));
+    check_cuda_value(cudaEventDestroy(hook_event_));
 }
 
 void CudaCommHook::hook_sync() const {
-    check_cuda_error(cudaStreamWaitEvent(main_stream_, hook_event_, 0));
+    check_cuda_value(cudaStreamWaitEvent(main_stream_, hook_event_, 0));
 }
 
 void CudaDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {

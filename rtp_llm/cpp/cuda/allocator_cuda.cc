@@ -95,16 +95,16 @@ void PurePointerCudaAllocator::free(void** ptr) {
 
 Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
     int device_count = 1;
-    check_cuda_error(cudaGetDeviceCount(&device_count));
+    check_cuda_value(cudaGetDeviceCount(&device_count));
     cudaMemPool_t mempool;
-    check_cuda_error(cudaDeviceGetDefaultMemPool(&mempool, device_id));
+    check_cuda_value(cudaDeviceGetDefaultMemPool(&mempool, device_id));
     cudaMemAccessDesc desc                  = {};
     int               peer_access_available = 0;
     for (int i = 0; i < device_count; i++) {
         if (i == device_id) {
             continue;
         }
-        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, device_id, i));
+        check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, device_id, i));
         if (!peer_access_available) {
             RTP_LLM_LOG_WARNING("Device " + std::to_string(device_id) + " peer access Device " + std::to_string(i)
                             + " is not available.");
@@ -113,11 +113,11 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocat
         desc.location.type = cudaMemLocationTypeDevice;
         desc.location.id   = i;
         desc.flags         = cudaMemAccessFlagsProtReadWrite;
-        check_cuda_error(cudaMemPoolSetAccess(mempool, &desc, 1));
+        check_cuda_value(cudaMemPoolSetAccess(mempool, &desc, 1));
     }
     // set memory pool threshold to avoid shrinking the pool
     uint64_t setVal = UINT64_MAX;
-    check_cuda_error(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &setVal));
+    check_cuda_value(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &setVal));
 }
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
@@ -126,20 +126,20 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     void* ptr      = nullptr;
-    check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
 }
 
 void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
     void* ptr      = nullptr;
-    check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
 }
 
 void Allocator<AllocatorType::CUDA>::doFree(void* address) {
     // tmp sync to avoid memory free before kernel run. cudaFree will not perform any implicit synchronization when the pointer was allocated with cudaMallocAsync or cudaMallocFromPoolAsync
     cudaStreamSynchronize(stream_);
-    check_cuda_error(cudaFree(address));
+    check_cuda_value(cudaFree(address));
     return;
 }
 
@@ -151,7 +151,7 @@ Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size) {
     void* ptr = nullptr;
-    check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
 }
 
@@ -161,7 +161,7 @@ void* Allocator<AllocatorType::CUDA_HOST>::doMallocSync(size_t size) {
 
 void Allocator<AllocatorType::CUDA_HOST>::doFree(void* address) {
     if (address) {
-        check_cuda_error(cudaFreeHost(address));
+        check_cuda_value(cudaFreeHost(address));
     }
     return;
 }

@@ -382,7 +382,7 @@ bench_cublas(Tensor input_activations, Tensor weight_dequantized, const int64_t 
     float total_time_ms = 0;
     cudaEventElapsedTime(&total_time_ms, start, stop);
     avg_time = total_time_ms / float(timing_iterations);
-    check_cuda_error(status);
+    check_cuda_value(status);
     return output_tensor;
 }
 

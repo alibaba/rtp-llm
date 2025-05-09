@@ -597,7 +597,7 @@ void segmentedTopPSinglePass_dispatch(const TopKPerSegmentParams&  params,
 #define KERNEL_RUN(INDEX)                                                                                              \
     {                                                                                                                  \
         if (smem_size > 0)                                                                                             \
-            check_cuda_error(                                                                                          \
+            check_cuda_value(                                                                                          \
                 cudaFuncSetAttribute((const void*)segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>,          \
                                      cudaFuncAttributeMaxDynamicSharedMemorySize,                                      \
                                      smem_size));                                                                      \
@@ -1139,7 +1139,7 @@ void invokeBatchTopPSampling(void*           workspace,
 
     if (do_radix_sort) {
         if (workspace == nullptr) {
-            check_cuda_error(
+            check_cuda_value(
                 cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr,
                                                                    cub_temp_storage_size,
                                                                    log_probs,
@@ -1171,7 +1171,7 @@ void invokeBatchTopPSampling(void*           workspace,
                                                                                 skip_decode);
         }
 
-        check_cuda_error(
+        check_cuda_value(
             cub::DeviceSegmentedRadixSort::SortPairsDescending(cub_temp_storage,
                                                                cub_temp_storage_size,
                                                                log_probs,

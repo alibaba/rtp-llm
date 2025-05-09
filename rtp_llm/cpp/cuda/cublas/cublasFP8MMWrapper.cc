@@ -158,21 +158,21 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
     cublasLtMatrixLayout_t Ddesc;
 
     {
-        check_cuda_error(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
+        check_cuda_value(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
 
         if (version_major_ >= 11 && version_minor_ >= 11 && version_patch_ > 0 && fastAccum) {
             const int8_t fastAccuMode = 1;  // enable fast imprecise accum
-            check_cuda_error(cublasLtMatmulDescSetAttribute(
+            check_cuda_value(cublasLtMatmulDescSetAttribute(
                 matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(decltype(fastAccuMode))));
         }
 
         // TODO: Check that do we need to set these attributes
         // TODO: comment them for compiler first
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &devAscalePtr, sizeof(devAscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &devBscalePtr, sizeof(devBscalePtr)));
     }
 
@@ -183,29 +183,29 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
 
         // create matrix descriptors, we are good with the details here so no need
         // to set any extra attributes
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Adesc, aType, tA == CUBLAS_OP_N ? n : k, tA == CUBLAS_OP_N ? k : n, lda));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
         }
 
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Bdesc, bType, tB == CUBLAS_OP_N ? k : m, tB == CUBLAS_OP_N ? m : k, ldb));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
         }
 
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
     }
@@ -273,20 +273,20 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
                                                cublas_workspace_,
                                                wsSizeBytes,
                                                stream);
-        check_cuda_error(status);
+        check_cuda_value(status);
     }
 
     if (Ddesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Ddesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Ddesc));
     }
     if (Bdesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Bdesc));
     }
     if (Adesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Adesc));
     }
     if (matmulDesc) {
-        check_cuda_error(cublasLtMatmulDescDestroy(matmulDesc));
+        check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
     mu_->unlock();
@@ -372,25 +372,25 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
     cublasLtMatrixLayout_t Ddesc;
 
     {
-        check_cuda_error(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
+        check_cuda_value(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
 
         if (version_major_ >= 11 && version_minor_ >= 11 && version_patch_ > 0 && fastAccum) {
             const int8_t fastAccuMode = 1;  // enable fast imprecise accum
-            check_cuda_error(cublasLtMatmulDescSetAttribute(
+            check_cuda_value(cublasLtMatmulDescSetAttribute(
                 matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(decltype(fastAccuMode))));
         }
 
         // TODO: Check that do we need to set these attributes
         // TODO: comment them for compiler first
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &devAscalePtr, sizeof(devAscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &devBscalePtr, sizeof(devBscalePtr)));
-        // check_cuda_error(cublasLtMatmulDescSetAttribute(
+        // check_cuda_value(cublasLtMatmulDescSetAttribute(
         //     matmulDesc, CUBLASLT_MATMUL_DESC_C_SCALE_POINTER, &devDscalePtr, sizeof(devDscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, &devDscalePtr, sizeof(devDscalePtr)));
     }
 
@@ -401,36 +401,36 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
 
         // create matrix descriptors, we are good with the details here so no need
         // to set any extra attributes
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Adesc, aType, tA == CUBLAS_OP_N ? n : k, tA == CUBLAS_OP_N ? k : n, lda));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
         }
 
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Bdesc, bType, tB == CUBLAS_OP_N ? k : m, tB == CUBLAS_OP_N ? m : k, ldb));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
         }
 
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Cdesc, cType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Cdesc, cType, n, m, ldd));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
     }
@@ -498,23 +498,23 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
                                                cublas_workspace_,
                                                wsSizeBytes,
                                                stream);
-        check_cuda_error(status);
+        check_cuda_value(status);
     }
 
     if (Ddesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Ddesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Ddesc));
     }
     if (Cdesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Cdesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Cdesc));
     }
     if (Bdesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Bdesc));
     }
     if (Adesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Adesc));
     }
     if (matmulDesc) {
-        check_cuda_error(cublasLtMatmulDescDestroy(matmulDesc));
+        check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
     mu_->unlock();
@@ -639,21 +639,21 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
     cublasLtMatrixLayout_t Ddesc;
 
     {
-        check_cuda_error(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
+        check_cuda_value(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
 
         if (version_major_ >= 11 && version_minor_ >= 11 && version_patch_ > 0) {
             const int8_t fastAccuMode = 1;  // enable fast imprecise accum
-            check_cuda_error(cublasLtMatmulDescSetAttribute(
+            check_cuda_value(cublasLtMatmulDescSetAttribute(
                 matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(decltype(fastAccuMode))));
         }
 
         // TODO: Check that do we need to set these attributes
         // TODO: comment them for compiler first
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &devAscalePtr, sizeof(devAscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &devBscalePtr, sizeof(devBscalePtr)));
 
         cublasLtEpilogue_t epi = CUBLASLT_EPILOGUE_BIAS;
@@ -675,29 +675,29 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
 
         // create matrix descriptors, we are good with the details here so no need
         // to set any extra attributes
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Adesc, aType, tA == CUBLAS_OP_N ? n : k, tA == CUBLAS_OP_N ? k : n, lda));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
         }
 
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Bdesc, bType, tB == CUBLAS_OP_N ? k : m, tB == CUBLAS_OP_N ? m : k, ldb));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
         }
 
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
     }
@@ -706,11 +706,11 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
     cublasLtMatmulHeuristicResult_t heuristicResult;
     cublasLtMatmulPreference_t      preference;
     int                             returnedAlgoCount = -1;
-    check_cuda_error(cublasLtMatmulPreferenceCreate(&preference));
-    check_cuda_error(cublasLtMatmulPreferenceSetAttribute(
+    check_cuda_value(cublasLtMatmulPreferenceCreate(&preference));
+    check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsSizeBytes, sizeof(wsSizeBytes)));
 
-    check_cuda_error(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_,
+    check_cuda_value(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_,
                                                     matmulDesc,
                                                     Adesc,
                                                     Bdesc,
@@ -738,20 +738,20 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
                                                cublas_workspace_,
                                                wsSizeBytes,
                                                stream);
-        check_cuda_error(status);
+        check_cuda_value(status);
     }
 
     if (Ddesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Ddesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Ddesc));
     }
     if (Bdesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Bdesc));
     }
     if (Adesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Adesc));
     }
     if (matmulDesc) {
-        check_cuda_error(cublasLtMatmulDescDestroy(matmulDesc));
+        check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
     mu_->unlock();
@@ -803,23 +803,23 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
     cublasLtMatrixLayout_t Ddesc;
 
     {
-        check_cuda_error(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
+        check_cuda_value(cublasLtMatmulDescCreate(&matmulDesc, computeType, scaleType));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &tA, sizeof(tA)));
+        check_cuda_value(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &tB, sizeof(tB)));
 
         if (version_major_ >= 11 && version_minor_ >= 11 && version_patch_ > 0) {
             const int8_t fastAccuMode = 1;  // enable fast imprecise accum
-            check_cuda_error(cublasLtMatmulDescSetAttribute(
+            check_cuda_value(cublasLtMatmulDescSetAttribute(
                 matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(decltype(fastAccuMode))));
         }
 
         // TODO: Check that do we need to set these attributes
         // TODO: comment them for compiler first
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &devAscalePtr, sizeof(devAscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &devBscalePtr, sizeof(devBscalePtr)));
-        check_cuda_error(cublasLtMatmulDescSetAttribute(
+        check_cuda_value(cublasLtMatmulDescSetAttribute(
             matmulDesc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, &devDscalePtr, sizeof(devDscalePtr)));
 
         cublasLtEpilogue_t epi = CUBLASLT_EPILOGUE_GELU_BIAS;
@@ -835,38 +835,38 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
 
         // create matrix descriptors, we are good with the details here so no need
         // to set any extra attributes
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Adesc, aType, tA == CUBLAS_OP_N ? n : k, tA == CUBLAS_OP_N ? k : n, lda));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
         }
 
-        check_cuda_error(
+        check_cuda_value(
             cublasLtMatrixLayoutCreate(&Bdesc, bType, tB == CUBLAS_OP_N ? k : m, tB == CUBLAS_OP_N ? m : k, ldb));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
         }
 
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Cdesc, cType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Cdesc, cType, n, m, ldd));
         // (TODO Hongbinl)Not sure if the implementation makes sense
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
 
-        check_cuda_error(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
+        check_cuda_value(cublasLtMatrixLayoutCreate(&Ddesc, dType, n, m, ldd));
         if (batchCount > 1) {
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
-            check_cuda_error(cublasLtMatrixLayoutSetAttribute(
+            check_cuda_value(cublasLtMatrixLayoutSetAttribute(
                 Ddesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideD, sizeof(strideD)));
         }
     }
@@ -875,16 +875,16 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
     cublasLtMatmulHeuristicResult_t heuristicResult;
     cublasLtMatmulPreference_t      preference;
     int                             returnedAlgoCount = -1;
-    check_cuda_error(cublasLtMatmulPreferenceCreate(&preference));
-    check_cuda_error(cublasLtMatmulPreferenceSetAttribute(
+    check_cuda_value(cublasLtMatmulPreferenceCreate(&preference));
+    check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsSizeBytes, sizeof(wsSizeBytes)));
 #if (CUBLAS_VERSION) <= 12000
     uint32_t pointer_mode_mask = 0;
-    check_cuda_error(cublasLtMatmulPreferenceSetAttribute(
+    check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_EPILOGUE_MASK, &pointer_mode_mask, sizeof(pointer_mode_mask)));
 #endif
 
-    check_cuda_error(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_,
+    check_cuda_value(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle_,
                                                     matmulDesc,
                                                     Adesc,
                                                     Bdesc,
@@ -912,20 +912,20 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
                                                cublas_workspace_,
                                                wsSizeBytes,
                                                stream);
-        check_cuda_error(status);
+        check_cuda_value(status);
     }
 
     if (Ddesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Ddesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Ddesc));
     }
     if (Bdesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Bdesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Bdesc));
     }
     if (Adesc) {
-        check_cuda_error(cublasLtMatrixLayoutDestroy(Adesc));
+        check_cuda_value(cublasLtMatrixLayoutDestroy(Adesc));
     }
     if (matmulDesc) {
-        check_cuda_error(cublasLtMatmulDescDestroy(matmulDesc));
+        check_cuda_value(cublasLtMatmulDescDestroy(matmulDesc));
     }
 
     mu_->unlock();

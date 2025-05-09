@@ -31,8 +31,8 @@ CommBuffer::CommBuffer(const NcclParam& nccl_para,
     // 110 sec wait time by default
     int sec_timeout = 110;
     int cur_dev;
-    check_cuda_error(cudaGetDevice(&cur_dev));
-    check_cuda_error(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+    check_cuda_value(cudaGetDevice(&cur_dev));
+    check_cuda_value(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
     comm->ub_timeout = 1000ull * device_clock * sec_timeout;
     RTP_LLM_LOG_DEBUG("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n",
             sec_timeout,
@@ -41,22 +41,22 @@ CommBuffer::CommBuffer(const NcclParam& nccl_para,
 
     // peer pointers + op flags + comm buffer
     register_user_buffer_collective(&(comm->gpu_ptrs), LOCALSIZE2, _comm, nccl_para, stream);
-    check_cuda_error(cudaMalloc(&comm->recv_id, NVTE_MAX_REGIONS * comm->tp_size * sizeof(int)));
-    check_cuda_error(cudaMemset(comm->recv_id, 0, NVTE_MAX_REGIONS * comm->tp_size * sizeof(int)));
-    check_cuda_error(cudaDeviceSynchronize());
+    check_cuda_value(cudaMalloc(&comm->recv_id, NVTE_MAX_REGIONS * comm->tp_size * sizeof(int)));
+    check_cuda_value(cudaMemset(comm->recv_id, 0, NVTE_MAX_REGIONS * comm->tp_size * sizeof(int)));
+    check_cuda_value(cudaDeviceSynchronize());
 
     priorityRange(&_gemm_priority, &_comm_priority);
     size_t tp_size = tp_ranks.size();
     for (int i = 0; i < std::min((size_t)NUM_MAX_STREAM, tp_size); i++) {
         cudaStream_t stream;
-        check_cuda_error(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
+        check_cuda_value(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
         _stream_compute.push_back(std::move(stream));
     }
 
     // CUDA event creation
-    check_cuda_error(cudaEventCreateWithFlags(&_start_compute, 0));
-    check_cuda_error(cudaEventCreateWithFlags(&_stop_compute, 0));
-    check_cuda_error(cudaEventCreateWithFlags(&_start_comm, 0));
+    check_cuda_value(cudaEventCreateWithFlags(&_start_compute, 0));
+    check_cuda_value(cudaEventCreateWithFlags(&_stop_compute, 0));
+    check_cuda_value(cudaEventCreateWithFlags(&_start_comm, 0));
 
     _is_reduce_scatter = !is_ag;
 
@@ -90,12 +90,12 @@ CommBuffer::CommBuffer(const NcclParam& nccl_para,
 
     for (int i = 0; i < std::min((size_t)NUM_MAX_STREAM, tp_size); i++) {
         cudaStream_t stream;
-        check_cuda_error(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+        check_cuda_value(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
         _stream_send.push_back(std::move(stream));
     }
-    check_cuda_error(cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
-    check_cuda_error(cudaEventCreateWithFlags(&_stop_send, 0));
-    check_cuda_error(cudaEventCreateWithFlags(&_stop_recv, 0));
+    check_cuda_value(cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
+    check_cuda_value(cudaEventCreateWithFlags(&_stop_send, 0));
+    check_cuda_value(cudaEventCreateWithFlags(&_stop_recv, 0));
 }
 
 CommBuffer::~CommBuffer() {
@@ -104,17 +104,17 @@ CommBuffer::~CommBuffer() {
             if (rank != _comm->myrank) {
                 cudaIpcCloseMemHandle(_comm->peer_ptr[hndl][rank]);
             } else {
-                check_cuda_error(cudaFree(reinterpret_cast<void *>(_comm->peer_ptr[hndl][rank])));
+                check_cuda_value(cudaFree(reinterpret_cast<void *>(_comm->peer_ptr[hndl][rank])));
             }
         }
         free(_comm->peer_ptr[hndl]);
     }
-    check_cuda_error(cudaFree(reinterpret_cast<void *>(_comm->recv_id)));
-    check_cuda_error(cudaEventDestroy(_stop_recv));
-    check_cuda_error(cudaEventDestroy(_stop_send));
-    check_cuda_error(cudaEventDestroy(_start_compute));
-    check_cuda_error(cudaEventDestroy(_stop_compute));
-    check_cuda_error(cudaEventDestroy(_start_comm));
+    check_cuda_value(cudaFree(reinterpret_cast<void *>(_comm->recv_id)));
+    check_cuda_value(cudaEventDestroy(_stop_recv));
+    check_cuda_value(cudaEventDestroy(_stop_send));
+    check_cuda_value(cudaEventDestroy(_start_compute));
+    check_cuda_value(cudaEventDestroy(_stop_compute));
+    check_cuda_value(cudaEventDestroy(_start_comm));
     delete _comm;
 }
 
@@ -125,18 +125,18 @@ int register_user_buffer_collective(void** gpubuff, size_t bytes, Communicator* 
     int hndl                = comm->free_region;
     comm->peer_ptr[hndl]    = reinterpret_cast<void**>(malloc(sizeof(void*) * (comm->tp_size)));
 
-    check_cuda_error(cudaMalloc(gpubuff, bytes));
-    check_cuda_error(cudaMemset(*gpubuff, 0, bytes));
+    check_cuda_value(cudaMalloc(gpubuff, bytes));
+    check_cuda_value(cudaMemset(*gpubuff, 0, bytes));
 
     RTP_LLM_CHECK_WITH_INFO(comm->tp_size <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
     cudaIpcMemHandle_t memhndl;
-    check_cuda_error(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+    check_cuda_value(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     char* serial_handle_buffer_ptr;
-    check_cuda_error(cudaMalloc(&serial_handle_buffer_ptr, comm->tp_size * CUDA_IPC_HANDLE_SIZE));
+    check_cuda_value(cudaMalloc(&serial_handle_buffer_ptr, comm->tp_size * CUDA_IPC_HANDLE_SIZE));
 
     // serialized cudaIpcMemHandle
-    check_cuda_error(cudaMemcpyAsync(serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * comm->myrank,
+    check_cuda_value(cudaMemcpyAsync(serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * comm->myrank,
                                      memhndl.reserved,
                                      CUDA_IPC_HANDLE_SIZE,
                                      cudaMemcpyHostToDevice,
@@ -146,12 +146,12 @@ int register_user_buffer_collective(void** gpubuff, size_t bytes, Communicator* 
         reinterpret_cast<char*>(serial_handle_buffer_ptr), reinterpret_cast<char*>(serial_handle_buffer_ptr), CUDA_IPC_HANDLE_SIZE, comm->myrank, nccl_para, stream);
     RTP_LLM_LOG_DEBUG("nccl_param %s", nccl_para.toString().c_str());
     
-    check_cuda_error(cudaDeviceSynchronize());
+    check_cuda_value(cudaDeviceSynchronize());
 
      // deserialize all ranks' cudaIpcMemHandle
     std::vector<cudaIpcMemHandle_t> handles(comm->tp_size);
     for (size_t i = 0; i < handles.size(); ++i) {
-        check_cuda_error(cudaMemcpyAsync(handles[i].reserved,
+        check_cuda_value(cudaMemcpyAsync(handles[i].reserved,
                                          serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * i,
                                          CUDA_IPC_HANDLE_SIZE,
                                          cudaMemcpyDeviceToHost,
@@ -160,15 +160,15 @@ int register_user_buffer_collective(void** gpubuff, size_t bytes, Communicator* 
 
     for (int i = 0; i < comm->tp_size; i++) {
         if (i != comm->myrank) {
-            check_cuda_error(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]),
+            check_cuda_value(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]),
                                                  handles[i],  // NOLINT(*)
                                                  cudaIpcMemLazyEnablePeerAccess));
         }
     }
 
     comm->peer_ptr[hndl][comm->myrank] = *gpubuff;
-    check_cuda_error(cudaDeviceSynchronize());
-    check_cuda_error(cudaFreeAsync(serial_handle_buffer_ptr, stream));
+    check_cuda_value(cudaDeviceSynchronize());
+    check_cuda_value(cudaFreeAsync(serial_handle_buffer_ptr, stream));
     comm->mem_ptr[hndl] = *gpubuff;
     return comm->free_region++;
 }

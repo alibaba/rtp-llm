@@ -549,10 +549,10 @@ void sort_KL(const int*   keys_in,
     size_t ws_size = 0;
     cub::DeviceRadixSort::SortPairs(
         ws_tmp, ws_size, keys_in, keys_out, values_in, values_out, num_key_value_pairs, 0, num_bits, stream);
-    check_cuda_error(cudaMalloc(&ws_tmp, ws_size));
+    check_cuda_value(cudaMalloc(&ws_tmp, ws_size));
     cub::DeviceRadixSort::SortPairs(
         ws_tmp, ws_size, keys_in, keys_out, values_in, values_out, num_key_value_pairs, 0, num_bits, stream);
-    check_cuda_error(cudaFree(ws_tmp));
+    check_cuda_value(cudaFree(ws_tmp));
 }
 
 // ============================== Infer GEMM sizes =================================

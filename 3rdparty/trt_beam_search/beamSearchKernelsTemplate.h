@@ -344,7 +344,7 @@ __launch_bounds__(THREADBLOCK_SIZE) __global__
     {                                                                                                                  \
         if (IS_FAST_KERNEL && nShareMemory >= (48 << 10))                                                              \
         {                                                                                                              \
-            check_cuda_error(cudaFuncSetAttribute(beamStage2Kernel<T, PAD_2K, N_VOCAB_PART, IS_FAST_KERNEL>,            \
+            check_cuda_value(cudaFuncSetAttribute(beamStage2Kernel<T, PAD_2K, N_VOCAB_PART, IS_FAST_KERNEL>,            \
                 cudaFuncAttributeMaxDynamicSharedMemorySize, nShareMemory));                                           \
         }                                                                                                              \
         beamStage2Kernel<T, PAD_2K, N_VOCAB_PART, IS_FAST_KERNEL>                                                      \
@@ -422,16 +422,16 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     float* pTemp = reinterpret_cast<float*>(pTempVal + offset);
     // Upper limit count of ThreadBlock, gotten by using no share memory
     int max_active_blocks = -1;
-    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &max_active_blocks, beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize>, nBlockSize, 0));
     // Find the max smem on the device and use that to determine the vocab parts in the best case.
     int max_smem_per_sm = -1;
     int max_smem_per_block = -1;
     int const device = rtp_llm::getDevice();
-    check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device));
-    check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    check_cuda_value(cudaDeviceGetAttribute(&max_smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device));
+    check_cuda_value(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
     cudaFuncAttributes attr;
-    check_cuda_error(cudaFuncGetAttributes(&attr, beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize>));
+    check_cuda_value(cudaFuncGetAttributes(&attr, beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize>));
     // One ThreadBlock must at least have share memory of `sizeof(T) * nV / nMaxVocabPartForStage1FastKernel` bytes
     int const static_smem = attr.sharedSizeBytes;
     int const max_dyn_smem_per_block = max_smem_per_block - static_smem;
@@ -452,7 +452,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     int const dyn_smem_size = sizeof(T) * nVocabChunk;
     if (dyn_smem_size >= (48 << 10))
     {
-        check_cuda_error(cudaFuncSetAttribute(beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize>,
+        check_cuda_value(cudaFuncSetAttribute(beamStage1Kernel<T, items_per_thread, 2 * PAD_K, nBlockSize>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem_size));
     }
     dim3 gridSize(nBS, nBM, nVPart);
@@ -467,7 +467,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     size_t constexpr nBlockSizeStage3 = (PAD_K + 31) / 32 * 32; // can not use `roundUp()`
     if (nShareMemory >= (48 << 10))
     {
-        check_cuda_error(cudaFuncSetAttribute(beamStage3Kernel<T, PAD_K * 2, nBlockSizeStage3>,
+        check_cuda_value(cudaFuncSetAttribute(beamStage3Kernel<T, PAD_K * 2, nBlockSizeStage3>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, nShareMemory));
     }
     beamStage3Kernel<T, PAD_K * 2, nBlockSizeStage3>

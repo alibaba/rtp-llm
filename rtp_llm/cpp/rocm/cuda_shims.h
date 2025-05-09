@@ -51,7 +51,7 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define curandState_t hiprandState_t
 
 #define cub hipcub
-#define check_cuda_error ROCM_CHECK
+#define check_cuda_value ROCM_CHECK
 
 #define cudaStream_t hipStream_t
 #define cudaStreamSynchronize hipStreamSynchronize

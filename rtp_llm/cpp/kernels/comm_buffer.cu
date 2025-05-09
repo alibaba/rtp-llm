@@ -48,7 +48,7 @@ void userbuffers_send(const int     handler,
     RTP_LLM_CHECK(INTRANODE(peer));
     void* srcptr = reinterpret_cast<char*>(comm->mem_ptr[handler]) + srcoffset;
     void* dstptr = reinterpret_cast<char*>(comm->peer_ptr[handler][peerlocal]) + dstoffset;
-    check_cuda_error(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+    check_cuda_value(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
     kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(flagptr));
 }
 

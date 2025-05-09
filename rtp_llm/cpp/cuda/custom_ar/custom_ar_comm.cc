@@ -48,8 +48,8 @@ CustomAllReduceComm::~CustomAllReduceComm() {
     // close cudaIPCMemhandle
     for (size_t i = 0; i < world_size_; i++) {
         if (i == rank_index_) {
-            check_cuda_error(cudaFree(param_.peer_comm_buffer_ptrs[i]));
-            check_cuda_error(cudaFree(param_.peer_barrier_ptrs[i]));
+            check_cuda_value(cudaFree(param_.peer_comm_buffer_ptrs[i]));
+            check_cuda_value(cudaFree(param_.peer_barrier_ptrs[i]));
         } else {
             cudaIpcCloseMemHandle(param_.peer_barrier_ptrs[i]);
             cudaIpcCloseMemHandle(param_.peer_comm_buffer_ptrs[i]);
@@ -107,7 +107,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) 
         if (err == cudaErrorPeerAccessAlreadyEnabled) {
             continue;
         }
-        check_cuda_error(err);
+        check_cuda_value(err);
     }
 
     // prepare share buffer
@@ -127,13 +127,13 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) 
             param_.peer_barrier_ptrs[i]     = reinterpret_cast<uint32_t*>(local_barrier_buffer_ptr);
         } else {
             uint8_t* comm_foreign_buffer{nullptr};
-            check_cuda_error(cudaIpcOpenMemHandle(reinterpret_cast<void**>(&comm_foreign_buffer),
+            check_cuda_value(cudaIpcOpenMemHandle(reinterpret_cast<void**>(&comm_foreign_buffer),
                                                   comm_buffer_handles[i],
                                                   cudaIpcMemLazyEnablePeerAccess));
             param_.peer_comm_buffer_ptrs[i] = reinterpret_cast<void*>(comm_foreign_buffer);
 
             uint8_t* barrier_forier_buffer{nullptr};
-            check_cuda_error(cudaIpcOpenMemHandle(reinterpret_cast<void**>(&barrier_forier_buffer),
+            check_cuda_value(cudaIpcOpenMemHandle(reinterpret_cast<void**>(&barrier_forier_buffer),
                                                   barrier_buffer_handles[i],
                                                   cudaIpcMemLazyEnablePeerAccess));
             param_.peer_barrier_ptrs[i] = reinterpret_cast<uint32_t*>(barrier_forier_buffer);
@@ -152,19 +152,19 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     // see https://developer.nvidia.com/blog/using-cuda-stream-ordered-memory-allocator-part-2/
 
     // malloc and reset local buffer
-    check_cuda_error(cudaMalloc(&local_buffer_ptr, local_buffer_size));
-    check_cuda_error(cudaMemset(local_buffer_ptr, 0, local_buffer_size));
+    check_cuda_value(cudaMalloc(&local_buffer_ptr, local_buffer_size));
+    check_cuda_value(cudaMemset(local_buffer_ptr, 0, local_buffer_size));
 
     // malloc serial handle buffer
     char* serial_handle_buffer_ptr;
-    check_cuda_error(cudaMalloc(&serial_handle_buffer_ptr, IPChandleBufSize(world_size_)));
+    check_cuda_value(cudaMalloc(&serial_handle_buffer_ptr, IPChandleBufSize(world_size_)));
 
     // open local cudaIpcMemHandle
     cudaIpcMemHandle_t local_buffer_handle;
-    check_cuda_error(cudaIpcGetMemHandle(&local_buffer_handle, local_buffer_ptr));
+    check_cuda_value(cudaIpcGetMemHandle(&local_buffer_handle, local_buffer_ptr));
 
     // serialized cudaIpcMemHandle
-    check_cuda_error(cudaMemcpyAsync(serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * rank_index_,
+    check_cuda_value(cudaMemcpyAsync(serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * rank_index_,
                                      local_buffer_handle.reserved,
                                      CUDA_IPC_HANDLE_SIZE,
                                      cudaMemcpyHostToDevice,
@@ -173,19 +173,19 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     // all gather serialized cudaIpcMemHandle
     ftNcclAllGather(
         serial_handle_buffer_ptr, serial_handle_buffer_ptr, CUDA_IPC_HANDLE_SIZE, rank_index_, nccl_para, stream);
-    check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_value(cudaStreamSynchronize(stream));
 
     // deserialize all ranks' cudaIpcMemHandle
     std::vector<cudaIpcMemHandle_t> handles(world_size_);
     for (size_t i = 0; i < handles.size(); ++i) {
-        check_cuda_error(cudaMemcpyAsync(handles[i].reserved,
+        check_cuda_value(cudaMemcpyAsync(handles[i].reserved,
                                          serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * i,
                                          CUDA_IPC_HANDLE_SIZE,
                                          cudaMemcpyDeviceToHost,
                                          stream));
     }
 
-    check_cuda_error(cudaFreeAsync(serial_handle_buffer_ptr, stream));
+    check_cuda_value(cudaFreeAsync(serial_handle_buffer_ptr, stream));
     return handles;
 }
 
@@ -238,7 +238,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
             continue;
         }
         int peer_access_available = 0;
-        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
+        check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
         if (peer_access_available == 0) {
             RTP_LLM_LOG_INFO("Disable custom all reduce since device %d and device %d do not have peer access", rank, i);
             return false;

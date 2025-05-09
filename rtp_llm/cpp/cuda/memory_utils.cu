@@ -27,7 +27,7 @@ template<typename T>
 void deviceMalloc(T** ptr, size_t size, bool is_random_initialize)
 {
     // RTP_LLM_CHECK_WITH_INFO(size >= ((size_t)0), "Ask deviceMalloc size " + std::to_string(size) + "< 0 is invalid.");
-    check_cuda_error(cudaMalloc((void**)(ptr), sizeof(T) * size));
+    check_cuda_value(cudaMalloc((void**)(ptr), sizeof(T) * size));
     if (is_random_initialize) {
         cudaRandomUniform(*ptr, size);
     }
@@ -51,7 +51,7 @@ template void deviceMalloc(__nv_fp8_e4m3** ptr, size_t size, bool is_random_init
 template<typename T>
 void deviceMemSetZero(T* ptr, size_t size)
 {
-    check_cuda_error(cudaMemset(static_cast<void*>(ptr), 0, sizeof(T) * size));
+    check_cuda_value(cudaMemset(static_cast<void*>(ptr), 0, sizeof(T) * size));
 }
 
 template void deviceMemSetZero(float* ptr, size_t size);
@@ -70,7 +70,7 @@ template<typename T>
 void deviceFree(T*& ptr)
 {
     if (ptr != NULL) {
-        check_cuda_error(cudaFree(ptr));
+        check_cuda_value(cudaFree(ptr));
         ptr = NULL;
     }
 }
@@ -95,7 +95,7 @@ void deviceFill(T* devptr, size_t size, T value, cudaStream_t stream)
 {
     T* arr = new T[size];
     std::fill(arr, arr + size, value);
-    check_cuda_error(cudaMemcpyAsync(devptr, arr, sizeof(T) * size, cudaMemcpyHostToDevice, stream));
+    check_cuda_value(cudaMemcpyAsync(devptr, arr, sizeof(T) * size, cudaMemcpyHostToDevice, stream));
     delete[] arr;
 }
 
@@ -110,7 +110,7 @@ template void deviceFill(bool* devptr, size_t size, bool value, cudaStream_t str
 template<typename T>
 void cudaD2Hcpy(T* tgt, const T* src, const size_t size)
 {
-    check_cuda_error(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDeviceToHost));
+    check_cuda_value(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDeviceToHost));
 }
 
 template void cudaD2Hcpy(float* tgt, const float* src, size_t size);
@@ -130,7 +130,7 @@ template void cudaD2Hcpy(int8_t* tgt, const int8_t* src, size_t size);
 template<typename T>
 void cudaH2Dcpy(T* tgt, const T* src, const size_t size)
 {
-    check_cuda_error(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyHostToDevice));
+    check_cuda_value(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyHostToDevice));
 }
 
 template void cudaH2Dcpy(float* tgt, const float* src, size_t size);
@@ -150,7 +150,7 @@ template void cudaH2Dcpy(int8_t* tgt, const int8_t* src, size_t size);
 template<typename T>
 void cudaD2Dcpy(T* tgt, const T* src, const size_t size)
 {
-    check_cuda_error(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDeviceToDevice));
+    check_cuda_value(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDeviceToDevice));
 }
 
 template void cudaD2Dcpy(float* tgt, const float* src, size_t size);
@@ -200,10 +200,10 @@ template<typename T>
 void cudaAutoCpy(T* tgt, const T* src, const size_t size, cudaStream_t stream)
 {
     if (stream != NULL) {
-        check_cuda_error(cudaMemcpyAsync(tgt, src, sizeof(T) * size, cudaMemcpyDefault, stream));
+        check_cuda_value(cudaMemcpyAsync(tgt, src, sizeof(T) * size, cudaMemcpyDefault, stream));
     }
     else {
-        check_cuda_error(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDefault));
+        check_cuda_value(cudaMemcpy(tgt, src, sizeof(T) * size, cudaMemcpyDefault));
     }
 }
 

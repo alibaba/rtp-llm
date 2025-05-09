@@ -59,7 +59,7 @@ void CudaDevice::copy(const CopyParams& params) {
 
     if (copyType == cudaMemcpyDeviceToHost) {
         cudaStreamSynchronize(stream);
-        check_cuda_error(cudaGetLastError());
+        check_cuda_value(cudaGetLastError());
     }
 
     sync_check_cuda_error();
@@ -510,10 +510,10 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
             // has been finished. Otherwise, the communication may overlap with the computation.
             // We use cuda event to ensure the computation on main stream has been finished.
             cudaEvent_t event;
-            check_cuda_error(cudaEventCreate(&event));
-            check_cuda_error(cudaEventRecord(event, stream_));
-            check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
-            check_cuda_error(cudaEventDestroy(event));
+            check_cuda_value(cudaEventCreate(&event));
+            check_cuda_value(cudaEventRecord(event, stream_));
+            check_cuda_value(cudaStreamWaitEvent(communication_stream_, event, 0));
+            check_cuda_value(cudaEventDestroy(event));
         }
     }
     BufferPtr output;
