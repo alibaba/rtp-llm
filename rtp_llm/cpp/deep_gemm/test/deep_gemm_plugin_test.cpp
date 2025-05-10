@@ -48,9 +48,9 @@ public:
         calcDiff(ref_output, gemm_output);
     }
     void RunDeepGemmPluginGroupedContiguousTest() {
-        int m = 128, n = 4096, k = 7168, num_groups = 2;
+        int m = 128, n = 4096, k = 1536, num_groups = 16;
 
-        auto input =  torch::ones({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
+        auto input =  torch::randn({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::randn({num_groups, m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
         auto weight = torch::randn({num_groups, n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto weight_scale = torch::randn({num_groups, int(n / 128), int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
@@ -82,10 +82,8 @@ public:
         calcDiff(ref_output, gemm_output);
     }
 
-    void RunDeepGeemPluginGroupedMaskedTest() {
-        int m = 256, n = 4096, k = 7168, num_groups = 2;
-
-        auto input =  torch::ones({(int)1, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn).repeat({num_groups, 1, 1}).contiguous();
+    void RunDeepGeemPluginGroupedMaskedTest(int m, int n, int k, int num_groups) {
+        auto input =  torch::randn({(int)1, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn).repeat({num_groups, 1, 1}).contiguous();
         auto input_scale = torch::randn({1, m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32).repeat({num_groups, 1, 1}).contiguous();
 
         auto weight = torch::randn({num_groups, n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
@@ -126,5 +124,12 @@ public:
 TEST_F(DeepGemmPluginTest, Test1) {
     RunDeepGemmPluginTest();
     RunDeepGemmPluginGroupedContiguousTest();
-    RunDeepGeemPluginGroupedMaskedTest();
+    RunDeepGeemPluginGroupedMaskedTest(16, 3072, 4096, 16);
+    RunDeepGeemPluginGroupedMaskedTest(16, 4096, 1536, 16);
+    RunDeepGeemPluginGroupedMaskedTest(32, 3072, 4096, 16);
+    RunDeepGeemPluginGroupedMaskedTest(32, 4096, 1536, 16);
+    RunDeepGeemPluginGroupedMaskedTest(64, 3072, 4096, 16);
+    RunDeepGeemPluginGroupedMaskedTest(64, 4096, 1536, 16);
+    RunDeepGeemPluginGroupedMaskedTest(128, 3072, 4096, 16);
+    RunDeepGeemPluginGroupedMaskedTest(128, 4096, 1536, 16);
 }

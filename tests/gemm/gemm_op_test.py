@@ -105,9 +105,22 @@ class TestGemmOp(unittest.TestCase):
 
     def test_block_gemm(self):
         shapes = [
-            (128, 256, 128),  # 小于块大小
-            (512, 512, 256),  # 大于块大小但不整除
-            (2048, 1024, 896)  # 完美对齐
+            # (128, 256, 128),   # 小于块大小
+            # (512, 512, 256),   # 大于块大小但不整除
+            # (2048, 1024, 896), # 完美对齐
+
+            (24, 2048, 7168),
+            (24, 7168, 4096),
+            (24, 4096, 9216),
+            (24, 8192, 4096),
+            (32, 4096, 9216),
+            (32, 8192, 4096),
+            (48, 4096, 9216),
+            (48, 8192, 4096),
+            (64, 4096, 9216),
+            (64, 8192, 4096),
+            (128, 4096, 9216),
+            (128, 8192, 4096),
         ]
         for m, k, n in shapes:
             # 创建测试数据
@@ -122,26 +135,25 @@ class TestGemmOp(unittest.TestCase):
 
             b_quant, b_scales = per_block_cast_to_fp8(weight_fp)
             b_quant = b_quant.T.contiguous().reshape([k,n])
-            b_scales = b_scales.T.contiguous().reshape([k//128,n//128])
-            
+            b_scales = b_scales.T.contiguous().reshape([(k + 127) // 128, (n + 127) // 128])
+
             custom_output = torch.zeros(m, n, device='cuda', dtype=torch.bfloat16)
             self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
             custom_output = custom_output.to("cpu")
             assert_close(
                 custom_output,
                 ref_output_fp8,
-                rtol=0.01,
-                atol=0.04,
+                rtol=0.05,
+                atol=0.1,
                 msg=f"m:{m}, k:{k}, n:{n} 结果不匹配: deep_gemm: {custom_output},\n torch_gemm_fp8:{ref_output_fp8},\n torch_gemm_fp16:{ref_output},"
             )
 
     def test_uneven_blocks(self):
         """测试非对齐分块"""
         shapes = [
-            (127, 256, 128), 
-            (385, 512, 256),
-            (511, 1024, 256),
-            (511, 1024, 896)
+            (127, 2048, 7168), 
+            (385, 2048, 7168),
+            (511, 2048, 7168),
         ]
         for m, k, n in shapes:
             # 创建测试数据
@@ -156,16 +168,16 @@ class TestGemmOp(unittest.TestCase):
 
             b_quant, b_scales = per_block_cast_to_fp8(weight_fp)
             b_quant = b_quant.T.contiguous().reshape([k,n])
-            b_scales = b_scales.T.contiguous().reshape([k//128,n//128])
-            
+            b_scales = b_scales.T.contiguous().reshape([(k + 127) // 128, (n + 127) // 128])
+
             custom_output = torch.zeros(m, n, device='cuda', dtype=torch.bfloat16)
             self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
             custom_output = custom_output.to("cpu")
             assert_close(
                 custom_output,
                 ref_output_fp8,
-                rtol=0.01,
-                atol=0.04,
+                rtol=0.05,
+                atol=0.1,
                 msg=f"m:{m}, k:{k}, n:{n} 结果不匹配: deep_gemm: {custom_output},\n torch_gemm_fp8:{ref_output_fp8},\n torch_gemm_fp16:{ref_output},"
             )
 

@@ -14,7 +14,15 @@
 using namespace std;
 
 namespace rtp_llm {
+
 #ifdef ENABLE_FP8
+template <class T>
+static inline void hash_combine(std::size_t& seed, const T& v)
+{
+    std::hash<T> hasher;
+    seed ^= hasher(v) + 0x9e3779b9 + (seed<<6) + (seed>>2);
+}
+
 void runDeepGemm(__nv_bfloat16*         output,
                  __nv_fp8_e4m3*         lhs,
                  float*                 lhs_scale,
@@ -33,8 +41,42 @@ void runDeepGemm(__nv_bfloat16*         output,
                  DeepGemmType           gemm_type,
                  cudaStream_t           stream,
                  uint32_t               num_sms,
-                 uint32_t               smem_size);
+                 uint32_t               smem_size,
+                 bool                   swap_ab);
 
+static bool gemm_swap_ab_heuristic(size_t m, DeepGemmType gemm_type) {
+    switch (gemm_type) {
+        case DeepGemmType::Normal:
+            return m < 64;  // based on rough empirical results
+        case DeepGemmType::GroupedContiguous:
+            return false;   // currently not supported
+        case DeepGemmType::GroupedMasked:
+            return m < 128; // based on rough empirical results
+        default:
+            return false;
+    }
+}
+
+#endif
+
+size_t DeepGemmPlugin::getPaddingSize(size_t m, DeepGemmType gemm_type) {
+#ifdef ENABLE_FP8
+    if (gemm_swap_ab_heuristic(m, gemm_type)) {
+        // For some reason, m64n8k32 is not used in deep gemm.
+        // It might be worth it to activate the shape 
+        // for some small m in swap ab variant.
+        if (m < 16) {
+            return 16;
+        } else {
+            return 8;
+        }
+    } else {
+        return 64;
+    }
+#endif
+}
+
+#ifdef ENABLE_FP8
 inline int DeepGemmPlugin::getNumSms() {
     static int num_sms = -1;
     if (num_sms != -1) {
@@ -99,23 +141,42 @@ inline bool isTmaMulticastLegal(int shape_dim, int block_dim, int num_tma_multic
     return (shape_dim % (block_dim * num_tma_multicast) == 0) && (num_sms % num_tma_multicast) == 0;
 }
 
-inline int getSmemSize(int num_stages, int k, int bm, int bn, int bk = 128) {
-    int smem_d = bm * bn * 2;
-    int smem_a_per_stage = bm * bk;
-    int smem_scales_a_per_stage = bm * 4;
-    int smem_b_per_stage = bn * bk;
-    int smem_scales_b = ceil_div(k, bk) * 4;
-    int smem_barrier = num_stages * 8 * 2;
-
-    int smem_size = 0;
-    smem_size += smem_d;
-    smem_size += num_stages * smem_a_per_stage;
-    smem_size += num_stages * smem_scales_a_per_stage;
-    smem_size += num_stages * smem_b_per_stage;
-    int scaler = (bk % bn == 0)? 1: 2;
-    smem_size += ceil_div(smem_scales_b * scaler, 8) * 8;
-    smem_size += smem_barrier;
-    return smem_size;
+inline int getSmemSize(int num_stages, int k, int bm, int bn, int bk, bool swap_ab) {
+    if (swap_ab) {
+        RTP_LLM_CHECK_WITH_INFO(bk % bm == 0, "invalid block k (%d) and block m (%d)", bk, bm);
+        int smem_d = bm * bn * 2;
+        int smem_a_per_stage = bm * bk;
+        int smem_scales_a_per_stage = ceil_div(k, bk) * 4;
+        int smem_b_per_stage = bn * bk;
+        int smem_scales_b = ceil_div(bn * 4, 128) * 128;
+        int smem_barrier = num_stages * 8 * 2;
+        
+        int smem_size = 0;
+        smem_size += smem_d;
+        smem_size += num_stages * smem_a_per_stage;
+        smem_size += num_stages * smem_scales_b;
+        smem_size += num_stages * smem_b_per_stage;
+        smem_size += ceil_div(smem_scales_a_per_stage, 8) * 8;
+        smem_size += smem_barrier;
+        return smem_size;
+    } else {
+        int smem_d = bm * bn * 2;
+        int smem_a_per_stage = bm * bk;
+        int smem_scales_a_per_stage = bm * 4;
+        int smem_b_per_stage = bn * bk;
+        int smem_scales_b = ceil_div(k, bk) * 4;
+        int smem_barrier = num_stages * 8 * 2;
+    
+        int smem_size = 0;
+        smem_size += smem_d;
+        smem_size += num_stages * smem_a_per_stage;
+        smem_size += num_stages * smem_scales_a_per_stage;
+        smem_size += num_stages * smem_b_per_stage;
+        int scaler = (bk % bn == 0)? 1: 2;
+        smem_size += ceil_div(smem_scales_b * scaler, 8) * 8;
+        smem_size += smem_barrier;
+        return smem_size;
+    }
 }
 
 
@@ -146,78 +207,179 @@ torch::Tensor getColMajorTmaAlignedTensor(Buffer lhs_scale) {
     }
 }
 
+struct DeepGemmConfigKey {
+    int m;
+    int n;
+    int k;
+    int num_groups;
+    int num_sms;
+    DeepGemmType gemm_type;
+    int expected_m;
+
+    bool operator==(const DeepGemmConfigKey&other) const {
+        return (
+            m == other.m &&
+            n == other.n &&
+            k == other.k &&
+            num_groups == other.num_groups &&
+            num_sms == other.num_sms &&
+            gemm_type == other.gemm_type &&
+            expected_m == other.expected_m
+        );
+    }
+};
+
+
+struct DeepGemmConfigKeyHasher {
+    std::size_t operator()(const DeepGemmConfigKey& key) const {
+        uint64_t hash = 0;
+        hash_combine(hash, key.m);
+        hash_combine(hash, key.n);
+        hash_combine(hash, key.k);
+        hash_combine(hash, key.num_groups);
+        hash_combine(hash, key.num_sms);
+        hash_combine(hash, uint64_t(key.gemm_type));
+        hash_combine(hash, key.expected_m);
+        return hash;
+    }
+};
+
 class DeepGemmConfig {
 public:
-    uint32_t block_m, block_n, num_stages, num_tma_multicast, smem_size;
+    uint32_t block_m, block_n, num_stages, num_tma_multicast, smem_size, swap_ab;
 
-    DeepGemmConfig(uint32_t block_m, uint32_t block_n, uint32_t num_stages, uint32_t num_tma_multicast, uint32_t smem_size):
+    DeepGemmConfig(uint32_t block_m, uint32_t block_n, uint32_t num_stages, uint32_t num_tma_multicast, uint32_t smem_size, bool swap_ab):
         block_m(block_m),
         block_n(block_n),
         num_stages(num_stages),
         num_tma_multicast(num_tma_multicast),
-        smem_size(smem_size){}
+        smem_size(smem_size),
+        swap_ab(swap_ab){}
 };
 
-DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, bool is_grouped_contiguous = false) {
-    static unordered_map<uint64_t, DeepGemmConfig> best_configs;
-    uint64_t key = ((uint64_t)m << 44) | ((uint64_t)(n & 0xffff) << 28) | ((uint64_t)(k & 0xffff) << 12) |  ((uint64_t)num_sms << 4) | ((uint64_t)is_grouped_contiguous);
+DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, DeepGemmType gemm_type, int expected_m = -1) {
+        static unordered_map<DeepGemmConfigKey, DeepGemmConfig, DeepGemmConfigKeyHasher> best_configs;
+
+    DeepGemmConfigKey key{ m, n, k, num_groups, num_sms, gemm_type, expected_m };
     auto it = best_configs.find(key);
     if (it != best_configs.end()) {
         return it->second;
     }
 
-    int block_m;
-    if (!is_grouped_contiguous && m <= 64) {
-        block_m = 64;
-    } else {
-        block_m = 128;
+    int original_m = m, original_n = n;
+    if (expected_m == -1) {
+        expected_m = m;
+    }
+    int expected_n = n;
+
+    bool swap_ab = gemm_swap_ab_heuristic(expected_m, gemm_type);
+    if (swap_ab) {
+        std::swap(m, n);
+        std::swap(expected_m, expected_n);
     }
 
     int best_block_m = -1, best_block_n = -1;
-    for (int block_n: std::vector<int>({16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128})) {
-        bool success = false;
-        if (best_block_m == -1 || best_block_n == -1) {
-            success = true;
+    {
+        struct BlockConfig {
+            int block_m = -1;
+            int block_n = -1;
+            int num_waves = std::numeric_limits<int>::max();
+            int util = std::numeric_limits<int>::min();
+
+            bool operator > (const BlockConfig &other) {
+                if (num_waves != other.num_waves) {
+                    return num_waves < other.num_waves;
+                }
+                if (util != other.util) {
+                    return util > other.util;
+                }
+                if (block_m != other.block_m) {
+                    return block_m > other.block_m;
+                }
+                if (block_n != other.block_n) {
+                    return block_n < other.block_n;
+                }
+                return false;
+            }
+        };
+
+        BlockConfig valid_best, best;
+        int block_m;
+        if ((gemm_type == DeepGemmType::GroupedContiguous && m <= 64) || expected_m <= 64) {
+            block_m = 64;
         } else {
-            int num_waves = getNumWaves(m, n, block_m, block_n, num_groups, num_sms);
-            int best_num_waves = getNumWaves(m, n, best_block_m, best_block_n, num_groups, num_sms);
-            if (num_waves < best_num_waves) {
-                success = true;
-            } else if (num_waves == best_num_waves) {
-                int util = getLastWaveUtil(m, n, block_m, block_n, num_groups, num_sms);
-                int best_util = getLastWaveUtil(m, n, best_block_m, best_block_n, num_groups, num_sms);
-                success = tie(util, block_m, best_block_n) > tie(best_util, best_block_m, block_n);
+            block_m = 128;
+        }
+
+        // For some reason, m64n8k32 is not used in deep gemm.
+        // It might be worth it to activate the shape 
+        // for some small m in swap ab variant.
+        static int block_ns[] = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
+        for (int block_n: block_ns) {
+            int num_waves = getNumWaves(expected_m, expected_n, block_m, block_n, num_groups, num_sms);
+            int util = getLastWaveUtil(expected_m, expected_n, block_m, block_n, num_groups, num_sms);
+
+            BlockConfig current{block_m, block_n, num_waves, util};
+
+            if (current > best) {
+                best = current;
+            }
+            if (current > valid_best) {
+                if (gemm_type == DeepGemmType::GroupedMasked && num_groups > 1) {
+                    if (swap_ab) {
+                        if (n < block_n || n % block_n != 0) continue;
+                    } else {
+                        if (m < block_m || m % block_m != 0) continue;
+                    }
+                }
+                valid_best = current;
             }
         }
-        if (success) {
-            best_block_m = block_m; best_block_n = block_n;
+        RTP_LLM_CHECK_WITH_INFO(valid_best.block_m != -1, "block m size cannot be None in best config");
+        RTP_LLM_CHECK_WITH_INFO(valid_best.block_n != -1, "block n size cannot be None in best config");
+        if (valid_best.block_m != best.block_m || valid_best.block_n != best.block_n) {
+            RTP_LLM_LOG_WARNING("best block shape for %sdeep gemm (%d, %d) is not valid, fallback to (%d, %d), "
+                           "consider changing the shape m%dn%dk%d for better performance", 
+                           swap_ab ? "swap ab ": "",
+                           best.block_m, best.block_n, valid_best.block_m, valid_best.block_n, 
+                           original_m, original_n, k);
         }
+
+        best_block_m = valid_best.block_m;
+        best_block_n = valid_best.block_n;
     }
-    RTP_LLM_CHECK_WITH_INFO(best_block_m != -1, "block m size cannot be None in best config");
-    RTP_LLM_CHECK_WITH_INFO(best_block_n != -1, "block n size cannot be None in best config");
+
     int best_num_stages = -1, best_smem_size = -1;
-    const int sm90_capacitty = getMaxSmem();
-    vector<int> num_stages_vec;
-    if (128 % best_block_n) {
-        num_stages_vec = vector<int>({6, 5, 4});
-    } else {
-        num_stages_vec = vector<int>({8, 7, 6, 5, 4});
-    }
-    for (auto& num_stages: num_stages_vec) {
-        best_smem_size = getSmemSize(num_stages, k, best_block_m, best_block_n);
-        if (best_smem_size <= sm90_capacitty) {
-            best_num_stages = num_stages;
-            break;
+    {
+        const int sm90_capacitty = getMaxSmem();
+        vector<int> num_stages_vec;
+        if (128 % best_block_n) {
+            num_stages_vec = vector<int>({6, 5, 4});
+        } else {
+            num_stages_vec = vector<int>({8, 7, 6, 5, 4});
         }
+        for (int num_stages: num_stages_vec) {
+            best_smem_size = getSmemSize(num_stages, k, best_block_m, best_block_n, 128, swap_ab);
+            if (best_smem_size <= sm90_capacitty) {
+                best_num_stages = num_stages;
+                break;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(best_num_stages != -1, "stages num cannot be None in best config");
     }
-    RTP_LLM_CHECK_WITH_INFO(best_num_stages != -1, "stages num cannot be None in best config");
 
     int best_num_tma_multicast = 1;
-    if (m >= 1024 && isTmaMulticastLegal(n, best_block_n, 2, num_sms) && num_groups == 1) {
-        best_num_tma_multicast = 2;
+    if (swap_ab) {
+        if (n >= 1024 && isTmaMulticastLegal(m, best_block_m, 2, num_sms) && num_groups == 1) {
+            best_num_tma_multicast = 2;
+        }
+    } else {
+        if (m >= 1024 && isTmaMulticastLegal(n, best_block_n, 2, num_sms) && num_groups == 1) {
+            best_num_tma_multicast = 2;
+        }
     }
 
-    DeepGemmConfig value = DeepGemmConfig(best_block_m, best_block_n, best_num_stages, best_num_tma_multicast, best_smem_size);
+    DeepGemmConfig value = DeepGemmConfig(best_block_m, best_block_n, best_num_stages, best_num_tma_multicast, best_smem_size, swap_ab);
     best_configs.emplace(key, value);
     return value;
 }
@@ -238,7 +400,7 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
 		reinterpret_cast<const QBuffer&>(rhs).scales().debugString().c_str(),
 		output.debugString().c_str());
     int num_sms = getNumSms();
-    auto best_config = getBestConfig(m, n, k, 1, num_sms);
+    auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::Normal);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
@@ -258,7 +420,8 @@ void DeepGemmPlugin::gemmFp8(const Buffer &lhs, const Buffer &rhs, Buffer &outpu
                 DeepGemmType::Normal,
                 stream,
                 num_sms,
-                best_config.smem_size);
+                best_config.smem_size,
+                best_config.swap_ab);
 #endif
 }
 
@@ -276,7 +439,7 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
     auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int num_sms = getNumSms();
 
-    auto best_config = getBestConfig(m, n, k, 1, num_sms, true);
+    auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::GroupedContiguous);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
@@ -296,7 +459,8 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer &lhs, const Buffer &r
                 DeepGemmType::GroupedContiguous,
                 stream,
                 num_sms,
-                best_config.smem_size);
+                best_config.smem_size,
+                best_config.swap_ab);
 #endif
 }
 
@@ -313,7 +477,7 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
 
     int num_sms = getNumSms();
 
-    auto best_config = getBestConfig(m, n, k, num_groups, num_sms);
+    auto best_config = getBestConfig(m, n, k, num_groups, num_sms, DeepGemmType::GroupedMasked, expected_m);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
@@ -333,7 +497,8 @@ void DeepGemmPlugin::groupedGemmFp8Masked(const Buffer &lhs, const Buffer &rhs, 
                 DeepGemmType::GroupedMasked,
                 stream,
                 num_sms,
-                best_config.smem_size);
+                best_config.smem_size,
+                best_config.swap_ab);
 #endif
 }
 } // namespace rtp_llm

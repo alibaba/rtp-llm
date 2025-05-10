@@ -21,6 +21,7 @@ private:
 };
 
 GemmOp::GemmOp() {
+    rtp_llm::initLogger();
     DeviceFactory::initDevices(GptInitParameter());
     device = DeviceFactory::getDefaultDevice();
 }

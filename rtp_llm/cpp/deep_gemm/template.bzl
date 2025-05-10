@@ -200,7 +200,8 @@ template void dispatchBlockNK<{0}, {1}, {2}, {3}>(__nv_bfloat16*         output,
                      uint32_t               num_tma_multicast,
                      cudaStream_t           stream,
                      uint32_t               num_sms,
-                     uint32_t               smem_size);
+                     uint32_t               smem_size,
+                     bool                   swap_ab);
 #endif
 """
 template_tail = """
@@ -231,7 +232,8 @@ void dispatchBlockNK(__nv_bfloat16*         output,
                      uint32_t               num_tma_multicast,
                      cudaStream_t           stream,
                      uint32_t               num_sms,
-                     uint32_t               smem_size);
+                     uint32_t               smem_size,
+                     bool                   swap_ab);
 
 #define DISPATCH_DEEP_GEMM(N, K, GROUP_NUM, GEMM_TYPE)                                           \\
     if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == GEMM_TYPE) {                 \\
@@ -249,7 +251,8 @@ void dispatchBlockNK(__nv_bfloat16*         output,
                                                     num_tma_multicast,                           \\
                                                     stream,                                      \\
                                                     num_sms,                                     \\
-                                                    smem_size);                                  \\
+                                                    smem_size,                                   \\
+                                                    swap_ab);                                    \\
         return;                                                                                  \\
     }
 
@@ -271,9 +274,10 @@ void runDeepGemm(__nv_bfloat16*         output,
                  DeepGemmType           gemm_type,
                  cudaStream_t           stream,
                  uint32_t               num_sms,
-                 uint32_t               smem_size) 
+                 uint32_t               smem_size,
+                 bool                   swap_ab)
 {
-    RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\\n", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast);
+    RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u, swap_ab:%u\\n", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, swap_ab);
 """
 
 dispatch_template = """

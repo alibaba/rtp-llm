@@ -1,3 +1,29 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 DeepSeek
+ * SPDX-License-Identifier: MIT
+ *
+ * Licensed under the MIT License.
+ * You may obtain a copy of the License at
+ *
+ * https://opensource.org/licenses/MIT
+ *
+ *
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #pragma once
 
 #include <cuda.h>
@@ -755,6 +781,31 @@ struct SM90_U32x4_STSM_N {
         const uint32_t src[4] = {*reinterpret_cast<uint32_t*>(&src_0), *reinterpret_cast<uint32_t*>(&src_1),
                                  *reinterpret_cast<uint32_t*>(&src_2), *reinterpret_cast<uint32_t*>(&src_3)};
         asm volatile("stmatrix.sync.aligned.x4.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n"
+                     :: "l"(smem_dst), "r"(src[0]), "r"(src[1]), "r"(src[2]), "r"(src[3]));
+    }
+};
+
+// 转置版本的2元素矩阵存储操作
+template <typename dtype_t>
+struct SM90_U32x2_STSM_T {
+    __device__ __forceinline__ static void
+    copy(dtype_t src_0, dtype_t src_1, void* smem_dst) {
+        const uint32_t src[2] = {*reinterpret_cast<uint32_t*>(&src_0), *reinterpret_cast<uint32_t*>(&src_1)};
+        // 使用.trans标志表示转置存储
+        asm volatile("stmatrix.sync.aligned.x2.m8n8.shared.b16.trans [%0], {%1, %2};\n"
+                     :: "l"(smem_dst), "r"(src[0]), "r"(src[1]));
+    }
+};
+
+// 转置版本的矩阵存储操作
+template <typename dtype_t>
+struct SM90_U32x4_STSM_T {
+    __device__ __forceinline__ static void
+    copy(dtype_t src_0, dtype_t src_1, dtype_t src_2, dtype_t src_3, void* smem_dst) {
+        const uint32_t src[4] = {*reinterpret_cast<uint32_t*>(&src_0), *reinterpret_cast<uint32_t*>(&src_1),
+                                 *reinterpret_cast<uint32_t*>(&src_2), *reinterpret_cast<uint32_t*>(&src_3)};
+        // 使用.trans标志表示转置存储
+        asm volatile("stmatrix.sync.aligned.x4.m8n8.shared.b16.trans [%0], {%1, %2, %3, %4};\n"
                      :: "l"(smem_dst), "r"(src[0]), "r"(src[1]), "r"(src[2]), "r"(src[3]));
     }
 };

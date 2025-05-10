@@ -338,7 +338,8 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
     BufferPtr      quanted_input;
     BufferPtr      gemm_output = output;
     if (params.A.type() != DataType::TYPE_QFP8_E4M3) {
-        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, 64));
+        auto padding_size = DeepGemmPlugin::getPaddingSize(params.A.shape()[0], DeepGemmType::Normal);
+        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, padding_size));
         DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
         output = gemm_output->slice(0, params.A.shape()[0], false);
         output->updateParent(gemm_output);
