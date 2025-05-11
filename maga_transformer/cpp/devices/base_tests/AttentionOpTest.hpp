@@ -3,6 +3,7 @@
 #include <torch/torch.h>
 #include "maga_transformer/cpp/devices/testing/TestBase.h"
 #include "maga_transformer/cpp/cache/CacheConfig.h"
+#include "maga_transformer/cpp/devices/cuda_impl/CudaXqa.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -85,12 +86,12 @@ public:
                              size_t num_key_value_heads,
                              size_t head_dim);
 
-    void xqaAttentionOpTest(size_t batch_size,
-                            size_t seq_len,
-                            size_t kv_seq_len,
-                            size_t num_heads,
-                            size_t num_key_value_heads,
-                            size_t head_dim);
+    void xqaInputKVOpTest(size_t batch_size,
+                          size_t seq_len,
+                          size_t kv_seq_len,
+                          size_t num_heads,
+                          size_t num_key_value_heads,
+                          size_t head_dim);
 };
 
 
@@ -317,16 +318,19 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
 
-void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
-                                         size_t seq_len,
-                                         size_t kv_seq_len,
-                                         size_t num_heads,
-                                         size_t num_key_value_heads,
-                                         size_t head_dim) {
+// 3rdparty/xqa/defines.h: #define USE_INPUT_KV 1
+void AttentionOpTest::xqaInputKVOpTest(size_t batch_size,
+                                       size_t seq_len,
+                                       size_t kv_seq_len,
+                                       size_t num_heads,
+                                       size_t num_key_value_heads,
+                                       size_t head_dim) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto state_dict = attention.ptr()->named_parameters();
     torch::NoGradGuard no_grad;
+
+    CudaDevice* device = dynamic_cast<CudaDevice*>(device_);
 
     auto tensor_options = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
     auto bf16_tensor_options = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
@@ -358,10 +362,10 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
-    size_t tokensPerBlock = 64;
+    size_t tokens_per_block = TOKENS_PER_PAGE;
 
-    size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
-    padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
+    size_t padding_kv_seq_len = ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) * tokens_per_block;
+    padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokens_per_block : padding_kv_seq_len;
     auto kvcache_pad = torch::zeros(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
         bf16_tensor_options);
@@ -393,10 +397,12 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16}));
+    auto block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    rtp_llm::CacheConfig cache_conf(
+        rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_FP8_E4M3})
+    );
     cache_manager_ = nullptr;
-    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_u8);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     auto common_inputs = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
@@ -414,21 +420,41 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
 
     auto token_num = batch_size * seq_len;
 
-    auto attention_config   = AttentionConfigs({num_heads,
-                                                num_key_value_heads,
-                                                head_dim,
-                                                num_heads * head_dim,
-                                                rope_config,
-                                                tokensPerBlock});
+    auto attention_config = AttentionConfigs({num_heads,
+                                              num_key_value_heads,
+                                              head_dim,
+                                              num_heads * head_dim,
+                                              rope_config,
+                                              tokens_per_block});
 
-    auto qkv_output = device_->allocateBuffer(
+    auto qkv_output = device->allocateBuffer(
         {qkv_states_device->type(), {token_num, num_heads, head_dim}}
     );
-    device_->decoderSelfAttention({0, *qkv_states_device,
+
+    AttentionModuleParams params = {0, 
+                                    *qkv_states_device,
                                     *qkv_output,
                                     common_inputs,
                                     attention_weight,
-                                    attention_config});
+                                    attention_config};
+
+    const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
+    auto kv_cache_page_List = device->allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_page_List"}
+    );
+    KVBlockArray kv_block_array = device->getKVBlockArray(params, *kv_cache_page_List, batch_size, false);
+
+    runXqa(params.input.data(),
+           params.output.data(),
+           num_heads,
+           num_key_value_heads,
+           batch_size,
+           kv_seq_len,
+           tokens_per_block,
+           kv_block_array.mPrimaryPoolPtr,
+           reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+           reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
+           device);
 
     auto result_ref = attention->forward(query_states_host,
                                          key_states_host,

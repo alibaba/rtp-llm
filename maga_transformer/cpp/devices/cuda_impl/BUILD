@@ -46,6 +46,7 @@ cc_library(
     hdrs = [
         "CudaDevice.h",
         "CudaFlashInfer.h",
+        "CudaXqa.h",
     ],
     srcs = [
         "CudaDevice.cc",
@@ -62,6 +63,7 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
+        "CudaXqa.cc",
     ],
     deps = [
         "//maga_transformer/cpp/devices:devices_base",

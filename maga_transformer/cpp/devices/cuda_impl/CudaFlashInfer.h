@@ -64,9 +64,9 @@ public:
              const BufferPtr &fp16_out,
              std::function<void()> moe_insertion_callback,
              int64_t stream,
+             KVBlockArray kv_block_array,
              CudaDevice *device,
-             const cudaDeviceProp& prop,
-             KVBlockArray kv_block_array);
+             bool use_xqa = false);
 
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(

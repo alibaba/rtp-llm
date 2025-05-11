@@ -113,6 +113,8 @@ public:
     cudaStream_t getStream() {return stream_;}
     cudaStream_t getStream(DeviceStream stream);
     torch::Device getTorchDevice() override { return torch::Device(torch::kCUDA);};
+    // different from getDeviceProperties
+    cudaDeviceProp getDeviceProp() const { return device_prop_; }
 
 public:
     void copy(const CopyParams& params) override;

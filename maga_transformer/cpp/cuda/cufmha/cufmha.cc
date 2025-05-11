@@ -393,42 +393,6 @@ void cufmha::runOpenSourceFmha(void* q,
     sync_check_cuda_error();
 }
 
-void cufmha::runXqa(const cudaDeviceProp& prop,
-                    size_t head_num,
-                    size_t kv_head_num,
-                    float q_scale,
-                    void* output,
-                    void* qkv,
-                    void* kv_cache,
-                    int* kv_cache_page_list,
-                    size_t max_seq_len,
-                    void* sequence_lengths,
-                    size_t batch_size,
-                    float* kv_cache_scale,
-                    uint32_t* semaphores,
-                    void* scratch,
-                    uint32_t beam_width)
-{
-    size_t group_size = head_num / kv_head_num;
-    // 8 is sufficient for qgmma kernel.
-    auto real_scratch = reinterpret_cast<void*>(roundUp<uintptr_t>(reinterpret_cast<uintptr_t>(scratch), ioHeadBytes * group_size * beam_width));
-    launchHopperF8MHA(prop,
-                      kv_head_num,
-                      q_scale,
-                      reinterpret_cast<OutputHead*>(output),
-                      reinterpret_cast<InputHead*>(qkv),
-                      reinterpret_cast<GMemCacheHead*>(kv_cache),
-                      kv_cache_page_list,
-                      max_seq_len,
-                      reinterpret_cast<uint32_t*>(sequence_lengths),
-                      batch_size,
-                      kv_cache_scale,
-                      semaphores,
-                      real_scratch,
-                      stream_);
-    sync_check_cuda_error();
-}
-
 Flash_fwd_params cufmha::genFlashFwdParams(void* q,
                                            void* k,
                                            void* v,

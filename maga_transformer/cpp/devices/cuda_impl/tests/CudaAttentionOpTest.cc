@@ -253,15 +253,15 @@ TEST_F(AttentionOpTest, XqaSelfAttentionOpTest) {
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
             for (auto kv_seq_len: kv_seq) {
-                size_t num_heads = 64;
                 size_t num_key_value_heads = 4;
-                size_t head_dim = 128;
-                xqaAttentionOpTest(batch_size,
-                                   seq_len,
-                                   kv_seq_len,
-                                   num_heads,
-                                   num_key_value_heads,
-                                   head_dim);
+                size_t num_heads = num_key_value_heads * HEAD_GRP_SIZE;
+                size_t head_dim = HEAD_ELEMS;
+                xqaInputKVOpTest(batch_size,
+                                 seq_len,
+                                 kv_seq_len,
+                                 num_heads,
+                                 num_key_value_heads,
+                                 head_dim);
             }
         }
     }
