@@ -277,7 +277,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
 
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
-    DataType topk_t = init_params_.use_deepep_moe && init_params_.use_deepep_low_latency ? DataType::TYPE_INT64 : DataType::TYPE_INT32;
+    DataType topk_t = init_params_.use_deepep_moe ? DataType::TYPE_INT64 : DataType::TYPE_INT32;
     const auto expert_for_source_row = allocateBuffer({topk_t, {token_num, top_k}}, {"moe_expert_for_src"});
     const auto softmax_out      = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
     const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
@@ -359,13 +359,26 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
     at::Tensor gate_with_bias_tensor = gate_tensor.add(e_score_correction_bias_tensor);
     at::Tensor group_scores = torch::empty({(int64_t)token_num, moe_conf.n_group}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
-    invokeNoAuxTc<float, int32_t>(gate->data<float>(),
-        reinterpret_cast<float *>(group_scores.mutable_data_ptr()),
-        expert_scales->data<float>(),
-        expert_for_source_row->data<int>(),
-        reinterpret_cast<float *>(gate_with_bias_tensor.data_ptr()),
-        token_num, num_expert, moe_conf.n_group, moe_conf.topk_group, top_k,
-        normalization_mode, 1.0, stream_);
+    if (expert_for_source_row->type() == DataType::TYPE_INT64) {
+        invokeNoAuxTc<float, int64_t>(gate->data<float>(),
+            reinterpret_cast<float *>(group_scores.mutable_data_ptr()),
+            expert_scales->data<float>(),
+            expert_for_source_row->data<int64_t>(),
+            reinterpret_cast<float *>(gate_with_bias_tensor.data_ptr()),
+            token_num, num_expert, moe_conf.n_group, moe_conf.topk_group, top_k,
+            normalization_mode, 1.0, stream_);
+    } else if (expert_for_source_row->type() == DataType::TYPE_INT32) {
+        invokeNoAuxTc<float, int32_t>(gate->data<float>(),
+            reinterpret_cast<float *>(group_scores.mutable_data_ptr()),
+            expert_scales->data<float>(),
+            expert_for_source_row->data<int32_t>(),
+            reinterpret_cast<float *>(gate_with_bias_tensor.data_ptr()),
+            token_num, num_expert, moe_conf.n_group, moe_conf.topk_group, top_k,
+            normalization_mode, 1.0, stream_);
+    } else {
+        FT_LOG_ERROR("Unsupported expert_for_source_row type: %d", int(expert_for_source_row->type()));
+        throw OpException({OpErrorType::ERROR_INTERNAL, "Unsupported expert_for_source_row type"});
+    }
 }
 
 void CudaDevice::prepareMoEGate(const FfnLayerParams& params, BufferPtr gate) {

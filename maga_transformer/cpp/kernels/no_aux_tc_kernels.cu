@@ -724,6 +724,7 @@ void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values, IdxT* topk_indice
         cudaStream_t const stream);
 
 INSTANTIATE_NOAUX_TC(float, int32_t);
+INSTANTIATE_NOAUX_TC(float, int64_t);
 // INSTANTIATE_NOAUX_TC(half, int32_t);
 // #ifdef ENABLE_BF16
 // INSTANTIATE_NOAUX_TC(__nv_bfloat16, int32_t);
