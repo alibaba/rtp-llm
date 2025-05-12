@@ -124,6 +124,7 @@ cc_library(
         "custom_ar_kernels.cu",
         "rocm/quantization_rocm.cu",
         "rocm/layernorm_kernels.cu",
+        "rocm/fused_qk_rmsnorm.cu",
         "mla_kernels/mla_merge_transpose_kernel.cu",
         ":mmha1",
         ":mmha2",
@@ -145,6 +146,7 @@ cc_library(
         "custom_ar_kernels.h",
         "rocm/quantization_rocm.h",
         "rocm/layernorm_kernels.h",
+        "rocm/fused_qk_rmsnorm.h",
         "mla_kernels/mla_merge_transpose_kernel.h",
     ],
     deps = [

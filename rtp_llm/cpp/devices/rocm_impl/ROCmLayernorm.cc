@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
 #include "rtp_llm/cpp/kernels/alpha_layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
+#include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
 namespace rtp_llm {
 using namespace rocm;
 
@@ -81,6 +82,38 @@ LayernormOutput ROCmDevice::layernormWithStride(const LayernormWithStrideParams&
     } else {
         throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
     }
+}
+
+QkRmsNormOutput ROCmDevice::qkRmsNorm(const QkRmsNormParams& params) {
+    const auto data_type = params.input->type();
+    const auto m = params.input->shape()[0];
+    const auto n = params.input->shape()[1];
+    const auto& q_gamma = params.q_norm_weight->get().gamma.get()->data();
+    const auto& q_beta = (params.q_norm_weight && params.q_norm_weight->get().beta) ? params.q_norm_weight->get().beta.get()->data() : nullptr;
+    const auto& k_gamma = params.k_norm_weight->get().gamma.get()->data();
+    const auto& k_beta = (params.k_norm_weight && params.k_norm_weight->get().beta) ? params.k_norm_weight->get().beta.get()->data() : nullptr;
+    RTP_LLM_CHECK_WITH_INFO((q_beta != nullptr && k_beta != nullptr) || (q_beta == nullptr && k_beta == nullptr),
+                       "q_gamma and k_gamma should both nullptr or not nullptr");
+    const auto eps         = params.eps;
+    const auto q_group_num = params.q_group_num;
+    const auto k_group_num = params.k_group_num;
+    const auto norm_size = params.norm_size;
+
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
+                                     invokeFusedQkRmsNorm,
+                                     params.input->data(),
+                                     q_gamma,
+                                     q_beta,
+                                     k_gamma,
+                                     k_beta,
+                                     eps,
+                                     q_group_num,
+                                     k_group_num,
+                                     m,
+                                     n,
+                                     norm_size,
+                                     stream_);
+    return params.input;
 }
 
 LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {

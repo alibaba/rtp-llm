@@ -127,6 +127,7 @@ public:
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
+    QkRmsNormOutput qkRmsNorm(const QkRmsNormParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
