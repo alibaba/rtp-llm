@@ -12,6 +12,7 @@
 #include "maga_transformer/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "maga_transformer/cpp/cuda/nccl/nccl_utils.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/TorchEvent.h"
 #include <memory>
 #include <unistd.h>
 
@@ -453,7 +454,7 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
     if (world_size < 2) {
         return {{params.buffers}};
     }
-    auto         stream     = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    auto stream = params.overlapped ? communication_stream_ : stream_;
     const size_t dims       = params.buffers[0]->dim();
     const auto   batch_size = params.buffers[0]->shape()[0];
     vector<BufferPtr> byte_buffers;
@@ -484,6 +485,8 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
     if (byte_buffers.size() < 2) {
         input_buffer = byte_buffers[0];
     } else {
+        RUNTIME_ASSERT_OP_ARG(!params.compute_stream_event,
+                              "compute_stream_event is not supported when input buffers are more than 1");
         input_buffer = allocateBuffer({DataType::TYPE_BYTES, {batch_size, dim1_size}});
         if (batch_size > 0) {
             vector<torch::Tensor> input_tensors;
@@ -495,14 +498,23 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
         }
     }
     if (stream == communication_stream_) {
-        // NOTE: before starting communication, we need to make sure that the previous computation
-        // has been finished. Otherwise, the communication may overlap with the computation.
-        // We use cuda event to ensure the computation on main stream has been finished.
-        cudaEvent_t event;
-        check_cuda_error(cudaEventCreate(&event));
-        check_cuda_error(cudaEventRecord(event, stream_));
-        check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
-        check_cuda_error(cudaEventDestroy(event));
+        if (params.compute_stream_event) {
+            const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+            if (!casted_event) {
+                throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+            }
+            // FT_LOG_INFO("alltoall wait compute stream event");
+            casted_event->event->block(*torch_comm_stream_);
+        } else {
+            // NOTE: before starting communication, we need to make sure that the previous computation
+            // has been finished. Otherwise, the communication may overlap with the computation.
+            // We use cuda event to ensure the computation on main stream has been finished.
+            cudaEvent_t event;
+            check_cuda_error(cudaEventCreate(&event));
+            check_cuda_error(cudaEventRecord(event, stream_));
+            check_cuda_error(cudaStreamWaitEvent(communication_stream_, event, 0));
+            check_cuda_error(cudaEventDestroy(event));
+        }
     }
     BufferPtr output;
     if (params.input_split_sizes.size() || params.output_split_sizes.size()) {

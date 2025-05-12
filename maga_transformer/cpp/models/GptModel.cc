@@ -533,70 +533,118 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
 
         std::vector<EpFfnInputs> ep_inputs;
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            if (micro_batch_idx) {
+                device_->holdBufferRecycle();
+            }
+
             auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
             auto batch_ep_input = forwardAttentionAndMoeGate(
                 layer_input, last_layer_defered_params[micro_batch_idx], i, micro_batch_idx);
+
+            if (micro_batch_idx == 0) {
+                // to overlap shared with combine
+                auto shared_expert_output = device_->moeSharedExpert(batch_ep_input.moe_ffn_params).hidden_states;
+                batch_ep_input.shared_expert_output = shared_expert_output;
+            }
+
+            batch_ep_input.compute_event = device_->createTorchEvent();
             ep_inputs.push_back(move(batch_ep_input));
         }
 
-        std::vector<EpFfnOutputs> ep_outputs;
+        std::vector<MoeDispatchOutput> dispatch_outputs;
+        std::vector<MoeOutputs> moe_ffn_outputs;
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            auto& ep_input = ep_inputs[micro_batch_idx];
+            const auto& ffn_layer_params = ep_input.moe_ffn_params;
+            const auto& gate_output = ep_input.gate_output;
+
+            auto dispatched_output = device_->epDispatch({
+                ep_input.quantized_hidden ? *(ep_input.quantized_hidden) : *(ep_input.hidden),
+                *gate_output.expert_ids,
+                *gate_output.expert_scales,
+                description_.ffn_conf.moe_configs.value(),
+                device_props_.enable_comm_overlap,
+                description_.act_qscheme,
+                ffn_layer_params.expert_stats,
+                false,
+                move(ep_input.compute_event),
+            });
+
+            device_->releaseBufferRecycleHold();
+            device_->holdBufferRecycle();
+
+            printBufferData(*dispatched_output.hidden, "layer_" + to_string(i) + "_dispatch_output");
+            dispatch_outputs.push_back(dispatched_output);
+
             DevicePerfWrapper wrapper(device_, "mb_moe_layer_" + std::to_string(i) + "_idx_" + std::to_string(micro_batch_idx));
             // auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
             auto& batch_ep_input = ep_inputs[micro_batch_idx];
             const auto& ffn_params = batch_ep_input.moe_ffn_params;
-            const auto& dispatched_output = batch_ep_input.dispatch_output;
 
-            const auto& moe_conf = ffn_params.configs.moe_configs.value();
             auto hidden_states = dispatched_output.hidden;
 
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
             prepareExpertStats(i, moe_ffn_params);
+
+            if (dispatched_output.comm_barrier_hook) {
+                dispatched_output.comm_barrier_hook->hook_sync();
+                dispatched_output.comm_barrier_hook = nullptr;
+            }
+
             hidden_states = device_->moeFfn(
                 moe_ffn_params,
                 {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output}
             ).hidden_states;
 
-                // shared experts to overlap combine
-                if (micro_batch_idx) {
-                    auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
-                    ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
-                }
-
-            if (last_comm_hook_) {
-                last_comm_hook_->hook_sync();
-                last_comm_hook_ = nullptr;
+            // shared experts to overlap combine
+            if (micro_batch_idx) {
+                auto shared_expert_output = device_->moeSharedExpert(ep_inputs[micro_batch_idx].moe_ffn_params).hidden_states;
+                ep_inputs[micro_batch_idx].shared_expert_output = shared_expert_output;
             }
 
+            auto compute_event = device_->createTorchEvent();
+            moe_ffn_outputs.push_back({move(hidden_states), move(compute_event)});
             printBufferData(*hidden_states, "layer_" + to_string(i) + "_combine_input");
+        }
+
+        std::vector<EpFfnOutputs> ep_outputs;
+        for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
+            auto& batch_ep_input = ep_inputs[micro_batch_idx];
+            const auto& ffn_params = batch_ep_input.moe_ffn_params;
+            auto& dispatched_output = dispatch_outputs[micro_batch_idx];
+            const auto& moe_conf = ffn_params.configs.moe_configs.value();
+
+            // const auto overlap = (!micro_batch_idx) ? device_props_.enable_comm_overlap : false;
+
             auto combine_out = device_->epCombine({
-                hidden_states,
+                moe_ffn_outputs[micro_batch_idx].hidden,
                 dispatched_output.indices,
                 ffn_params.output,
                 dispatched_output.input_split_sizes,
                 dispatched_output.output_split_sizes,
                 moe_conf,
                 ffn_params.input.shape()[0],
+                // overlap, // device_props_.enable_comm_overlap,
                 device_props_.enable_comm_overlap,
                 dispatched_output.deep_ep_output,
                 dispatched_output.deep_ep_ll_output,
                 std::make_shared<MoeGateSelectOutput>(batch_ep_input.gate_output),
                 dispatched_output.expert_ids,
                 dispatched_output.expert_scales,
+                false,
+                move(moe_ffn_outputs[micro_batch_idx].compute_event),
             });
             printBufferData(*combine_out.all_output, "layer_" + to_string(i) + "_combine_output");
 
             auto hook = nullptr;
-            if (combine_out.comm_barrier_hook) {
-                last_comm_hook_ = move(combine_out.comm_barrier_hook);
-            } else {
-                RTP_LLM_LOG_DEBUG("no combine barrier for layer %ld, micro batch %ld", i, micro_batch_idx);
-            }
-
             auto output = combine_out.all_output;
 
             ep_outputs.push_back(EpFfnOutputs({output, move(combine_out), move(hook)}));
+
+            if (micro_batch_idx == 0) {
+                device_->releaseBufferRecycleHold();
+            }
         }
 
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
@@ -606,9 +654,8 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             auto& batch_ep_output = ep_outputs[micro_batch_idx];
 
             if (i == layer_num_ - 1) {
-                if (last_comm_hook_) {
-                    last_comm_hook_->hook_sync();
-                    last_comm_hook_ = nullptr;
+                if (batch_ep_output.combine_output.comm_barrier_hook) {
+                    batch_ep_output.combine_output.comm_barrier_hook->hook_sync();
                 }
                 auto output = batch_ep_output.hidden;
                 output = device_->gatherCombineOutput(batch_ep_output.combine_output).hidden_states;
@@ -683,9 +730,27 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
 
             auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx);
 
+            // call combine hook sync
+            const auto& previous_moe_ret = device_->getMoEInsertionRet();
+            if (previous_moe_ret && previous_moe_ret->combine_output.comm_barrier_hook) {
+                previous_moe_ret->combine_output.comm_barrier_hook->hook_sync();
+            }
+
+            MoeDispatchOutput dispatched_output = device_->epDispatch({
+                ep_input.moe_ffn_params.input,
+                *ep_input.gate_output.expert_ids,
+                *ep_input.gate_output.expert_scales,
+                description_.ffn_conf.moe_configs.value(),
+                device_props_.enable_comm_overlap,
+                description_.act_qscheme,
+                ep_input.moe_ffn_params.expert_stats,
+                false,
+                std::move(ep_input.compute_event),
+            });
+
             // set moe insertion params
             device_->setMoEInsertion(MoEInsertionParams(
-                ep_input.dispatch_output,
+                dispatched_output,
                 ep_input.moe_ffn_params,
                 std::make_shared<MoeGateSelectOutput>(ep_input.gate_output),
                 ep_input.hidden->shape()[0]
@@ -859,6 +924,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     DevicePerfWrapper wrapper(device_, "attention_block_layer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
 
     if (last_layer_defered_params.combine_output) {
+        if (last_layer_defered_params.combine_output.value().comm_barrier_hook) {
+            last_layer_defered_params.combine_output.value().comm_barrier_hook->hook_sync();
+        }
+
         printBufferData(*(last_layer_defered_params.combine_output.value().all_output), "layer_" + to_string(layer_id - 1) + "_combine_output_defered");
         hidden = device_->gatherCombineOutput(last_layer_defered_params.combine_output.value()).hidden_states;
     }
@@ -1051,46 +1120,15 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         printBufferData(*gate_output.expert_scales, "layer_" + to_string(layer_id) + "_expert_scales");
     }
 
-    if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
-        // shared expert when overlapping combine
-        if (micro_batch_idx == 0) {
-            shared_expert_output = device_->moeSharedExpert(ffn_layer_params).hidden_states;
-            last_layer_defered_params.shared_expert_output = shared_expert_output;
-        }
-
-        if (last_comm_hook_) {
-            last_comm_hook_->hook_sync();
-            last_comm_hook_ = nullptr;
-        }
-    } else {
-        // call combine hook sync
-        const auto& previous_moe_ret = device_->getMoEInsertionRet();
-        if (previous_moe_ret && previous_moe_ret->combine_output.comm_barrier_hook) {
-            previous_moe_ret->combine_output.comm_barrier_hook->hook_sync();
-        }
+    BufferPtr quantized_hidden = nullptr;
+    if (description_.act_qscheme == QScheme::Qfp8PerTokenBlock) {
+        quantized_hidden = device_->quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, description_.act_qscheme});
     }
 
-    MoeDispatchOutput dispatched_output = device_->epDispatch({
-        ffn_layer_params.input,
-        *gate_output.expert_ids,
-        *gate_output.expert_scales,
-        description_.ffn_conf.moe_configs.value(),
-        device_props_.enable_comm_overlap,
-        description_.act_qscheme,
-        ffn_layer_params.expert_stats
-    });
-    printBufferData(*dispatched_output.hidden, "layer_" + to_string(layer_id) + "_dispatch_output");
-    RTP_LLM_LOG_DEBUG("call layer %ld micro batch ep dispatch done.", layer_id, hidden->shape()[0]);
-
-    if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
-        if (dispatched_output.comm_barrier_hook) {
-            last_comm_hook_ = move(dispatched_output.comm_barrier_hook);
-        } else {
-            RTP_LLM_LOG_DEBUG("no dispatch barrier for layer %ld, micro batch %ld", layer_id, inputs.micro_batch_inputs.size());
-        }
-    }
-
-    return {hidden, residual, shared_expert_output, move(ffn_layer_params), move(gate_output), move(dispatched_output)};
+    return {
+        hidden, quantized_hidden, residual, shared_expert_output,
+        move(ffn_layer_params), move(gate_output),
+    };
 }
 
 GptLayerOutputs GptModel::forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id) {

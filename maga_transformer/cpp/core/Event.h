@@ -14,7 +14,7 @@ struct DeviceEvent {
     virtual void synchronize() const = 0;
 };
 
-using DeviceEventPtr = std::unique_ptr<DeviceEvent>;
+using DeviceEventPtr = std::shared_ptr<DeviceEvent>;
 
 // Event hook is used for hooking communication streams or other io operations
 // that is simultaneous with some computation but needs to be synchronized before another computation

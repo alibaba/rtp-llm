@@ -133,6 +133,18 @@ cc_library(
 )
 
 cc_library(
+    name = "torch_event",
+    hdrs = [
+        "torch_utils/TorchEvent.h",
+    ],
+    deps = [
+        ":event",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "torch_cuda_allocator",
     srcs = [
         "torch_utils/torch_cuda_allocator.cc"

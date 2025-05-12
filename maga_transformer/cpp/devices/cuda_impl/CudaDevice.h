@@ -41,6 +41,7 @@ public:
     ~CudaEvent() override;
 
     void synchronize() const override;
+    cudaEvent_t getEvent() const { return event_; }
 
 private:
     cudaEvent_t event_;
@@ -81,6 +82,7 @@ public:
     void overlappedComputeBarrier() override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
     DeviceEventPtr createEvent() override;
+    DeviceEventPtr createTorchEvent() override;
     bool useGroupGemm() const;
 
 private:

@@ -31,6 +31,7 @@ cc_library(
         "//maga_transformer/cpp/devices:devices_base",
         "//maga_transformer/cpp/devices:device_utils",
         "//maga_transformer/cpp/core:torch_cuda_allocator",
+        "//maga_transformer/cpp/core:torch_event",
         "//:th_utils",
     ] + select({
         ":use_accl_ep": [

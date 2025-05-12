@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/kernels/gpt_kernels.h"
 #include "maga_transformer/cpp/cuda/Dispatch.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/TorchEvent.h"
 #include "maga_transformer/cpp/devices/utils/DevicePerfWrapper.h"
 #include "maga_transformer/cpp/kernels/eplb/experts_stats_kernels.h"
 #include <cstring>
@@ -85,6 +86,16 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
                 token_idx_per_rank[ep_rank].push_back(i);
             }
         }
+    }
+
+    if (params.overlapped && params.compute_stream_event) {
+        // TOOD(wangyin.yx): encapsulate this event stream with device-independent interface
+        // and implement epDispatch method in DeviceBase.
+        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        if (!casted_event) {
+            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+        }
+        casted_event->event->block(*torch_comm_stream_);
     }
 
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
@@ -180,7 +191,8 @@ MoeCombineOutput CudaDevice::epCombine(const MoeCombineParams& params) {
         }
     }
     auto all2all_ret = allToAll({
-        {params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
+        {params.input}, params.output_split_sizes, params.input_split_sizes,
+        params.overlapped, ParallelMode::DP_AND_TP, params.compute_stream_event});
     return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, move(all2all_ret.comm_barrier_hook)});
 }
 
@@ -376,7 +388,7 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
             token_num, num_expert, moe_conf.n_group, moe_conf.topk_group, top_k,
             normalization_mode, 1.0, stream_);
     } else {
-        FT_LOG_ERROR("Unsupported expert_for_source_row type: %d", int(expert_for_source_row->type()));
+        RTP_LLM_LOG_ERROR("Unsupported expert_for_source_row type: %d", int(expert_for_source_row->type()));
         throw OpException({OpErrorType::ERROR_INTERNAL, "Unsupported expert_for_source_row type"});
     }
 }

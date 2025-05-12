@@ -31,6 +31,8 @@ public:
     void traceMemoryUsage();
     bool enableDevicePerf() const { return enable_device_perf_; }
     void setTraceMemory(bool trace_memory);
+    void holdBufferRecycle();
+    void releaseBufferRecycleHold();
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     BufferPtr allocateBufferLike(const Buffer& buffer,
                                  const AllocationType atype = AllocationType::DEVICE,
@@ -44,6 +46,7 @@ public:
     virtual void overlappedComputeBarrier();
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr createEvent();
+    virtual DeviceEventPtr createTorchEvent();
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
 
     void writeCacheStore(const WriteCacheParams& params);

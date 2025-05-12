@@ -44,8 +44,17 @@ BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints&
 }
 
 void BufferManager::recycle(Buffer* buffer, IAllocator* allocator) {
-    recordRecycle(buffer);
-    doRecycle(buffer, allocator);
+    auto data = buffer->data();
+
+    if (recycle_held_) {
+        RTP_LLM_LOG_DEBUG("hold recycle buffer: %p [%s][%s]",
+                    data, allocation_records_[data].hints.tag.c_str(), buffer->debugString().c_str());
+        held_data_.push_back(std::make_pair(data, allocator));
+        return;
+    }
+
+    recordRecycle(data);
+    doRecycle(data, allocator);
 }
 
 BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHints& hints) {
@@ -60,8 +69,7 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
     return BufferPtr(buffer);
 }
 
-void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {
-    void* data = buffer->data();
+void BufferManager::doRecycle(void* data, IAllocator* allocator) {
     allocator->free(&data);
 }
 
@@ -94,14 +102,14 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
     }
 }
 
-void BufferManager::recordRecycle(Buffer* buffer) {
+void BufferManager::recordRecycle(void* data) {
     if (trace_memory_) {
         RTP_LLM_LOG_DEBUG("record recycle: %p [%s]",
-                     buffer->data(), allocation_records_[buffer->data()].hints.tag.c_str());
+                     data, allocation_records_[data].hints.tag.c_str());
     }
     {
         WriteLock lock(mutex_);
-        allocation_records_.erase(buffer->data());
+        allocation_records_.erase(data);
     }
 }
 
@@ -123,6 +131,29 @@ BufferStatus BufferManager::queryStatus() {
         status.device_max_consumed_bytes = device_max_consumed_bytes_;
     }
     return status;
+}
+
+void BufferManager::holdRecycle() {
+    if (recycle_held_) {
+        throw std::runtime_error("last buffer manager recycle hold is not released");
+    }
+    recycle_held_ = true;
+}
+
+void BufferManager::releaseRecycleHold() {
+    if (!recycle_held_) {
+        throw std::runtime_error("buffer manager recycle is not held");
+    }
+    for (const auto& data_pair : held_data_) {
+        auto data = data_pair.first;
+        auto allocator = data_pair.second;
+        RTP_LLM_LOG_DEBUG("release held buffer data %p [%s]",
+                    data, allocation_records_[data].hints.tag.c_str());
+        recordRecycle(data);
+        doRecycle(data, allocator);
+    }
+    held_data_.clear();
+    recycle_held_ = false;
 }
 
 string BufferManager::printAllocationRecords(IAllocator* allocator) {

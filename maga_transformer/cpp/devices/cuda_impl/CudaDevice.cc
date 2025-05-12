@@ -12,6 +12,7 @@
 #include "maga_transformer/cpp/utils/Logger.h"
 #include "maga_transformer/cpp/utils/compiler_config.h"
 #include "maga_transformer/cpp/core/torch_utils/torch_cuda_allocator.h"
+#include "maga_transformer/cpp/core/torch_utils/TorchEvent.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 #include <cuda_runtime.h>
@@ -586,6 +587,10 @@ nvinfer1::DataType nvinfer1DtypeConvert(rtp_llm::DataType dtype) {
 
 DeviceEventPtr CudaDevice::createEvent() {
     return std::make_unique<CudaEvent>(stream_);
+}
+
+DeviceEventPtr CudaDevice::createTorchEvent() {
+    return std::make_unique<TorchEvent>(*torch_default_stream_);
 }
 
 CudaEvent::CudaEvent(cudaStream_t stream): stream_(stream) {

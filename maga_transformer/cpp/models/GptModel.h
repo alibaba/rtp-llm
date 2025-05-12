@@ -163,11 +163,17 @@ struct AttentionBlockOutputs {
 
 struct EpFfnInputs {
     rtp_llm::BufferPtr hidden;
+    rtp_llm::BufferPtr quantized_hidden;
     rtp_llm::BufferPtr residual;
     rtp_llm::BufferPtr shared_expert_output;
     rtp_llm::FfnLayerParams moe_ffn_params;
     rtp_llm::MoeGateSelectOutput gate_output;
-    rtp_llm::MoeDispatchOutput dispatch_output;
+    rtp_llm::DeviceEventPtr compute_event;
+};
+
+struct MoeOutputs {
+    rtp_llm::BufferPtr hidden;
+    rtp_llm::DeviceEventPtr compute_event;
 };
 
 struct EpFfnOutputs {
@@ -261,7 +267,6 @@ protected:
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
 
-    rtp_llm::DeviceHookPtr          last_comm_hook_;
 public:
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

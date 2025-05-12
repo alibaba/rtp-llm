@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/kernels/eplb/experts_stats_kernels.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/core/torch_utils/TorchEvent.h"
 #include "maga_transformer/cpp/devices/OpData.h"
 #include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
@@ -93,7 +94,9 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     size_t    tp_token_size = (token_num + tp_size - 1) / tp_size;
     size_t    slice_begin   = std::min(tp_token_size * moe_conf.tp_rank, token_num);
     size_t    slice_size    = std::min(token_num - slice_begin, tp_token_size);
-    BufferPtr hidden        = params.input.slice(slice_begin, slice_size);          // [tp_token_size, hidden_size]
+    BufferPtr hidden        = params.input.isQBuffer()
+        ? dynamic_cast<const QBuffer*>(&(params.input))->qslice(slice_begin, slice_size)
+        : params.input.slice(slice_begin, slice_size);          // [tp_token_size, hidden_size]
     auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);     // [tp_token_size, topk]
     auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);  // [tp_token_size, topk]
 
@@ -109,17 +112,24 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
             torch::empty({0, static_cast<long int>(expert_ids->shape()[1])},
                          torch::dtype(torch::kFloat).device(torch::Device(torch::kCUDA)));  //[num_tokens, top_k]
     } else {
-        topk_idx_tensor     = Buffer2torchTensor(expert_ids, false).toType(torch::kInt64);  //[num_tokens, top_k]
+        RUNTIME_ASSERT_OP_ARG(expert_ids->type() == DataType::TYPE_INT64,
+                              "expert_ids must be int64 but got %d", int(expert_ids->type()));
+        topk_idx_tensor     = Buffer2torchTensor(expert_ids, false);                        //[num_tokens, top_k]
         topk_weights_tensor = Buffer2torchTensor(expert_scales, false);                     //[num_tokens, top_k]
     }
-    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16,
-                          "hidden must be bf16 in deepEpDispatch, actual: %d",
+    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16
+                          || (params.qscheme == QScheme::Qfp8PerTokenBlock
+                              && hidden->type() == DataType::TYPE_QFP8_E4M3),
+                          "hidden must be bf16 or fp8 in deepEpDispatch, actual: %d",
                           int(hidden->type()));
     BufferPtr                    quantized_hidden;
     torch::Tensor                x;
     std::optional<torch::Tensor> x_scales;
+
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        quantized_hidden = quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        quantized_hidden = hidden->isQBuffer()
+                         ? hidden
+                         : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
         auto kernel_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
         auto scales_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
         x                = Buffer2torchTensor(kernel_ptr, false);  // [num_tokens, hidden_size]
@@ -128,7 +138,21 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
     }
 
-    const auto dispatch_begin_event = deepep_buffer_->capture();
+    std::shared_ptr<EventOverlap> dispatch_begin_event;
+    if (params.overlapped && params.compute_stream_event) {
+        auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        auto event_handle = deep_ep::EventHandle();
+        event_handle.event = casted_event->event;
+        dispatch_begin_event = std::make_shared<EventOverlap>(event_handle);
+    } else {
+        dispatch_begin_event = deepep_buffer_->capture();
+    }
+
+    // auto event = createTorchEvent();
+    // auto casted_event = dynamic_cast<TorchEvent*>(event.get());
+    // auto event_handle = deep_ep::EventHandle();
+    // event_handle.event = casted_event->event;
+    // auto dispatch_begin_event = std::make_shared<EventOverlap>(event_handle);
 
     try {
         // call dispatch and force sync, maybe sync is not necessary
@@ -203,14 +227,14 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
         out.comm_barrier_hook = std::move(comm_hook);
 
-        if (params.expert_stats.has_value()) {
-            auto& experts_stats = params.expert_stats.value();
-            update_gpu_loads_deepep_kernel(recv_topk_idx_buffer->data<int64_t>(),
-                                           experts_stats.getLayerGpuLoads(),
-                                           recv_topk_idx_buffer->size(),
-                                           moe_conf.ep_rank,
-                                           stream_);
-        }
+        // if (params.expert_stats.has_value()) {
+        //     auto& experts_stats = params.expert_stats.value();
+        //     update_gpu_loads_deepep_kernel(recv_topk_idx_buffer->data<int64_t>(),
+        //                                    experts_stats.getLayerGpuLoads(),
+        //                                    recv_topk_idx_buffer->size(),
+        //                                    moe_conf.ep_rank,
+        //                                    stream_);
+        // }
 
         return out;
     } catch (const std::exception& e) {
@@ -235,12 +259,21 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
     auto  combine_config  = deepep_buffer_->getCombineConfig();
     auto& dispatch_output = params.deep_ep_output;
 
-    auto compute_event  = deepep_buffer_->capture();
+    std::shared_ptr<EventOverlap> combine_begin_event;
+    if (params.overlapped && params.compute_stream_event) {
+        auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        auto event_handle = deep_ep::EventHandle();
+        event_handle.event = casted_event->event;
+        combine_begin_event = std::make_shared<EventOverlap>(event_handle);
+    } else {
+        combine_begin_event = deepep_buffer_->capture();
+    }
+
     auto combine_output = deepep_buffer_->combine(input_tensor,
                                                   dispatch_output->handle.value(),
                                                   dispatch_output->recv_topk_weights,
                                                   combine_config,
-                                                  compute_event,
+                                                  move(combine_begin_event),
                                                   true /*async_finish*/,
                                                   true /*allocate_on_comm_stream*/);
 

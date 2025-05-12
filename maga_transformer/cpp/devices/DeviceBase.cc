@@ -34,6 +34,14 @@ void DeviceBase::setTraceMemory(bool trace_memory) {
     buffer_manager_->setTraceMemory(trace_memory);
 }
 
+void DeviceBase::holdBufferRecycle() {
+    buffer_manager_->holdRecycle();
+}
+
+void DeviceBase::releaseBufferRecycleHold() {
+    buffer_manager_->releaseRecycleHold();
+}
+
 std::shared_ptr<rtp_llm::CacheStore> DeviceBase::cacheStore() {
     return cache_store_;
 }
@@ -127,6 +135,10 @@ void DeviceBase::overlappedComputeBarrier() {
 }
 
 DeviceEventPtr DeviceBase::createEvent() {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+DeviceEventPtr DeviceBase::createTorchEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

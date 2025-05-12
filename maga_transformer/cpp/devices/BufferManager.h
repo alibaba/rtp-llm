@@ -63,11 +63,14 @@ public:
     virtual BufferStatus queryStatus();
     std::string printAllocationRecords(IAllocator* allocator);
 
+    void holdRecycle();
+    void releaseRecycleHold();
+
 private:
     virtual BufferPtr doAllocate(const BufferParams& params, const BufferHints& hints);
-    virtual void doRecycle(Buffer* buffer, IAllocator* allocator);
+    virtual void doRecycle(void* data, IAllocator* allocator);
     void recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer);
-    void recordRecycle(Buffer* buffer);
+    void recordRecycle(void* data);
 
 private:
     IAllocator* device_allocator_;
@@ -81,6 +84,10 @@ private:
     size_t device_max_consumed_bytes_      = 0; // this includes allocaetd bytes + fragmented bytes
     bool trace_memory_;
     const bool trace_malloc_stack_;
+
+    // hold recycling for multi-stream scenario
+    bool recycle_held_ = false;
+    std::vector<std::pair<void *, IAllocator*>> held_data_;
 };
 
 } // namespace rtp_llm

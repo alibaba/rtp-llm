@@ -619,6 +619,7 @@ struct MoeCombineParams {
     BufferPtr expert_ids;
     BufferPtr expert_scales;
     bool sp_model = false;
+    DeviceEventPtr compute_stream_event = nullptr;
 };
 
 struct MoeCombineOutput {
@@ -685,16 +686,6 @@ struct MoeGateSelectOutput {
 };
 
 struct MoeDispatchParams {
-    MoeDispatchParams(const Buffer&     input,
-                      const Buffer&     expert_ids,
-                      const Buffer&     expert_scales,
-                      const MoeConfigs& moe_configs,
-                      bool              overlapped = false,
-                      const QScheme     qscheme  = QScheme::NoQuantize,
-                      OptionalExpertStats expert_stats = std::nullopt,
-                      bool sp_model = false):
-        input(input), expert_ids(expert_ids), expert_scales(expert_scales), moe_configs(moe_configs), overlapped(overlapped), qscheme(qscheme), expert_stats(expert_stats), sp_model(sp_model) {}
-
     const Buffer&     input;
     const Buffer&     expert_ids;
     const Buffer&     expert_scales;
@@ -703,6 +694,7 @@ struct MoeDispatchParams {
     const QScheme     qscheme;
     OptionalExpertStats expert_stats = std::nullopt;
     bool sp_model = false;
+    DeviceEventPtr compute_stream_event = nullptr;
 };
 
 struct MoeEpPlanParams {
@@ -847,6 +839,7 @@ struct AllToAllParams {
     const std::vector<size_t>    output_split_sizes;
     bool                         overlapped = false;
     ParallelMode                 mode       = ParallelMode::DP_AND_TP;
+    DeviceEventPtr compute_stream_event     = nullptr;
 };
 
 struct AllToAllOutput {
