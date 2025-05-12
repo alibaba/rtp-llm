@@ -297,16 +297,15 @@ void FlashInferAttnParams::genPlan(int batch_size,
     }
 }
 
-FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
-        rtp_llm::DeviceBase *device,
-        const rtp_llm::AttentionConfigs &attn_configs,
-        const BufferPtr &prefix_lengths_host,
-        const BufferPtr &sequence_lengths_host,
-        const BufferPtr &input_lengths_host,
-        const BufferPtr &kv_cache_block_id_host,
-        const BufferPtr &kv_cache_block_id_device,
-        rtp_llm::DataType dtype)
-{
+FlashInferAttnParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
+                                                      const rtp_llm::AttentionConfigs& attn_configs,
+                                                      const BufferPtr&                 prefix_lengths_host,
+                                                      const BufferPtr&                 sequence_lengths_host,
+                                                      const BufferPtr&                 input_lengths_host,
+                                                      const BufferPtr&                 kv_cache_block_id_host,
+                                                      const BufferPtr&                 kv_cache_block_id_device,
+                                                      DataType                         dtype,
+                                                      bool                             is_prefill) {
     if (rtp_llm::get_sm() < 80) {
         return nullptr;
     }
@@ -323,9 +322,15 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(
 
     MlaOpsType mla_ops_type = device->mla_ops_type;
     int q_length = -1;
-    if (mla_ops_type == MlaOpsType::FLASH_MLA &&
-        (!sameQLength(input_lengths_host, batch_size, q_length) || q_length == -1 || q_length > 32)) {
-        mla_ops_type = MlaOpsType::FLASH_INFER;
+    if (mla_ops_type == MlaOpsType::FLASH_MLA) {
+        if (is_prefill) {
+            // check if is MTP decode
+            if (!sameQLength(input_lengths_host, batch_size, q_length) || q_length == -1 || q_length > 32) {
+                mla_ops_type = MlaOpsType::FLASH_INFER;
+            }
+        } else {
+            q_length = 1; // deocde q_length always 1
+        }
     }
 
     const char* disable_flash_infer_env = getenv("DISABLE_FLASH_INFER");

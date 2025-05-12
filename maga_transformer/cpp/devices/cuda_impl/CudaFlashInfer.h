@@ -50,15 +50,15 @@ public:
     torch::Tensor plan;
     DataType dtype = DataType::TYPE_INVALID;
 
-    static FlashInferAttnParamsPtr prepare(
-            rtp_llm::DeviceBase *device,
-            const rtp_llm::AttentionConfigs &attn_configs,
-            const BufferPtr &prefix_lengths_host,
-            const BufferPtr &sequence_lengths_host,
-            const BufferPtr &input_lengths_host,
-            const BufferPtr &kv_cache_block_id_host,
-            const BufferPtr &kv_cache_block_id_device,
-            DataType dtype);
+    static FlashInferAttnParamsPtr prepare(rtp_llm::DeviceBase*             device,
+                                           const rtp_llm::AttentionConfigs& attn_configs,
+                                           const BufferPtr&                 prefix_lengths_host,
+                                           const BufferPtr&                 sequence_lengths_host,
+                                           const BufferPtr&                 input_lengths_host,
+                                           const BufferPtr&                 kv_cache_block_id_host,
+                                           const BufferPtr&                 kv_cache_block_id_device,
+                                           DataType                         dtype,
+                                           bool                             is_prefill);
 
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
