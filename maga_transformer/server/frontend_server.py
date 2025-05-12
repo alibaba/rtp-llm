@@ -113,7 +113,7 @@ class FrontendServer(object):
             else:
                 req[request_id_field_name] = self._global_controller.increment()
         except Exception as e:
-            return self._handle_exception(request, e)
+            return self._handle_exception(req, e)
 
         def generate_call():
             assert self._frontend_worker is not None
