@@ -86,7 +86,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           input_lengths_host,
                                           kvcache_block_id_host,
                                           kvcache_block_id_device,
-                                          DataType::TYPE_BF16);
+                                          DataType::TYPE_BF16,
+                                         false);
         auto context_flash_infer_attn_params =
             FlashInferAttnParams::prepare(device_,
                                           attn_configs,
@@ -95,7 +96,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           input_lengths_host,
                                           kvcache_block_id_host,
                                           kvcache_block_id_device,
-                                          DataType::TYPE_BF16);
+                                          DataType::TYPE_BF16,
+                                          true);
 
         size_t token_num     = hidden.size(0);
         auto   hidden_b      = torchTensor2Buffer(hidden);
@@ -107,7 +109,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         auto   q_b_weight_b  = torchTensor2Buffer(weights[5]);
         auto   kv_a_norm_weight_gamma = torchTensor2Buffer(weights[6]);
         auto   kv_a_norm_weight_beta = torchTensor2Buffer(weights[7]);
-        auto   output_weight_b = torchTensor2Buffer(weights[8]);  
+        auto   output_weight_b = torchTensor2Buffer(weights[8]);
         auto   cos_sin_cache_b = torchTensor2Buffer(weights[9]);
         auto hidden_buffer = torchTensor2Buffer(hidden);
         auto qkv_output = device_->allocateBuffer(
@@ -129,7 +131,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         attn_common_inputs.context_batch_size = 0;
         attn_common_inputs.decoder_batch_size = hidden.size(0);
         attn_common_inputs.kv_cache =
-            std::make_optional<KvCacheInfo>({1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer, 
+            std::make_optional<KvCacheInfo>({1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer,
             nullptr, nullptr});
         attn_common_inputs.prefill_flash_infer_attn_params = context_flash_infer_attn_params;
         attn_common_inputs.decode_flash_infer_attn_params = decode_flash_infer_attn_params;
@@ -165,4 +167,4 @@ static auto MlaAttnLayerOp =
     torch::jit::class_<unittest::MlaAttnLayerOp>("unittest", "MlaAttnLayerOp")
         .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
         .def("forward", &unittest::MlaAttnLayerOp::forward)
-        .def("reset_head_num", &unittest::MlaAttnLayerOp::reset_head_num); 
+        .def("reset_head_num", &unittest::MlaAttnLayerOp::reset_head_num);

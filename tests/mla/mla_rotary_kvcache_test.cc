@@ -100,7 +100,8 @@ void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequenc
                                                     torchTensor2Buffer(input_length)->slice(decoder_batch_size_, context_batch_size_, false),
                                                     torchTensor2Buffer(block_id_map)->slice(decoder_batch_size_, context_batch_size_, false),
                                                     torchTensor2Buffer(block_id_map_device)->slice(decoder_batch_size_, context_batch_size_, false),
-                                                    DataType::TYPE_FP16);
+                                                    DataType::TYPE_FP16,
+                                                    true);
     decode_params_ = FlashInferAttnParams::prepare(device_,
                                                    attn_configs,
                                                    nullptr,
@@ -108,7 +109,8 @@ void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequenc
                                                    torchTensor2Buffer(input_length)->slice(0, decoder_batch_size_, false),
                                                    torchTensor2Buffer(block_id_map)->slice(0, decoder_batch_size_, false),
                                                    torchTensor2Buffer(block_id_map_device)->slice(0, decoder_batch_size_, false),
-                                                   DataType::TYPE_FP16);
+                                                   DataType::TYPE_FP16,
+                                                   false);
 #endif
 }
 
