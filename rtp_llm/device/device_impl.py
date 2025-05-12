@@ -204,6 +204,8 @@ class GpuImpl(DeviceBase):
 
     def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
         return x
+    def convert_fp8_weight_params(self, weight: torch.Tensor, weight_scale: torch.Tensor):
+        return [weight, weight_scale]
 
 class CudaImpl(GpuImpl):
     def __init__(self, exported_device: DeviceExporter):
@@ -380,3 +382,19 @@ class RocmImpl(GpuImpl):
         x_ = x_.view(b_, n_ , k_)
         x_ = x_.contiguous()
         return x_
+    def convert_fp8_weight_params(self, weight: torch.Tensor, weight_scale: torch.Tensor):
+        assert weight.dtype == torch.float8_e4m3fn
+        # The bits pattern 10000000(-128) represents zero in e4m3fn
+        # but NaN in e4m3fnuz. So here we set it to 0.
+        # https://onnx.ai/onnx/technical/float8.html
+        weight_as_int8 = weight.view(torch.int8)
+        ROCM_FP8_NAN_AS_INT = -128
+        weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+        weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+        # For the same bits representation, e4m3fnuz value is half of
+        # the e4m3fn value, so we should double the scaling factor to
+        # get the same dequantized value.
+        # https://onnx.ai/onnx/technical/float8.html
+        weight_scale = weight_scale * 2.0
+        return weight, weight_scale
+

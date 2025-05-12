@@ -369,7 +369,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             scale_weight = scale_weight.reshape(scale_weight.shape[-1], -1) if  scale_weight.dim() == 2 else scale_weight
+            kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
             processed_res[self.scale.name] = scale_weight
+            processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
 
