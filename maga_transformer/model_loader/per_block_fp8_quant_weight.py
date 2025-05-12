@@ -1,3 +1,4 @@
+import copy
 import functools
 import torch
 from typing import Any, List, Union, Dict
@@ -7,7 +8,7 @@ from maga_transformer.model_loader.weight_module import AtomicWeight, CompositeW
 from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, kv_split, mla_pad, \
     mla_pad_scale, stack_, stack_moe_w1, concat_0,\
     multipy_identity, pad, transpose_slice_k, transpose_slice_v,\
-        pad_w13
+        pad_w13, sp_neg1, sp_head_gemm_a8, sp_head_s_gemm_a8_block, sp_0
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from maga_transformer.utils.util import check_with_info
 
@@ -28,14 +29,44 @@ def dequant_weight_split_v(ts: List[torch.Tensor], block_size: int, head_num: in
     return transpose_slice_v([weight_dequant(ts[0], ts[1], block_size)],
                              head_num, nope_head_dim, v_head_dim, lora_rank)
 
+def gemm_block_fp8_gpt_style_tp_strategy():
+    gemm_block_fp8_weight_tp_strategy: Dict[str, Any] = {
+        W.attn_o_w: sp_neg1,
+        W.attn_o_s: sp_neg1,
+        
+        W.attn_qkv_w: sp_head_gemm_a8,
+        W.attn_qkv_s: sp_head_s_gemm_a8_block,
+
+        W.ffn_w1: sp_0,
+        W.ffn_s1: sp_0,
+        W.ffn_w3: sp_0,
+        W.ffn_s3: sp_0,
+        W.ffn_w13: sp_0_w13,
+        W.ffn_s13: sp_0_w13,
+        W.ffn_w2: sp_neg1,
+        W.ffn_s2: sp_neg1,
+        # mla
+        # W.mla_kv_a_w: sp_id,
+        W.mla_k_nope_w: sp_0,
+        W.mla_k_nope_s: sp_0,
+        W.mla_v_w: sp_0,
+        W.mla_v_s: sp_0,
+        W.mla_q_b_w: sp_0,
+        W.mla_q_b_s: sp_0,
+    }
+    tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+    tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
+    return tp_strategy
+
 
 class W8A8Fp8PerBlockAtomicWeight(AtomicWeight):
-    gpt_style_tp_strategy = W.gemm_block_fp8_gpt_style_tp_strategy()
+    gpt_style_tp_strategy = gemm_block_fp8_gpt_style_tp_strategy()
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
 
     def _get_split_func(self):
         return self.gpt_style_tp_strategy[self.name]
+
 
 class W8A8Fp8PerBlockAttnAtomicWeight(AttnAtomicWeight, W8A8Fp8PerBlockAtomicWeight):
     def __init__(self, *args: Any, **kwargs: Any):

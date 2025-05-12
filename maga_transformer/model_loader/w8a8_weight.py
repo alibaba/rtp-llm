@@ -1,11 +1,34 @@
-from typing import Any
+from typing import Any, Dict
+import copy
 from maga_transformer.utils.model_weight import W
+from maga_transformer.utils.model_weight import sp_head_gemm_a8, sp_id, sp_neg1, ffn_sp_0, ffn_sp_neg1, sp_head_s_gemm_a8, sp_0
 from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
 from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 
+def gemm_int8_gpt_style_tp_strategy():
+    gemm_a8_weight_tp_strategy: Dict[str, Any] = {
+        W.attn_qkv_w: sp_head_gemm_a8,
+        W.attn_qkv_s: sp_head_s_gemm_a8,
+        W.attn_o_w: sp_neg1,
+        W.attn_o_s: sp_id,
+        W.attn_o_smoother: sp_0,
+        W.attn_o_shift: sp_0,
+        W.ffn_w1: ffn_sp_0,
+        W.ffn_s1: ffn_sp_0,
+        W.ffn_w3: ffn_sp_0,
+        W.ffn_s3: ffn_sp_0,
+        W.ffn_w13: ffn_sp_0_w13,
+        W.ffn_s13: ffn_sp_0_w13,
+        W.ffn_w2: ffn_sp_neg1,
+        W.ffn_s2: sp_id,
+    }
+    tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+    tp_strategy.update(gemm_a8_weight_tp_strategy)
+    return tp_strategy
+
 class W8A8Int8AtomicWeight(AtomicWeight):
-    gpt_style_tp_strategy = W.gemm_int8_gpt_style_tp_strategy()
+    gpt_style_tp_strategy = gemm_int8_gpt_style_tp_strategy()
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
 
@@ -42,8 +65,42 @@ def create_w8a8_int8_weight(src_weight_info: WeightModule, *args: Any, **kwargs:
         return W8A8Int8AtomicWeight(*args, **kwargs)
     raise NotImplementedError(f"Unsupported weight type: {src_weight_info}")
 
+
+def gemm_fp8_per_tensor_gpt_style_tp_strategy():
+    gemm_a8_weight_tp_strategy: Dict[str, Any] = {
+        W.attn_qkv_w: sp_head_gemm_a8,
+        W.attn_qkv_s: sp_id,
+        W.attn_o_w: sp_neg1,
+        W.attn_o_s: sp_id,
+        W.attn_o_smoother: sp_id,
+        W.attn_o_shift: sp_id,
+        W.ffn_w1: ffn_sp_0,
+        W.ffn_s1: sp_id,
+        W.ffn_w3: ffn_sp_0,
+        W.ffn_s3: sp_id,
+        W.ffn_w13: ffn_sp_0_w13,
+        W.ffn_s13: sp_id,
+        W.ffn_w2: ffn_sp_neg1,
+        W.ffn_s2: sp_id,
+        W.pre_ln_static_quant: sp_id,
+        W.pre_ln_static_quant_reciprocal: sp_id,
+        W.attention_output_static_quant: sp_id,
+        W.attention_output_static_quant_reciprocal: sp_id,
+        W.post_ln_static_quant: sp_id,
+        W.post_ln_static_quant_reciprocal: sp_id,
+        W.ffn_intermediate_weight2_static_quant: sp_id,
+        W.ffn_intermediate_weight2_static_quant_reciprocal: sp_id,
+        W.ffn_intermediate_weight3_static_quant: sp_id,
+        W.ffn_intermediate_weight3_static_quant_reciprocal: sp_id,
+        W.post_ffn_ln_static_quant: sp_id,
+        W.post_ffn_ln_static_quant_reciprocal: sp_id
+    }
+    tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+    tp_strategy.update(gemm_a8_weight_tp_strategy)
+    return tp_strategy
+
 class W8A8Fp8AtomicWeight(AtomicWeight):
-    gpt_style_tp_strategy = W.gemm_fp8_per_tensor_gpt_style_tp_strategy()
+    gpt_style_tp_strategy = gemm_fp8_per_tensor_gpt_style_tp_strategy()
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
 

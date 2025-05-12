@@ -341,9 +341,19 @@ class ModelDeployWeightInfo:
         if not isinstance(origin_weight_info.layer_weights[0], list):
             raise Exception("model weight use sparse config should be list(list())")
         new_layer_weights = []
+
+        skip_weights_list = [
+            W.attn_qkv_w,
+            W.attn_qkv_b,
+            W.attn_ln_gamma,
+            W.attn_ln_beta,
+            W.qk_ln_gamma,
+            W.attn_o_w,
+        ]
+
         for i, layer_weight in enumerate(origin_weight_info.layer_weights):
             if self._layer_head_num[i] == 0:
-                new_weights = [weight for weight in layer_weight if weight.name not in W.skip_weights_list]
+                new_weights = [weight for weight in layer_weight if weight.name not in skip_weights_list]
             else:
                 new_weights = layer_weight
             new_layer_weights.append(new_weights)
