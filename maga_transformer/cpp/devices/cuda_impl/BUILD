@@ -70,6 +70,7 @@ cc_library(
         "//maga_transformer/cpp/cuda:cuda",
         "//maga_transformer/cpp/cuda:allocator_cuda",
         "//maga_transformer/cpp/core:torch_cuda_allocator",
+        "//maga_transformer/cpp/core:torch_event",
         "//maga_transformer/cpp/kernels:kernels",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp/deep_gemm:deep_gemm_plugins_impl",

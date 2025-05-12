@@ -15,7 +15,7 @@ struct TorchEvent : public DeviceEvent {
     ~TorchEvent() override = default;
 
     void synchronize() const override {
-        event->synchronize();
+        throw std::runtime_error("TorchEvent::synchronize() is not implemented.");
     }
 
     std::shared_ptr<torch::Event> event;
