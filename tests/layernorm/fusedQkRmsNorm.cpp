@@ -8,11 +8,10 @@
 #include "maga_transformer/cpp/devices/OpData.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/core/BufferHelper.h"
-
-using namespace rtp_llm;
-
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp8.h>
+
+using namespace rtp_llm;
 
 namespace unittest {
 
@@ -48,7 +47,7 @@ void FusedQkRmsNormOp::forward(torch::Tensor input,
     rtp_llm::DeviceFactory::initDevices(gpt_params);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();;
     int m = input.size(0);
-    int n = input.size(1);    
+    int n = input.size(1);
     auto input_buffer = torchTensor2Buffer(input);
     auto q_gamma_buffer = torchTensor2Buffer(q_gamma);
     auto q_bias_buffer = q_bias ? torchTensor2Buffer(q_bias.value()) : nullptr;

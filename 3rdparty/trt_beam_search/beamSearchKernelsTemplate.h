@@ -22,7 +22,7 @@
 #endif
 #include "maga_transformer/cpp/cuda/reduce_kernel_utils.cuh"
 #include "beamSearchKernels.h"
-using namespace rtp_llm;
+
 namespace tensorrt_llm
 {
 namespace kernels
@@ -32,7 +32,7 @@ namespace kernels
 
 inline int roundUp(int a, int n)
 {
-    return div_up(a, n) * n;
+    return rtp_llm::div_up(a, n) * n;
 }
 
 template <typename T, int PAD_2K, int THREADBLOCK_SIZE>
@@ -45,7 +45,7 @@ __launch_bounds__(THREADBLOCK_SIZE) __global__
     int const nBM{bh.nBeamWidth};
     int const nCandidate{nBM * nBM * 2}; // Keep top 2K candidates from each beam output
     int const nV{bh.nVocabSize};
-    T const MAX_T_VAL = std::is_same_v<T, half> ? HALF_FLT_MAX : FLT_MAX;
+    T const MAX_T_VAL = std::is_same_v<T, half> ? rtp_llm::HALF_FLT_MAX : FLT_MAX;
     __shared__ int nBeamForNextStep; // Only used by thread of tid == 0
     __shared__ float smemCumLogProbs[PAD_2K / 2];
     if (tid == 0)
@@ -176,7 +176,7 @@ __launch_bounds__(THREADBLOCK_SIZE, 1) __global__
     int const section_end = std::min(section_start + nVLocal, nV);
     auto const nVOffset = (blockIdx.x * nBM + blockIdx.y) * nV;
     int const valid_smem_length = section_end - section_start;
-    T const MAX_T_VAL = std::is_same_v<T, half> ? HALF_FLT_MAX : FLT_MAX;
+    T const MAX_T_VAL = std::is_same_v<T, half> ? rtp_llm::HALF_FLT_MAX : FLT_MAX;
     // Load element from logits to smemLogProbs, doing reduce_md and argmax meanwhile
     // Each thread is responsible for `nVLocal / THREADBLOCK_SIZE` elements
     extern __shared__ char smem[];
@@ -264,7 +264,7 @@ __launch_bounds__(THREADBLOCK_SIZE) __global__
     auto const gbid = blockIdx.x * gridDim.y + blockIdx.y;
     int const tid = threadIdx.x;
     auto const slot = blockIdx.x;
-    T const MAX_T_VAL = std::is_same_v<T, half> ? HALF_FLT_MAX : FLT_MAX;
+    T const MAX_T_VAL = std::is_same_v<T, half> ? rtp_llm::HALF_FLT_MAX : FLT_MAX;
     using KVPair = cub::KeyValuePair<int, T>;
     using BlockReduceTopK = cub::BlockReduce<KVPair, THREADBLOCK_SIZE>;
     using BlockReduceMD = cub::BlockReduce<MD, THREADBLOCK_SIZE>;
@@ -427,7 +427,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     // Find the max smem on the device and use that to determine the vocab parts in the best case.
     int max_smem_per_sm = -1;
     int max_smem_per_block = -1;
-    int const device = getDevice();
+    int const device = rtp_llm::getDevice();
     check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device));
     check_cuda_error(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
     cudaFuncAttributes attr;
@@ -446,7 +446,7 @@ void topKSoftMaxKernelLauncher(T const* logits, void* workspace, BeamHypotheses&
     {
         int dyn_smem_size = max_smem_per_sm / n_block - extra_smem;
         dyn_smem_size -= dyn_smem_size % sizeof(T);
-        nVPart = ceilDiv(sizeof(T) * nV, dyn_smem_size);
+        nVPart = rtp_llm::ceilDiv(sizeof(T) * nV, dyn_smem_size);
     }
     int const nVocabChunk = (nV + nVPart - 1) / nVPart;
     int const dyn_smem_size = sizeof(T) * nVocabChunk;

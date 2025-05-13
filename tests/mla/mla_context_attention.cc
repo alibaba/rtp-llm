@@ -45,7 +45,7 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
                                    int64_t hidden_size,
                                    double  softmax_extra_scale) {
     rtp_llm::initLogger();
-    
+
     auto gpt_params = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
     rtp_llm::DeviceFactory::initDevices(gpt_params);
@@ -104,13 +104,16 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
 
     BufferPtr input_lengths = torchTensor2Buffer(seq_len);
 
+    BufferPtr kv_cache_block_id_host;
+    BufferPtr kv_cache_block_id_device;
+
     auto device_prep_params = DevicePrepParams({
         attn_configs,
         prefix_lengths,
         sequence_lengths,
         input_lengths,
-        nullptr, // kv_cache_block_id_host
-        nullptr, // kv_cache_block_id_device
+        kv_cache_block_id_host,
+        kv_cache_block_id_device,
         datatype,
         batch_size,
         0,
