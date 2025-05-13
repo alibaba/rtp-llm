@@ -148,19 +148,7 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         dispatch_begin_event = deepep_buffer_->capture();
     }
 
-    // auto event = createTorchEvent();
-    // auto casted_event = dynamic_cast<TorchEvent*>(event.get());
-    // auto event_handle = deep_ep::EventHandle();
-    // event_handle.event = casted_event->event;
-    // auto dispatch_begin_event = std::make_shared<EventOverlap>(event_handle);
-
     try {
-        // call dispatch and force sync, maybe sync is not necessary
-        // RTP_LLM_LOG_INFO("get dispatch layout expert num %ld, expert_ids: %s, expert_scales: %s, hidden: %s",
-        //             expert_num,
-        //             expert_ids->debugString().c_str(),
-        //             expert_scales ? expert_scales->debugString().c_str() : "null",
-        //             hidden->debugString().c_str());
         auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
             topk_idx_tensor, expert_num, dispatch_begin_event, true /*async*/, true /*allocate_on_comm_stream*/);
 
@@ -227,14 +215,14 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
         out.deep_ep_output.reset(new DeepEPDispatchOutput(std::move(dispatch_output)));
         out.comm_barrier_hook = std::move(comm_hook);
 
-        // if (params.expert_stats.has_value()) {
-        //     auto& experts_stats = params.expert_stats.value();
-        //     update_gpu_loads_deepep_kernel(recv_topk_idx_buffer->data<int64_t>(),
-        //                                    experts_stats.getLayerGpuLoads(),
-        //                                    recv_topk_idx_buffer->size(),
-        //                                    moe_conf.ep_rank,
-        //                                    stream_);
-        // }
+        if (params.expert_stats.has_value()) {
+            auto& experts_stats = params.expert_stats.value();
+            update_gpu_loads_deepep_kernel(recv_topk_idx_buffer->data<int64_t>(),
+                                           experts_stats.getLayerGpuLoads(),
+                                           recv_topk_idx_buffer->size(),
+                                           moe_conf.ep_rank,
+                                           stream_);
+        }
 
         return out;
     } catch (const std::exception& e) {
