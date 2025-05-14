@@ -11,7 +11,7 @@
 ## **New!** Our technical reports
 Check below for series of public technical reports released by RTP-LLM team.
 
-- [RTP-LLM DeepSeek Replay Tech Report](docs/RTP-LLM-DeepSeek-Replay-Tech-Report.md)
+- [RTP-LLM DeepSeek Reproduce Tech Report](docs/RTP-LLM-DeepSeek-Replay-Tech-Report.md)
 - [大模型推理新突破：分布式推理技术探索与实践](https://mp.weixin.qq.com/s/Zs61CDerMwI7JKbFyD001Q)
 - [为异构推理做好准备：次世代 RTP-LLM 推理引擎设计分享](https://mp.weixin.qq.com/s/bsB2QImcOZKHpmHMHd0P9w)
 - [LLM推理加速：decode阶段的Attention在GPU上的优化](https://zhuanlan.zhihu.com/p/715348837)
