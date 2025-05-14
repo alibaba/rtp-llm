@@ -12,6 +12,22 @@ def copy_so(target):
         cmd = "cp $(SRCS) $(@D)",
     )
 
+def copy_so_inst(target, inst_num):
+    for i in range(inst_num):
+        name = 'lib' + target.split(':')[1] + '_' + str(i) + '_inst_so'
+        so_name = 'lib' + target.split(':')[1] + '_' + str(i) + '_inst.so'
+        native.genrule(
+            name = name,
+            srcs = [target + '_' + str(i) + '_inst'],
+            outs = [so_name],
+            cmd = "cp $(SRCS) $@",
+        )
+
+    native.filegroup(
+        name = 'lib' + target.split(':')[1] + '_inst_so',
+        srcs = [':lib' + target.split(':')[1] + '_' + str(i) + '_inst_so' for i in range(inst_num)],
+    )
+
 def copy_target_to(name, to_copy, copy_name, dests = [], **kwargs):
     if dests:
         outs = [path + copy_name for path in dests]

@@ -1,6 +1,6 @@
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 
 preloaded_deps = [
@@ -14,7 +14,7 @@ sm90_cuda_copts = ["-x", "cuda", "-std=c++17", "-shared", "--cuda-include-ptx=sm
 
 def sub_lib(name, srcs):
     native.cc_library(
-        name = name + '_cu',
+        name = name + "_cu",
         srcs = [srcs],
         deps = preloaded_deps,
         copts = sm90_cuda_copts,
@@ -27,4 +27,53 @@ def sub_lib(name, srcs):
         preloaded_deps = preloaded_deps,
         visibility = ["//visibility:public"],
     )
-    return name
+
+def sub_lib_and_interleave(name, srcs):
+    native.cc_library(
+        name = name + "_cu",
+        srcs = [srcs],
+        deps = preloaded_deps,
+        copts = sm90_cuda_copts,
+        visibility = ["//visibility:public"],
+    )
+    
+    cc_shared_library(
+        name = name + "_so",
+        roots = [":" + name + "_cu"],
+        preloaded_deps = preloaded_deps,
+        visibility = ["//visibility:public"],
+    )
+
+    native.genrule(
+        name = name,
+        srcs = [":" + name + "_so"],
+        tools = ["interleave_ffma.py"],
+        outs = ["lib" + name + ".so"],
+        cmd = """
+            cp "$(location :{lib_name})" "$@"
+            chmod 777 $@
+            /opt/conda310/bin/python "$(location interleave_ffma.py)" --so "$@"
+        """.format(lib_name = name + "_so"),
+        visibility = ["//visibility:public"],
+    )
+
+def gen_cu_and_lib(name, params_list, split_num, template_header, template, template_tail, element_per_file):
+    for i in range((len(params_list) + split_num - 1) // split_num):
+        gen_cpp_code(name + "_" + str(i), [params_list[i * split_num: (i + 1) * split_num]], template_header, template, template_tail, element_per_file, suffix=".cu")
+        sub_lib_and_interleave(name + "_" + str(i) + "_inst", ":" + name + "_" + str(i))
+
+    native.cc_library(
+        name = name + "_inst",
+        hdrs = ["DeepGemmPlugin.h", "utils.h"],
+        srcs = ["DeepGemmPlugin.cpp"] + [
+            ":" + name + "_" + str(i) + "_inst" for i in range((len(params_list) + split_num - 1) // split_num)
+        ],
+        copts = copts(),
+        deps = [
+            "//maga_transformer/cpp/core:buffer_torch",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+            "//maga_transformer/cpp/cuda:nvtx",
+        ] + torch_deps(),
+        visibility = ["//visibility:public"],
+    )

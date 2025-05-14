@@ -2,7 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("//maga_transformer/cpp/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts")
+load("//maga_transformer/cpp/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts", "gen_cu_and_lib")
 
 test_linkopts = [
     "-lpython3.10",
@@ -42,11 +42,11 @@ NORMAL_GEMM_CASES = [
     ("36864", "7168", "1", "DeepGemmType::Normal"),
     ("7168", "18432", "1", "DeepGemmType::Normal"),
 
-    # tp 8
-    ("3072", "1536", "1", "DeepGemmType::Normal"),
-    ("2048", "512", "1", "DeepGemmType::Normal"),
-    ("2304", "7168", "1", "DeepGemmType::Normal"),
-    ("7168", "2304", "1", "DeepGemmType::Normal")
+    # # tp 8
+    # ("3072", "1536", "1", "DeepGemmType::Normal"),
+    # ("2048", "512", "1", "DeepGemmType::Normal"),
+    # ("2304", "7168", "1", "DeepGemmType::Normal"),
+    # ("7168", "2304", "1", "DeepGemmType::Normal")
 ]
 
 GROUPED_CONTIGUOUS_GEMM_CASES = [
@@ -125,7 +125,7 @@ GROUPED_MASKED_GEMM_CASES = [
     ("7168", "2048", "10", "DeepGemmType::GroupedMasked"),
 ]
 
-QWEN_CASES = [
+QWEN_NORMAL_CASES = [
     ("9216", "4096", "1", "DeepGemmType::Normal"),
     ("4096", "8192", "1", "DeepGemmType::Normal"),
     ("4608", "4096", "1", "DeepGemmType::Normal"),
@@ -138,55 +138,68 @@ QWEN_CASES = [
     ("2048", "4096", "1", "DeepGemmType::Normal"),
     ("2560", "2048", "1", "DeepGemmType::Normal"),
     ("2048", "2048", "1", "DeepGemmType::Normal"),    
-    
+]
+
+QWEN_CONTIGUOUS_CASES = [
     ("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "64", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "64", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "64", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "64", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "32", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "32", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
-
+    
     ("3072", "4096", "5", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "5", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "5", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "5", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "16", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "16", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "4", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "4", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "4", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "4", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "2", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "2", "DeepGemmType::GroupedContiguous"),
-    ("3072", "4096", "2", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "2", "DeepGemmType::GroupedMasked"),
 
     ("3072", "4096", "16", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "16", "DeepGemmType::GroupedContiguous"),
+
+    ("1536", "2048", "128", "DeepGemmType::GroupedContiguous"),
+    ("2048", "768", "128", "DeepGemmType::GroupedContiguous"),
+
+    ("1536", "2048", "64", "DeepGemmType::GroupedContiguous"),
+    ("2048", "768", "64", "DeepGemmType::GroupedContiguous"),
+]
+
+QWEN_MASKED_CASES = [
+    ("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "64", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "64", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "5", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "5", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "4", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "4", "DeepGemmType::GroupedMasked"),
+
+    ("3072", "4096", "2", "DeepGemmType::GroupedMasked"),
+    ("4096", "1536", "2", "DeepGemmType::GroupedMasked"),
+
     ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),   
 
-    # qwen3-30b-a3b ep=1/2 
-    ("1536", "2048", "128", "DeepGemmType::GroupedContiguous"),
-    ("2048", "768", "128", "DeepGemmType::GroupedContiguous"),
     ("1536", "2048", "128", "DeepGemmType::GroupedMasked"),
     ("2048", "768", "128", "DeepGemmType::GroupedMasked"),
-    
-    ("1536", "2048", "64", "DeepGemmType::GroupedContiguous"),
-    ("2048", "768", "64", "DeepGemmType::GroupedContiguous"),
+
     ("1536", "2048", "64", "DeepGemmType::GroupedMasked"),
     ("2048", "768", "64", "DeepGemmType::GroupedMasked"),
 ]
@@ -225,11 +238,7 @@ template_tail = """
 }
 """
 
-gen_cpp_code("deepgemm_dpsk", [NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES],
-             template_header, template, template_tail, element_per_file=1, suffix=".cu")
-
-
-gen_cpp_code("deepgemm_qwen", [QWEN_CASES],
+gen_cpp_code("deepgemm_qwen", [QWEN_NORMAL_CASES + QWEN_CONTIGUOUS_CASES + QWEN_MASKED_CASES],
              template_header, template, template_tail, element_per_file=1, suffix=".cu")
 
 cc_library(
@@ -252,15 +261,17 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-sub_lib("deepgemm_dpsk_inst", ":deepgemm_dpsk")
 sub_lib("deepgemm_qwen_inst", ":deepgemm_qwen")
+
+gen_cu_and_lib("deepgemm_dpsk", NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES, 2, template_header, template, template_tail, 1)
 
 cc_library(
     name = "deep_gemm_plugins_impl",
     hdrs = ["DeepGemmPlugin.h", "utils.h"],
-    srcs = ["DeepGemmPlugin.cpp", ":deepgemm_dpsk_inst", ":deepgemm_qwen_inst"],
+    srcs = ["DeepGemmPlugin.cpp", ":deepgemm_qwen_inst"],
     copts = copts(),
     deps = [
+        ":deepgemm_dpsk_inst",
         "//maga_transformer/cpp/core:buffer_torch",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

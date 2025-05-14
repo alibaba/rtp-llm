@@ -1,4 +1,4 @@
-load("//bazel:defs.bzl", "copy_so")
+load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
 load("//bazel:arch_select.bzl", "kernel_so_deps")
 package(default_visibility = ["//maga_transformer:__subpackages__"])
 
@@ -16,7 +16,8 @@ copy_so("@flashinfer//:flashinfer_single_decode")
 copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
 copy_so("@flashinfer//:flashinfer_batch_paged_decode")
 copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
-copy_so("//maga_transformer/cpp/deep_gemm:deepgemm_dpsk_inst")
+# num of so
+copy_so_inst("//maga_transformer/cpp/deep_gemm:deepgemm_dpsk", 32)
 copy_so("//maga_transformer/cpp/deep_gemm:deepgemm_qwen_inst")
 copy_so("@flashinfer//:flashinfer_sm90")
 copy_so("@acext//:acext_1")
