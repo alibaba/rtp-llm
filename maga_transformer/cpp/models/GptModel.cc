@@ -731,9 +731,10 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
             auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx);
 
             // call combine hook sync
-            const auto& previous_moe_ret = device_->getMoEInsertionRet();
+            auto& previous_moe_ret = device_->getMoEInsertionRet();
             if (previous_moe_ret && previous_moe_ret->combine_output.comm_barrier_hook) {
                 previous_moe_ret->combine_output.comm_barrier_hook->hook_sync();
+                previous_moe_ret->combine_output.comm_barrier_hook = nullptr;
             }
 
             MoeDispatchOutput dispatched_output = device_->epDispatch({
