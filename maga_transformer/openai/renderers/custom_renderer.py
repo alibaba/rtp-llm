@@ -83,6 +83,20 @@ class StreamStatus:
     def tokens_to_decode(self):
         return self.prev_token_id + self.output_ids[len(self.last_output_ids):]
 
+    def __str__(self):
+        return (f"StreamStatus("
+                f"index={self.index}, "
+                f"request={self.request}, "
+                f"output={self.output}, "
+                f"origin_output_ids={self.origin_output_ids}, "
+                f"output_ids={self.output_ids}, "
+                f"last_output_ids={self.last_output_ids}, "
+                f"last_token_length={self.last_token_length}, "
+                f"finish_reason={self.finish_reason}, "
+                f"tokenizer={self.tokenizer}, "
+                f"responded_string={self.responded_string!r}, "
+                f"delta_output_string={self.delta_output_string!r})")
+
 class StreamStatusSync:
     index: int = 0
     request: ChatCompletionRequest

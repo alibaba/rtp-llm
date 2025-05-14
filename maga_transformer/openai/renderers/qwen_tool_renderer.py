@@ -86,6 +86,23 @@ class QwenToolStreamStatus(StreamStatus):
     tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = (
         ToolCallMessageExtractStrategy.DEFAULT
     )
+    
+    def __str__(self):
+        return (f"QwenToolStreamStatus("
+                f"index={self.index}, "
+                f"request={self.request}, "
+                f"output={self.output}, "
+                f"origin_output_ids={self.origin_output_ids}, "
+                f"output_ids={self.output_ids}, "
+                f"last_output_ids={self.last_output_ids}, "
+                f"last_token_length={self.last_token_length}, "
+                f"finish_reason={self.finish_reason}, "
+                f"tokenizer={self.tokenizer}, "
+                f"responded_string={self.responded_string!r}, "
+                f"delta_output_string={self.delta_output_string!r})"
+                f"generating_tool_call={self.generating_tool_call}"
+                f"tool_call_index={self.tool_call_index}"
+                f"tool_call_responded_string={self.tool_call_responded_string}")
 
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
@@ -341,12 +358,10 @@ class QwenToolRenderer(CustomChatRenderer):
                     result_text += tool_call_begin_tag + part
                     continue
             # 如果有剩余文本，添加到结果中
-            if len(tool_parts) > 1:
+            if len(tool_parts) > 1 and len(tool_parts[1].strip()) > 0:
                 result_text += tool_parts[1]
 
         if tool_calls:
-            # 如果只有\n在result_text中, 则去掉
-            result_text = result_text.strip()
             return tool_calls, result_text
         else:
             return None, result_text
