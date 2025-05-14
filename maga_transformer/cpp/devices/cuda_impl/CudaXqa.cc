@@ -69,17 +69,11 @@ void runXqa(void* input,
         return;
     }
 
-    RTP_LLM_LOG_INFO("xqa params: input = %p, output = %p, head_num = %zu, kv_head_num = %zu, decode_batch_size = %zu, "
-        "decode_max_seq_len = %zu, tokens_per_block = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, sequence_lengths = %p, "
-        "device = %p, q_scale = %f, max_decode_batch_size = %zu, beam_width = %zu", input, output, head_num, kv_head_num, 
-        decode_batch_size, decode_max_seq_len, tokens_per_block, kv_cache_pool, kv_cache_page_list, sequence_lengths, device, 
-        q_scale, max_decode_batch_size, beam_width);
-
     size_t max_seq_len = round_up(decode_max_seq_len, tokens_per_block);
 
     static BufferPtr kv_cache_scale = getKVCacheScale(device);
 
-    BufferPtr semaphores = getSemaphores(device, kv_head_num, decode_batch_size);
+    static BufferPtr semaphores = getSemaphores(device, kv_head_num, max_decode_batch_size);
 
     static void* scratch = getScratch(device, head_num, kv_head_num, beam_width);
 

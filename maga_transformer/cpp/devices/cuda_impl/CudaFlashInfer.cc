@@ -480,13 +480,11 @@ void FlashInferAttnParams::run(
     sync_check_cuda_error();
 
     if (use_xqa && size_per_head == HEAD_ELEMS && local_head_num / local_head_num_kv == HEAD_GRP_SIZE &&
-        // params.common.kv_cache->k_cache_buffer.type() == DataType::TYPE_FP8_E4M3 &&
+        params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3 &&
         params.input.type() == DataType::TYPE_BF16 && params.output.type() == DataType::TYPE_BF16 &&
         params.configs.tokens_per_block == TOKENS_PER_PAGE) {
-        std::cout << "kvlen: " << kvlen_d << std::endl;
-        std::cout << "input: " << q.sizes() << std::endl;
-        std::cout << "output: " << params.output.shape() << std::endl;
-        runXqa(q.data_ptr(),
+        auto q_c = q.contiguous();
+        runXqa(q_c.data_ptr(),
                params.output.data(),
                local_head_num,
                local_head_num_kv,

@@ -6,6 +6,25 @@
 
 namespace rtp_llm {
 
+/**
+ * @brief run xqa for decoding attention
+ * 
+ * @param input q [batch_size, beam_width, head_num, head_dim] or 
+ *              qkv [batch_size, beam_width, head_num + kv_head_num * 2, head_dim]
+ * @param output [batch_size, beam_width, head_num, head_dim]
+ * @param head_num 
+ * @param kv_head_num 
+ * @param decode_batch_size 
+ * @param decode_max_seq_len max kv seq len
+ * @param tokens_per_block 
+ * @param kv_cache_pool head ptr [block_nums, kv_head_num, tokens_per_block, head_dim]
+ * @param kv_cache_page_list [batch_size, beam_width, 2, max_pages_per_seq]
+ * @param sequence_lengths kv seq len
+ * @param device 
+ * @param q_scale 
+ * @param max_decode_batch_size for semaphores
+ * @param beam_width 
+ */
 void runXqa(void* input,
             void* output,
             size_t head_num,
