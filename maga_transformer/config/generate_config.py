@@ -71,6 +71,9 @@ class GenerateConfig(BaseModel):
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
 
+    # multimodal preprocess
+    resized_shape: Optional[List[int]] = None
+
     # 是否允许tool_call专用的标签如<tool_call>作为content传出, 优化tool_call失败时的用户体验
     tool_call_message_extract_strategy: str = "default" # default/skip_on_failure
     

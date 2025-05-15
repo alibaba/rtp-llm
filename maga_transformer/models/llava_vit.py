@@ -96,8 +96,11 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         else:
             raise Exception("unknown mm url type")
     
-    def load_image(self, data, **kwargs):
-        return Image.open(data).convert("RGB")
+    def load_image(self, data, configs, **kwargs):
+        image = Image.open(data).convert("RGB")
+        if configs.width > 0 and configs.height > 0:
+            image = image.resize((configs.width, configs.height))
+        return image
 
     def load_video(self, data, configs, **kwargs):
         fps = 1 if configs.fps == -1 else configs.fps

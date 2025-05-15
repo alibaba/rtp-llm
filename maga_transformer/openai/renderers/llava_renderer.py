@@ -63,7 +63,9 @@ class Conversation:
                                     images, mm_types)
         
         def get_preprocess_config(config):
-            return MMPreprocessConfig(fps=config.fps or -1,
+            return MMPreprocessConfig(width=config.width or -1,
+                                      height=config.height or -1,
+                                      fps=config.fps or -1,
                                       min_frames=config.min_frames or -1,
                                       max_frames=config.max_frames or -1)
 
@@ -83,6 +85,8 @@ class Conversation:
                         assert (content_part.image_url != None)
                         images.append(content_part.image_url.url)
                         mm_types.append(MMUrlType.IMAGE)
+                        if content_part.preprocess_config:
+                            preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
                         now_prompt = now_prompt + "<image>\n"
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert (content_part.video_url != None)
