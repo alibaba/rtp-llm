@@ -9,4 +9,4 @@ def load_num_labels(ckpt_path: str) -> int:
         return config_json['num_labels']
     if 'id2label' in config_json:
         return len(config_json['id2label'])
-    raise Exception("unknown label num")
+    raise Exception("unknown label num, please set 'num_labels' or 'id2label' in config.json")
