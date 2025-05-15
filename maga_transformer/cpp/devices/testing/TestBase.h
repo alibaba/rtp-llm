@@ -261,7 +261,7 @@ protected:
         auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
         max_seq_len = (max_seq_len == 0) ? 1 : max_seq_len;
         const auto tokensPerBlock = cache_config.seq_size_per_block;
-        const auto batch_layer_kv_block_num = ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
+        const auto batch_layer_kv_block_num = ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock);
         const auto batch_size = input_lengths.size();
 
         auto kv_cache_block_id = device_->allocateBuffer({
@@ -292,15 +292,21 @@ protected:
                          i,
                          0,
                          torch::indexing::Slice(block_start, block_end),
-                         torch::indexing::Slice()}).contiguous();
+                         torch::indexing::Slice()}).reshape({cache_config.seq_size_per_block, cache_config.local_head_num_kv, cache_config.size_per_head}).transpose(1, 0).contiguous();
                     auto vblock = kvCache.index(
                         {torch::indexing::Slice(),
                          i,
                          1,
                          torch::indexing::Slice(block_start, block_end),
                          torch::indexing::Slice()}).contiguous();
+                         torch::indexing::Slice()}).reshape({cache_config.seq_size_per_block, cache_config.local_head_num_kv, cache_config.size_per_head}).transpose(1, 0).contiguous();
+                    tensor_holders.emplace_back(kblock);
+                    tensor_holders.emplace_back(vblock);
                     auto kblock_buffer = rtp_llm::torchTensor2Buffer(kblock);
                     auto vblock_buffer = rtp_llm::torchTensor2Buffer(vblock);
+                    auto kblock_buffer2 = device_->clone({*kblock_buffer});
+                    auto vblock_buffer2 = device_->clone({*vblock_buffer});
+                    device_->syncAndCheck();
                     cache_manager_->setKVBlockValue(k_indexs[k],
                                                     *kblock_buffer,
                                                     *vblock_buffer);
