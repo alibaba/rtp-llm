@@ -3,8 +3,8 @@
 #include "maga_transformer/cpp/kernels/activation_kernels.h"
 #include "maga_transformer/cpp/cuda/Dispatch.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 
 
 using namespace std;
@@ -88,7 +88,9 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     auto gate_bias = params.gate_bias ? params.gate_bias.value().get().data() : nullptr;
     auto act_scale = params.act_scale ? params.act_scale.value().get().data() : nullptr;
     if (params.fuse_gate_up) {
-        FT_CHECK_WITH_INFO(params.output_buffer != nullptr, "when fuse gate and up, output buffer must not be nullptr");
+        RTP_LLM_CHECK_WITH_INFO(params.output_buffer != nullptr, "when fuse gate and up, output buffer must not be nullptr");
+
+#ifdef ENABLE_FP8
         if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
             auto padded_shape_m = (params.output_buffer->shape()[0] + 63) / 64 * 64;
             auto act_output = allocateBuffer({DataType::TYPE_FP8_E4M3, {padded_shape_m, params.output_buffer->shape()[1]}, AllocationType::DEVICE});
@@ -103,7 +105,9 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
             sync_check_cuda_error();
             auto out_qbuffer = std::make_shared<QBuffer>(std::move(act_output), std::move(act_scale), std::move(act_zeros));
             return std::move(out_qbuffer);
-        } else {
+        } else 
+#endif
+        {
             torch::Tensor gate_up_tensor = Buffer2torchTensor(*params.states, false);
             torch::Tensor output_tensor = Buffer2torchTensor(*params.output_buffer, false);
             if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {

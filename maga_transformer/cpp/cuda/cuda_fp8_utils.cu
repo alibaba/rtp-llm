@@ -618,7 +618,7 @@ void computeFP8ActivationAndQuantize(__nv_fp8_e4m3*       fp8_output,
                                      const int64_t        dim0,
                                      const int64_t        dim1,
                                      cudaStream_t         stream) {
-    FT_CHECK(dim1 % 128 == 0);
+    RTP_LLM_CHECK(dim1 % 128 == 0);
     static constexpr int ELEM_PER_THREAD = 8;
     const int num_per_grid = CTA_SIZE / (128 / ELEM_PER_THREAD);
     const int size = dim0 * dim1;
