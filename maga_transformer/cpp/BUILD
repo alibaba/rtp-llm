@@ -64,6 +64,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+
+cc_library(
+    name = "logits_processor",
+    hdrs = glob([
+        "logits_processor/*.h",
+    ]),
+    srcs = glob([
+        "logits_processor/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":cache",
+        ":dataclass",
+        ":utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "stream",
     hdrs = glob([
@@ -167,6 +184,7 @@ cc_library(
         "models/*.cc",
     ]),
     deps = torch_deps() + [
+        ":logits_processor",
         ":dataclass",
         ":utils",
         ":cache",

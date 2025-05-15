@@ -2,13 +2,11 @@
 #include "gtest/gtest.h"
 
 #include "maga_transformer/cpp/devices/testing/TestBase.h"
-#include "maga_transformer/cpp/models/GptModel.h"
-#include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
+#include "maga_transformer/cpp/logits_processor/ThinkModeLogitsProcessor.h"
+#include "maga_transformer/cpp/logits_processor/LogitsProcessorStates.h"
 #include "maga_transformer/cpp/core/BufferHelper.h"
 
 using namespace std;
-
-
 
 namespace rtp_llm {
 
@@ -31,9 +29,9 @@ public:
         size_t batch_size = max_thinking_tokens.size();
         for (size_t i = 0; i < batch_size; i++) {
             auto think_info = StreamThinkInfo(
-                think_mode, max_thinking_tokens[i], end_think_token_ids, std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids)
+                think_mode, max_thinking_tokens[i], end_think_token_ids, 0, 0, 0, std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids)
             );
-            think_info.think_end_status_dfa_ptr->forceSetStatus(think_status[i]);
+            think_info.dfa_ptr->forceSetStatus(think_status[i]);
             think_infos.push_back(think_info);
         }
 
@@ -41,14 +39,18 @@ public:
         return processor_ptr;
     }
 
-    SamplerInputs allocate(Config config, std::vector<BaseLogitsProcessorPtr> grammars) {
+    SamplerInputs allocate(Config config, std::vector<BaseLogitsProcessorPtr> processors, std::vector<size_t> nums) {
         SamplerInputs sampler_inputs;
 
         sampler_inputs.step                 = config.max_length;
         sampler_inputs.batch_size           = config.batch_size;
         sampler_inputs.vocab_size           = config.vocab_size;
-        sampler_inputs.grammars.clear();
-        sampler_inputs.grammars.insert(sampler_inputs.grammars.end(), grammars.begin(), grammars.end());
+        LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+        for (size_t i = 0, idx = 0; i < processors.size(); i++) {
+            state_ptr->insert(processors[i], idx, idx + nums[i]);
+            idx += nums[i];
+        }
+        sampler_inputs.logits_processor_states_ptr = state_ptr;
         sampler_inputs.logits               = device_->allocateBuffer({config.logits_type, {config.batch_size, config.vocab_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.sequence_lengths     = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.input_lengths        = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
@@ -133,7 +135,7 @@ TEST_F(SamplerTest, testMemFill) {
     std::vector<int> think_status = {0, 0, 0, 0};
     BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
     
-    SamplerInputs sampler_inputs = builder.allocate({4, 1024, 1024}, {processor});
+    SamplerInputs sampler_inputs = builder.allocate({4, 1024, 1024}, {processor}, {(size_t) 4});
     std::vector<int> sequence_lengths = {1, 2, 3, 4};
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
@@ -157,104 +159,100 @@ TEST_F(SamplerTest, testMemFill) {
     EXPECT_SIMILAR(buffer2vector<double>(*logits2->index(3)), std::vector<double>({neg_inf, neg_inf, neg_inf, 1, neg_inf}), 1e-6);
 }
 
-TEST_F(SamplerTest, testUpdateStatus) {
+
+template<typename Dtype>
+void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) {
+    RTP_LLM_CHECK(buf->shape().size() == 2);
+    RTP_LLM_CHECK(buf->shape()[0] == content.size());
+    RTP_LLM_CHECK(buf->shape()[1] == content[0].size());
+    for (auto i = 0; i < buf->shape()[0]; i++) {
+        auto tensor = Buffer2torchTensor(*buf->index(i), false);
+        for (auto j = 0; j < buf->shape()[1]; j++) {
+            tensor[j] = content[i][j];
+        }
+    }
+}
+
+TEST_F(SamplerTest, testUpdateLogitProcessorStatus) {
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5};
         std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         std::vector<int> think_status = {0, 0, 0, 0};
         BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
-        
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-        std::vector<std::vector<int>> token_ids = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
+        rtp_llm::BufferPtr new_token = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
+        std::vector<std::vector<int>> new_token_ids = {
+            {0},
+            {1},
+            {5},
+            {9}
         };
-        builder.setTokenIds(sampler_inputs, token_ids);
+        setBuffer(new_token, new_token_ids);
         
-        processor->updateStatus(sampler_inputs);
+        processor->updateLogitProcessorStatus(new_token, 1);
 
         auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
-        EXPECT_EQ(0, think_end_tokens_status[0]);
-        EXPECT_EQ(0, think_end_tokens_status[1]);
-        EXPECT_EQ(1, think_end_tokens_status[2]);
-        EXPECT_EQ(0, think_end_tokens_status[3]);
+        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        EXPECT_EQ(0, status_list[0]);
+        EXPECT_EQ(0, status_list[1]);
+        EXPECT_EQ(1, status_list[2]);
+        EXPECT_EQ(0, status_list[3]);
     }
 
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5, 5};
         std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         std::vector<int> think_status = {0, 0, 1, 1};
         BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
-        
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-        std::vector<std::vector<int>> token_ids = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
+        rtp_llm::BufferPtr new_token = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
+        std::vector<std::vector<int>> new_token_ids = {
+            {0},
+            {1},
+            {5},
+            {9}
         };
-        builder.setTokenIds(sampler_inputs, token_ids);
-
-        processor->updateStatus(sampler_inputs);
+        setBuffer(new_token, new_token_ids);
+        
+        processor->updateLogitProcessorStatus(new_token, 1);
 
         auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
-        EXPECT_EQ(0, think_end_tokens_status[0]);
-        EXPECT_EQ(0, think_end_tokens_status[1]);
-        EXPECT_EQ(2, think_end_tokens_status[2]);
-        EXPECT_EQ(0, think_end_tokens_status[3]);
+        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        EXPECT_EQ(0, status_list[0]);
+        EXPECT_EQ(0, status_list[1]);
+        EXPECT_EQ(2, status_list[2]);
+        EXPECT_EQ(0, status_list[3]);
     }
 
     {
         SamplerDataBuilder builder;
         size_t batch_size = 4;
-        size_t vocab_size = 10;
-        size_t max_length = 10;
         std::vector<int> end_think_token_ids = {5, 6};
         std::vector<int> max_thinking_tokens = {3, 3, 3, 3};
         std::vector<int> think_status = {0, 0, 1, 1};
         BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
-        
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-        EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-        std::vector<std::vector<int>> token_ids = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5},
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6}
+        rtp_llm::BufferPtr new_token = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
+        std::vector<std::vector<int>> new_token_ids = {
+            {5},
+            {6},
+            {5},
+            {6}
         };
-        builder.setTokenIds(sampler_inputs, token_ids);
-
-        processor->updateStatus(sampler_inputs);
+        setBuffer(new_token, new_token_ids);
+        
+        processor->updateLogitProcessorStatus(new_token, 1);
 
         auto proc = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> think_end_tokens_status = proc->thinkEndTokensStatus();
-        EXPECT_EQ(1, think_end_tokens_status[0]);
-        EXPECT_EQ(0, think_end_tokens_status[1]);
-        EXPECT_EQ(1, think_end_tokens_status[2]);
-        EXPECT_EQ(2, think_end_tokens_status[3]);
+        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        EXPECT_EQ(1, status_list[0]);
+        EXPECT_EQ(0, status_list[1]);
+        EXPECT_EQ(1, status_list[2]);
+        EXPECT_EQ(2, status_list[3]);
     }
 }
 
@@ -278,16 +276,15 @@ TEST_F(SamplerTest, testSetVocabMask) {
         std::vector<int> think_status = {0, 0, 1, 1};
         BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
         
-        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor});
+        SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
         std::vector<int> sequence_lengths = {1, 2, 3, 4};
         builder.setSequenceLengths(sampler_inputs, sequence_lengths);
         EXPECT_EQ(buffer2vector<int>(*sampler_inputs.sequence_lengths), std::vector<int>({1, 2, 3, 4}));
 
-        EXPECT_EQ((size_t) 1, sampler_inputs.grammars.size());
-        auto grammar = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(sampler_inputs.grammars[0]);
+        auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
         
         for (size_t i = 0; i < batch_size; i++) {
-            grammar->setVocabMask(grammar->think_infos_[i].think_end_status_dfa_ptr,
+            think_processor->setVocabMask(think_processor->think_infos_[i].dfa_ptr,
                 sampler_inputs.logits->index(i), 1, end_think_token_ids,
                 vocab_size, i % 2 == 0 ? true : false);
         }

@@ -14,6 +14,7 @@
 #include "maga_transformer/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "maga_transformer/cpp/core/torch_utils/TorchEvent.h"
 #include "maga_transformer/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "maga_transformer/cpp/kernels/mask_logits.h"
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -587,6 +588,18 @@ MemoryStatus CudaDevice::getDeviceMemoryStatus() {
     RTP_LLM_CHECK(error == cudaSuccess);
     status.used_bytes = total_bytes - status.free_bytes;
     return status;
+}
+
+void CudaDevice::maskLogits(Buffer &logits, const Buffer &mask) {
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeMaskLogits<float>((float*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeMaskLogits<half>((half*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
 }
 
 nvinfer1::DataType nvinfer1DtypeConvert(rtp_llm::DataType dtype) {

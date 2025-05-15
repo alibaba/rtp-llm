@@ -2,11 +2,10 @@
 
 #include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/utils/DFAUtil.h"
-#include "maga_transformer/cpp/models/ThinkModeLogitsProcessor.h"
-#include "maga_transformer/cpp/models/SampleInfos.h"
+#include "maga_transformer/cpp/logits_processor/LogitsProcessorStates.h"
+#include "maga_transformer/cpp/dataclass/SampleInfos.h"
 #include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/devices/DeviceBase.h"
-
 
 
 namespace rtp_llm {
@@ -21,7 +20,6 @@ public:
 
 private:
     void preprocessLogits(const SamplerInputs& inputs);
-    void updateGrammarStatus(const SamplerInputs& inputs);
 
 private:
     rtp_llm::DeviceBase* device_;

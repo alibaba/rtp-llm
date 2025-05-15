@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/stream/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/utils/PrefixToCandidateTokens.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/core/Buffer.h"
 #include "maga_transformer/cpp/core/Types.h"
@@ -74,12 +75,17 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    for (size_t i = 0; i < batchSize(); i++) {
-        StreamThinkInfo think_info(generate_input_->generate_config->in_think_mode,
-            generate_input_->generate_config->max_thinking_tokens,
-            generate_input_->generate_config->end_think_token_ids,
-            std::make_shared<StringContainDFA<size_t, int>>(generate_input_->generate_config->end_think_token_ids));
-        think_infos_.push_back(think_info);
+    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
+    tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
+    initializeLogitsProcessorList();
+}
+
+void GenerateStream::initializeLogitsProcessorList() {
+    if (think_logits_processor_ptr_ != nullptr) {
+        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_logits_processor_ptr_));
+    }
+    if (tree_logits_processor_ptr_ != nullptr) {
+        logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_logits_processor_ptr_));
     }
 }
 
@@ -658,6 +664,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     const auto& new_tokens = update_info.new_tokens;
     auto num_new_tokens = update_info.num_new_tokens;
+    updateLogitProcessorStatus(update_info);
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), vocab_size_, numBeams(), streamId(), error_token_id)) {
@@ -672,14 +679,30 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 }
 
 // beam_idx: [beam_width] int, the element must less than beam_width.
-void GenerateStream::beamSearchKvCacheUpdate(rtp_llm::BufferPtr beam_idx) {
+void GenerateStream::beamSearchKvCacheUpdate(const rtp_llm::BufferPtr& beam_idx) {
     auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
     RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
 
     stream_cache_resource_.beamSearchKvCacheUpdate(beam_idx_vec);
 }
 
+void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {
+    auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
+    RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
 
+    for (auto logit_processor_ptr: getAllLogitsProcessorPtr()) {
+        logit_processor_ptr->beamSearchLogitProcessorUpdate(beam_idx_vec);
+    }
+}
+
+void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
+    const auto& new_tokens = update_info.new_tokens;
+    auto num_new_tokens = update_info.num_new_tokens;
+
+    for (auto logit_processor_ptr: getAllLogitsProcessorPtr()) {
+        logit_processor_ptr->updateLogitProcessorStatus(new_tokens, num_new_tokens);
+    }
+}
 
 void GenerateStream::setLoss(const rtp_llm::Buffer& loss) {
     RTP_LLM_CHECK(loss_index_ + loss.size() < inputLength());

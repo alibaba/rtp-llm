@@ -55,3 +55,18 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "prefix_to_candidate_tokens_test",
+    srcs = [
+        "PrefixToCandidateTokensTest.cc",
+    ],
+    data = [
+        "gir_prefix_dict.json"
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)

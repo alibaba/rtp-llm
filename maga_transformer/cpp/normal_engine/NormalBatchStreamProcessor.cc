@@ -11,6 +11,7 @@
 #include "maga_transformer/cpp/utils/AssertUtils.h"
 #include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "maga_transformer/cpp/logits_processor/LogitsProcessorStates.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/devices/utils/DebugUtils.h"
@@ -229,7 +230,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size, model_inputs.sequence_lengths);
     setCommonSamplerInputs(sampler_inputs, all_streams);
 
-    setThinkModeLogitsProcessorInputs(sampler_inputs, all_streams);
+    setLogitsProcessorInputs(sampler_inputs, all_streams);
 
     int batch_idx   = 0;
     bool return_logits = false;
@@ -291,7 +292,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.sequence_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
-    sampler_inputs.grammars.clear();
+    sampler_inputs.logits_processor_states_ptr.reset();
     sampler_inputs.beam_search_sequence_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     sampler_inputs.beam_index   =  device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {total_batch_size}, rtp_llm::AllocationType::HOST}, {});
     // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
@@ -368,16 +369,16 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs& sampler_i
     }
 }
 
-
-void NormalBatchStreamProcessor::setThinkModeLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
-    std::vector<StreamThinkInfo> think_infos;
-    for (auto& stream : all_streams) {
-        const std::vector<StreamThinkInfo> streamThinkInfo = stream->streamThinkInfo();
-        think_infos.insert(think_infos.end(), streamThinkInfo.begin(), streamThinkInfo.end());
-    }
-    RTP_LLM_CHECK(think_infos.size() == sampler_inputs.batch_size);
-    BaseLogitsProcessorPtr processor_ptr = std::make_shared<ThinkModeLogitsProcessor>(device_, think_infos);
-    sampler_inputs.grammars.push_back(processor_ptr);
+void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch) const {
+    LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    std::for_each(all_streams.begin(), all_streams.end(), 
+        [&state_ptr, idx = 0](auto& stream) mutable {
+            for (const auto& processor: stream->getAllLogitsProcessorPtr()) {
+                state_ptr->insert(processor, idx, idx + stream->tileNum());
+            }
+            idx += stream->tileNum();
+        });
+    sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
@@ -406,6 +407,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->slice(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
+        auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx, current_batch_size);
         BufferPtr batch_cum_log_probs;
         if (sampler_output.cum_log_probs) {
             batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
@@ -441,8 +443,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         }
         RTP_LLM_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         if (stream->numBeams() > 1 && beam_index != nullptr) {
-            StreamUpdateInfo update_info{new_all_token_ids, 1, batch_hidden_states, batch_logits,
+            StreamUpdateInfo update_info{batch_new_all_token_ids, 1, batch_hidden_states, batch_logits,
                     current_softmax_result, batch_cum_log_probs, all_probs, loss, all_hidden_states};
+            stream->beamSearchLogitProcessorUpdate(beam_index);
             stream->update(update_info);
             stream->beamSearchKvCacheUpdate(beam_index);
         } else {

@@ -5,12 +5,10 @@
 #include "maga_transformer/cpp/core/Types.h"
 #include "maga_transformer/cpp/devices/DeviceBase.h"
 
-
-
 namespace rtp_llm {
 
-class BaseLogitsProcessor;
-typedef std::shared_ptr<BaseLogitsProcessor> BaseLogitsProcessorPtr;
+class LogitsProcessorStates;
+typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
     rtp_llm::DeviceBase* device;
@@ -40,7 +38,7 @@ public:
     rtp_llm::BufferPtr input_lengths;     // shape: [batch_size]
     // shape: [decoder_batch_size]
     rtp_llm::BufferPtr sequence_lengths;
-    std::vector<BaseLogitsProcessorPtr> grammars;
+    LogitsProcessorStatesPtr logits_processor_states_ptr;
 
     size_t    vocab_size;
     size_t    step;                  // typically largest sequence length in the batch
@@ -72,20 +70,5 @@ public:
     rtp_llm::BufferPtr success;
 };
 
-struct StreamThinkInfo {
-    bool in_think_mode;
-    int max_thinking_tokens;
-    std::vector<int> end_think_token_ids;
-    std::shared_ptr<StringContainDFA<size_t, int>> think_end_status_dfa_ptr;
-    
-    StreamThinkInfo() = default;
-
-    StreamThinkInfo(
-        bool think_mode, int max_thinking_tokens, std::vector<int> end_think_token_ids, 
-        std::shared_ptr<StringContainDFA<size_t, int>> think_end_status_dfa_ptr) : 
-        in_think_mode(think_mode), max_thinking_tokens(max_thinking_tokens), 
-        end_think_token_ids(end_think_token_ids), 
-        think_end_status_dfa_ptr(think_end_status_dfa_ptr) {}
-};
 
 }  // namespace rtp_llm

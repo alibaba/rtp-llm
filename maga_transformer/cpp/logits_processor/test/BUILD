@@ -8,8 +8,8 @@ test_copts = [
 test_deps = [
     "//maga_transformer/cpp/devices/testing:device_test_utils",
     "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
-    "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:dataclass",
+    "//maga_transformer/cpp:logits_processor",
     "//:gpt_init_params",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -18,11 +18,27 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
-    name = "model_data_test",
+    name = "think_mode_logits_processor_test",
     srcs = [
-        "ModelDataTest.cc",
+        "ThinkModeLogitsProcessorTest.cc",
     ],
     data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "tree_logits_processor_test",
+    srcs = [
+        "TreeLogitsProcessorTest.cc",
+    ],
+    data = [
+        "gir_prefix_dict.json"
+    ],
     copts = test_copts,
     deps = test_deps,
     env = {

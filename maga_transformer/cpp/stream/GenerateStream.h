@@ -6,6 +6,8 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
+#include "maga_transformer/cpp/logits_processor/ThinkModeLogitsProcessor.h"
+#include "maga_transformer/cpp/logits_processor/TreeLogitsProcessor.h"
 #include "maga_transformer/cpp/stream/StreamCacheResource.h"
 #include "maga_transformer/cpp/stream/CompleteTokenIds.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
@@ -204,7 +206,9 @@ public:
         return acceped_bouns_token_;
     }
 
-    void beamSearchKvCacheUpdate(rtp_llm::BufferPtr beam_idx);
+    void beamSearchKvCacheUpdate(const rtp_llm::BufferPtr& beam_idx);
+    void beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx);
+    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
 
     rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
 
@@ -273,9 +277,17 @@ public:
     void incBatchWithPrefillTimes(int32_t times);
     void incBatchWithPrefillLen(int32_t len);
 
+    ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
+        return think_logits_processor_ptr_;
+    }
 
-    const std::vector<StreamThinkInfo> streamThinkInfo() {
-        return think_infos_;
+    TreeLogitsProcessorPtr getTreeLogitsProcessor() {
+        return tree_logits_processor_ptr_;
+    }
+
+    void initializeLogitsProcessorList();
+    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
+        return logits_processor_list_;
     }
 
 public:
@@ -352,9 +364,12 @@ protected:
     std::optional<rtp_llm::BufferPtr>        context_position_ids_;
     PositionIdsStyle                    mm_position_ids_style_;
 
-    std::vector<StreamThinkInfo>        think_infos_;
     rtp_llm::DataType dtype_;
     size_t hidden_size_;
+    
+    ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
+    TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
+    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
 
     // just for bool test
     bool perf_test_ = false;

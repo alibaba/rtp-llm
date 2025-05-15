@@ -131,6 +131,20 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_mask_logits_op_test",
+    srcs = [
+        "CudaMaskLogitsOpTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts(),
+    deps = test_deps + [
+        "//maga_transformer/cpp/devices/cuda_impl:gpu_base",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
     name = "cuda_group_gemm_op_test",
     srcs = [
         "CudaGroupGemmOpTest.cc",

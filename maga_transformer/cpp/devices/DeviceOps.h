@@ -37,6 +37,7 @@ public:
     virtual LossOutput loss(const LossParams& params);
     virtual MaskOutput attentionMask(const MaskParams& params);
     virtual BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params);
+    virtual void maskLogits(Buffer &logits, const Buffer &mask);
 
     // QKV ops
     virtual BufferPtr mhaQKVGemm(const AttentionLayerParams& params);

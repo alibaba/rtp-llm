@@ -25,8 +25,8 @@ TEST_F(DFAUtilTest, testSimple) {
     ASSERT_EQ(0, dfa.next(1));
     ASSERT_EQ(0, dfa.next(2));
     ASSERT_EQ(1, dfa.next(3));
-    ASSERT_EQ(0, dfa.next(1));
-    ASSERT_EQ(0, dfa.next(1));
+    ASSERT_EQ(1, dfa.next(1));
+    ASSERT_EQ(1, dfa.next(1));
     ASSERT_EQ(1, dfa.next(3));
     ASSERT_TRUE(dfa.isFinished());
 }

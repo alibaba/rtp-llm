@@ -267,6 +267,10 @@ torch::Tensor DeviceOps::preprocessWeightScale(torch::Tensor weight, torch::Tens
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::maskLogits(Buffer &logits, const Buffer &mask) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void DeviceOps::perfRangePush(const std::string& name) const {}
 
 void DeviceOps::perfRangePop() const {}

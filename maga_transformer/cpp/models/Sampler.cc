@@ -1,5 +1,7 @@
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/devices/utils/DebugUtils.h"
+#include "maga_transformer/cpp/logits_processor/BaseLogitsProcessor.h"
+#include "maga_transformer/cpp/logits_processor/LogitsProcessorStates.h"
 #include <unordered_set>
 
 using namespace std;
@@ -27,13 +29,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_seq_idx = 0; // accumulates batch_size * num_beams
 
     auto beam_sizes = inputs.num_beams->data<uint64_t>();
-    auto current_beam_size = beam_sizes[0];
 
     const auto& input_tokens = *inputs.token_ids;
     auto success = device_->allocateBuffer({DataType::TYPE_BOOL, {inputs.batch_size}, AllocationType::HOST});
     preprocessLogits(inputs);
 
     do {
+        auto current_beam_size = beam_sizes[sample_to_batch_idx];
         while (sample_to_batch_idx + 1 < inputs.batch_size &&
                beam_sizes[sample_to_batch_idx + 1] == current_beam_size)
         {
@@ -160,7 +162,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         sample_to_batch_idx = from_batch_idx;
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
-    updateGrammarStatus(inputs);
     // TODO(xinfei.sxf) 优化copy token_ids
     return SamplerOutput({move(inputs.token_ids),
                           move(inputs.cum_log_probs),
@@ -170,14 +171,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {
-    for (auto grammar: inputs.grammars) {
-        grammar->process(inputs);
-    }
-}
-
-void Sampler::updateGrammarStatus(const SamplerInputs& inputs) {
-    for (auto grammar: inputs.grammars) {
-        grammar->updateStatus(inputs);
+    if (inputs.logits_processor_states_ptr != nullptr) {
+        inputs.logits_processor_states_ptr->batchProcess(inputs);
     }
 }
 

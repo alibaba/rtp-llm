@@ -103,6 +103,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.gpt_init_parameter, cache_config, warm_up_));
+    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.gpt_init_parameter.ckpt_path_);
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {

@@ -182,6 +182,7 @@ public:
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
     static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch);
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer &logits, const Buffer &mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
