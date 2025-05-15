@@ -1,5 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 
 cc_library(
     name = "xqa_impl",
@@ -13,12 +15,10 @@ cc_library(
     deps = [
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//maga_transformer/cpp/cuda:cuda_utils",
-        "//3rdparty:cuda_driver",
+        "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = cuda_copts() + ['--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a', "--expt-relaxed-constexpr"],
-    visibility = ["//:__subpackages__"],
-    alwayslink = True,
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

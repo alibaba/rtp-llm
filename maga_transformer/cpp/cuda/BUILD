@@ -54,7 +54,6 @@ cc_library(
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "//3rdparty/xqa:xqa_impl",
     ],
     copts = copts(),
     include_prefix = "src",

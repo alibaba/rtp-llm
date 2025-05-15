@@ -359,7 +359,6 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                        use_trtv2_fmha_paged,
                        use_open_source_fmha,
                        use_open_source_fmha_paged,
-                       use_xqa,
                        stream_));
         cufmha_runner_ = cufmha_runner_pool_.back();
     }

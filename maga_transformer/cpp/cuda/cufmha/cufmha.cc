@@ -31,7 +31,6 @@ cufmha::cufmha(DataType dtype,
                bool can_use_trtv2_fmha_paged,
                bool can_use_open_source_fmha,
                bool can_use_open_source_fmha_paged,
-               bool can_use_xqa,
                cudaStream_t stream) {
 
         dtype_ = dtype;
@@ -46,7 +45,6 @@ cufmha::cufmha(DataType dtype,
         support_trt_v2_paged_fmha_ = can_use_trtv2_fmha_paged && initTrtV2FmhaPagedAndCheckSupport();
         // sm 90 use open source has bug currently
         support_open_source_fmha_  = (can_use_open_source_fmha || can_use_open_source_fmha_paged) && initOpenSourceFmhaAndCheckSupport() && get_sm() < 90;
-        support_xqa_ = can_use_xqa && initXqaAndCheckSupport();
         stream_ = stream;
     }
 
@@ -160,14 +158,6 @@ bool cufmha::initOpenSourceFmhaAndCheckSupport()
            (mtype_ == AttentionMaskType::causalMask ||
             mtype_ == AttentionMaskType::noMask) &&
            ((size_per_head_ == 64) || (size_per_head_ == 96) || (size_per_head_ == 128) || (size_per_head_ == 192));
-}
-
-bool cufmha::initXqaAndCheckSupport() {
-    if (get_sm() < tensorrt_llm::kernels::kSM_89) {
-        RTP_LLM_LOG_INFO("cuda sm %d < 89, not support xqa", get_sm());
-        return false;
-    }
-    return true;
 }
 
 void cufmha::runTrtV2FmhaPaged(void*  input,

@@ -24,7 +24,6 @@ public:
            bool              can_use_trtv2_fmha_paged,
            bool              can_use_open_source_fmha,
            bool              can_use_open_source_fmha_paged,
-           bool              can_use_xqa,
            cudaStream_t      stream);
 
     ~cufmha() = default;
@@ -43,10 +42,6 @@ public:
 
     bool openSourceFmhaSupport() {
         return support_open_source_fmha_;
-    }
-
-    bool xqaSupport() {
-        return support_xqa_;
     }
 
     void runTrtV1Fmha(void* input,
@@ -133,8 +128,6 @@ private:
 
     bool initOpenSourceFmhaAndCheckSupport();
 
-    bool initXqaAndCheckSupport();
-
     static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
@@ -175,7 +168,6 @@ private:
     bool support_trt_v2_fhma_;
     bool support_trt_v2_paged_fmha_;
     bool support_open_source_fmha_;
-    bool support_xqa_;
 
     cudaStream_t stream_;
 };

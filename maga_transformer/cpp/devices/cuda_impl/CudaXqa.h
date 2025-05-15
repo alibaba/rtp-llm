@@ -37,7 +37,7 @@ void runXqa(void* input,
             uint32_t* sequence_lengths,
             CudaDevice *device,
             float q_scale = 1.f,
-            size_t max_decode_batch_size = 256,
+            size_t max_decode_batch_size = 1024,
             uint32_t beam_width = beamWidth);
 
 }

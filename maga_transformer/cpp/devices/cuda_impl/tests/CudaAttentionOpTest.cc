@@ -236,7 +236,8 @@ TEST_F(AttentionOpTest, LongSeqSelfAttentionOpTest) {
     }
 }
 
-TEST_F(AttentionOpTest, XqaSelfAttentionOpTest) {
+#ifdef USING_CUDA12
+TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     setenv("ENABLE_TRT_FMHA", "OFF", 1);
     setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
     setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
@@ -247,22 +248,32 @@ TEST_F(AttentionOpTest, XqaSelfAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
-    std::vector<size_t> batch = {3};
+    std::vector<size_t> batch = {2};
     std::vector<size_t> seq   = {1};
-    std::vector<size_t> kv_seq = {2049};
+    std::vector<size_t> kv_seq = {TOKENS_PER_PAGE + 1};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
             for (auto kv_seq_len: kv_seq) {
                 size_t num_key_value_heads = 4;
                 size_t num_heads = num_key_value_heads * HEAD_GRP_SIZE;
                 size_t head_dim = HEAD_ELEMS;
-                xqaInputKVOpTest(batch_size,
-                                 seq_len,
-                                 kv_seq_len,
-                                 num_heads,
-                                 num_key_value_heads,
-                                 head_dim);
+                if (USE_INPUT_KV) {
+                    xqaInputQKVAttentionOpTest(batch_size,
+                                               seq_len,
+                                               kv_seq_len,
+                                               num_heads,
+                                               num_key_value_heads,
+                                               head_dim);
+                } else {
+                    xqaInputQAttentionOpTest(batch_size,
+                                             seq_len,
+                                             kv_seq_len,
+                                             num_heads,
+                                             num_key_value_heads,
+                                             head_dim);
+                }
             }
         }
     }
 }
+#endif

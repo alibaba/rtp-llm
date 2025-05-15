@@ -4,7 +4,6 @@
 #include "maga_transformer/cpp/devices/OpData.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
 #include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "maga_transformer/cpp/devices/cuda_impl/CudaXqa.h"
 #include "maga_transformer/cpp/devices/CommonDefines.h"
 #include "maga_transformer/cpp/devices/utils/DebugUtils.h"
 #include "maga_transformer/cpp/cuda/Dispatch.h"
@@ -13,6 +12,10 @@
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
+
+#ifdef USING_CUDA12
+#include "maga_transformer/cpp/devices/cuda_impl/CudaXqa.h"
+#endif
 
 using namespace std;
 using namespace rtp_llm;
@@ -479,6 +482,7 @@ void FlashInferAttnParams::run(
 
     sync_check_cuda_error();
 
+#ifdef USING_CUDA12
     if (use_xqa && size_per_head == HEAD_ELEMS && local_head_num / local_head_num_kv == HEAD_GRP_SIZE &&
         params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3 &&
         params.input.type() == DataType::TYPE_BF16 && params.output.type() == DataType::TYPE_BF16 &&
@@ -498,6 +502,7 @@ void FlashInferAttnParams::run(
 
         return;
     }
+#endif
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

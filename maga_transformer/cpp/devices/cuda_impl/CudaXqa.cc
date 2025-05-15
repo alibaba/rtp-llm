@@ -57,8 +57,7 @@ void runXqa(void* input,
             CudaDevice *device,
             float q_scale,
             size_t max_decode_batch_size,
-            uint32_t beam_width)
-{
+            uint32_t beam_width) {
     if (!input || !output || !head_num || !kv_head_num || !decode_batch_size || decode_batch_size > max_decode_batch_size ||
         !decode_max_seq_len || !tokens_per_block || !kv_cache_pool || !kv_cache_page_list || !sequence_lengths || !device) {
         RTP_LLM_LOG_ERROR("xqa params error: input = %p, output = %p, head_num = %zu, kv_head_num = %zu, decode_batch_size = %zu, "

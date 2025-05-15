@@ -46,8 +46,12 @@ cc_library(
     hdrs = [
         "CudaDevice.h",
         "CudaFlashInfer.h",
-        "CudaXqa.h",
-    ],
+    ] + select({
+        "@//:using_cuda12": [
+            "CudaXqa.h",
+        ],
+        "//conditions:default": [],
+    }),
     srcs = [
         "CudaDevice.cc",
         "CudaWeights.cc",
@@ -63,8 +67,12 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
-        "CudaXqa.cc",
-    ],
+    ] + select({
+        "@//:using_cuda12": [
+            "CudaXqa.cc",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         "//maga_transformer/cpp/devices:devices_base",
         "//maga_transformer/cpp/devices:device_utils",
@@ -87,6 +95,11 @@ cc_library(
     ] + select({
         ":enable_deep_ep": [
             ":deep_ep_buffer",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12": [
+            "//3rdparty/xqa:xqa_impl",
         ],
         "//conditions:default": [],
     }),
