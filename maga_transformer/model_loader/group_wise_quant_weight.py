@@ -260,7 +260,6 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
         else:
             raise ValueError(f"Unsupported weight name {self.kernel.name}")
 
-        logging.info(f"now apply quant func to weight {self.kernel.name}: {kernel.shape}, {zero.shape}, {scale.shape}, {kernel}, {zero}, {scale}, {self.quant_algo.getWeightBits}")
         weight, zero, scale = post_func(kernel, zero, scale, device,
                                                      self.quant_algo.isGptq(),
                                                      self.quant_algo.isAwq(),
