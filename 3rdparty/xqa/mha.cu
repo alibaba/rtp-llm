@@ -28,6 +28,8 @@
 #endif
 #endif
 
+#if !defined(__CUDA_ARCH__) || (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 890 || __CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 870 || __CUDA_ARCH__ == 900))
+
 // There are 4 ways to pass ctaRowMax backward from gemm1 warps to gemm0 warps:
 //  1. Protect with xFwdBarriers+xBwdBarriers. This way, ctaRowMax is available to gemm0 warps together with x tiles and
 //  warpRowMax/warpRowSum. But ctaRowMax is required before warp tile online softmax, while the other buffers is needed
@@ -2815,3 +2817,5 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #endif // USE_INPUT_KV
 }
 #endif
+
+#endif // __CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 890 || __CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 870 || __CUDA_ARCH__ == 900

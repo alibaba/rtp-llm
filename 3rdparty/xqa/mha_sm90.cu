@@ -16,6 +16,8 @@
 #include "utils.cuh"
 #include "utils.h"
 
+#if !defined(__CUDA_ARCH__) || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900)
+
 #if SPEC_DEC
 #define Q_HEADS_PER_CTA 64
 #include "specDec.h"
@@ -3221,3 +3223,5 @@ void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
     checkCuda(err);
 }
 #endif
+
+#endif // defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900
