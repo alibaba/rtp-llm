@@ -193,6 +193,10 @@ class CkptFileInfo:
                 logging.info(f"use safetensors to device: {device}")
                 from safetensors.torch import load_file
                 return load_file(self.file_name, device=device)
+            except RuntimeError as e:
+                logging.info(f"use safetensors to device: {device} instead, because fast load failed: {e},")
+                from safetensors.torch import load_file
+                return load_file(self.file_name, device=device)                
         else:
             return torch.load(self.file_name, map_location=torch.device(device))
 
