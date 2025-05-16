@@ -30,6 +30,10 @@ class BaseDatabase:
     def is_ft_style(self)-> bool:
         return False
 
+    @property
+    def ft_weight_params(self) -> Optional[Dict[str, Any]]:
+        return None
+
 
 class CkptDatabase(BaseDatabase):
 
@@ -57,11 +61,17 @@ class CkptDatabase(BaseDatabase):
 
         self._is_ft_style: bool = self._parse_weight_style(path)
 
+        self._ft_weight_params = self._parse_ft_weight_params(path) if self._is_ft_style else None
+
         logging.debug(f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}")
 
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
+
+    @property
+    def ft_weight_params(self) -> Optional[Dict[str, Any]]:
+        return self._ft_weight_params
     
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
@@ -190,3 +200,9 @@ class CkptDatabase(BaseDatabase):
         else:
             return False
         
+
+    def _parse_ft_weight_params(self, ckpt_path: str):
+        meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
+        with open(meta_file, 'r') as reader:
+            meta_json = json.loads(reader.read())
+            return meta_json.get("__env__params__", None)

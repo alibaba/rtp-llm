@@ -12,6 +12,7 @@ from maga_transformer.model_loader.load_config import LoadConfig
 from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight, CompositeWeight
 from maga_transformer.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from maga_transformer.model_loader.attn_weight import AttnConfig
+from maga_transformer.distribute.worker_info import ParallelInfo
 
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
@@ -393,6 +394,13 @@ class ModelDeployWeightInfo:
         if database.has_lora() and not self.support_lora:
             raise Exception(f"current weights_info: {self.__class__} not support lora, but database has lora")
 
+        if database.is_ft_style and database.ft_weight_params:
+            # check ft_style ParallelInfo is match weight's ParallelInfo
+            src_paralle_info = ParallelInfo.from_params(database.ft_weight_params)
+            if src_paralle_info.tp_size != self.tp_size or src_paralle_info.dp_size != self.dp_size or src_paralle_info.ep_size != self.ep_size:
+                raise ValueError(f"ft_style ParallelInfo is not match weight's ParallelInfo, src_paralle_info: {src_paralle_info}" + \
+                    f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, ep_size: {self.ep_size}")
+            
         load_config = LoadConfig(
             database = database,
             num_layers = self._num_layers,
