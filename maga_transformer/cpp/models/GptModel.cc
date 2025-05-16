@@ -290,7 +290,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
 
     // disable micro batching if both context and decoder query exists.
     if (context_batch_size && decoder_batch_size) {
-        RTP_LLM_LOG_INFO("split context in micro batch 0, decode in micro batch 1 disabled!");
+        RTP_LLM_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
         return {false, {}};
     }
 
@@ -298,7 +298,7 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto micro_batch_0_size = (batch_size_to_split + 1) / 2;
     const auto micro_batch_1_size = batch_size_to_split - micro_batch_0_size;
 
-    RTP_LLM_LOG_INFO("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
+    RTP_LLM_LOG_DEBUG("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
     return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}}
                               : MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
 }
