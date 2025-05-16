@@ -64,3 +64,18 @@ py_test(
         "//maga_transformer:pynvml",
     ],
 )
+
+py_test(
+    name = "multimodal_util_test",
+    srcs = [
+        "multimodal_util_test.py",
+    ],
+    deps = [
+        "//maga_transformer:utils",
+        "//maga_transformer:_ft_pickler",
+        "//maga_transformer:pynvml",
+        "//maga_transformer:Pillow",
+        "//maga_transformer:oss2",
+        "//maga_transformer:pyOpenSSL"
+    ],
+)

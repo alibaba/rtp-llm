@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import json
 import requests
@@ -23,6 +24,14 @@ else:
     }
 
 BASE64_PREFIX = 'data:image/jpeg;base64,'
+URL_CACHE_SIZE = int(os.environ.get('URL_CACHE_ITEM_NUM', '100'))
+MM_CACHE_SIZE = int(os.environ.get('MM_CACHE_ITEM_NUM', '10'))
+
+def get_base64_prefix(s):
+    match = re.match(r'^data:[^,]*;base64,', s)
+    if not match:
+        return 0
+    return match.end()
 
 class MMUrlType(IntEnum):
     DEFAULT = 0
@@ -72,8 +81,8 @@ def get_bytes_io_from_url(url: str):
                     raise Exception(f'download failed, error code: {response.status_code}')
             elif url.startswith("oss"):
                 res = get_bytes_io_from_oss_path(url)
-            elif url.startswith(BASE64_PREFIX):
-                url = maybe_unhash_url(url)[len(BASE64_PREFIX):]
+            elif get_base64_prefix(url) > 0:
+                url = maybe_unhash_url(url)[get_base64_prefix(url):]
                 res = BytesIO(base64.b64decode(url))
             else:
                 # treat url as local path
@@ -110,23 +119,25 @@ class MMDataCache(object):
         with self.cache_lock:
             self.mm_data_cache[url] = data
 
-hashed_url_cache_ = MMDataCache(100)
+hashed_url_cache_ = MMDataCache(URL_CACHE_SIZE)
 
 def maybe_hash_url(url: str):
-    if url.startswith(BASE64_PREFIX):
-        hashed_url = url[len(BASE64_PREFIX):]
-        hashed_url = BASE64_PREFIX + hashlib.sha512(hashed_url.encode('utf-8')).hexdigest()
+    prefix_len = get_base64_prefix(url)
+    if prefix_len > 0:
+        hashed_url = url[prefix_len:]
+        hashed_url = url[:prefix_len] + hashlib.sha512(hashed_url.encode('utf-8')).hexdigest()
         hashed_url_cache_.insert_cache(hashed_url, url)
         return hashed_url
     return url
 
 def maybe_unhash_url(hashed_url: str):
-    if hashed_url.startswith(BASE64_PREFIX):
+    prefix_len = get_base64_prefix(hashed_url)
+    if prefix_len > 0:
         url = hashed_url_cache_.check_cache(hashed_url)
         if url is None:
             return hashed_url
         return url
     return hashed_url
 
-vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '0')))
-url_data_cache_ = MMDataCache(100)
+vit_emb_cache_ = MMDataCache(MM_CACHE_SIZE)
+url_data_cache_ = MMDataCache(URL_CACHE_SIZE)
