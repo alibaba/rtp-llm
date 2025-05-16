@@ -75,9 +75,9 @@ class ModelLoader:
                 lora_weights.set_layer_weight(False, id, name, tensor)
 
         lora_weights.apply_scale(lora_alpha / rank) # apply scale
-        self._load_config.database.remove_lora(adapter_name)    
+        self._load_config.database.remove_lora(adapter_name)
         return lora_weights
-        
+
     def dump_weight_as_ft_style(self, device: str, output_dir: str):
         check_with_info(not self._load_config.is_ft_style_weight, "dump_weight_as_ft_style only support non-ft-style weight")
         tp_rank = self._load_config.tp_rank
@@ -97,11 +97,12 @@ class ModelLoader:
             nonlocal current_size, part_idx, current_dict
             if current_size >= max_size:
                 filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
-                save_max_retry_times = 10   # maybe fuse is unstable
+                save_max_retry_times = 2   # maybe fuse is unstable
                 for i in range(save_max_retry_times):
                     try:
                         safetensors.torch.save_file(current_dict, filename)
                         logging.info(f"Saved partition {part_idx} ({current_size/1024**3:.2f}GB)")
+                        break
                     except Exception as e:
                         logging.error(f"Failed to save partition {part_idx}: {e}")
                         if i == save_max_retry_times - 1:
