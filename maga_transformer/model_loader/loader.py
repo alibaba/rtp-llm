@@ -33,7 +33,7 @@ class ModelLoader:
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
     def load_weights(self, device: str):
-        if self._weights_info.weight_style == WeightStyle.RTP_LLM_STYLE:
+        if self._load_config.is_ft_style_weight:
             return self._load_from_ft_style(device)
 
         weights = self._create_model_weights(device)
@@ -97,9 +97,19 @@ class ModelLoader:
             nonlocal current_size, part_idx, current_dict
             if current_size >= max_size:
                 filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
-                safetensors.torch.save_file(current_dict, filename)
-                logging.info(f"Saved partition {part_idx} ({current_size/1024**3:.2f}GB)")
-                # 显式释放内存
+                save_max_retry_times = 10   # maybe fuse is unstable
+                for i in range(save_max_retry_times):
+                    try:
+                        safetensors.torch.save_file(current_dict, filename)
+                        logging.info(f"Saved partition {part_idx} ({current_size/1024**3:.2f}GB)")
+                    except Exception as e:
+                        logging.error(f"Failed to save partition {part_idx}: {e}")
+                        if i == save_max_retry_times - 1:
+                            raise e
+                        else:
+                            logging.info(f"Failed to save partition {part_idx}: {e}, Retrying...")
+                            continue
+                # release gpu memory
                 del current_dict
                 current_dict = OrderedDict()
                 part_idx += 1
@@ -114,9 +124,9 @@ class ModelLoader:
             current_dict[tensor_name] = tensor.cpu().contiguous()
             current_size += tensor_size
             maybe_save()
-            # self.force_clean_cuda_memory()
+            self.force_clean_cuda_memory()
 
-        # 保存最后剩余部分
+        # save last partition
         if current_dict:
             filename = f"{filename_prefix}part-{part_idx:05d}.safetensors"
             safetensors.torch.save_file(current_dict, filename)
@@ -154,7 +164,6 @@ class ModelLoader:
                 global_weights[name] = tensor[0].to(device)
         model_weights.weights = weights
         model_weights.global_weights = global_weights
-        model_weights.is_ft_style_weight = True
         return model_weights
 
     def prepare_weights(self, device: str):

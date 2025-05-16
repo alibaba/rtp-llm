@@ -26,6 +26,10 @@ class BaseDatabase:
     def get_tensor_type(self, name: str) -> torch.dtype:
         raise NotImplementedError
 
+    @property
+    def is_ft_style(self)-> bool:
+        return False
+
 
 class CkptDatabase(BaseDatabase):
 
@@ -51,8 +55,14 @@ class CkptDatabase(BaseDatabase):
 
         self.load_ptuning_meta(ptuning_path)
 
+        self._is_ft_style: bool = self._parse_weight_style(path)
+
         logging.debug(f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}")
 
+    @property
+    def is_ft_style(self) -> bool:
+        return self._is_ft_style
+    
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
         index = os.path.join(path, 'model.safetensors.index.json')
@@ -169,3 +179,14 @@ class CkptDatabase(BaseDatabase):
 
     def dump_lora_info(self) -> None:
         self.LoraCkpt.dump_lora_info()
+
+    def _parse_weight_style(self, ckpt_path: str):
+        if ckpt_path and os.path.exists(os.path.join(ckpt_path, "model.safetensors.index.json")):
+            meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
+            logging.info(f"read weight style from: {meta_file}")
+            with open(meta_file, 'r') as reader:
+                meta_json = json.loads(reader.read())
+                return meta_json.get("is_ft_style_weight", False)
+        else:
+            return False
+        

@@ -166,7 +166,7 @@ class ModelDeployWeightInfo:
         self.tie_word_embeddings = config.tie_word_embeddings
         self.need_ffn_act_scale = config.need_ffn_act_scale
         self.use_expert_attention = config.use_expert_attention
-        self.weight_style = WeightStyle.RTP_LLM_STYLE if config.is_ft_style_weight else WeightStyle.NONE
+        self.weight_style = WeightStyle.NONE
 
 
         # for mla
@@ -175,7 +175,6 @@ class ModelDeployWeightInfo:
         self.rope_head_dim = config.rope_head_dim
         self.v_head_dim = config.v_head_dim
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.is_ft_style_weight = config.is_ft_style_weight
 
         # for vit sep
         self.vit_separation = config.vit_separation
@@ -353,22 +352,22 @@ class ModelDeployWeightInfo:
         raise NotImplementedError()
 
     def create_model_weight_info(self, database: BaseDatabase) -> ModelWeightInfo:
-        if isinstance(database, CkptDatabase):
+        if isinstance(database, CkptDatabase) and not database.is_ft_style:
             self.process_meta_from_ckpt(database.PretrainFileList)
             self.process_meta_from_ckpt(database.FinetuneFileList)
-            if not self.is_ft_style_weight:
-                return self.get_weight_info()
+            return self.get_weight_info()
+        elif database.is_ft_style:
+            return None
         else:
             raise Exception("Unknown database class")
 
     def process_meta_from_ckpt(self, ckpt_metas: List[CkptFileInfo]):
         if len(ckpt_metas) == 0:
             return
-        if not self.is_ft_style_weight:
-            # call subclass process_meta
-            meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
-            weight_keys = set(functools.reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
-            self._process_meta(meta_dicts, weight_keys)
+        # call subclass process_meta
+        meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
+        weight_keys = set(functools.reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
+        self._process_meta(meta_dicts, weight_keys)
 
     def _process_meta(self, meta_dict, weight_keys):
         pass
@@ -388,7 +387,7 @@ class ModelDeployWeightInfo:
                            database: BaseDatabase,
                            exported_device: Optional[Any] = None):
         merge_lora = False
-        if not self.is_ft_style_weight:
+        if not database.is_ft_style:
             merge_lora = database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
 
         if database.has_lora() and not self.support_lora:
@@ -427,7 +426,7 @@ class ModelDeployWeightInfo:
             compute_dtype = compute_dtype,
             quant_algo = self._quant_algo,
             bit = self._quant_algo.getWeightBits(),
-            is_ft_style_weight = self.is_ft_style_weight,
+            is_ft_style_weight = database.is_ft_style,
             phy2log=self.phy2log_,
             exported_device = exported_device
         )
@@ -440,7 +439,6 @@ class ModelWeights:
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._dtype = dtype
-        self.is_ft_style_weight: bool = False
 
         for _ in range(num_layers):
             self.weights.append({})
