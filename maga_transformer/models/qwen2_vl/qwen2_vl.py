@@ -14,7 +14,7 @@ from maga_transformer.model_factory_register import register_model
 
 from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 
-from maga_transformer.utils.model_weight import (W, CkptWeightInfo, identity, zeros, transpose, merge_qkv_b, merge_qkv_hf, transpose_pad)
+from maga_transformer.utils.model_weight import (W, CkptWeightInfo, identity, merge_qkv_lora_A, merge_qkv_lora_B, sp_0, sp_head_lora, sp_id, sp_neg1, zeros, transpose, merge_qkv_b, merge_qkv_hf, transpose_pad)
 from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
 from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
@@ -30,6 +30,10 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         ModelDeployWeightInfo.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
 
+    @property
+    def support_lora(self) -> bool:
+        return True
+    
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
         weights = self._get_vit_info(weights)
@@ -60,19 +64,33 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
             AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.k_proj.weight', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.v_proj.weight', identity)],
-                                      functools.partial(merge_qkv_hf), config=attn_config),
+                                      functools.partial(merge_qkv_hf), config=attn_config,
+                                      lora_a_process_func=functools.partial(merge_qkv_lora_A, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
+                                      lora_b_process_func=functools.partial(merge_qkv_lora_B, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
+                                      lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora),
             AttnAtomicWeight(W.attn_qkv_b, [CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
                                       CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)],
-                                      functools.partial(merge_qkv_b), config=attn_config),
+                                      functools.partial(merge_qkv_b), config=attn_config,
+                                      lora_a_process_func=transpose, lora_b_process_func=transpose,
+                                      lora_a_split_func=sp_0, lora_b_split_func=sp_id),
             AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)], transpose, config=attn_config),
             FfnWeight(sub_weights=[
                 FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)], 
-                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config),
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config,
+                                lora_a_process_func=transpose,
+                                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
                 FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)], 
-                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config),
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0), config=ffn_config,
+                                lora_a_process_func=transpose,
+                                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+                                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
                 FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)], 
-                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1), config=ffn_config)
+                                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1), config=ffn_config,
+                                lora_a_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1),
+                                lora_b_process_func=transpose,
+                                lora_a_split_func=sp_0, lora_b_split_func=sp_id)
             ], config=ffn_config),
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity)
         ]
