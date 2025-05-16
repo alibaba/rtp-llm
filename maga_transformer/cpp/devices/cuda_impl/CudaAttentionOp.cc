@@ -17,6 +17,10 @@
 #include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/utils/RpcErrorCode.h"
 
+#ifdef USING_CUDA12
+#include "maga_transformer/cpp/devices/cuda_impl/CudaXqa.h"
+#endif
+
 using namespace std;
 using namespace rtp_llm;
 
@@ -325,6 +329,28 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto       kv_cache_block_id      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_block_id"});
     KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, use_fp8_fmha_);
+
+#ifdef USING_CUDA12
+    size_t local_kv_head_num = params.configs.kv_head_num;
+    if (use_xqa && size_per_head == HEAD_ELEMS && local_head_num / local_kv_head_num == HEAD_GRP_SIZE &&
+        params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3 &&
+        params.input.type() == DataType::TYPE_BF16 && params.output.type() == DataType::TYPE_BF16 &&
+        params.configs.tokens_per_block == TOKENS_PER_PAGE) {
+        runXqa(params.input.data(),
+               params.output.data(),
+               local_head_num,
+               local_kv_head_num,
+               params.common.decoder_batch_size,
+               params.common.decoder_max_seq_len,
+               params.configs.tokens_per_block,
+               kv_block_array.mPrimaryPoolPtr,
+               reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+               reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
+               this);
+        return;
+    }
+#endif
+
     auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
     if (flash_infer && flash_infer->plan.numel() > 0) {
         BufferPtr f16_out;

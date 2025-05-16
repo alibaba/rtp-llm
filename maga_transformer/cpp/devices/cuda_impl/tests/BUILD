@@ -188,6 +188,7 @@ cc_test(
     env = test_envs,
     copts = copts() + ["-fno-access-control"],
     deps = test_deps,
+    tags = ['H20'],
     exec_properties = {'gpu':'H20'},
 )
 

@@ -95,7 +95,7 @@ cc_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":kernels_cu",
-        "//3rdparty:cuda_driver",
+        "@local_config_cuda//cuda:cuda_driver",
         "//maga_transformer/cpp:utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

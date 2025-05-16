@@ -18,7 +18,7 @@
 #include "cubin/fmha_cubin.h"
 #include "cuda_runtime_api.h"
 #include "fused_multihead_attention_common.h"
-#include "3rdparty/common/cudaDriverWrapper.h"
+#include "3rdparty/common/cuda_driver.h"
 #include "tmaDescriptor.h"
 #include <assert.h>
 #include <memory>
@@ -69,8 +69,7 @@ public:
 
     TFusedMultiHeadAttentionXMMAKernel(
         TKernelMeta const* pMetaStart, unsigned int nMetaCount, Data_type type, unsigned int sm)
-        : mDriver(CUDADriverWrapper::getInstance())
-        , mDataType(type)
+        : mDataType(type)
         , mKernelMeta(pMetaStart)
         , mKernelMetaCount(nMetaCount)
         , mSM(sm)
@@ -97,19 +96,17 @@ public:
                 }
                 else
                 {
-                    cuErrCheck(mDriver->cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
+                    checkCu(cuModuleLoadData(&hmod, kernelMeta.mCubin));
                     mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
                 }
 
                 FusedMultiHeadAttentionKernelInfo funcInfo;
                 funcInfo.mMetaInfoIndex = i;
-                cuErrCheck(
-                    mDriver->cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
+                checkCu(cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName));
                 if (kernelMeta.mSharedMemBytes >= 48 * 1024)
                 {
-                    cuErrCheck(mDriver->cuFuncSetAttribute(funcInfo.mDeviceFunction,
-                                   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
-                        mDriver);
+                    checkCu(cuFuncSetAttribute(funcInfo.mDeviceFunction,
+                                   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes));
                 }
                 mFunctions.insert(std::make_pair(hashID(kernelMeta), funcInfo));
                 int s = static_cast<int>(kernelMeta.mS);
@@ -132,9 +129,8 @@ public:
         const CUfunction func = findIter->second.mDeviceFunction;
 
         void* kernelParams[] = {&params, nullptr};
-        cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
-                       kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-            mDriver);
+        checkCu(cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+                       kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
     }
 
     virtual void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv,
@@ -150,8 +146,6 @@ public:
     virtual ~TFusedMultiHeadAttentionXMMAKernel() = default;
 
 protected:
-    std::shared_ptr<CUDADriverWrapper> mDriver;
-
     Data_type mDataType;
     TKernelMeta const* mKernelMeta;
     unsigned int mKernelMetaCount;
@@ -276,9 +270,8 @@ public:
 
         if (!forceUnroll)
         {
-            cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
-                           kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                mDriver);
+            checkCu(cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+                           kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
         } // forceunroll = true for flash attention kernels
         else if (mSM == kSM_90 && launch_params.flash_attention && launch_params.warp_specialization)
         {
@@ -327,9 +320,8 @@ public:
                 }
             }
 
-            cuErrCheck(mDriver->cuLaunchKernel(func, block_size.x, block_size.y, block_size.z,
-                           kernelMeta.mThreadsPerCTA, 1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                mDriver);
+            checkCu(cuLaunchKernel(func, block_size.x, block_size.y, block_size.z,
+                           kernelMeta.mThreadsPerCTA, 1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
         }
         else
         { // forceunroll = true for flash attention kernels
@@ -345,26 +337,21 @@ public:
             {
                 if (kernelMeta.mSharedMemBytes >= 48 * 1024)
                 {
-                    cuErrCheck(mDriver->cuFuncSetAttribute(func,
-                                                          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
-                               mDriver);
+                    checkCu(cuFuncSetAttribute(func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes));
                 }
-                cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
+                checkCu(cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
             }
             // on Hopper non-flash-attention, we still launch blocks (h, b, steps)
             else if (mSM == kSM_90 && !launch_params.flash_attention)
             {
-                cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
+                checkCu(cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
             } // on Ampere/Ada/Volta flash attention, we launch blocks (steps, h, b)
             else
             {
-                cuErrCheck(mDriver->cuLaunchKernel(func, unroll, params.h, params.b, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
+                checkCu(cuLaunchKernel(func, unroll, params.h, params.b, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));
             }
         }
     }

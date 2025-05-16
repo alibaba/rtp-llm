@@ -13,10 +13,6 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
 
-#ifdef USING_CUDA12
-#include "maga_transformer/cpp/devices/cuda_impl/CudaXqa.h"
-#endif
-
 using namespace std;
 using namespace rtp_llm;
 
@@ -481,28 +477,6 @@ void FlashInferAttnParams::run(
     moe_insertion_callback();
 
     sync_check_cuda_error();
-
-#ifdef USING_CUDA12
-    if (use_xqa && size_per_head == HEAD_ELEMS && local_head_num / local_head_num_kv == HEAD_GRP_SIZE &&
-        params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3 &&
-        params.input.type() == DataType::TYPE_BF16 && params.output.type() == DataType::TYPE_BF16 &&
-        params.configs.tokens_per_block == TOKENS_PER_PAGE) {
-        auto q_c = q.contiguous();
-        runXqa(q_c.data_ptr(),
-               params.output.data(),
-               local_head_num,
-               local_head_num_kv,
-               params.common.decoder_batch_size,
-               params.common.decoder_max_seq_len + 1,
-               params.configs.tokens_per_block,
-               kv_block_array.mPrimaryPoolPtr,
-               reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
-               reinterpret_cast<uint32_t*>(kvlen_d.data_ptr()),
-               device);
-
-        return;
-    }
-#endif
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

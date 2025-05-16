@@ -21,6 +21,9 @@ namespace rtp_llm {
  * @param kv_cache_page_list [batch_size, beam_width, 2, max_pages_per_seq]
  * @param sequence_lengths kv seq len
  * @param device 
+ * @param rope_theta 
+ * @param rope_dim 
+ * @param max_position_embeddings 
  * @param q_scale 
  * @param max_decode_batch_size for semaphores
  * @param beam_width 
@@ -36,6 +39,9 @@ void runXqa(void* input,
             int32_t* kv_cache_page_list,
             uint32_t* sequence_lengths,
             CudaDevice *device,
+            int rope_theta = 1000000,
+            int rope_dim = validElemsPerHead,
+            int max_position_embeddings = 40960,
             float q_scale = 1.f,
             size_t max_decode_batch_size = 1024,
             uint32_t beam_width = beamWidth);

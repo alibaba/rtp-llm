@@ -250,28 +250,19 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2};
     std::vector<size_t> seq   = {1};
-    std::vector<size_t> kv_seq = {TOKENS_PER_PAGE + 1};
+    std::vector<size_t> kv_seq = {1, TOKENS_PER_PAGE - 1, TOKENS_PER_PAGE, TOKENS_PER_PAGE + 1};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
             for (auto kv_seq_len: kv_seq) {
                 size_t num_key_value_heads = 4;
                 size_t num_heads = num_key_value_heads * HEAD_GRP_SIZE;
                 size_t head_dim = HEAD_ELEMS;
-                if (USE_INPUT_KV) {
-                    xqaInputQKVAttentionOpTest(batch_size,
-                                               seq_len,
-                                               kv_seq_len,
-                                               num_heads,
-                                               num_key_value_heads,
-                                               head_dim);
-                } else {
-                    xqaInputQAttentionOpTest(batch_size,
-                                             seq_len,
-                                             kv_seq_len,
-                                             num_heads,
-                                             num_key_value_heads,
-                                             head_dim);
-                }
+                xqaAttentionOpTest(batch_size,
+                                   seq_len,
+                                   kv_seq_len,
+                                   num_heads,
+                                   num_key_value_heads,
+                                   head_dim);
             }
         }
     }

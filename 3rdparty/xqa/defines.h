@@ -109,7 +109,7 @@ using MaskType = uint32_t;
 #endif
 
 #ifndef USE_INPUT_KV
-#define USE_INPUT_KV 0
+#define USE_INPUT_KV 1
 #endif
 
 #if USE_INPUT_KV
@@ -117,7 +117,7 @@ using MaskType = uint32_t;
 // 1 - NEOX style
 // 2 - GPTJ style
 #ifndef ROPE_STYLE
-#define ROPE_STYLE 0
+#define ROPE_STYLE 1
 #endif
 
 #if SPEC_DEC

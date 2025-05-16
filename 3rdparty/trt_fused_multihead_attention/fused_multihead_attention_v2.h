@@ -5341,18 +5341,17 @@ public:
         const CUfunction func           = findIter->second.mDeviceFunction;
         void*            kernelParams[] = {&params, nullptr};
         if (!forceUnroll) {
-            cuErrCheck(mDriver->cuLaunchKernel(func,
-                                              params.h,
-                                              params.b,
-                                              1,
-                                              kernelMeta.mThreadsPerCTA,
-                                              1,
-                                              1,
-                                              kernelMeta.mSharedMemBytes,
-                                              ss,
-                                              kernelParams,
-                                              nullptr),
-                       mDriver);
+            checkCu(cuLaunchKernel(func,
+                                   params.h,
+                                   params.b,
+                                   1,
+                                   kernelMeta.mThreadsPerCTA,
+                                   1,
+                                   1,
+                                   kernelMeta.mSharedMemBytes,
+                                   ss,
+                                   kernelParams,
+                                   nullptr));
         }
         else {
             int unroll = kernelMeta.mS / kernelMeta.mUnrollStep;
@@ -5361,18 +5360,17 @@ public:
             if (flash_attention) {
                 unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
             }
-            cuErrCheck(mDriver->cuLaunchKernel(func,
-                                              params.h,
-                                              params.b,
-                                              unroll,
-                                              kernelMeta.mThreadsPerCTA,
-                                              1,
-                                              1,
-                                              kernelMeta.mSharedMemBytes,
-                                              ss,
-                                              kernelParams,
-                                              nullptr),
-                       mDriver);
+            checkCu(cuLaunchKernel(func,
+                                   params.h,
+                                   params.b,
+                                   unroll,
+                                   kernelMeta.mThreadsPerCTA,
+                                   1,
+                                   1,
+                                   kernelMeta.mSharedMemBytes,
+                                   ss,
+                                   kernelParams,
+                                   nullptr));
         }
     }
 };

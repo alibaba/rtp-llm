@@ -389,8 +389,6 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
             } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && mla_ops_type == MlaOpsType::MHA) {
                 fmha_type_ = FMHAType::TRT_V1;
             }
-        } else if (use_xqa) {
-            fmha_type_ = FMHAType::XQA;
         } else {
             fmha_type_ = FMHAType::NONE;
         }
@@ -512,13 +510,13 @@ void CudaDevice::checkUseTrtV2FMHA() {
 
 void CudaDevice::checkUseXQA() {
     int sm = get_sm();
-    if (sm < 89) {
-        RTP_LLM_LOG_WARNING("XQA is disabled for sm %d", sm);
+    if (sm < 90) {
+        RTP_LLM_LOG_WARNING("XQA is disabled for sm %d < 90", sm);
         return;
     }
     char* xqa_env = std::getenv("ENABLE_XQA");
     if (xqa_env && std::string(xqa_env) == "OFF") {
-        RTP_LLM_LOG_WARNING("XQA is disabled for by env");
+        RTP_LLM_LOG_WARNING("XQA is disabled by env");
         return;
     }
     RTP_LLM_LOG_INFO("use xqa");
