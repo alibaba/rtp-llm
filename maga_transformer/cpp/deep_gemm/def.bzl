@@ -49,11 +49,16 @@ def sub_lib_and_interleave(name, srcs):
         srcs = [":" + name + "_so"],
         tools = ["interleave_ffma.py"],
         outs = ["lib" + name + ".so"],
-        cmd = """
-            cp "$(location :{lib_name})" "$@"
-            chmod 777 $@
-            /opt/conda310/bin/python "$(location interleave_ffma.py)" --so "$@"
-        """.format(lib_name = name + "_so"),
+        cmd = select({
+            "@//:using_cuda12": """
+                cp "$(location :{lib_name})" "$@"
+                chmod 777 $@
+                /opt/conda310/bin/python "$(location interleave_ffma.py)" --so "$@"
+            """.format(lib_name = name + "_so"),
+            "@//conditions:default": """
+                cp "$(location :{lib_name})" "$@"
+            """.format(lib_name = name + "_so")
+        }),
         visibility = ["//visibility:public"],
     )
 
@@ -76,4 +81,16 @@ def gen_cu_and_lib(name, params_list, split_num, template_header, template, temp
             "//maga_transformer/cpp/cuda:nvtx",
         ] + torch_deps(),
         visibility = ["//visibility:public"],
+    )
+
+def gen_dispatch_code(name, params_list, template_header, template, template_tail):
+    all_dispatch_code = ""
+    for params in params_list:
+        all_dispatch_code += template.format(*list(params))
+    
+    native.genrule(
+        name = name,
+        srcs = [],
+        outs = [name + ".cc"],
+        cmd = "cat > $@ << 'EOF'\n" + template_header + all_dispatch_code + template_tail + "EOF"
     )

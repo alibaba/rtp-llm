@@ -2,7 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("//maga_transformer/cpp/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts", "gen_cu_and_lib")
+load("//maga_transformer/cpp/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts", "gen_cu_and_lib", "gen_dispatch_code")
 
 test_linkopts = [
     "-lpython3.10",
@@ -265,10 +265,98 @@ sub_lib("deepgemm_qwen_inst", ":deepgemm_qwen")
 
 gen_cu_and_lib("deepgemm_dpsk", NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES, 2, template_header, template, template_tail, 1)
 
+dispatch_template_header = """
+#include <cuda.h>
+#include "maga_transformer/cpp/deep_gemm/utils.h"
+#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "maga_transformer/cpp/deep_gemm/DeepGemmPlugin.h"
+namespace rtp_llm {
+#ifdef ENABLE_FP8
+template<uint32_t N, uint32_t K, uint32_t GROUP_NUM, DeepGemmType GEMM_TYPE>
+void dispatchBlockNK(__nv_bfloat16*         output,
+                     __nv_fp8_e4m3*         lhs,
+                     float*                 lhs_scale,
+                     __nv_fp8_e4m3*         rhs,
+                     float*                 rhs_scale,
+                     int*                   grouped_layout,
+                     uint32_t               m,
+                     uint32_t               bm,
+                     uint32_t               bn,
+                     uint32_t               bk,
+                     uint32_t               num_stages,
+                     uint32_t               num_tma_multicast,
+                     cudaStream_t           stream,
+                     uint32_t               num_sms,
+                     uint32_t               smem_size);
+
+#define DISPATCH_DEEP_GEMM(N, K, GROUP_NUM, GEMM_TYPE)                                           \\
+    if (n == N && k == K && num_groups == GROUP_NUM && gemm_type == GEMM_TYPE) {                 \\
+        dispatchBlockNK<N, K, GROUP_NUM, GEMM_TYPE>(output,                                      \\
+                                                    lhs,                                         \\
+                                                    lhs_scale,                                   \\
+                                                    rhs,                                         \\
+                                                    rhs_scale,                                   \\
+                                                    grouped_layout,                              \\
+                                                    m,                                           \\
+                                                    bm,                                          \\
+                                                    bn,                                          \\
+                                                    bk,                                          \\
+                                                    num_stages,                                  \\
+                                                    num_tma_multicast,                           \\
+                                                    stream,                                      \\
+                                                    num_sms,                                     \\
+                                                    smem_size);                                  \\
+        return;                                                                                  \\
+    }
+
+void runDeepGemm(__nv_bfloat16*         output,
+                 __nv_fp8_e4m3*         lhs,
+                 float*                 lhs_scale,
+                 __nv_fp8_e4m3*         rhs,
+                 float*                 rhs_scale,
+                 int*                   grouped_layout,
+                 uint32_t               m,
+                 uint32_t               n,
+                 uint32_t               k,
+                 uint32_t               bm,
+                 uint32_t               bn,
+                 uint32_t               bk,
+                 uint32_t               num_groups,
+                 uint32_t               num_stages,
+                 uint32_t               num_tma_multicast,
+                 DeepGemmType           gemm_type,
+                 cudaStream_t           stream,
+                 uint32_t               num_sms,
+                 uint32_t               smem_size) 
+{
+    RTP_LLM_LOG_DEBUG("m:%u, n:%u, k:%u , bm:%u, bn:%u, bk:%u, num_groups:%u, num_stages:%u, num_tma_multicast:%u\\n", m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast);
+"""
+
+dispatch_template = """
+    DISPATCH_DEEP_GEMM({0}, {1}, {2}, {3})
+"""
+
+dispatch_template_tail = """
+    RTP_LLM_FAIL("DISPATCH_DEEP_GEMM(N=%u, K=%u, NUM_GROUPS=%u, GEMM_TYPE=%u) no template found", n, k, num_groups, gemm_type);
+}
+#endif
+} // namespace rtp_llm
+"""
+
+gen_dispatch_code(
+    "deepgemm_dispatch", 
+    NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES + 
+    QWEN_NORMAL_CASES + QWEN_CONTIGUOUS_CASES + QWEN_MASKED_CASES,
+    dispatch_template_header,
+    dispatch_template,
+    dispatch_template_tail
+)
+
 cc_library(
     name = "deep_gemm_plugins_impl",
     hdrs = ["DeepGemmPlugin.h", "utils.h"],
-    srcs = ["DeepGemmPlugin.cpp", ":deepgemm_qwen_inst"],
+    srcs = ["DeepGemmPlugin.cpp", ":deepgemm_qwen_inst", ":deepgemm_dispatch"],
     copts = copts(),
     deps = [
         ":deepgemm_dpsk_inst",
