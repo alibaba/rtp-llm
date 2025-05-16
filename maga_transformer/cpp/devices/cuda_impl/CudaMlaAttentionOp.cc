@@ -219,6 +219,8 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
                                      rope_head_dim,
                                      v_head_dim,
                                      stream_);
+    k_nope.reset();
+    v.reset();
 
     printBufferData(*qkv, "mla_qkv");
     auto padded_qkv_output_t = allocateBuffer({datatype, {token_num, head_num * size_per_head}, AllocationType::DEVICE}, {"padded_qkv_output"});
