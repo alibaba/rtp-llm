@@ -400,17 +400,26 @@ def trans_lora_qkv(ts: List[torch.Tensor], head_num: int, head_size: int):
     return ts[0].T.reshape(r, head_num, split, head_size).permute(0, 2, 1, 3).reshape(r, split, head_num * head_size).contiguous()
 
 def merge_qkv_lora_A(ts: List[torch.Tensor], allow_empty=False, hidden_size: int=None, head_num: int=None, head_num_kv: int=None, size_per_head: int = -1):
-    assert(len(ts) == 3), f"merge_qkv_lora_A expect 3 tensor list but get {len(ts)}"
     q, k, v = ts
-    if not allow_empty:
-        assert q and k and v, f"merge_qkv_lora_A expect 3 tensor is not None but get {len(ts)}"
-    if q is None:
-        pass
-    if k is None:
-        pass
-    if v is None:
-        pass
-
+    rank = -1
+    if q is not None:
+        rank = int(q.numel() // hidden_size)
+    elif k is not None:
+        rank = int(k.numel() // hidden_size)
+    else:
+        rank = int(v.numel() // hidden_size)
+    logging.debug("merge_qkv_lora_A rank %d", rank)
+    if allow_empty:
+        if q is None:
+            q = torch.zeros(rank, hidden_size)
+            logging.info("lora_B  is empty, use zeros instead")
+        if k is None:
+            k = torch.zeros(rank, hidden_size)
+            logging.info("lora_B  is empty, use zeros instead")
+        if v is None:
+            v = torch.zeros(rank, hidden_size)
+            logging.info("lora_B  is empty, use zeros instead")
+            
     try:
         qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
         return qkv_weight
@@ -421,9 +430,25 @@ def merge_qkv_lora_A(ts: List[torch.Tensor], allow_empty=False, hidden_size: int
         
 def merge_qkv_lora_B(ts: List[torch.Tensor], allow_empty=False, hidden_size: int=None, head_num: int=None, head_num_kv: int=None, size_per_head: int = -1):
     q, k, v = ts
+    if q is not None:
+        rank = int(q.numel() // (head_num*size_per_head))
+    elif k is not None:
+        rank = int(k.numel() // (head_num_kv*size_per_head))
+    else:
+        rank = int(v.numel() // (head_num_kv*size_per_head))
+    logging.debug("merge_qkv_lora_B rank %d", rank)
+
+    if allow_empty:
+        if q is None:
+            q = torch.zeros(head_num*size_per_head, rank)
+        if k is None:
+            k = torch.zeros(head_num_kv*size_per_head, rank)
+        if v is None:
+            v = torch.zeros(head_num_kv*size_per_head, rank)
     t_q = torch.zeros_like(q)
     t_k = torch.zeros_like(k)
     t_v = torch.zeros_like(v)
+    
     return torch.cat((torch.cat((q,   t_q, t_q), dim=1),
                       torch.cat((t_k, k,   t_k), dim=1),
                       torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()

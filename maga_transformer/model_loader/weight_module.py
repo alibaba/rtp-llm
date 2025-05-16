@@ -331,7 +331,7 @@ class AtomicWeight(WeightModule):
 
 
     def _merge_lora(self, tensor: Union[torch.Tensor, Dict[str, torch.Tensor]], database: BaseDatabase, layer_id: Optional[int], load_config: LoadConfig, lora_name:Optional[str] = None):
-        if self.lora_a_process_func is None or self.lora_b_process_func is None:
+        if self.lora_a_process_func is None or self.lora_b_process_func is None or tensor is None:
             return tensor
         lora_name = database.get_first_lora_name() if lora_name is None else lora_name
         assert lora_name is not None
