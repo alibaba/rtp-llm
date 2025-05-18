@@ -139,19 +139,15 @@ class WeightModule(ABC):
     @torch.inference_mode()
     def load(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig):
         raw_tensors = self._load_raw_tensor(database, layer_id, device, load_config)
-        logging.debug(f"load weight: {self.name} layer_id: {layer_id}, res:{raw_tensors}")
 
         if load_config.merge_lora:
-            logging.debug(f"merge lora weight: {self.name} layer_id: {layer_id}")
             merged_tensors = self._merge_lora(raw_tensors, database, layer_id, load_config)
         else:
             merged_tensors = raw_tensors
 
         split_tensors = self._split(merged_tensors, load_config)
-        logging.debug(f"split weight: {self.name} layer_id: {layer_id}, res:{split_tensors}")
 
         processed_tensors = self._postprocess(split_tensors, device, load_config)
-        logging.debug(f"postprocess weight: {self.name} layer_id: {layer_id}, res:{processed_tensors}")
         flat_res = {}
         def __extract_tensor(tensors):
             for k,v in tensors.items():
@@ -161,7 +157,6 @@ class WeightModule(ABC):
                     flat_res.update({k: v.to(device)})
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
-        logging.debug(f"extract weight: {self.name} layer_id: {layer_id}, res:{shape_info}")
         return flat_res
 
     @torch.inference_mode()

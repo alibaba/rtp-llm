@@ -133,6 +133,7 @@ def shift_one(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
 
+    
 def ffn_sp_0(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int,**kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[0] // ffn_tp_size, dim=0)[ffn_tp_rank]
 
@@ -586,6 +587,26 @@ def transpose_w13(ts: List[torch.Tensor]):
 def concat_w13(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=-1).contiguous()
 
+def ffn_sp_neg1_w13(t: torch.Tensor, tp: int, tp_rank: int,  ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int, **kwargs: Any) -> torch.Tensor:
+    w1, w3 = torch.chunk(t, 2, dim=-1)
+    w1 = ffn_sp_neg1(w1, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs)
+    w3 = ffn_sp_neg1(w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs)
+    return concat_w13([w1, w3])
+
+
+def ffn_sp_0_w13(t: torch.Tensor, tp: int, tp_rank: int, ep: int, ep_rank: int, dp: int, dp_rank: int, ffn_tp_rank: int, ffn_tp_size: int,**kwargs: Any) -> torch.Tensor:
+    w1, w3 = torch.chunk(t, 2, dim=-1)
+    w1 = ffn_sp_0(w1, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs)
+    w3 = ffn_sp_0(w3, tp, tp_rank, ep, ep_rank, dp, dp_rank, ffn_tp_rank, ffn_tp_size, **kwargs)
+    return concat_w13([w1, w3])
+
+
+def sp_0_w13(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    w1, w3 = torch.chunk(t, 2, dim=0)
+    w1 = sp_0(w1, tp, tp_rank, **kwargs)
+    w3 = sp_0(w3, tp, tp_rank, **kwargs)
+    return torch.concat([w1, w3], dim=0)
+ 
 class W:
     # global
     embedding = 'embedding'
@@ -1051,6 +1072,10 @@ class W:
         ffn_z3: ffn_sp_neg1,
         ffn_s3: ffn_sp_neg1,
         ffn_b3: ffn_sp_neg1,
+        ffn_w13: ffn_sp_neg1_w13,
+        ffn_z13: ffn_sp_neg1_w13,
+        ffn_s13: ffn_sp_neg1_w13,
+        ffn_b13: ffn_sp_neg1_w13,
         ffn_w2: ffn_sp_0,
         vision_ffn_w2: ffn_sp_0,
         ffn_z2: ffn_sp_0,
@@ -1129,6 +1154,8 @@ class W:
             W.ffn_s1: ffn_sp_0,
             W.ffn_w3: ffn_sp_0,
             W.ffn_s3: ffn_sp_0,
+            W.ffn_w13: ffn_sp_0_w13,
+            W.ffn_s13: ffn_sp_0_w13,
             W.ffn_w2: ffn_sp_neg1,
             W.ffn_s2: sp_id,
         }
@@ -1149,6 +1176,8 @@ class W:
             W.ffn_s1: sp_id,
             W.ffn_w3: ffn_sp_0,
             W.ffn_s3: sp_id,
+            W.ffn_w13: ffn_sp_0_w13,
+            W.ffn_s13: sp_id,
             W.ffn_w2: ffn_sp_neg1,
             W.ffn_s2: sp_id,
             W.pre_ln_static_quant: sp_id,
@@ -1181,6 +1210,8 @@ class W:
             W.ffn_s1: sp_0,
             W.ffn_w3: sp_0,
             W.ffn_s3: sp_0,
+            W.ffn_w13: sp_0_w13,
+            W.ffn_s13: sp_0_w13,
             W.ffn_w2: sp_neg1,
             W.ffn_s2: sp_neg1,
             # mla
