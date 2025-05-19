@@ -342,7 +342,7 @@ struct GemmParams {
     mutable int math_sm_count = 0;
     void* stream = nullptr;
     // tmp param, should use qscheme instead of this bool
-    bool do_fp8_quant = true;
+    QScheme qscheme = QScheme::NoQuantize;
 
     void check() const;
     GemmType dispatch() const;

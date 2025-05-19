@@ -190,15 +190,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             printBufferData(*gemm_output, "ffn_rs_inter_output");
             printBufferData(*output, "ffn_rs_final_output");
         } else {
-            auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, nullptr);
-            down_gemm_params.do_fp8_quant = !fuse_gate_up_weight;
+            auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
+            down_gemm_params.qscheme = params.qscheme;
             output = loraLinear(LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input)).output;
-            // for fp8 block wise
-            if (output->shape()[0] != params.input.shape()[0]) {
-                auto origin_output = output;
-                output = origin_output->slice(0, params.input.shape()[0], false);
-                output->updateParent(origin_output);
-            }
         }
     }
 

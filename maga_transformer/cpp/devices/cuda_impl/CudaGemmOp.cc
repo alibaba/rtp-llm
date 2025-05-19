@@ -97,7 +97,7 @@ struct CudaGemmArguments {
             DDtype = DataType::TYPE_FP16;
         }
         // fp8 block wise with fused activation
-        if (!params.do_fp8_quant && ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
+        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
             DDtype = DataType::TYPE_BF16;
         }
 
@@ -336,23 +336,15 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params,
     RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
     BufferPtr      quanted_input;
-    BufferPtr      gemm_output;
+    BufferPtr      gemm_output = output;
     if (params.A.type() != DataType::TYPE_QFP8_E4M3) {
         quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, 64));
-    } else {
-        quanted_input = params.A.slice(0, params.A.shape()[0]);
-    }
-    gemm_output = output;
-
-    if (params.do_fp8_quant) {
-        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, 64));
         DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
+        output = gemm_output->slice(0, params.A.shape()[0], false);
+        output->updateParent(gemm_output);
     } else {
         DeepGemmPlugin::gemmFp8(params.A, params.B, *gemm_output, stream_);
     }
- 
-    output = gemm_output->slice(0, params.A.shape()[0], false);
-    output->updateParent(gemm_output);
 }
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C
@@ -363,27 +355,36 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     params.check();
     CudaGemmArguments arguments(params);
 
+    auto is_fp8_blockwise_gemm = (params.qscheme == QScheme::Qfp8PerTokenBlock);
+
     BufferPtr output;
-    if (params.D) {
-        output = params.D;
-        RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
-                                "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
-                                arguments.DDtype,
-                                autil::StringUtil::toString(arguments.Dshape).c_str(),
-                                params.D->debugString().c_str());
-    } else if (!(params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3)) {
-        output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    if (!is_fp8_blockwise_gemm) {
+        if (params.D) {
+            output = params.D;
+            RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
+                                    "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+                                    arguments.DDtype,
+                                    autil::StringUtil::toString(arguments.Dshape).c_str(),
+                                    params.D->debugString().c_str());
+        } else if (!(params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3)) {
+            output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+        }
     }
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
         InvokeSmoothQaunt(params, arguments, output);
-    } else if (((params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3) || (!params.do_fp8_quant)) && params.B.type() == DataType::TYPE_QFP8_E4M3) { 
+    } else if (((params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3) || (params.qscheme == QScheme::Qfp8PerTokenBlock)) && params.B.type() == DataType::TYPE_QFP8_E4M3) {
         auto dshape = arguments.Dshape;
-        dshape[0] = (dshape[0] + 63) / 64 * 64;
+        // padding to 128
+        dshape[0] = (dshape[0] + 127) / 128 * 128;
         auto padded_output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
         InvokeDeepGemm(params, arguments, padded_output);
         if (params.D) {
-            copy({*params.D, *padded_output});
+            auto d_shape_0 = params.D->shape()[0], padded_shape_0 = padded_output->shape()[0];
+            RUNTIME_ASSERT_OP_ARG(d_shape_0 <= padded_shape_0,
+                                "Gemm output D shape[0] should be less than output shape[0] in fp8 blockwise gemm case, but got [%ld] > [%ld]",
+                                d_shape_0, padded_shape_0);
+            copy({*params.D, *padded_output->slice(0, d_shape_0)});
             output = params.D;
         } else {
             output = padded_output;
