@@ -320,9 +320,10 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->step();
 
     // append first token to generate stream
-    auto new_tokens = engine_->getDevice()->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)generate_stream->tileNum(), (size_t)1}, rtp_llm::AllocationType::HOST},
-        {});
+    auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                                {(size_t)generate_stream->tileNumIn(), (size_t)1},
+                                                                rtp_llm::AllocationType::HOST},
+                                                               {});
     auto data           = new_tokens->data<int32_t>();
     auto first_token_id = response.first_generate_token_id();
     *data               = first_token_id;

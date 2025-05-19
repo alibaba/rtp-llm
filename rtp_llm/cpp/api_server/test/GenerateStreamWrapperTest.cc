@@ -100,7 +100,8 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
     generate_config->num_beams = 2;
     auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
-    ASSERT_EQ(res.aux_info[0].beam_responses, generate_texts);
+    std::vector<std::string> beam_responses;
+    ASSERT_EQ(res.aux_info[0].beam_responses, beam_responses);
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_Logits) {

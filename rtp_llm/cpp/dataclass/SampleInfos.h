@@ -31,8 +31,8 @@ public:
     }
 
 public:
-    rtp_llm::BufferPtr         logits;         // shape: [batch_size * num_beams, vocab_size]
-    mutable rtp_llm::BufferPtr token_ids;      // shape: [batch_size * num_beams, max_length]
+    rtp_llm::BufferPtr         logits;         // shape: [batch_size, vocab_size]
+    mutable rtp_llm::BufferPtr token_ids;      // shape: [batch_size, max_length]
     rtp_llm::BufferPtr         input_lengths;  // shape: [batch_size]
     // shape: [decoder_batch_size]
     rtp_llm::BufferPtr       sequence_lengths;
@@ -41,7 +41,8 @@ public:
     size_t vocab_size;
     size_t step;  // typically largest sequence length in the batch
 
-    size_t             batch_size;
+    size_t             batch_size;            // sum of all num_beams_in of all streams
+    size_t             batch_size_out;        // sum of all num_beams_out of all streams
     rtp_llm::BufferPtr num_beams_in;          // shape: [batch_size]
     rtp_llm::BufferPtr num_beams_out;         // shape: [batch_size]
     rtp_llm::BufferPtr top_k;                 // shape: [batch_size]
@@ -55,12 +56,8 @@ public:
     rtp_llm::BufferPtr no_repeat_ngram_size;  // shape: [batch_size]
     rtp_llm::BufferPtr do_sample;             // shape: [batch_size]
 
-    mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size * max_num_beams]
-    mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size * max_num_beams, vocab_size]
-
-    // for beam search
-    rtp_llm::BufferPtr beam_search_sequence_lengths;
-    rtp_llm::BufferPtr beam_index;
+    mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
+    mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
 };
 
 struct SamplerOutput {

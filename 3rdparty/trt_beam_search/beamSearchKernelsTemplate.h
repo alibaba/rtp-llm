@@ -768,8 +768,10 @@ void beamSearchKernelLauncher(
     }
     check_cuda_error();
 
-    invokePopulateTokenIds(bh.tokenIdsOut, bh.tokenIdsIn, bh.sequenceLengthsOut, bh.parentIdsPtr, bh.outputIdsPtr,
-        bh.nBatchSize, bh.nMaxSeqLen, bh.nBeamWidthOut, bh.nBeamWidthIn, stream);
+    if (bh.tokenIdsOut != nullptr && bh.tokenIdsIn != nullptr) {
+        invokePopulateTokenIds(bh.tokenIdsOut, bh.tokenIdsIn, bh.sequenceLengthsOut, bh.parentIdsPtr, bh.outputIdsPtr,
+            bh.nBatchSize, bh.nMaxSeqLen, bh.nBeamWidthOut, bh.nBeamWidthIn, stream);
+    }
 
     return;
 }

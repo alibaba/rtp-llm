@@ -43,6 +43,7 @@ class GenerateConfig(BaseModel):
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
     num_beams: int = 1
+    variable_num_beams: List[int] = []
     do_sample: bool = True
     # 0 mean not use num_return_sequences,
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
@@ -136,6 +137,9 @@ class GenerateConfig(BaseModel):
         cp.md5_value = ""
         cp.timeout_ms = -1
         self.md5_value = hashlib.md5(cp.__str__().encode()).hexdigest()
+
+    def has_num_beams(self):
+        return self.num_beams > 1 or max(self.variable_num_beams) > 1
 
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
@@ -264,6 +268,10 @@ class GenerateConfig(BaseModel):
             check_with_info(
                 is_positive_integer(self.num_beams),
                 f"num_beams {self.num_beams} is wrong data type",
+            )
+            check_with_info(
+                is_list_positive_integer(self.variable_num_beams),
+                f"variable_num_beams {self.variable_num_beams} is wrong data type"
             )
             check_with_info(
                 is_positive_integer(self.num_return_sequences),

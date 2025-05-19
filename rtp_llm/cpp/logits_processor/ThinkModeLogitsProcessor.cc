@@ -46,7 +46,6 @@ void ThinkModeLogitsProcessor::setVocabMask(std::shared_ptr<StringContainDFA<siz
 }
 
 void ThinkModeLogitsProcessor::beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) {
-    RTP_LLM_CHECK(size() == beam_idx_vec.size());
     std::vector<StreamThinkInfo> new_think_infos;
     for (auto beam_idx : beam_idx_vec) {
         new_think_infos.push_back(think_infos_[beam_idx].copy());

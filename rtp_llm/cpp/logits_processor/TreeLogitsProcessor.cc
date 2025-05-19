@@ -39,12 +39,11 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
 }
 
 void TreeLogitsProcessor::beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) {
-    RTP_LLM_CHECK(size() == beam_idx_vec.size());
     std::vector<StreamTreeInfo> new_tree_infos;
     for (auto beam_idx : beam_idx_vec) {
         new_tree_infos.push_back(tree_infos_[beam_idx].copy());
     }
-    tree_infos_ = new_tree_infos;
+    tree_infos_ = std::move(new_tree_infos);
 }
 
 void TreeLogitsProcessor::updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {

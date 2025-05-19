@@ -9,7 +9,7 @@ class ScoreStream: public GenerateStream {
 public:
     ScoreStream(const GenerateStream& stream): GenerateStream(stream) {
         // WARNING: ScoreStream currently only support batch_size = 1
-        RTP_LLM_CHECK(tileNum() == 1);
+        RTP_LLM_CHECK(tileNumMax() == 1);
         CopyOnWrite(stream, true, true);
         sp_output_buffer_ = std::make_shared<SpeculativeExecutorStreamOutput>();
 

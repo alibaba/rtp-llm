@@ -49,19 +49,19 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
     if (generate_input_->generate_config->return_softmax_probs) {
         softmax_probs_ = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST},
+            {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNumIn(), (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST},
             {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
-    complete_token_ids_ =
-        std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
+    complete_token_ids_ = std::make_shared<CompleteTokenIds>(
+        device_, tileNumIn(), tileNumMax(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input, extra_reserve_token_num);
 
     last_output_pos_ = seqLength();
     max_chunk_len_   = seqLength();
 
-    cum_log_probs_ =
-        device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum()}, rtp_llm::AllocationType::HOST}, {});
+    cum_log_probs_ = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNumIn()}, rtp_llm::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
 
     is_context_stream_       = std::make_shared<bool>();
@@ -69,19 +69,16 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     generate_status_         = std::make_shared<GenerateStatus>();
     generate_status_->status = StreamState::WAITING;
     sub_generate_status_.clear();
-    sub_generate_status_.resize(tileNum());
-    for (int i = 0; i < tileNum(); ++i) {
-        sub_generate_status_[i].status = StreamState::WAITING;
-    }
+    resizeSubGenerateStatus(tileNumIn());
 
-    stream_cache_resource_->init(tileNum());
+    stream_cache_resource_->init(tileNumIn());
 
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
+    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNumIn());
+    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNumIn());
     initializeLogitsProcessorList();
 }
 
@@ -167,7 +164,7 @@ void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
 }
 int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
     // TODO: maybe need fix when context and reuse
-    return stream_cache_resource_->singleBatchNeedBlocks(seqLength() + reserve_step) * batchSize();
+    return stream_cache_resource_->singleBatchNeedBlocks(seqLength() + reserve_step) * batchSizeOut();
 }
 
 void GenerateStream::incrFallbackBlock(int fallback_blocks) {
@@ -182,7 +179,7 @@ std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() const {
     return generate_input_->generate_config;
 }
 bool GenerateStream::isStreaming() const {
-    if (numBeams() > 1) {
+    if (generate_input_->generate_config->hasNumBeams()) {
         return false;
     }
     return generate_input_->generate_config->is_streaming;
@@ -205,16 +202,65 @@ rtp_llm::SpecialTokens GenerateStream::specialTokens() const {
     return special_tokens_;
 }
 
-int GenerateStream::tileNum() const {
-    return std::max(numBeams(), numReturnSequences());
+int GenerateStream::tileNum(int iter_count) const {
+    return generate_input_->generate_config->hasNumBeams() ? numBeams(iter_count) : numReturnSequences();
 }
 
-int GenerateStream::batchSize() const {
-    return seqLength() == inputLength() && !perf_test_ ? 1 : tileNum();
+int GenerateStream::tileNumIn() const {
+    return tileNum(iter_count_ - 1);
 }
 
-int GenerateStream::numBeams() const {
-    return generate_input_->generate_config->num_beams;
+int GenerateStream::tileNumOut() const {
+    return tileNum(iter_count_);
+}
+
+int GenerateStream::tileNumMax() const {
+    return generate_input_->generate_config->hasNumBeams() ? numBeamsMax() : numReturnSequences();
+}
+
+int GenerateStream::batchSize(int iter_count) const {
+    return seqLength() == inputLength() && !perf_test_ ? 1 : tileNum(iter_count);
+}
+
+int GenerateStream::batchSizeIn() const {
+    return batchSize(iter_count_ - 1);
+}
+
+int GenerateStream::batchSizeOut() const {
+    return batchSize(iter_count_);
+}
+
+int GenerateStream::batchSizeMax() const {
+    return seqLength() == inputLength() && !perf_test_ ? 1 : tileNumMax();
+}
+
+int GenerateStream::numBeams(int iter_count) const {
+    // Note that iter_count may be negative, which refers to the num_beams_in for context stream
+
+    if (iter_count < 0) {
+        // num_beams_in is 1 for the first beam search
+        return 1;
+    }
+
+    int var_steps = generate_input_->generate_config->variable_num_beams.size();
+    if (var_steps == 0) {
+        return generate_input_->generate_config->num_beams;
+    } else {
+        int idx = iter_count < var_steps ? iter_count : var_steps - 1;
+        return generate_input_->generate_config->variable_num_beams[idx];
+    }
+}
+
+int GenerateStream::numBeamsIn() const {
+    return numBeams(iter_count_ - 1);
+}
+
+int GenerateStream::numBeamsOut() const {
+    return numBeams(iter_count_);
+}
+
+int GenerateStream::numBeamsMax() const {
+    return generate_input_->generate_config->numBeamsMax();
 }
 
 int GenerateStream::numReturnSequences() const {
@@ -289,7 +335,7 @@ int GenerateStream::seqLength() const {
 }
 
 int GenerateStream::adjustedCommonLen() const {
-    return tileNum() == 1 ? seqLength() : inputLength() / seqSizePerBlock() * seqSizePerBlock();
+    return tileNumMax() == 1 ? seqLength() : inputLength() / seqSizePerBlock() * seqSizePerBlock();
 }
 
 int GenerateStream::seqSizePerBlock() const {
@@ -385,17 +431,17 @@ const rtp_llm::BufferPtr& GenerateStream::completeTokenIds() {
 }
 
 std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < tileNum());
+    RTP_LLM_CHECK(batch_idx < tileNumIn());
     return complete_token_ids_->completeTokenIdsVec(batch_idx);
 }
 
 std::vector<int> GenerateStream::commonCompleteTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < tileNum());
+    RTP_LLM_CHECK(batch_idx < tileNumIn());
     return complete_token_ids_->commonCompleteTokenIdsVec(batch_idx);
 }
 
 int GenerateStream::currentExecuteTokenSize() {
-    return currentExecuteTokens(0).size() * batchSize();
+    return currentExecuteTokens(0).size() * batchSizeIn();
 }
 
 std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
@@ -408,7 +454,7 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
 }
 
 int GenerateStream::multimodalFeaturesLength() const {
-    return multimodalFeatures().size() * batchSize();
+    return multimodalFeatures().size() * batchSizeIn();
 }
 
 rtp_llm::BufferPtr GenerateStream::multimodalLocations() const {
@@ -549,7 +595,7 @@ bool GenerateStream::setRunning() {
 
 void GenerateStream::setFinishedWithoutLock() {
     generate_status_->status = StreamState::FINISHED;
-    for (int i = 0; i < tileNum(); ++i) {
+    for (int i = 0; i < tileNumIn(); ++i) {
         sub_generate_status_[i].status = StreamState::FINISHED;
     }
 }
@@ -656,7 +702,7 @@ bool GenerateStream::needFinishBySPTokens() {
     matchEosToken();
     matchStopWordsList();
     // num beams, finished by batch 0
-    if (numBeams() != 1) {
+    if (numBeamsMax() != 1) {
         return sub_generate_status_[0].status == StreamState::FINISHED;
     }
     // num sequence, finished by all batch
@@ -666,7 +712,7 @@ bool GenerateStream::needFinishBySPTokens() {
 }
 
 void GenerateStream::matchEosToken() {
-    for (int i = 0; i < tileNum(); ++i) {
+    for (int i = 0; i < tileNumIn(); ++i) {
         matchEosToken(i);
     }
 }
@@ -689,7 +735,7 @@ void GenerateStream::matchStopWordsList() {
     if (seqLength() == inputLength()) {
         return;
     }
-    for (int i = 0; i < tileNum(); ++i) {
+    for (int i = 0; i < tileNumIn(); ++i) {
         matchStopWordsList(i);
     }
 }
@@ -731,7 +777,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     numBeams(),
+                                     numBeamsMax() > 1,
                                      streamId(),
                                      error_token_id)) {
         setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
@@ -740,30 +786,27 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    std::vector<int> cache_block_src_batch;
-    if (tileNum() > 1 && isContextStream()) {
-        cache_block_src_batch.resize(tileNum(), 0);
-    } else if (numBeams() > 0 && update_info.beam_indices != nullptr) {
-        cache_block_src_batch = rtp_llm::buffer2vector<int>(*update_info.beam_indices);
-    }
-    if (cache_block_src_batch.size() > 0) {
-        updateKvCacheBlocks(cache_block_src_batch);
+    resizeSubGenerateStatus(update_info.new_tokens->shape()[0]);
+
+    if (update_info.src_batch_indices) {
+        auto src_batch_indices_vec = rtp_llm::buffer2vector<int>(*update_info.src_batch_indices);
+        updateKvCacheBlocks(src_batch_indices_vec);
     }
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 }
 
-// beam_idx: [beam_width] int, the element must less than beam_width.
+// beam_idx: [beam_width_out] int, the element must less than beam_width_in.
 void GenerateStream::updateKvCacheBlocks(const std::vector<int>& block_src_batch) {
-    RTP_LLM_CHECK(block_src_batch.size() == tileNum());
+    RTP_LLM_CHECK(block_src_batch.size() == tileNumOut());
 
     stream_cache_resource_->updateKvCacheBlocks(block_src_batch);
 }
 
 void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {
     auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
-    RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
+    RTP_LLM_CHECK(beam_idx_vec.size() == tileNumOut());
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->beamSearchLogitProcessorUpdate(beam_idx_vec);
@@ -771,8 +814,9 @@ void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& be
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens = update_info.new_tokens;
+    RTP_LLM_CHECK(new_tokens->shape()[0] == tileNumOut());
+    auto num_new_tokens = update_info.num_new_tokens;
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->updateLogitProcessorStatus(new_tokens, num_new_tokens);
@@ -787,8 +831,8 @@ void GenerateStream::setLoss(const rtp_llm::Buffer& loss) {
 
 void GenerateStream::setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos) {
     RTP_LLM_CHECK(softmax_probs.dim() == 2);
-    RTP_LLM_CHECK(softmax_probs.shape()[0] == tileNum());
-    for (int i = 0; i < tileNum(); ++i) {
+    RTP_LLM_CHECK(softmax_probs.shape()[0] == tileNumOut());
+    for (int i = 0; i < tileNumOut(); ++i) {
         device_->copy({(*softmax_probs_)[i].view(start_pos, softmax_probs.shape()[1]), softmax_probs[i]});
     }
 }
@@ -823,7 +867,7 @@ void GenerateStream::reportMetric() {
             collector.input_token_length     = inputLength();
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
-            collector.query_batch_size       = tileNum();
+            collector.query_batch_size       = tileNumOut();  // TODO(zhangjianning.zjn): better metrics for batch size
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
@@ -853,12 +897,13 @@ std::string GenerateStream::debugString() const {
                  << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
                  << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
                  << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
-                 << ", batch_size:" << batchSize() << ", tile_num:" << tileNum()
+                 << ", batch_size_in:" << batchSizeIn() << ", batch_size_out:" << batchSizeOut()
+                 << ", tile_num_in:" << tileNumIn() << ", tile_num_out:" << tileNumOut()
                  << ", need_release_resource: " << need_release_resource_
                  << ", fallback_prefix_length: " << fallback_prefix_length_
                  << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
                  << ", need_remote_generate: " << need_remote_generate_
-                 << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: ";
+                 << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: " << propose_token_;
 
     for (int i = 0; i < propose_token_.size(); i++) {
         debug_string << propose_token_[i] << " ";
@@ -867,7 +912,7 @@ std::string GenerateStream::debugString() const {
         debug_string << ", hidden_state_token_num: " << last_hidden_states_->shape()[0];
     }
     debug_string << ", complete_token_ids: [";
-    for (size_t i = 0; i < tileNum(); i++) {
+    for (size_t i = 0; i < complete_token_ids_->batchSize(); i++) {
         debug_string << complete_token_ids_->toString(i) << ",";
     }
 
@@ -875,6 +920,7 @@ std::string GenerateStream::debugString() const {
     debug_string << ", stream_cache_resource: " << stream_cache_resource_->debugString();
 
     debug_string << "}";
+
     return debug_string.str();
 }
 
@@ -927,6 +973,16 @@ void GenerateStream::incBatchWithPrefillTimes(int32_t times) {
 
 void GenerateStream::incBatchWithPrefillLen(int32_t len) {
     batch_with_prefill_len_ += len;
+}
+
+void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
+    if (sub_generate_status_.size() != new_size) {
+        size_t old_size = sub_generate_status_.size();
+        sub_generate_status_.resize(new_size);
+        for (size_t i = old_size; i < new_size; ++i) {
+            sub_generate_status_[i].status = StreamState::WAITING;
+        }
+    }
 }
 
 }  // namespace rtp_llm

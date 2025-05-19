@@ -29,7 +29,7 @@ public:
     py::object                                       getPyObject() const;
 
     virtual std::shared_ptr<TokenProcessorPerStream>
-    getTokenProcessorCtx(int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
+    getTokenProcessorCtx(bool use_beam_search, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
 
 private:
     // TODO: change to tokenizer wrapper
@@ -40,7 +40,7 @@ class TokenProcessorPerStream {
 public:
     TokenProcessorPerStream() = default;
     ~TokenProcessorPerStream();
-    void init(int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
+    void init(bool use_beam_search, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
     std::vector<std::string>
     decodeTokens(GenerateOutputs& responses, std::vector<int>& output_lens, std::shared_ptr<GenerateConfig> config);
 

@@ -36,7 +36,8 @@ public:
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups&       stream_groups,
-                                        size_t                    total_batch_size,
+                                        size_t                    total_batch_size_in,
+                                        size_t                    total_batch_size_out,
                                         const rtp_llm::BufferPtr& sequence_length) const;
     void          setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                          std::list<GenerateStreamPtr>& all_streams,

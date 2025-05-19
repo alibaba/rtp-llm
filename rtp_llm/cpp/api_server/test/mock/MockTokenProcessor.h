@@ -22,7 +22,7 @@ public:
                                           std::vector<int>&,
                                           std::shared_ptr<GenerateConfig>));
     MOCK_METHOD3(getTokenProcessorCtx,
-                 std::shared_ptr<TokenProcessorPerStream>(int, int, const std::shared_ptr<TokenProcessor>&));
+                 std::shared_ptr<TokenProcessorPerStream>(bool, int, const std::shared_ptr<TokenProcessor>&));
 };
 
 }  // namespace rtp_llm

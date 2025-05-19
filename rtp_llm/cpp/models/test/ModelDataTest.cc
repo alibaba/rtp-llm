@@ -23,15 +23,18 @@ public:
 
     SamplerInputs allocate(Config config) {
         SamplerInputs sampler_inputs;
-        sampler_inputs.step       = config.max_length;
-        sampler_inputs.batch_size = config.batch_size;
-        sampler_inputs.logits     = device_->allocateBuffer(
+        sampler_inputs.step           = config.max_length;
+        sampler_inputs.batch_size     = config.batch_size;
+        sampler_inputs.batch_size_out = config.batch_size;
+        sampler_inputs.logits         = device_->allocateBuffer(
             {config.logits_type, {config.batch_size, config.vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         sampler_inputs.sequence_lengths = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.input_lengths = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.num_beams = device_->allocateBuffer(
+        sampler_inputs.num_beams_in = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
+        sampler_inputs.num_beams_out = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
         sampler_inputs.top_k = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_UINT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});

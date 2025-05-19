@@ -11,6 +11,9 @@ using namespace std;
 namespace rtp_llm {
 
 BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
+    // TODO(zhangjianning.zjn): make input_lengths_out and sequence_lengths_out computation optional
+    // TODO(zhangjianning.zjn): make token_ids_out computation optional
+
     const int batch_size     = params.logits.shape()[0];
     const int beam_width_in  = params.logits.shape()[1];
     const int beam_width_out = params.num_beams_out != 0 ? params.num_beams_out : beam_width_in;
@@ -69,42 +72,27 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     cudaMemsetAsync(workspace->data(), 0, workspace->sizeBytes(), stream_);
 
     // allocate output buffer
-    BufferPtr input_lengths_out, sequence_lengths_out, cum_log_probs_out;
-    auto      new_token_ids = allocateBuffer({DataType::TYPE_INT32,
+    auto token_ids_out = allocateBuffer({DataType::TYPE_INT32,
                                          {(size_t)batch_size, (size_t)beam_width_out, (size_t)max_seq_len},
                                          AllocationType::DEVICE},
-                                        {"new_token_ids"});
-    auto      beam_indices  = allocateBuffer(
+                                        {"token_ids_out"});
+    auto beam_indices  = allocateBuffer(
         {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
     auto output_ids = allocateBuffer(
         {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
+    auto input_lengths_out =
+        allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                       {"input_length_out"});
+    auto sequence_lengths_out =
+        allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                       {"sequence_lengths_out"});
+    BufferPtr cum_log_probs_out;
     if (config.mVBWS) {
-        input_lengths_out =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
-                           {"input_length_out"});
-        sequence_lengths_out =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
-                           {"sequence_lengths_out"});
         cum_log_probs_out =
             allocateBuffer({DataType::TYPE_FP32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
                            {"cum_log_probs_out"});
     } else {
-        input_lengths_out    = params.input_lengths;
-        sequence_lengths_out = params.sequence_lengths;
-        cum_log_probs_out    = params.cum_log_probs;
-    }
-
-    // if not variable beam width search, setup cum_log_probs for prefill
-    if (!config.mVBWS) {
-        // TODO(zhangjianning.zjn): would be better to use a single kernel to setup cum_log_probs
-        auto input_lengths_tsr    = Buffer2torchTensor(params.input_lengths, false);
-        auto sequence_lengths_tsr = Buffer2torchTensor(params.sequence_lengths, false);
-        auto cum_log_probs_tsr    = Buffer2torchTensor(params.cum_log_probs, false);
-        for (int i = 0; i < batch_size; i++) {
-            if (input_lengths_tsr[i].equal(sequence_lengths_tsr[i])) {
-                cum_log_probs_tsr.index_put_({i, torch::indexing::Slice(1, beam_width_in)}, -1e9);
-            }
-        }
+        cum_log_probs_out = params.cum_log_probs;
     }
 
     // set BeamHypotheses
@@ -130,7 +118,7 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     BH.cumLogProbsIn      = params.cum_log_probs->data<float>();
     BH.cumLogProbsOut     = cum_log_probs_out->data<float>();
     BH.tokenIdsIn         = params.token_ids->data<int>();
-    BH.tokenIdsOut        = new_token_ids->data<int>();
+    BH.tokenIdsOut        = token_ids_out->data<int>();
     BH.parentIdsPtr       = beam_indices->data<int>();
     BH.outputIdsPtr       = output_ids->data<int>();
 
@@ -146,7 +134,7 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
 
     check_cuda_error();
 
-    return BeamSearchOutput({std::move(new_token_ids),
+    return BeamSearchOutput({std::move(token_ids_out),
                              std::move(input_lengths_out),
                              std::move(sequence_lengths_out),
                              std::move(cum_log_probs_out),

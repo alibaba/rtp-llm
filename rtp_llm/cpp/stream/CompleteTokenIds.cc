@@ -4,15 +4,18 @@
 
 namespace rtp_llm {
 
-CompleteTokenIds::CompleteTokenIds(rtp_llm::DeviceBase* device,
-                                   int                  batch_size,
-                                   int                  max_seq_len,
-                                   int                  seq_size_per_block):
-    device_(device), batch_size_(batch_size), max_seq_len_(max_seq_len), seq_size_per_block_(seq_size_per_block) {}
+CompleteTokenIds::CompleteTokenIds(
+    rtp_llm::DeviceBase* device, int batch_size, int max_batch_size, int max_seq_len, int seq_size_per_block):
+    device_(device),
+    batch_size_(batch_size),
+    max_batch_size_(max_batch_size),
+    max_seq_len_(max_seq_len),
+    seq_size_per_block_(seq_size_per_block) {}
 
 CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, int shift_token_num):
     device_(other.device_),
     batch_size_(other.batch_size_),
+    max_batch_size_(other.max_batch_size_),
     max_seq_len_(other.max_seq_len_),
     seq_size_per_block_(other.seq_size_per_block_),
     seq_length_(other.seq_length_),
@@ -32,7 +35,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
                 other.complete_token_ids_->data<int>() + shift_token_num));
         }
     } else {
-        complete_token_ids_ = device_->clone({*(other.complete_token_ids_), rtp_llm::AllocationType::HOST});
+        complete_token_ids_ = device_->allocateBufferLike(*(other.complete_token_ids_), AllocationType::HOST);
+        device_->copy({complete_token_ids_->view(0, batch_size_), other.complete_token_ids_->view(0, batch_size_)});
     }
 }
 
@@ -48,7 +52,7 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
 
     complete_token_ids_ =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                 {(size_t)batch_size_, (size_t)max_seq_len_ + extra_reserve_token_num},
+                                 {(size_t)max_batch_size_, (size_t)max_seq_len_ + extra_reserve_token_num},
                                  rtp_llm::AllocationType::HOST},
                                 {});
 
@@ -62,27 +66,39 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
 }
 
+int CompleteTokenIds::maxBatchSize() {
+    return max_batch_size_;
+}
+
+int CompleteTokenIds::batchSize() {
+    return batch_size_;
+}
+
 const rtp_llm::BufferPtr& CompleteTokenIds::completeTokenIds() {
     return complete_token_ids_;
 }
 
 std::vector<int> CompleteTokenIds::completeTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < batch_size_);
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_idx < batch_size_, "batch_idx is out of bound, expected < %d, found %d", batch_size_, batch_idx);
     return rtp_llm::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), seq_length_);
 }
 
 std::vector<int> CompleteTokenIds::commonCompleteTokenIdsVec(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < batch_size_);
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_idx < batch_size_, "batch_idx is out of bound, expected < %d, found %d", batch_size_, batch_idx);
     return rtp_llm::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), common_len_);
 }
 
 std::vector<int> CompleteTokenIds::currentExecuteTokens(int batch_idx) {
-    RTP_LLM_CHECK(batch_idx < batch_size_);
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_idx < batch_size_, "batch_idx is out of bound, expected < %d, found %d", batch_size_, batch_idx);
     return {*(data(batch_idx) + seq_length_ - 1)};
 }
 
 std::vector<int> CompleteTokenIds::contextTokens(int batch_idx, int prefix_length, int context_length) {
-    RTP_LLM_CHECK(batch_idx < batch_size_);
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_idx < batch_size_, "batch_idx is out of bound, expected < %d, found %d", batch_size_, batch_idx);
     return rtp_llm::buffer2vector<int>((*complete_token_ids_)[batch_idx].view(prefix_length, context_length));
 }
 
@@ -131,9 +147,13 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
                               int                       input_length,
                               int                       max_token_num,
                               int                       vocab_size,
-                              int                       num_beams,
+                              bool                      is_beam_search,
                               int64_t                   stream_id,
                               int&                      error_token_id) {
+    int new_batch_size = new_tokens->shape()[0];
+    RTP_LLM_CHECK_WITH_INFO(
+        new_batch_size <= max_batch_size_, "too many batches, expect < %d, found %d", max_batch_size_, new_batch_size);
+
     if (seq_length_ == input_length) {
         first_token_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
@@ -149,23 +169,34 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
     // # which needs to update all the generated tokens each update.
     RTP_LLM_CHECK(new_tokens->dim() == 2);
 
-    auto new_tokens_ptr     = new_tokens->data<int>();  // [batch_size, max_num_new_tokens]
-    auto max_num_new_tokens = new_tokens->shape()[1];
+    auto       new_tokens_ptr     = new_tokens->data<int>();  // [batch_size, max_num_new_tokens]
+    auto       max_num_new_tokens = new_tokens->shape()[1];
+    const auto get_token_id       = [&](auto batch_idx, auto token_idx) {
+        if (is_beam_search) {
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
+        } else {
+            return (new_tokens_ptr + num_new_tokens * batch_idx)[token_idx];
+        }
+    };
 
-    for (size_t i = 0; i < batch_size_; ++i) {
+    for (size_t i = 0; i < new_batch_size; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = (new_tokens_ptr + num_new_tokens * i)[j];
+            auto current_token_id = get_token_id(i, j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) {  // check tokenid
                 error_token_id = current_token_id;
                 return false;
             }
         }
-        if (num_beams > 1) {
+        if (is_beam_search) {
             memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
         } else {
+            if (batch_size_ != new_batch_size && i > 0) {
+                memcpy(data(i), data(0), sizeof(int) * seq_length_);
+            }
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
+    batch_size_ = new_batch_size;
     setSeqLength(seq_length_ + num_new_tokens);
 
     RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());

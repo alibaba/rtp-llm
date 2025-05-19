@@ -16,6 +16,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->max_new_tokens                 = config_proto->max_new_tokens();
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
+    generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
+    memcpy(generate_config->variable_num_beams.data(), config_proto->variable_num_beams().data(), config_proto->variable_num_beams_size() * sizeof(int));
     generate_config->num_return_sequences           = config_proto->num_return_sequences();
     generate_config->return_logits                  = config_proto->return_logits();
     generate_config->return_incremental             = config_proto->return_incremental();

@@ -94,19 +94,19 @@ std::vector<std::string> TokenProcessor::decodeTokens(std::shared_ptr<TokenProce
 }
 
 std::shared_ptr<TokenProcessorPerStream> TokenProcessor::getTokenProcessorCtx(
-    int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
+    bool use_beam_search, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
     auto ctx = std::make_shared<TokenProcessorPerStream>();
-    ctx->init(num_beams, size, token_processor_cpp);
+    ctx->init(use_beam_search, size, token_processor_cpp);
     return ctx;
 }
 
-void TokenProcessorPerStream::init(int                                    num_beams,
+void TokenProcessorPerStream::init(bool                                   use_beam_search,
                                    int                                    size,
                                    const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
     py::gil_scoped_acquire acquire;
     py::module             token_processor = py::module::import("rtp_llm.utils.token_processor");
     py::object             cls             = token_processor.attr("TokenProcessorPerStream");
-    token_processor_stream_                = cls(num_beams, size, token_processor_cpp->getPyObject());
+    token_processor_stream_                = cls(use_beam_search, size, token_processor_cpp->getPyObject());
 }
 
 std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs&                responses,

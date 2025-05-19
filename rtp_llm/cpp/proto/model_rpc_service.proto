@@ -90,6 +90,7 @@ message GenerateConfigPB {
     bool do_sample = 46;
     bool reuse_cache = 47;
     bool enable_3fs = 48;
+    repeated int32 variable_num_beams = 49;
 }
 
 message MMPreprocessConfigPB {

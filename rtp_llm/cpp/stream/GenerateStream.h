@@ -30,7 +30,8 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr loss;
     // for mtp
     const rtp_llm::BufferPtr all_hidden_states;
-    const rtp_llm::BufferPtr beam_indices;
+    // for dynamic batch size in beam search or multiple return sequences
+    const rtp_llm::BufferPtr src_batch_indices;
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
 };
@@ -132,9 +133,21 @@ public:
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 
-    int    tileNum() const;
-    int    batchSize() const;
-    int    numBeams() const;
+    int tileNum(int iter_count) const;
+    int tileNumIn() const;
+    int tileNumOut() const;
+    int tileNumMax() const;
+
+    int batchSize(int iter_count) const;
+    int batchSizeIn() const;
+    int batchSizeOut() const;
+    int batchSizeMax() const;
+
+    int numBeams(int iter_count) const;
+    int numBeamsIn() const;
+    int numBeamsOut() const;
+    int numBeamsMax() const;
+
     int    numReturnSequences() const;
     bool   calculateLoss() const;
     bool   calculateSoftmaxProbs() const;
@@ -284,7 +297,7 @@ public:
     }
 
     bool disableSpRun() const {
-        return numBeams() > 1 || forceDisableSpRun();
+        return numBeamsMax() > 1 || forceDisableSpRun();
     }
 
     bool needReturnHiddenStates() {
@@ -454,6 +467,8 @@ public:
     bool enable3FS() const {
         return generate_input_->generate_config->enable_3fs;
     }
+
+    void resizeSubGenerateStatus(size_t new_size);
 
 public:
     struct TimeInfo {

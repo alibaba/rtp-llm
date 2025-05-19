@@ -27,7 +27,8 @@ public:
     int min_new_tokens     = 0;
     int num_validate_token = 0;  // for speculative decoding validation.
 
-    int                        num_beams            = 1;
+    int                        num_beams = 1;
+    std::vector<int>           variable_num_beams;
     int                        num_return_sequences = 1;
     int                        top_k                = 0;
     float                      top_p                = 1.0;
@@ -88,6 +89,18 @@ public:
     std::vector<RoleAddr> role_addrs;
     int64_t               inter_request_id = -1;  // used for master scheduling
 
+    int numBeamsMax() {
+        if (variable_num_beams.size() > 0) {
+            return *std::max_element(variable_num_beams.begin(), variable_num_beams.end());
+        } else {
+            return num_beams;
+        }
+    }
+
+    bool hasNumBeams() {
+        return numBeamsMax() > 1;
+    }
+
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list_) {
             std::vector<int> tmpVec;
@@ -120,9 +133,9 @@ public:
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
-                     << ", num_beams:" << num_beams << ", num_return_sequences:" << num_return_sequences
-                     << ", calculate_loss:" << calculate_loss << ", return_logits:" << return_logits
-                     << ", return_incremental: " << return_incremental
+                     << ", num_beams:" << num_beams << ", variable_num_beams:" << vectorToString(variable_num_beams)
+                     << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
+                     << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
@@ -157,6 +170,7 @@ public:
         JSONIZE(min_new_tokens);
         JSONIZE(num_validate_token);
         JSONIZE(num_beams);
+        JSONIZE(variable_num_beams);
         JSONIZE(num_return_sequences);
         JSONIZE(top_k);
         JSONIZE(top_p);

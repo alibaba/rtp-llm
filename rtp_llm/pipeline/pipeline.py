@@ -283,7 +283,7 @@ class Pipeline(object):
         all_texts = []
         output_lens = []
         if len(decoding_states) == 0:
-            if generate_config.num_beams == 1 and generate_config.is_streaming:
+            if not generate_config.has_num_beams() and generate_config.is_streaming:
                 decoding_states = [
                     DecodingState()
                     for _ in range(len(generate_outputs.generate_outputs))
@@ -305,7 +305,7 @@ class Pipeline(object):
         i = 0
         for generate_output in generate_outputs.generate_outputs:
             # all model incremental return output_ids
-            if generate_config.num_beams == 1:
+            if not generate_config.has_num_beams():
                 ouput_tokens_list[i] = torch.cat(
                     (ouput_tokens_list[i], generate_output.output_ids), dim=1
                 )

@@ -7,7 +7,8 @@ namespace rtp_llm {
 
 class CompleteTokenIds {
 public:
-    CompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block);
+    CompleteTokenIds(
+        rtp_llm::DeviceBase* device, int batch_size, int max_batch_size, int max_seq_len, int seq_size_per_block);
     CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
 
 public:
@@ -19,6 +20,9 @@ public:
     std::vector<int> contextTokens(int batch_id, int prefix_length, int context_length);
     std::vector<int> getLatestTokens(size_t token_num);
 
+    int maxBatchSize();
+    int batchSize();
+
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 
@@ -28,7 +32,7 @@ public:
                 int                       input_length,
                 int                       max_token_num,
                 int                       vocab_size,
-                int                       num_beams,
+                bool                      is_beam_search,
                 int64_t                   stream_id,
                 int&                      error_token_id);
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);
@@ -51,8 +55,8 @@ public:
 private:
     rtp_llm::DeviceBase* device_;
 
-    // eq to stream.tileNum()
-    int batch_size_;
+    int batch_size_;      // eq to stream.tileNumIn()
+    int max_batch_size_;  // eq to stream.tileNumMax()
     int max_seq_len_;
     int seq_size_per_block_;
 

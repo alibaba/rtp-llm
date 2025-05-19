@@ -40,13 +40,13 @@ class TokenProcessorPerStream:
     decoding_states: List[DecodingState]
     ouput_tokens_list: List[torch.Tensor]
     token_buffers: List[str]
-    num_beams: int
+    has_num_beams: bool
 
-    def __init__(self, num_beams: int, size: int, token_processor: TokenProcessor):
-        self.num_beams = num_beams
+    def __init__(self, has_num_beams: bool, size: int, token_processor: TokenProcessor):
+        self.has_num_beams = has_num_beams
         self.tokenizer = token_processor.tokenizer
         self.special_tokens = token_processor.special_tokens
-        if num_beams == 1:
+        if not has_num_beams:
             self.decoding_states = [DecodingState() for _ in range(size)]
         else:
             # num_beams不等于1的情况下，不能进行增量decode，因为过去的token id会变化
@@ -66,7 +66,7 @@ class TokenProcessorPerStream:
         stop_word_ids: List[List[int]],
         return_incremental: bool = False,
     ):
-        if self.num_beams == 1:
+        if not self.has_num_beams:
             self.ouput_tokens_list[i] = torch.cat(
                 (self.ouput_tokens_list[i], tokens), dim=1
             )

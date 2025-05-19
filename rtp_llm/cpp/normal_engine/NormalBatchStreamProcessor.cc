@@ -86,7 +86,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     for (const auto& stream : decode_streams) {
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto current_batch_size     = stream->batchSize();
+        auto current_batch_size     = stream->batchSizeIn();
 
         const auto& kv_cache = stream->kvCache();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
@@ -117,7 +117,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
             batch_idx += 1;
         }
-        stream->step();
     }
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
@@ -128,7 +127,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了fallback的场景和perf test的场景
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto current_batch_size     = stream->batchSize();
+        auto current_batch_size     = stream->batchSizeIn();
 
         const auto& kv_cache = stream->kvCache();
         RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
@@ -203,8 +202,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             batch_idx += 1;
             token_idx += input_tokens.size();
         }
-
-        stream->step();
     }
 
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
@@ -217,13 +214,13 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    const auto& context_streams         = stream_groups.contextStreams();
-    size_t      total_decode_batch_size = stream_groups.totalDecodeBatchSize();
-    auto        all_streams             = stream_groups.allStreams();
-    auto        total_batch_size        = stream_groups.totalSamplerBatchSize();
+    auto all_streams          = stream_groups.allStreams();
+    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    bool return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, model_inputs.sequence_lengths);
+        allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, model_inputs.sequence_lengths);
     setCommonSamplerInputs(sampler_inputs, all_streams);
 
     setLogitsProcessorInputs(sampler_inputs, all_streams);
@@ -235,7 +232,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
         auto        seq_len            = stream->seqLength();
-        auto        current_batch_size = stream->tileNum();
+        auto        current_batch_size = stream->tileNumIn();
 
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
@@ -255,30 +252,17 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     auto vocab_size           = model_output.logits->shape()[1];
     sampler_inputs.vocab_size = vocab_size;
-    if (stream_groups.needReturnAllProbs()) {
-        sampler_inputs.all_probs = CACHED_DEVICE_BUF(TYPE_FP32, {total_batch_size, vocab_size});
+    if (return_all_probs) {
+        sampler_inputs.all_probs = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->bufMemset(*sampler_inputs.all_probs, 0);
     }
 
-    batch_idx = 0;
     // need copy logits when has tile or return logits
-    if (return_logits || calculate_softmax_probs || (context_streams.size() && total_batch_size > all_streams.size())) {
-        sampler_inputs.logits = device_->allocateBuffer(
-            {model_output.logits->type(), {total_batch_size, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-        device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size),
-                       model_output.logits->view(0, total_decode_batch_size)});
+    if (return_logits || calculate_softmax_probs) {
+        sampler_inputs.logits = device_->clone({*model_output.logits, rtp_llm::AllocationType::DEVICE});
     } else {
         sampler_inputs.logits = model_output.logits;
-    }
-    batch_idx += total_decode_batch_size;
-    size_t logits_offset = batch_idx;
-    for (auto& stream : context_streams) {
-        auto current_batch_size = stream->tileNum();
-        for (int i = 0; i < current_batch_size; ++i) {
-            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.logits->view(logits_offset, 1)});
-            batch_idx += 1;
-        }
-        logits_offset += 1;
     }
 
     RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
@@ -291,65 +275,63 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups&       stream_groups,
-                                                                size_t                    total_batch_size,
+                                                                size_t                    total_batch_size_in,
+                                                                size_t                    total_batch_size_out,
                                                                 const rtp_llm::BufferPtr& sequence_lengths) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
-    sampler_inputs.step = stream_groups.maxSeqLen();
-    ;
-    sampler_inputs.batch_size       = total_batch_size;
-    sampler_inputs.sequence_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
+    sampler_inputs.step             = stream_groups.maxSeqLen();
+    sampler_inputs.batch_size       = total_batch_size_in;
+    sampler_inputs.batch_size_out   = total_batch_size_out;
+    sampler_inputs.sequence_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.logits_processor_states_ptr.reset();
-    sampler_inputs.beam_search_sequence_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    sampler_inputs.beam_index                   = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
-    // eg: device_->bufMemset(*sampler_inputs.beam_index, 0);
-    sampler_inputs.input_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    sampler_inputs.num_beams_in         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
-    sampler_inputs.num_beams_out        = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
-    sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size});
-    sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
-    sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
-    sampler_inputs.random_seeds         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
-    sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
-    sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
-    sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
-    sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size});
-    sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size});
+    sampler_inputs.input_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
+    sampler_inputs.num_beams_in         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
+    sampler_inputs.num_beams_out        = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
+    sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size_in});
+    sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
+    sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
+    sampler_inputs.random_seeds         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
+    sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
+    sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
+    sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
+    sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
+    sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
+    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
     if (stream_groups.needReturnCumLogProbs()) {
-        sampler_inputs.cum_log_probs = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
+        sampler_inputs.cum_log_probs = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in}, rtp_llm::AllocationType::HOST}, {});
     }
-    sampler_inputs.token_ids = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, sampler_inputs.step + 1});
+    sampler_inputs.token_ids = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST},
+        {});
     return sampler_inputs;
 }
 
 void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                                         std::list<GenerateStreamPtr>& all_streams,
                                                         bool                          score_batch) const {
-    int*      input_lengths                = sampler_inputs.input_lengths->data<int32_t>();
-    int*      sequence_lengths             = sampler_inputs.sequence_lengths->data<int32_t>();
-    uint64_t* num_beams_in                 = sampler_inputs.num_beams_in->data<uint64_t>();
-    uint64_t* num_beams_out                = sampler_inputs.num_beams_out->data<uint64_t>();
-    uint32_t* top_k                        = sampler_inputs.top_k->data<uint32_t>();
-    float*    top_p                        = sampler_inputs.top_p->data<float>();
-    float*    temperature                  = sampler_inputs.temperature->data<float>();
-    uint64_t* random_seeds                 = sampler_inputs.random_seeds->data<uint64_t>();
-    float*    repetition_penalty           = sampler_inputs.repetition_penalty->data<float>();
-    float*    presence_penalty             = sampler_inputs.presence_penalty->data<float>();
-    float*    frequency_penalty            = sampler_inputs.frequency_penalty->data<float>();
-    int32_t*  min_lengths                  = sampler_inputs.min_lengths->data<int32_t>();
-    int32_t*  no_repeat_ngram_size         = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
-    int*      beam_search_sequence_lengths = sampler_inputs.beam_search_sequence_lengths->data<int32_t>();
-    bool*     do_sample                    = sampler_inputs.do_sample->data<bool>();
+    int*      input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
+    int*      sequence_lengths     = sampler_inputs.sequence_lengths->data<int32_t>();
+    uint64_t* num_beams_in         = sampler_inputs.num_beams_in->data<uint64_t>();
+    uint64_t* num_beams_out        = sampler_inputs.num_beams_out->data<uint64_t>();
+    uint32_t* top_k                = sampler_inputs.top_k->data<uint32_t>();
+    float*    top_p                = sampler_inputs.top_p->data<float>();
+    float*    temperature          = sampler_inputs.temperature->data<float>();
+    uint64_t* random_seeds         = sampler_inputs.random_seeds->data<uint64_t>();
+    float*    repetition_penalty   = sampler_inputs.repetition_penalty->data<float>();
+    float*    presence_penalty     = sampler_inputs.presence_penalty->data<float>();
+    float*    frequency_penalty    = sampler_inputs.frequency_penalty->data<float>();
+    int32_t*  min_lengths          = sampler_inputs.min_lengths->data<int32_t>();
+    int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
+    bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
     int  batch_idx       = 0;
     bool has_random_seed = false;
     for (auto& stream : all_streams) {
         int current_batch_size;
         if (!score_batch) {
-            current_batch_size = stream->tileNum();
+            current_batch_size = stream->tileNumIn();
         } else {
             current_batch_size = stream->scoreLen();
         }
@@ -360,12 +342,10 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                    cum_log_probs->sizeBytes());
         }
         for (int i = 0; i < current_batch_size; ++i) {
-            input_lengths[batch_idx]                = stream->inputLength();
-            sequence_lengths[batch_idx]             = stream->seqLength();
-            beam_search_sequence_lengths[batch_idx] = stream->seqLength();
-            // TODO(xinfei.sxf) fix num beams after sampler support
-            num_beams_in[batch_idx]       = stream->numBeams();
-            num_beams_out[batch_idx]      = stream->numBeams();
+            input_lengths[batch_idx]      = stream->inputLength();
+            sequence_lengths[batch_idx]   = stream->seqLength();
+            num_beams_in[batch_idx]       = stream->numBeamsIn();
+            num_beams_out[batch_idx]      = stream->numBeamsOut();
             top_k[batch_idx]              = stream->generateConfig()->top_k;
             top_p[batch_idx]              = stream->generateConfig()->top_p;
             temperature[batch_idx]        = stream->generateConfig()->temperature;
@@ -403,9 +383,9 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->tileNum());
+            state_ptr->insert(processor, idx, idx + stream->tileNumIn());
         }
-        idx += stream->tileNum();
+        idx += stream->tileNumIn();
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
@@ -417,98 +397,121 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     const auto& sampler_output    = merge_outputs.sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
-    const size_t step             = new_all_token_ids->shape()[1];
-    size_t       total_batch_size = stream_groups.totalSamplerBatchSize();
-    RTP_LLM_CHECK(total_batch_size == new_all_token_ids->shape()[0]);
-    int  batch_idx      = 0;
-    int  offset         = 0;
-    int  token_offset   = 0;
-    auto new_tokens_all = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size, (size_t)1});
+    const size_t token_stride         = new_all_token_ids->shape()[1];
+    const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    RTP_LLM_CHECK(total_batch_size_out == new_all_token_ids->shape()[0]);
+    int  batch_idx_in     = 0;
+    int  batch_idx_out    = 0;
+    int  token_offset     = 0;
+    bool return_all_probs = stream_groups.needReturnAllProbs();
+    auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
             continue;
         }
-        auto      current_batch_size = stream->tileNum();
-        auto      new_tokens         = new_tokens_all->slice(batch_idx, current_batch_size);
-        auto      token_size         = stream->currentExecuteTokenSize();
-        auto      batch              = stream->isContextStream() ? 1 : current_batch_size;
-        BufferPtr loss               = nullptr;
-        BufferPtr beam_index         = (sampler_output.beam_index == nullptr) ?
-                                           nullptr :
-                                           sampler_output.beam_index->slice(batch_idx, current_batch_size);
-        BufferPtr batch_logits       = nullptr;
-        if (stream->returnLogits() || stream->calculateSoftmaxProbs()
-            || (stream->numBeams() > 1 && beam_index != nullptr)) {
-            batch_logits = model_output.logits->slice(offset, batch);
+        auto cur_batch_size_in  = stream->tileNumIn();
+        auto cur_batch_size_out = stream->tileNumOut();
+
+        auto token_size              = stream->currentExecuteTokenSize();
+        auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx_out, cur_batch_size_out);
+
+        bool has_beam_search = stream->numBeamsIn() > 1 || stream->numBeamsOut() > 1;
+
+        // construct mapping from output batches to input batches
+        BufferPtr src_batch_indices;
+        if (has_beam_search) {
+            // beam search
+            src_batch_indices = sampler_output.beam_index->slice(batch_idx_out, cur_batch_size_out);
+        } else if (cur_batch_size_in != cur_batch_size_out) {
+            // from context stream to decode straem, there might be other cases in future
+            src_batch_indices = device_->allocateBuffer(
+                {rtp_llm::DataType::TYPE_INT32, {(size_t)cur_batch_size_out}, rtp_llm::AllocationType::HOST}, {});
+            device_->bufMemset(*src_batch_indices, 0);
         }
+        const auto get_src_idx = [&](int32_t dst_idx) {
+            return src_batch_indices ? src_batch_indices->data<int32_t>()[dst_idx] : dst_idx;
+        };
+
+        // construct update info
         BufferPtr batch_hidden_states = nullptr;
         if (stream->generateConfig()->return_hidden_states) {
-            batch_hidden_states = model_output.hidden_states->slice(offset, batch);
-        }
-        BufferPtr batch_cum_log_probs;
-        if (sampler_output.cum_log_probs) {
-            batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
-        }
-        BufferPtr all_probs = nullptr;
-        if (stream_groups.needReturnAllProbs()) {
-            all_probs = sampler_output.all_probs->slice(batch_idx, current_batch_size, false);
-            all_probs->updateParent(sampler_output.all_probs);
+            batch_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size_in);
         }
 
+        BufferPtr batch_logits = nullptr;
+        if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
+            batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size_in);
+        }
+
+        BufferPtr all_probs = nullptr;
+        if (return_all_probs) {
+            all_probs = sampler_output.all_probs->slice(batch_idx_out, cur_batch_size_out, false);
+            all_probs->updateParent(sampler_output.all_probs);
+        };
+
+        BufferPtr batch_cum_log_probs;
+        if (sampler_output.cum_log_probs) {
+            batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx_out, cur_batch_size_out);
+        }
+
+        BufferPtr loss;
         if (stream->calculateLoss()) {
             auto               all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto               tokens     = stream->currentExecuteTokens(0);
             rtp_llm::BufferPtr label      = device_->clone({{rtp_llm::MemoryType::MEMORY_CPU,
-                                                        rtp_llm::DataType::TYPE_INT32,
-                                                        {tokens.size() - 1},
-                                                        tokens.data() + 1}});
+                                                             rtp_llm::DataType::TYPE_INT32,
+                                                             {tokens.size() - 1},
+                                                             tokens.data() + 1}});
             loss                          = device_->loss({all_logits, *label});
         }
+
         BufferPtr all_hidden_states = nullptr;
         if (stream->needReturnHiddenStates()) {
             all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size, false);
             all_hidden_states->updateParent(model_output.all_hidden_states);
         }
+
+        BufferPtr new_tokens = new_tokens_all->slice(batch_idx_out, cur_batch_size_out);
+        for (size_t i = 0; i < cur_batch_size_out; ++i) {
+            new_tokens->data<int32_t>()[i] =
+                new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        }
+
         BufferPtr batch_softmax_result;
         BufferPtr current_softmax_result;
         if (stream->calculateSoftmaxProbs()) {
             current_softmax_result = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP32, {(size_t)current_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST},
+                {rtp_llm::DataType::TYPE_FP32, {(size_t)cur_batch_size_out, (size_t)1}, rtp_llm::AllocationType::HOST},
                 {});
             batch_softmax_result =
                 device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
-        }
-        int old_batch_idx = batch_idx;
-        for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(new_tokens->dataWithOffset<int32_t>(i),
-                   new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1),
-                   sizeof(int32_t));
-            if (stream->calculateSoftmaxProbs()) {
+            for (int i = 0; i < cur_batch_size_out; ++i) {
                 device_->copy({(*current_softmax_result)[i],
-                               (*batch_softmax_result)[i].view(*(new_tokens->dataWithOffset<int32_t>(i)), 1)});
+                               (*batch_softmax_result)[get_src_idx(i)].view(new_tokens->data<int32_t>()[i], 1)});
             }
-            if (sampler_output.success && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx)))) {
+        }
+
+        for (int i = 0; i < cur_batch_size_in; ++i) {
+            if (sampler_output.success && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx_in + i)))) {
                 stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
             }
-            batch_idx += 1;
         }
+
         RTP_LLM_LOG_DEBUG(
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        if (stream->numBeams() > 1 && beam_index != nullptr) {
-            auto             batch_new_all_token_ids = new_all_token_ids->slice(old_batch_idx, current_batch_size);
-            StreamUpdateInfo update_info{batch_new_all_token_ids,
-                                         1,
-                                         batch_hidden_states,
-                                         batch_logits,
-                                         current_softmax_result,
-                                         batch_cum_log_probs,
-                                         all_probs,
-                                         loss,
-                                         all_hidden_states,
-                                         beam_index};
-            stream->beamSearchLogitProcessorUpdate(beam_index);
-            stream->update(update_info);
+        if (has_beam_search) {
+            stream->beamSearchLogitProcessorUpdate(src_batch_indices);
+            stream->update({batch_new_all_token_ids,
+                            1,
+                            batch_hidden_states,
+                            batch_logits,
+                            current_softmax_result,
+                            batch_cum_log_probs,
+                            all_probs,
+                            loss,
+                            all_hidden_states,
+                            src_batch_indices});
         } else {
             stream->update({new_tokens,
                             1,
@@ -519,11 +522,21 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                             all_probs,
                             loss,
                             all_hidden_states,
-                            {}});
+                            src_batch_indices});
         }
-        offset += batch;
+
+        batch_idx_in += cur_batch_size_in;
+        batch_idx_out += cur_batch_size_out;
         token_offset += token_size;
     }
+
+    // move to next step
+    // NOTE: make sure step is called strictly after all operations of current step,
+    // as tileNum, batchSize, beamNum, etc. depend on the value of iter_count
+    for (auto& stream : stream_groups.allStreams()) {
+        stream->step();
+    }
+
     RTP_LLM_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
 }

@@ -53,7 +53,7 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
     autil::ScopedTime2 timer;
     if (token_processor_ctx_ == nullptr) {
         token_processor_ctx_ = token_processor_->getTokenProcessorCtx(
-            generate_config_->num_beams, outputs_cache_.generate_outputs.size(), token_processor_);
+            generate_config_->hasNumBeams(), outputs_cache_.generate_outputs.size(), token_processor_);
     }
     std::vector<std::string> texts =
         token_processor_->decodeTokens(token_processor_ctx_, outputs_cache_, output_lens_, generate_config_);
@@ -98,7 +98,7 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
                    std::back_inserter(res.aux_info),
                    [generate_config, generate_texts](const auto& out) {
                        auto aux_info = AuxInfoAdapter(out.aux_info);
-                       if (generate_config->num_beams > 1) {
+                       if (generate_config->hasNumBeams()) {
                            aux_info.beam_responses = generate_texts;
                        }
                        return aux_info;

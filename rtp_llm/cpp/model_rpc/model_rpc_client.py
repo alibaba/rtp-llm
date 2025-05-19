@@ -67,6 +67,9 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
+    generate_config_pb.variable_num_beams.extend(
+        input_py.generate_config.variable_num_beams
+    )
     generate_config_pb.num_return_sequences = (
         input_py.generate_config.num_return_sequences
     )

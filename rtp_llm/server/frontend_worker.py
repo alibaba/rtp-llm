@@ -131,7 +131,7 @@ class FrontendWorker:
                     )
                 )
             has_num_beams = any(
-                config.num_beams > 1 for config in request.generate_configs
+                config.has_num_beams() for config in request.generate_configs
             )
             in_test = bool(int(os.environ.get("FT_SERVER_TEST", 0)))
             parallel_batch = StaticConfig.model_config.parallel_batch

@@ -41,7 +41,8 @@ TEST_F(SamplerTest, testGeneralSampling) {
 
     BufferPtr input_lengths    = createBuffer<int32_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
     BufferPtr sequence_lengths = createBuffer<int32_t>({batch_size}, {1, 2, 3, 2, 3}, AllocationType::HOST);
-    BufferPtr num_beams        = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
+    BufferPtr num_beams_in     = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
+    BufferPtr num_beams_out    = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
 
     BufferPtr cum_log_probs = createBuffer<float>({batch_size}, {-1, -1, -1, -1, -1});
     BufferPtr rand_seed     = createBuffer<uint64_t>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
@@ -65,7 +66,9 @@ TEST_F(SamplerTest, testGeneralSampling) {
         size_t(vocab_size),
         size_t(step),
         batch_size,
-        move(num_beams),
+        batch_size,
+        move(num_beams_in),
+        move(num_beams_out),
         move(top_k),
         move(top_p),
         move(temperature),
@@ -77,6 +80,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
         nullptr,  // no_repeat_ngram_size
         nullptr,
         device_->clone({*cum_log_probs}),
+        nullptr,
     };
 
     auto outputs = sampler_->forward(inputs);
