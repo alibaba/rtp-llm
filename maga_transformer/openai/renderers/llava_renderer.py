@@ -63,8 +63,8 @@ class Conversation:
                                     images, mm_types)
         
         def get_preprocess_config(config):
-            return MMPreprocessConfig(width=config.width or -1,
-                                      height=config.height or -1,
+            return MMPreprocessConfig(width=config.resized_width or -1,
+                                      height=config.resized_height or -1,
                                       fps=config.fps or -1,
                                       min_frames=config.min_frames or -1,
                                       max_frames=config.max_frames or -1)

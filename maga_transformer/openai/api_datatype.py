@@ -44,7 +44,7 @@ class ContentPartTypeEnum(str, Enum):
     video_url = "video_url"
     audio_url = "audio_url"
 
-class MMPreprocessConfig(BaseModel):
+class MMPreprocessConfigPart(BaseModel):
     resized_width: Optional[int] = None
     resized_height: Optional[int] = None
     min_pixels: Optional[int] = None
@@ -66,7 +66,7 @@ class ContentPart(BaseModel):
     image_url: Optional[ImageURL] = None
     video_url: Optional[ImageURL] = None
     audio_url: Optional[AudioURL] = None
-    preprocess_config: Optional[MMPreprocessConfig] = None
+    preprocess_config: Optional[MMPreprocessConfigPart] = None
 
 class ChatMessage(BaseModel):
     role: RoleEnum
