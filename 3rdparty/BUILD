@@ -4,9 +4,6 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "cuda_driver",
-    srcs = glob([
-        "common/*.cpp",
-    ]),
     hdrs = glob([
         "common/*.h",
     ]),
@@ -16,9 +13,7 @@ cc_library(
         "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = copts(),
-    linkopts = [
-        "-ldl",
-    ]    
+    visibility = ["//visibility:public"],  
 )
 
 cc_library(
