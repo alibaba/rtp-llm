@@ -75,6 +75,7 @@ public:
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 
     void syncAndCheck() override;
+    void printDebugInfo() override;
     void syncDeviceStream(DeviceStream stream) override;
     void syncCommunication(bool timeout = true) override;
     void syncCommunication(ParallelMode mode, bool timeout = true) override;
@@ -154,7 +155,7 @@ public:
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     void sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr quantize(const QuantizeParams& params) override;
-    void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
+    void preRun() override;
 
     void moeGateSelectWithBias(const FfnLayerParams& params,
                                BufferPtr gate,
@@ -300,6 +301,7 @@ protected:
     uint32_t ll_num_max_token_per_rank = 0;
     // for local perf
     bool hack_moe_expert_ = false;
+    std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
 
 } // namespace rtp_llm

@@ -33,12 +33,15 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
-
-    torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
+    if (getenv("NOT_USE_DEFAULT_STREAM") && std::string(getenv("NOT_USE_DEFAULT_STREAM")) == "1") {
+        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
+    } else {
+        torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
+    } 
     torch_comm_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
+    at::cuda::setCurrentCUDAStream(*torch_default_stream_);
     stream_ = torch_default_stream_->stream();
     communication_stream_ = torch_comm_stream_->stream();
-
     check_cuda_error(cudaStreamCreateWithFlags(&no_block_copy_stream_, cudaStreamNonBlocking));
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
@@ -191,6 +194,15 @@ CudaDevice::~CudaDevice() {
         ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
     }
     cache_store_.reset();
+}
+
+void CudaDevice::preRun() {
+    check_cuda_error(cudaSetDevice(device_id_));
+    at::cuda::setCurrentCUDAStream(*torch_default_stream_);
+}
+
+void CudaDevice::printDebugInfo() {
+    RTP_LLM_LOG_INFO("default_stream: %d, device_id_: %d, stream_: %d", torch_default_stream_->id(), at::cuda::current_device(), at::cuda::getCurrentCUDAStream(at::cuda::current_device()).id());
 }
 
 void CudaDevice::init() {

@@ -29,6 +29,7 @@ public:
     }
 
     void traceMemoryUsage();
+    virtual void printDebugInfo() {};
     bool enableDevicePerf() const { return enable_device_perf_; }
     void setTraceMemory(bool trace_memory);
     void holdBufferRecycle();
