@@ -54,7 +54,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             is_gated_activation=self._is_gated_activation,
             inter_padding_size=self._inter_padding_size,
             is_moe=False,
-            need_ffn_act_scale=self.need_ffn_act_scale
+            need_ffn_act_scale=True
         )
         layer_weights = [
             AtomicWeight(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_1.bias', identity)], identity),
@@ -139,11 +139,6 @@ class StarCoder(BaseModel):
             config.special_tokens.bos_token_id=0
             config.special_tokens.eos_token_id=0
         return config
-
-    @classmethod
-    def _load_quant_config(cls, ckpt_path: str,  config: GptInitModelParameters):
-        super(StarCoder, cls)._load_quant_config(ckpt_path, config)
-        config.need_ffn_act_scale = config.quant_algo.isAwq()
 
 register_model('gpt_bigcode', StarCoder, ['GPTBigCodeForCausalLM'])
 register_model('wizardcoder', StarCoder)

@@ -20,7 +20,6 @@ class LoadConfig(BaseModel):
     inter_size: int
     inter_padding_size: int
     use_stack_weight: bool
-    need_ffn_act_scale: bool
     moe_inter_padding_size: int
     moe_layer_index: List[int]
     moe_n_group: int

@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.database import FinetuneType, CkptFileInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
+from maga_transformer.distribute.worker_info import ParallelInfo
 from maga_transformer.utils.database import BaseDatabase
 from maga_transformer.utils.util import check_with_info
 
@@ -104,7 +104,6 @@ def div(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
         else:
             raise Exception("ts is empty")
     return (1.0/ts[0]).to(torch.float32).contiguous()
-    #return (torch.tensor(1.0, dtype=torch.float32, device="cuda:0")).contiguous()
 
 def get_tensor_reciprocal(ts: List[torch.Tensor]) -> torch.Tensor:
     return 1.0 / ts[0].reshape(-1)
@@ -607,6 +606,30 @@ def sp_0_w13(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Ten
     w3 = sp_0(w3, tp, tp_rank, **kwargs)
     return torch.concat([w1, w3], dim=0)
  
+def split_slopes_tp(slopes: torch.Tensor, head_num: int, tp: int, tp_rank: int):
+    local_head_num = 1 if head_num == 1 else head_num // tp
+    start_pos = local_head_num * tp_rank
+    return slopes[start_pos: start_pos + local_head_num]
+
+
+def get_slopes(n: int) -> List[float]:
+    def get_slopes_power_of_2(n: int) -> List[float]:
+        start = (2 ** (-2 ** -(math.log2(n) - 3)))
+        ratio = start
+        return [start * ratio ** i for i in range(n)]
+
+    if math.log2(n).is_integer():
+        return get_slopes_power_of_2(n)
+    else:
+        closest_power_of_2 = 2 ** math.floor(math.log2(n))
+
+        return get_slopes_power_of_2(closest_power_of_2) + \
+            get_slopes(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
+
+def slopes(ts: List[torch.Tensor], n: int):
+    slopes = torch.Tensor(get_slopes(n))
+    return slopes
+
 class W:
     # global
     embedding = 'embedding'
@@ -798,6 +821,8 @@ class W:
         final_ln_beta: sp_id,
         pre_ln_gamma: sp_id,
         pre_ln_beta: sp_id,
+        linear_bias_slopes: split_slopes_tp,
+        rope_cos_sin_cache: sp_id,
         # deepseekv3-mtp
         multi_tokens_predict_enorm: sp_id,
         multi_tokens_predict_hnorm: sp_id,

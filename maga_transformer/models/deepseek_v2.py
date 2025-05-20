@@ -2,10 +2,9 @@ import logging
 
 import torch
 import functools
-import math
 import os
 import json
-from typing import List
+from typing import List, Optional
 
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.utils.model_weight import (
@@ -159,6 +158,32 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 ], config=ffn_config
                 ),
             ]
+         
+    def _create_rope_w(self) -> Optional[AtomicWeight]:
+        if self.config.mla_ops_type == MlaOpsType.MHA:
+            return None
+        config: GptInitModelParameters = self.config
+        def __create_rope_w(ts: List[torch.Tensor], config: GptInitModelParameters):
+            logging.info(f"initialize rope cos sin cache with seq_len: {config.max_seq_len}")
+            rotary_emb = DeepseekV3YarnRotaryEmbedding(config.rotary_embedding_dim,
+                                                    config.max_seq_len,
+                                                    config.rotary_embedding_base,
+                                                    scaling_factor=config.rotary_embedding_scale,
+                                                    original_max_position_embeddings=config.org_embedding_max_pos,
+                                                    beta_fast=config.rotary_factor2,
+                                                    beta_slow=config.rotary_factor1,
+                                                    mscale=config.deepseek_rope_mscale,
+                                                    mscale_all_dim=config.deepseek_mscale_all_dim)
+            half_rope_dim = config.rotary_embedding_dim // 2
+            cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
+            sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
+            # cos sin cache must be float32
+            cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous()
+            return cos_sin_cache
+
+        return AtomicWeight(W.rope_cos_sin_cache, [], process_fun=functools.partial(__create_rope_w, config=config), data_type=torch.float32)
+
+        
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []
@@ -284,28 +309,6 @@ class DeepSeekV2(BaseModel):
     def get_weight_cls():
         return DeepSeekV2Weight
 
-
-    def _initialize_rope(self):
-        if self.config.mla_ops_type == MlaOpsType.MHA:
-            return
-        assert self.weight
-        config = self.config
-        logging.info(f"initialize rope cos sin cache with seq_len: {config.max_seq_len}")
-        rotary_emb = DeepseekV3YarnRotaryEmbedding(config.rotary_embedding_dim,
-                                                   config.max_seq_len,
-                                                   config.rotary_embedding_base,
-                                                   scaling_factor=config.rotary_embedding_scale,
-                                                   original_max_position_embeddings=config.org_embedding_max_pos,
-                                                   beta_fast=config.rotary_factor2,
-                                                   beta_slow=config.rotary_factor1,
-                                                   mscale=config.deepseek_rope_mscale,
-                                                   mscale_all_dim=config.deepseek_mscale_all_dim)
-        half_rope_dim = config.rotary_embedding_dim // 2
-        cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
-        sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
-        # cos sin cache must be float32
-        cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous().to(self.device).to(torch.float32)
-        self.weight.global_weights[W.rope_cos_sin_cache] = cos_sin_cache
 
 class DeepSeekV3MtpWeight(DeepSeekV2Weight):
 

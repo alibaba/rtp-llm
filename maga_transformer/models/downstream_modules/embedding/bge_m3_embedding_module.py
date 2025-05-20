@@ -2,15 +2,15 @@ import torch
 from typing import List, Dict, Any, Union
 from transformers import PreTrainedTokenizerBase
 from pydantic import BaseModel
-from functools import partial
 from maga_transformer.config.base_model_config import PyDanticModelBase
 
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler, CustomRenderer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.downstream_modules.embedding.misc import combo_to_batch
 from maga_transformer.embedding.embedding_type import EmbeddingType, TYPE_STR
-from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
+from maga_transformer.async_decoder_engine.embedding.interface import EngineOutputs
 from maga_transformer.models.downstream_modules.embedding.api_datatype import OpenAIEmbeddingRequest, SparseEmbeddingRequest, ColbertEmbeddingRequest
+from maga_transformer.model_loader.weight_module import CustomAtomicWeight
 
 from maga_transformer.models.downstream_modules.embedding.colbert_embedding_module import ColBertEmbeddingModule, ColBertEmbeddingHandler
 from maga_transformer.models.downstream_modules.embedding.sparse_emebdding_module import SparseEmbeddingModule, SparseEmbeddingHandler
@@ -37,7 +37,7 @@ class BgeM3EmbeddingModule(CustomModule):
 
         self.handler = BgeM3EmbeddingHandler(self._dense_module.handler, self._sparse_module.handler, self._colbert_module.handler)
 
-    def tensor_info(self) -> List[str]:
+    def custom_weight_info(self) -> List[CustomAtomicWeight]:
         return []
 
     def get_renderer(self, request: Dict[str, Any]) -> CustomRenderer:

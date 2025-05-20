@@ -1,12 +1,14 @@
 
 import functools
 from typing import Any, Dict
+import torch
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from ..model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.utils.util import get_config_from_path
-from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, trans_qkv, trans_qkv_b
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, transpose, trans_qkv, trans_qkv_b, slopes
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.model_loader.weight_module import AtomicWeight
 from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
@@ -33,6 +35,8 @@ class BloomWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('ln_f.weight', identity)], identity),
             AtomicWeight(W.final_ln_beta, [CkptWeightInfo('ln_f.bias', identity)], identity),
         ]
+        if self.config.use_attention_linear_bias:
+            weights.append(AtomicWeight(W.linear_bias_slopes, [], functools.partial(slopes, n=self.config.head_num), data_type=torch.float))
         attn_config=self.attn_config
         ffn_config=self.ffn_config
 

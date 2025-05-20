@@ -1,9 +1,11 @@
+import logging
 import torch
-from typing import List, Dict, Any, Union, Callable
+from typing import List, Dict, Any, Union
 from pydantic import BaseModel
 
 from transformers import PreTrainedTokenizerBase
-from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.model_loader.weight_module import CustomAtomicWeight
+from maga_transformer.model_loader.model_weight_info import ModelWeights
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 
@@ -26,12 +28,26 @@ class CustomModule(object):
     def get_handler(self) -> 'CustomHandler':
         return self.handler
 
+    def get_custom_weight_info(self) -> List[CustomAtomicWeight]:
+        return self.handler.custom_weight_info()
+
+    def init(self, weight: ModelWeights):
+        tensor_map: Dict[str, torch.Tensor] = {}
+        for weight_info in self.get_custom_weight_info():
+            if weight_info.name.startswith(CustomAtomicWeight.prefix):
+                name = weight_info.name.replace(CustomAtomicWeight.prefix, '', 1)
+            else:
+                name = weight_info.name
+            tensor_map[name] = weight.get_global_weight(weight_info.name)
+        self.handler.init(tensor_map)
+        
+
 class CustomHandler(object):
     def __init__(self, config: GptInitModelParameters):
         self.config_ = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def tensor_info(self) -> List[str]:
+    def custom_weight_info(self) -> List[CustomAtomicWeight]:
         return []
 
     # for cpp

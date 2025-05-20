@@ -1,7 +1,7 @@
 from typing import Any, Dict
 import copy
 from maga_transformer.utils.model_weight import W
-from maga_transformer.utils.model_weight import sp_head_gemm_a8, sp_id, sp_neg1, ffn_sp_0, ffn_sp_neg1, sp_head_s_gemm_a8, sp_0
+from maga_transformer.utils.model_weight import sp_head_gemm_a8, sp_id, sp_neg1, ffn_sp_0, ffn_sp_neg1, sp_head_s_gemm_a8, sp_0, ffn_sp_0_w13
 from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
 from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight

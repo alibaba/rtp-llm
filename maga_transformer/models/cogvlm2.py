@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -8,13 +8,11 @@ from einops import rearrange
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
-from maga_transformer.utils.util import to_torch_dtype
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
@@ -25,21 +23,12 @@ class CogVLM2(Llama, MultiModalMixin):
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
         super().__init__(config)
-        
-    def _init_multimodal(self, config: GptInitModelParameters):        
+
+    def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = EVA2CLIPImageEmbedding(config)
         config.mm_related_params.vit_weights = CogVLM2VitWeights(
             {"vit": self.mm_part.vit}
         )
-
-    def load(self, device: str):
-        if os.environ.get("VIT_TRT", "0") == "1":
-            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            self.init_mm_trt(
-                weights_info, self.config.ckpt_path,
-                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
-            )
-        super().load(device=device)
 
     @staticmethod
     def _create_config(ckpt_path):

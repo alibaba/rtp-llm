@@ -8,7 +8,7 @@ from maga_transformer.model_loader.weight_module import AtomicWeight, CompositeW
 from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, kv_split, mla_pad, \
     mla_pad_scale, stack_, stack_moe_w1, concat_0,\
     multipy_identity, pad, transpose_slice_k, transpose_slice_v,\
-        pad_w13, sp_neg1, sp_head_gemm_a8, sp_head_s_gemm_a8_block, sp_0
+        pad_w13, sp_neg1, sp_head_gemm_a8, sp_head_s_gemm_a8_block, sp_0, sp_0_w13, ffn_sp_0_w13
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from maga_transformer.utils.util import check_with_info
 

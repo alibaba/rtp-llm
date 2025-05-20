@@ -6,7 +6,6 @@ import math
 from typing import Any, Dict, List
 
 from transformers.models.llama.tokenization_llama import LlamaTokenizer as LlamaTokenizerOrigin
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
 from maga_transformer.models.base_model import BaseModel

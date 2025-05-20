@@ -48,14 +48,14 @@ class Bert(BaseModel):
             cls.from_huggingface(config, config_json)
         return config
 
-    def load_custom_module(self) -> Optional[CustomModule]:
+    def _init_custom_module(self) -> Optional[CustomModule]:
         if self.task_type == TaskType.SEQ_CLASSIFICATION:
             logging.info("using BertClassifierModule as custom module")
             return BertClassifierModule(self.config, self.tokenizer)
         if self.task_type == TaskType.RERANKER:
             logging.info("using BertRerankerModule as custom module")
             return BertRerankerModule(self.config, self.tokenizer)
-        return super().load_custom_module()
+        return super()._init_custom_module()
 
     @classmethod
     def from_huggingface(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
@@ -85,14 +85,15 @@ class Roberta(Bert):
     def get_weight_cls():
         return RobertaWeightInfo
 
-    def load_custom_module(self) -> Optional[CustomModule]:
+    def _init_custom_module(self) -> Optional[CustomModule]:
+        logging.info(f"task_type : {self.task_type}")
         if self.task_type == TaskType.SEQ_CLASSIFICATION:
             logging.info("using RobertaClassifierModule as custom module")
             return RobertaClassifierModule(self.config, self.tokenizer)
         elif self.task_type == TaskType.RERANKER:
             logging.info("using RobertaRerankerModule as custom module")
             return RobertaRerankerModule(self.config, self.tokenizer)
-        return super().load_custom_module()
+        return super()._init_custom_module()
 
     @classmethod
     def from_huggingface(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):

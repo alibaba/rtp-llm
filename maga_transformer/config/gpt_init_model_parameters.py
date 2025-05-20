@@ -87,7 +87,6 @@ class GptInitModelParameters:
         "ref_module",
         "ref_dict",
         "tie_word_embeddings",
-        "need_ffn_act_scale",
         "task_type",
         "add_special_tokens",
         "template_type",
@@ -288,7 +287,6 @@ class GptInitModelParameters:
         self.task_type = TaskType.LANGUAGE_MODEL
 
         self.tie_word_embeddings = False
-        self.need_ffn_act_scale = False
         self.nccl_ip = g_master_info.ip
         self.tp_nccl_port = g_master_info.tp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
@@ -454,6 +452,7 @@ class GptInitModelParameters:
                       parallel_info: ParallelInfo=g_parallel_info,
                       config_mode: ConfigMode = ConfigMode.ComplexMode,
                       gang_info: Optional[GangInfo] = None):
+        self._load_quant_config(ckpt_path)
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
         self.ep_size = parallel_info.ep_size
@@ -624,6 +623,44 @@ class GptInitModelParameters:
 
         logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
                         f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
+
+
+    def _load_quant_config(self, ckpt_path: str):
+        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
+        if os.path.exists(quant_config_path):
+            self.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
+        per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
+
+        if os.path.exists(per_tensor_config_path):
+            self.quant_algo.setQuantAlgo('pertensor_quant', 0, 0)
+
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.exists(config_path):
+            return
+
+        config_json = json.load(open(config_path))
+        quant_config = None
+        quant_method = None
+        if config_json.get("quantization_config", None):
+            quant_config = config_json["quantization_config"]
+            quant_method = quant_config['quant_method'].lower()
+
+        if config_json.get("quantization", None):
+            quant_config = config_json["quantization"]
+            quant_method = quant_config['quant_algo'].lower()
+        if quant_config is None:
+            return
+
+        group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
+        bits = quant_config['bits'] if 'bits' in quant_config else 0
+        if quant_method == 'fp8':
+            bits = 8
+            if 'weight_block_size' in quant_config:
+                weight_block = quant_config.get("weight_block_size")
+                assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
+                group_size = weight_block[0]
+
+        self.quant_algo.setQuantAlgo(quant_method, bits, group_size)
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

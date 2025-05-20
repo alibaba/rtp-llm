@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Union
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.model_loader.weight_module import CustomAtomicWeight
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseFormat, EmbeddingResponseType, SparseEmbeddingRequest, SimilarityRequest
@@ -27,17 +28,17 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
                                   self.tokenizer_.eos_token_id,
                                   self.tokenizer_.pad_token_id,
                                   self.tokenizer_.unk_token_id])
-        
+
     def render_request(self, request_json: Dict[str, Any]):
         if 'left' in request_json:
             return SimilarityRequest(**request_json)
         else:
             return SparseEmbeddingRequest(**request_json)
-        
+
     def embedding_func(self, request: Union[SparseEmbeddingRequest, SimilarityRequest], res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[Dict[str, float]]:
         if len(res.shape) != 1:
             raise Exception("sparse hidden should be 1-dim")
-        sparse_emb: Dict[int, float] = defaultdict(float)        
+        sparse_emb: Dict[int, float] = defaultdict(float)
         for score, id in zip(res[:input_length], input_tokens):
             score = float(score)
             id = int(id)
@@ -67,7 +68,7 @@ class SparseEmbeddingHandler(CustomHandler):
         self.sparse_linear = torch.nn.Linear(in_features=self.config_.hidden_size, out_features=1)
         self.dtype_ = to_torch_dtype(self.config_.data_type)
 
-    def tensor_info(self) -> List[str]:
+    def custom_weight_info(self) -> List[CustomAtomicWeight]:
         return []
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:

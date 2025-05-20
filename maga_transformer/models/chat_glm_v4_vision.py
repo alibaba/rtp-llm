@@ -4,14 +4,13 @@ import torch
 
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
-from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.chat_glm_v4 import ChatGlmV4
 from maga_transformer.models.chat_glm_v4_vision_weight import (
     ChatGlmV4VisionVitWeights, ChatGlmV4VisionWeightInfo)
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
-from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
+from maga_transformer.utils.util import get_config_from_path
 
 
 class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
@@ -30,14 +29,6 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
             {"vit": self.mm_part.vit}
         )
 
-    def load(self, device: str):
-        if os.environ.get("VIT_TRT", "0") == "1":
-            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            self.init_mm_trt(
-                weights_info, self.config.ckpt_path,
-                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
-            )
-        super().load(device=device)
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

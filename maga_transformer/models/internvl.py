@@ -13,7 +13,6 @@ from maga_transformer.models.llama import Llama
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.internvl_weight import InternVLVitWeight, InternVLWeightInfo
-from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.internvl_vit import InternVLImageEmbedding
 

@@ -4,7 +4,7 @@ import json
 import functools
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, zeros, transpose
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, identity, zeros, transpose, slopes
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
@@ -19,6 +19,10 @@ class MptWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('transformer.norm_f.weight', identity)], identity),
             AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=self._hidden_size)),
         ]
+
+        if self.config.use_attention_linear_bias:
+            weights.append(AtomicWeight(W.linear_bias_slopes, [], functools.partial(slopes, n=self.config.head_num), data_type=torch.float))
+
         attn_config = self.attn_config
         ffn_config = self.ffn_config
         layer_weights = []

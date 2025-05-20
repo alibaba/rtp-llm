@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List
 
 import torch
 import math
@@ -8,7 +8,6 @@ from PIL import Image
 from transformers import AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface, mm_lock
@@ -20,7 +19,7 @@ from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, 
 from maga_transformer.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_bytes_io_from_url
 from torchvision import transforms
 from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
-from typing import Any, Dict, List, Type, Optional
+from typing import Any, Dict, List, Optional
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.embedding.minicpmv_embedding_module import MiniCPMVModule, slice_image
 from maga_transformer.models.llama_weight import LlamaWeightInfo
@@ -31,7 +30,6 @@ import timm
 # for faster batch inference
 from concurrent.futures import ThreadPoolExecutor
 
-from maga_transformer.config.task_type import TaskType
 
 
 class LlamaTokenizerWrapper(LlamaTokenizer):
@@ -122,7 +120,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     @torch.inference_mode()
     def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
         dtype = self._data_type
-        if g_parallel_info.tp_rank > 0:
+        if self.config.tp_rank > 0:
             return torch.Tensor([])
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
@@ -138,12 +136,12 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             return (features, None)
         else:
             return (cached_res, None)
-        
+
     def _mm_preprocess(self, data, type, **kwargs):
         if type == MMUrlType.IMAGE:
             return Image.open(data).convert("RGB")
         elif type == MMUrlType.VIDEO:
-            return encode_video(data) 
+            return encode_video(data)
 
     @torch.inference_mode()
     def mm_process(self, mm_input, **kwargs):
@@ -339,9 +337,8 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         config.mm_related_params.config[
             "drop_vision_last_layer"] = config_json["drop_vision_last_layer"]
 
-    def load_custom_module(self) -> Optional[CustomModule]:
+    def _init_custom_module(self) -> Optional[CustomModule]:
         return MiniCPMVModule(self.config, self.tokenizer)
-        # return super().load_custom_module()
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

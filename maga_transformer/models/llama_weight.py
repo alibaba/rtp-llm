@@ -8,7 +8,7 @@ from einops import rearrange
 
 from maga_transformer.utils.model_weight import (W, CkptWeightInfo, WeightStyle, concat_1,
                                                  concat_0, identity, sp_0, sp_head_lora, sp_id, sp_neg1, zeros, transpose, merge_qkv_lora_A,
-                                                 merge_qkv_lora_B, shift_one, merge_qkv_b)
+                                                 merge_qkv_lora_B, shift_one, merge_qkv_b, slopes)
 from maga_transformer.model_loader.weight_module import AtomicWeight, WeightModule
 from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
@@ -185,6 +185,9 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             AtomicWeight(W.final_ln_gamma, [CkptWeightInfo(self._prefix + self._names.NORM, identity)], identity),
             AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
+        if self.config.use_attention_linear_bias:
+            weights.append(AtomicWeight(W.linear_bias_slopes, [], functools.partial(slopes, n=self.config.head_num), data_type=torch.float))
+
         attn_config = AttnConfig(
             hidden_size=self._hidden_size,
             size_per_head=self._size_per_head,
@@ -230,16 +233,16 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         else:
             layer_weights.extend([
                 AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self._prefix + self._names.WO, concat_1)], transpose,
-                                 config=attn_config, 
+                                 config=attn_config,
                                  lora_a_process_func=transpose, lora_b_process_func=transpose,
                                  lora_a_split_func=sp_0, lora_b_split_func=sp_id),
                 FfnWeight(sub_weights=[
                     FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo(self._prefix + self._names.FFW1, concat_0)], transpose,
-                                    config=ffn_config, 
+                                    config=ffn_config,
                                     lora_a_process_func=transpose, lora_b_process_func=transpose,
                                     lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
                     FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo(self._prefix + self._names.FFW3, concat_0)], transpose,
-                                    config=ffn_config, 
+                                    config=ffn_config,
                                     lora_a_process_func=transpose, lora_b_process_func=transpose,
                                     lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
                     FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo(self._prefix + self._names.FFW2, concat_1)], transpose,
@@ -280,14 +283,14 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                                functools.partial(self._merge_qkv,
                                                  hidden_size=self._hidden_size,
                                                  head_num_kv=self._head_num_kv,
-                                                 head_num=self._head_num), 
-                               config=attn_config, 
+                                                 head_num=self._head_num),
+                               config=attn_config,
                                lora_a_process_func=lora_a_process_func, lora_b_process_func=lora_b_process_func,
                                lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora))
             else:
                 layer_weights.append(
                     AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo(self._prefix + self._names.W_QKV, identity)], transpose,
-                    config=attn_config, 
+                    config=attn_config,
                     lora_a_process_func=transpose, lora_b_process_func=transpose,
                     lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora))
 

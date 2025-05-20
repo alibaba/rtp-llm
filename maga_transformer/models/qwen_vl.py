@@ -35,15 +35,6 @@ class QWen_VL(QWen, MultiModalMixin):
         self.mm_part = QwenVLImageEmbedding(config)
         config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
 
-    def load(self, device: str):
-        if os.environ.get("VIT_TRT", "0") == "1":
-            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            self.init_mm_trt(
-                weights_info, self.config.ckpt_path,
-                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
-            )
-        super().load(device=device)
-
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[MultimodalInput]]:

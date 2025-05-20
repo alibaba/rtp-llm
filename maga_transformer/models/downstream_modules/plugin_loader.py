@@ -19,6 +19,6 @@ def load_module(file_path: str) -> ModuleType:
 
 class UserModuleLoader(object):
     @staticmethod
-    def load(module_path: str):                
+    def load(module_path: str):
         module = load_module(module_path)
         return module.UserModule

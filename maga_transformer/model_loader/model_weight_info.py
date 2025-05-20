@@ -139,7 +139,6 @@ class ModelDeployWeightInfo:
         self.ffn_tp_rank = config.ffn_tp_rank
         self.ffn_tp_size = config.ffn_tp_size
         self._size_per_head = config.size_per_head
-        self.phy2log_ = config.phy2log
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
         self._quant_algo = config.quant_algo
@@ -165,7 +164,6 @@ class ModelDeployWeightInfo:
         self._moe_inter_padding_size = config.moe_inter_padding_size
 
         self.tie_word_embeddings = config.tie_word_embeddings
-        self.need_ffn_act_scale = config.need_ffn_act_scale
         self.use_expert_attention = config.use_expert_attention
         self.weight_style = WeightStyle.NONE
 
@@ -372,6 +370,16 @@ class ModelDeployWeightInfo:
         else:
             raise Exception("Unknown database class")
 
+    def create_dynamic_weights(self) -> List[AtomicWeight]:
+        dynamic_weights = []
+        rope_w = self._create_rope_w()
+        if rope_w:
+            dynamic_weights.append(rope_w)
+        return dynamic_weights
+
+    def _create_rope_w(self) -> List[AtomicWeight]:
+        return None
+
     def process_meta_from_ckpt(self, ckpt_metas: List[CkptFileInfo]):
         if len(ckpt_metas) == 0:
             return
@@ -398,6 +406,7 @@ class ModelDeployWeightInfo:
                            database: BaseDatabase,
                            exported_device: Optional[Any] = None):
         merge_lora = False
+
         if not database.is_ft_style:
             merge_lora = database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
 
@@ -406,10 +415,12 @@ class ModelDeployWeightInfo:
 
         if database.is_ft_style and database.ft_weight_params:
             # check ft_style ParallelInfo is match weight's ParallelInfo
-            src_paralle_info = ParallelInfo.from_params(database.ft_weight_params)
-            if src_paralle_info.tp_size != self.tp_size or src_paralle_info.dp_size != self.dp_size or src_paralle_info.ep_size != self.ep_size:
-                raise ValueError(f"ft_style ParallelInfo is not match weight's ParallelInfo, src_paralle_info: {src_paralle_info}" + \
-                    f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, ep_size: {self.ep_size}")
+            src_tp_size = int(database.ft_weight_params.get('TP_SIZE', self.tp_size))
+            src_dp_size = int(database.ft_weight_params.get('DP_SIZE', self.dp_size))
+            src_ep_size = int(database.ft_weight_params.get('EP_SIZE', self.ep_size))
+            if src_tp_size != self.tp_size or src_dp_size != self.dp_size or src_ep_size != self.ep_size:
+                raise ValueError(f"ft_style ParallelInfo is not match weight's ParallelInfo," + \
+                    f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}")
             
         load_config = LoadConfig(
             database = database,
@@ -419,7 +430,6 @@ class ModelDeployWeightInfo:
             head_num_kv = self._head_num_kv,
             size_per_head = self._size_per_head,
             use_stack_weight = self._use_stack_weight,
-            need_ffn_act_scale = self.need_ffn_act_scale,
             inter_size = self._inter_size,
             moe_layer_index = self.moe_layer_index_,
             moe_n_group = self.moe_n_group_,
@@ -445,7 +455,7 @@ class ModelDeployWeightInfo:
             quant_algo = self._quant_algo,
             bit = self._quant_algo.getWeightBits(),
             is_ft_style_weight = database.is_ft_style,
-            phy2log=self.phy2log_,
+            phy2log=self.config.phy2log,                      # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
             exported_device = exported_device
         )
         return load_config

@@ -3,6 +3,8 @@ from typing import Dict, List, Any
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.utils.model_weight import CkptWeightInfo
+from maga_transformer.model_loader.weight_module import CustomAtomicWeight
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.tensor_utils import get_first_token_from_combo_tokens
@@ -30,11 +32,18 @@ class BertClassifierHandler(CustomHandler):
         self.activation = torch.nn.Tanh()
         self.linear = torch.nn.Linear(self.config_.hidden_size, num_labels)
 
-    def tensor_info(self):
-        return [
-            'bert.pooler.dense.bias', 'bert.pooler.dense.weight',
-            'classifier.weight', 'classifier.bias'
+    def custom_weight_info(self) -> List[CustomAtomicWeight]:
+        w_list = [
+            'bert.pooler.dense.bias', 
+            'bert.pooler.dense.weight',
+            'classifier.weight', 
+            'classifier.bias'
         ]
+        weights = []
+        for k in  w_list:
+            weights.append(CustomAtomicWeight(CustomAtomicWeight.prefix + k, [CkptWeightInfo(k)]))
+        return weights
+
 
     def pooler(self, hidden_states: torch.Tensor) -> torch.Tensor:
         pooled_output = self.dense(hidden_states)
@@ -55,6 +64,7 @@ class BertClassifierHandler(CustomHandler):
             self.dense = self.dense.to(torch.float32)
             self.linear = self.linear.to(torch.float32)
 
+    @torch.inference_mode()
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor,
                 input_lengths: torch.Tensor) -> List[torch.Tensor]:
         first_tokens = get_first_token_from_combo_tokens(

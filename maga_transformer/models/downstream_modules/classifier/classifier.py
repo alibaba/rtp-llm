@@ -3,6 +3,8 @@ from typing import Dict, List, Any
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.utils.model_weight import CkptWeightInfo
+from maga_transformer.model_loader.weight_module import CustomAtomicWeight
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomRenderer, CustomHandler
 from maga_transformer.models.downstream_modules.common_input_generator import CommonInputGenerator
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -41,8 +43,12 @@ class ClassifierHandler(CustomHandler):
         num_labels = load_num_labels(self.config_.ckpt_path)
         self.linear = torch.nn.Linear(self.config_.hidden_size, num_labels)
 
-    def tensor_info(self):
-        return ['classifier.weight', 'classifier.bias']
+    def custom_weight_info(self) -> List[CustomAtomicWeight]:
+        w_list = ['classifier.weight', 'classifier.bias']
+        weights = []
+        for k in  w_list:
+            weights.append(CustomAtomicWeight(CustomAtomicWeight.prefix + k, [CkptWeightInfo(k)]))
+        return weights
 
     def init(self, tensor_map: Dict[str, torch.Tensor]):
         data_type = to_torch_dtype(self.config_.data_type)
@@ -50,6 +56,7 @@ class ClassifierHandler(CustomHandler):
         self.linear.bias.data = tensor_map['classifier.bias']
         self.linear = self.linear.to(data_type).eval().to(self.device)
 
+    @torch.inference_mode()
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         #TODO test it
         if self.config_.is_causal:

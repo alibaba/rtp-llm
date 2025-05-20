@@ -3,10 +3,10 @@ import functools
 from typing import List, Any
 from pydantic import BaseModel
 
-from maga_transformer.utils.model_weight import W, CkptWeightInfo, concat_0, transpose
+from maga_transformer.utils.model_weight import W, CkptWeightInfo, concat_0, transpose, slopes
 from maga_transformer.model_loader.weight_module import WeightModule, AtomicWeight
-from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
-from maga_transformer.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from maga_transformer.model_loader.ffn_weight import FfnAtomicWeight
+from maga_transformer.model_loader.attn_weight import AttnAtomicWeight
 from maga_transformer.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
@@ -97,12 +97,16 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
 
 
     def _get_base_weight_info(self) -> List[WeightModule]:
-        return [
+        weights = [
             AtomicWeight(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING)]),
             AtomicWeight(W.token_type_embedding, [CkptWeightInfo(self._names.TOKEN_TYPE_EMBEDDING)]),
             AtomicWeight(W.pre_decoder_ln_beta, [CkptWeightInfo(self._names.EMB_NORM_B)]),
             AtomicWeight(W.pre_decoder_ln_gamma, [CkptWeightInfo(self._names.EMB_NORM_W)]),
         ]
+        if self.config.use_attention_linear_bias:
+            weights.append(AtomicWeight(W.linear_bias_slopes, [], functools.partial(slopes, n=self.config.head_num), data_type=torch.float))
+        return weights
+
 
     def _get_weight_info(self):
         weights = self._get_base_weight_info()
