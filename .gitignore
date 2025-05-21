@@ -46,3 +46,5 @@ model_rpc_service_pb2.py
 model_rpc_service_pb2_grpc.py
 
 cuda_profiler*.json
+
+core-*
