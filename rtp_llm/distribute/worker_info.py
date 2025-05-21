@@ -117,7 +117,8 @@ class ParallelInfo(object):
                 ffn_sp_size = int(params.get('FFN_SP_SIZE', '1')),
                 world_size=world_size,
                 world_rank=int(params.get('WORLD_RANK', '0')),
-                local_world_size=local_world_size)
+                local_world_size=local_world_size
+        )
         if (torch.cuda.is_available() and (info.local_world_size > torch.cuda.device_count())):
             raise Exception(f'local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}')
         if (info.tp_size * info.pp_size * info.dp_size != info.world_size or

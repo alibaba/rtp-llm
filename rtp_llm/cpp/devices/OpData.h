@@ -581,6 +581,7 @@ struct MoeConfigs {
     bool    normalize_expert_scale = false;
     int64_t moe_inter_padding_size = 0;
     bool    has_moe_norm           = false;
+    bool    use_all_gather         = false;
     size_t  ep_rank                = 0;
     size_t  ep_size                = 1;
     size_t  tp_rank                = 0;

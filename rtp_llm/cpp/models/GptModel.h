@@ -106,7 +106,7 @@ enum GptModelInputIndex : size_t{
     gptModelInputLength
 };
 
-void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device);
+void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device);
 
 struct GptModelOutputs {
     rtp_llm::BufferPtr logits;

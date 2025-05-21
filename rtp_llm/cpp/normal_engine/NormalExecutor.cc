@@ -54,6 +54,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     lora_manager_(lora_manager),
     warm_up_(warm_up),
     gen_timeline_sync_(autil::EnvUtil::getEnv("GEN_TIMELINE_SYNC", 0L)),
+    use_all_gather_(params.gpt_init_parameter.use_all_gather_),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
 {
@@ -136,7 +137,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        dpAndTpSyncModelInputs(model_input, device_);
+        tpSyncModelInputs(model_input, device_);
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     // get lora input

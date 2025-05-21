@@ -344,7 +344,7 @@ class GptInitModelParameters:
         worker_grpc_addrs = []
         for member in get_gang_info().members:
             logging.info(f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {self.local_rank}, " \
-                f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}")
+                f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}, use_all_gather: {self.use_all_gather}")
             if int((member.world_rank / self.tp_size) % self.dp_size) == self.dp_rank:
                 worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
                 worker_grpc_addrs.append(f'{member.ip}:{member.rpc_server_port}')
@@ -463,6 +463,8 @@ class GptInitModelParameters:
         self.ffn_tp_size = parallel_info.ffn_tp_size
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
+        self.use_all_gather = os.environ.get("USE_ALL_GATHER", "FALSE").upper() == "TRUE"
+        logging.info(f"use_all_gather: {self.use_all_gather}")
 
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
         self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]

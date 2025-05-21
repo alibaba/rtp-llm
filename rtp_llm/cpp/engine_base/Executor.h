@@ -47,6 +47,7 @@ public:
                 params.moe_normalize_expert_scale_,
                 params.moe_inter_padding_size_ / moe_tp_size,
                 params.has_moe_norm_,
+                params.use_all_gather_,
                 (size_t)params.ep_rank_,
                 (size_t)params.ep_size_,
                 (size_t)params.tp_rank_,

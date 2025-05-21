@@ -237,7 +237,7 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
-    if (moe_conf.ep_size > 1) {
+    if (moe_conf.ep_size > 1 && !moe_conf.use_all_gather) {
         return epMoeFfnLayer(params, gate_output);
     }
     return moeFfn(params, gate_output);
@@ -268,7 +268,7 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
             shared_expert_output = multiply({
                     shared_gate->reshape({shared_gate->size()}), *shared_expert_output, shared_expert_output});
         }
-        if (moe_conf.tp_size > 1) {
+        if (moe_conf.tp_size > 1 && !moe_conf.use_all_gather) {
             auto wrapper = DevicePerfWrapper(this, "shared_expert_all_reduce, sizeBytes=%ld", (long)shared_expert_output->sizeBytes());
             shared_expert_output = allReduce({shared_expert_output, ReduceOp::Sum}).buffer;
         }

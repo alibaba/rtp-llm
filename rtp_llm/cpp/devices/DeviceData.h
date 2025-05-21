@@ -36,6 +36,7 @@ struct DeviceInitParams {
     size_t dp_size         = 1;
     size_t ffn_tp_rank     = 0;
     size_t ffn_tp_size     = 1;
+    bool use_all_gather    = false;
 
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
@@ -107,6 +108,7 @@ struct DeviceProperties {
     bool use_deepep_internode = false;
     bool use_deepep_low_latency = false;
     bool is_mtp = false;
+    bool use_all_gather = false;
 };
 
 struct MemoryStatus {

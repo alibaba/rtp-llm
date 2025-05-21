@@ -339,6 +339,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(ffn_tp_rank, ffn_tp_rank_)                             \
     DEF_PROPERTY(enable_sp, enable_sp_)                                 \
     DEF_PROPERTY(world_size, world_size_)                               \
+    DEF_PROPERTY(use_all_gather, use_all_gather_)                       \
     DEF_PROPERTY(cache_store_listen_port, cache_store_listen_port_)     \
     DEF_PROPERTY(cache_store_connect_port, cache_store_connect_port_)   \
     DEF_PROPERTY(cache_store_rdma_connect_port, cache_store_rdma_connect_port_)   \

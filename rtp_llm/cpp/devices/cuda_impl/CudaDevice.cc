@@ -320,9 +320,10 @@ void CudaDevice::overlappedComputeBarrier() {
 DeviceProperties CudaDevice::getDeviceProperties() {
     static DeviceProperties* prop = nullptr;
     if (prop == nullptr) {
-        prop          = new DeviceProperties();
-        prop->type    = DeviceType::Cuda;
-        prop->id      = device_id_;
+        prop = new DeviceProperties();
+        prop->type = DeviceType::Cuda;
+        prop->id = device_id_;
+        prop->use_all_gather = init_params_.use_all_gather;
         prop->tp_rank = init_params_.tp_rank;
         prop->tp_size = init_params_.tp_size;
         prop->dp_rank = init_params_.dp_rank;
@@ -747,7 +748,7 @@ void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
                                                 expert_stats_v.log_exp_num,
                                                 expert_stats_v.phy_exp_num,
                                                 expert_ids->size(),
-                                                moe_conf.ep_rank,
+                                                moe_conf.use_all_gather? 0: moe_conf.ep_rank,
                                                 stream_);
                 } else {
                     launch_equal_expert_balance(expert_ids->data<int>(),
@@ -757,7 +758,7 @@ void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
                                                 expert_stats_v.log_exp_num,
                                                 expert_stats_v.phy_exp_num,
                                                 expert_ids->size(),
-                                                moe_conf.ep_rank,
+                                                moe_conf.use_all_gather? 0: moe_conf.ep_rank,
                                                 stream_);
                 }
                 break;

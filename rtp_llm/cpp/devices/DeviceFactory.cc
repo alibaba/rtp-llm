@@ -65,6 +65,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.ffn_tp_size       = params.ffn_tp_size_;
     device_params.ffn_tp_rank       = params.ffn_tp_rank_;
     device_params.enable_sp         = params.enable_sp_;
+    device_params.use_all_gather    = params.use_all_gather_;
     device_params.device_id         = params.local_rank_;
     device_params.master_ip         = params.nccl_ip_;
     device_params.tp_master_port    = params.tp_nccl_port_;

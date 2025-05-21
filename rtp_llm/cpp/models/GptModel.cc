@@ -910,7 +910,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     device_->checkError();
     hidden = ffn_output.hidden_states;
-    if (device_props_.ffn_tp_size > 1 && !layer.ffn_weights.moe_gating_weight && !enable_sp) {
+    if (device_props_.ffn_tp_size > 1 && (!layer.ffn_weights.moe_gating_weight || device_props_.use_all_gather) && !enable_sp) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
         auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=%ld", (long)hidden->sizeBytes());
         hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum, false, ParallelMode::FFN_TP}).buffer;
@@ -1326,7 +1326,7 @@ void GptModel::cleanExpertStats() {
     }
 }
 
-void dpAndTpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
+void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
