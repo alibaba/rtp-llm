@@ -8,8 +8,8 @@
 
 ``` python
 import os
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 model_name = "Qwen/Qwen-7B-Chat"
 model_config = ModelConfig()

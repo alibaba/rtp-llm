@@ -26,9 +26,9 @@
 #include <string>      // string
 #include <vector>      // vector
 
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
-#include "maga_transformer/cpp/cuda/memory_utils.h"
-#include "maga_transformer/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/memory_utils.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
 
 #define PRINT_LIMIT 16
 #define EPSILON (1e-20)

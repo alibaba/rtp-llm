@@ -1,9 +1,9 @@
-#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
-#include "maga_transformer/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "maga_transformer/cpp/devices/OpData.h"
-#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "maga_transformer/cpp/core/BufferHelper.h"
-#include "maga_transformer/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 using namespace rtp_llm;
 

@@ -136,7 +136,7 @@ class TestRope(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         self.config = MlaConfig()
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.mla_qkv_gemm_op = torch.classes.unittest.MlaQKVGemmOP(
             self.config.num_attention_heads,
             self.config.q_lora_rank,

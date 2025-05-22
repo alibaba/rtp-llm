@@ -17,8 +17,8 @@ rtp-llm通过环境变量`MULTI_TASK_PROMPT`指定需要做静态缓存的system
 
 ``` python
 import os
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 os.environ["MULTI_TASK_PROMPT"] = "/path/to/file"
 # os.environ["MULTI_TASK_PROMPT_STR"] = "{json str}"

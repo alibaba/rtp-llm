@@ -1,5 +1,5 @@
 import torch
-from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
+from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):

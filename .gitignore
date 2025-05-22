@@ -39,7 +39,7 @@ logs/
 *.log
 
 package/requirements*.txt
-package/maga_transformer*.whl
+package/rtp_llm*.whl
 package/maga_start.sh
 
 model_rpc_service_pb2.py

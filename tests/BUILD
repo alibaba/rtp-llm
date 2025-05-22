@@ -31,11 +31,11 @@ cc_library(
     }) + [":fa"],
     deps = torch_deps() + [
         ":fa_hdrs",
-        "//maga_transformer/cpp/cuda:allocator_torch",
-        "//maga_transformer/cpp/cuda:cuda",
-        "//maga_transformer/cpp/kernels:kernels",
+        "//rtp_llm/cpp/cuda:allocator_torch",
+        "//rtp_llm/cpp/cuda:cuda",
+        "//rtp_llm/cpp/kernels:kernels",
         "//:th_utils",
-        "//maga_transformer/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//:gpt_init_params",
     ],
     copts = cuda_copts(),
@@ -63,8 +63,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:transformers",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -79,7 +79,7 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -96,9 +96,9 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:transformers",
-        "//maga_transformer:einops"
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+        "//rtp_llm:einops"
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -113,7 +113,7 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -128,8 +128,8 @@ py_test(
         ":test_ops"
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:numpy",
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -144,8 +144,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:numpy",
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
     ],
     tags = ["H20"],
     exec_properties = {'gpu':'H20'},
@@ -161,8 +161,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:numpy",
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
     ],
     tags = ["H20"],
     exec_properties = {'gpu':'H20'},
@@ -178,8 +178,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:numpy",
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -194,7 +194,7 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -210,8 +210,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:flash_attn",
+        "//rtp_llm:torch",
+        "//rtp_llm:flash_attn",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -232,8 +232,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -262,7 +262,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = torch_deps() + [
-        "//maga_transformer/cpp/devices/rocm_impl:rocm_impl",        
+        "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",        
     ],
     copts = rocm_copts(),
     alwayslink = True,
@@ -288,8 +288,8 @@ py_test(
         ":rocm_test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -310,8 +310,8 @@ py_test(
         ":rocm_test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -334,8 +334,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     exec_properties = {'gpu':'A10'},
 )
@@ -351,8 +351,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -372,8 +372,8 @@ py_test(
         ":rocm_test_ops",
     ],
    deps = [
-        "//maga_transformer:testlib",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:testlib",
+        "//rtp_llm:rtp_llm_lib",
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
@@ -396,8 +396,8 @@ py_test(
         ":rocm_test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     tags = [
         "rocm",
@@ -412,7 +412,7 @@ cc_test(
     copts = cuda_copts(),
     deps = [
         "@com_google_googletest//:gtest",
-        "//maga_transformer/cpp/kernels:kernels_cu"
+        "//rtp_llm/cpp/kernels:kernels_cu"
     ],
     data = [
     ],
@@ -440,8 +440,8 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
     ],
     exec_properties = {'gpu':'A10'},
 )

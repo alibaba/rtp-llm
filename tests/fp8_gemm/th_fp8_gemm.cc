@@ -5,15 +5,15 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
-#include "maga_transformer/cpp/cuda/memory_utils.h"
-#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
-#include "maga_transformer/cpp/cutlass/interface.h"
-#include "maga_transformer/cpp/th_op/th_utils.h"
-#include "maga_transformer/cpp/cuda/cublas/cublasAlgoMap.h"
-#include "maga_transformer/cpp/cuda/cublas/cublasMMWrapper.h"
-#include "maga_transformer/cpp/cuda/allocator_torch.h"
-#include "maga_transformer/cpp/core/allocator.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/memory_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/cutlass/interface.h"
+#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/cuda/cublas/cublasAlgoMap.h"
+#include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
+#include "rtp_llm/cpp/cuda/allocator_torch.h"
+#include "rtp_llm/cpp/core/allocator.h"
 
 #include "cutlass/numeric_types.h"
 

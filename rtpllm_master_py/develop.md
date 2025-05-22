@@ -19,7 +19,7 @@
   - 原因：load balancer会摘除健康检查不对的worker，在单台机器下处理不过来这么多请求，超时设置短就会被摘掉
   - 解决方案： 加大超时时间和间隔
 - [✅] Bug2：报错
-  [RANK 0][maga_transformer/cpp/disaggregate/rtpllm_master/estimator/LookupMapImpl.cpp:66][bool rtp_llm::rtp_llm_master::LookupMapImpl::checkConfigValid(int, int, const rtp_llm::rtp_llm_master::SingleConfig&, const rtp_llm::rtp_llm_master::SingleConfig&) const] input or prefix lower bound match failed, expect: [1024:0], actual: [1024:2048]]
+  [RANK 0][rtp_llm/cpp/disaggregate/rtpllm_master/estimator/LookupMapImpl.cpp:66][bool rtp_llm::rtp_llm_master::LookupMapImpl::checkConfigValid(int, int, const rtp_llm::rtp_llm_master::SingleConfig&, const rtp_llm::rtp_llm_master::SingleConfig&) const] input or prefix lower bound match failed, expect: [1024:0], actual: [1024:2048]]
   - 复现步骤：起服务就有
   - 优先级：高
   - 原因： 代码写错了

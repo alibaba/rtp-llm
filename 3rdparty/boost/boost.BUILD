@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
 
-load("@maga_transformer//3rdparty/boost:boost.bzl", "boost_library", "boost_headers")
+load("@rtp_llm//3rdparty/boost:boost.bzl", "boost_library", "boost_headers")
 
 cc_library(
     name = "headers-base",

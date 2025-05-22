@@ -15,7 +15,7 @@ class TestRAPE(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
     def test_logn_attention(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         
         for logn_seq_len in range(1024, 2048, 512):
             self.LognAttentionOp = torch.classes.unittest.LognAttentionOp(logn_seq_len)

@@ -7,7 +7,7 @@ rtp-llm 支持 openai chat 格式的接口调用，可以作为 openai 接口服
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export FT_SERVER_TEST=1
-python3 -m maga_transformer.start_server
+python3 -m rtp_llm.start_server
 ```
 
 在 server 启动后，我们提供了一个 openai client 兼容的 chat 接口。使用示例如下：

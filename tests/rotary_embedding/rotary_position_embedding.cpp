@@ -1,9 +1,9 @@
 
-#include "maga_transformer/cpp/kernels/rotary_position_embedding.h"
+#include "rtp_llm/cpp/kernels/rotary_position_embedding.h"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
-#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace rtp_llm;
 

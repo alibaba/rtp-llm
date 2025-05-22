@@ -22,11 +22,11 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "maga_transformer/cpp/cutlass/interface.h"
-#include "maga_transformer/cpp/th_op/th_utils.h"
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
-#include "maga_transformer/cpp/cuda/quantize_utils.h"
-#include "maga_transformer/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/cutlass/interface.h"
+#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/quantize_utils.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 #include "cutlass/numeric_types.h"
 

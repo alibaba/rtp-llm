@@ -5,8 +5,8 @@ rtp-llm框架目前集成草稿模型投机采样模式, 接下来是它的使�
 
 **注意：投机采样由于q和kv长度不一致，目前无法使用flash attention，需要在运行代码前配置环境变量`export ENABLE_FMHA=OFF`**
 ``` python
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 # gen_num_per_circle控制投机采样时每轮的最大token数
 model_config = ModelConfig(
@@ -43,7 +43,7 @@ pipeline.stop()
 <img src="pics/sp_decoding_image.png" width = "1000" height = "500" alt="图片名称"/>
 
 ### 服务
-在起服务时，草稿模型需要添加如下几个环境变量，具体可以参考`maga_transformer/model_factory.py:create_from_env()`:
+在起服务时，草稿模型需要添加如下几个环境变量，具体可以参考`rtp_llm/model_factory.py:create_from_env()`:
 - SP_CHECKPOINT_PATH: 草稿模型的checkpoint路径
 - GEN_NUM_PER_CIRCLE： 每轮最大生成token数
 - SP_WEIGHT_TYPE：草稿模型的量化类型

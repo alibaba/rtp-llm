@@ -7,8 +7,8 @@
 通过环境变量指定LoRA信息,示例
 ``` python
 ### load model ###
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 model_name = "Qwen/Qwen-7B-Chat"
 model_config = ModelConfig(lora_infos={"default": "/data/lora_1"})
@@ -35,8 +35,8 @@ lora_infos是一个字典，key 为adapter名字，value 为LoRA ckpt文件所�
 通过环境变量指定LoRA信息,示例
 ``` python
 ### load model ###
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 model_name = "Qwen/Qwen-7B-Chat"
 model_config = ModelConfig(lora_infos={"lora_1": "/data/lora_1", "lora_2": "/data/lora_2", "lora_3": "/data/lora_3"})

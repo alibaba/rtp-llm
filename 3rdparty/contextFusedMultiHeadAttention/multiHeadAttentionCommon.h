@@ -18,7 +18,7 @@
 
 #include <limits.h>
 #include <stdint.h>
-#include "maga_transformer/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace tensorrt_llm
 {

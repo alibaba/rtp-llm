@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <random>
-#include "maga_transformer/cpp/kernels/eplb/experts_stats_kernels.h"
+#include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
 
 using namespace std;
 using namespace rtp_llm;

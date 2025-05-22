@@ -11,7 +11,7 @@ from io import TextIOWrapper
 import subprocess
 import os
 
-from maga_transformer.test.utils.port_util import get_consecutive_free_ports
+from rtp_llm.test.utils.port_util import get_consecutive_free_ports
 from concurrent.futures import ThreadPoolExecutor
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))

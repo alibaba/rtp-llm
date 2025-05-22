@@ -1,5 +1,5 @@
 
-#include "maga_transformer/cpp/kernels/mla_kernels/mla_merge_transpose_kernel.h"
+#include "rtp_llm/cpp/kernels/mla_kernels/mla_merge_transpose_kernel.h"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 

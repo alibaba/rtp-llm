@@ -1,7 +1,7 @@
 set -x;
 
-BASE_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_transformer_rocm_base
-TARGET_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_transformer_rocm
+BASE_IMAGE=reg.docker.alibaba-inc.com/isearch/rtp_llm_rocm_base
+TARGET_IMAGE=reg.docker.alibaba-inc.com/isearch/rtp_llm_rocm
 DEV_IMAGE=$BASE_IMAGE
 BAZEL_ARGS="--config=rocm"
 

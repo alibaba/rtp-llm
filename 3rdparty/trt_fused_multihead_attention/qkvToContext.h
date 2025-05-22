@@ -26,7 +26,7 @@
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 
 namespace rtp_llm
 {

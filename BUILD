@@ -45,15 +45,15 @@ config_setting(
 cc_library(
     name = "gpt_init_params",
     srcs = [
-        "//maga_transformer/cpp:th_op/GptInitParameter.cc"
+        "//rtp_llm/cpp:th_op/GptInitParameter.cc"
     ],
     hdrs = [
-        "//maga_transformer/cpp:th_op/GptInitParameter.h",
-        "//maga_transformer/cpp:th_op/GptInitParameterRegister.h",
+        "//rtp_llm/cpp:th_op/GptInitParameter.h",
+        "//rtp_llm/cpp:th_op/GptInitParameterRegister.h",
     ],
     deps = [
-        "//maga_transformer/cpp:utils",
-	    "//maga_transformer/cpp/core:types"
+        "//rtp_llm/cpp:utils",
+	    "//rtp_llm/cpp/core:types"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -62,11 +62,11 @@ cc_library(
 filegroup(
     name = "th_op_hdrs_files",
     srcs = [
-        "//maga_transformer/cpp:th_op/common/NcclOp.h",
-        "//maga_transformer/cpp:th_op/common/InitEngineOps.h",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
+        "//rtp_llm/cpp:th_op/common/NcclOp.h",
+        "//rtp_llm/cpp:th_op/common/InitEngineOps.h",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
     ],
 )
 
@@ -81,15 +81,15 @@ cc_library(
 filegroup(
     name = "th_transformer_lib_files",
     srcs = [
-        "//maga_transformer/cpp:th_op/GptInitParameter.cc",
-        "//maga_transformer/cpp:th_op/init.cc",
-        "//maga_transformer/cpp:th_op/common/InitEngineOps.cc",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
-        "//maga_transformer/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
+        "//rtp_llm/cpp:th_op/GptInitParameter.cc",
+        "//rtp_llm/cpp:th_op/init.cc",
+        "//rtp_llm/cpp:th_op/common/InitEngineOps.cc",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
     ] + select({
         "@//:using_cuda": [
-            "//maga_transformer/cpp:th_op/common/NcclOp.cc",
+            "//rtp_llm/cpp:th_op/common/NcclOp.cc",
         ],
         "//conditions:default": [],
     }),
@@ -104,15 +104,15 @@ cc_library(
     deps = [
         ":gpt_init_params",
     	":th_op_hdrs",
-        "//maga_transformer/cpp:utils",
-        "//maga_transformer/cpp/devices:device_py_export",
-        "//maga_transformer/cpp/devices:devices_base",
-        "//maga_transformer/cpp:http_api_server",
-        "//maga_transformer/cpp:model_rpc_server",
+        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/devices:device_py_export",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp:http_api_server",
+        "//rtp_llm/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
         "@//:using_cuda": [
-            "//maga_transformer/cpp/cuda:allocator_torch",
+            "//rtp_llm/cpp/cuda:allocator_torch",
         ],
         "//conditions:default": [],
     }),
@@ -125,22 +125,22 @@ cc_library(
     name = "th_transformer_gpu",
     srcs = select({
         "@//:using_cuda11": [
-            "//maga_transformer/cpp:th_op/common/CutlassConfigOps.cc",
+            "//rtp_llm/cpp:th_op/common/CutlassConfigOps.cc",
         ],
         "@//:using_cuda12": [
-            "//maga_transformer/cpp:th_op/common/CutlassConfigOps.cc",
+            "//rtp_llm/cpp:th_op/common/CutlassConfigOps.cc",
         ],
         "//conditions:default": [],
     }),
     deps = [
         ":gpt_init_params",
     	":th_op_hdrs",
-        "//maga_transformer/cpp:utils",
-        "//maga_transformer/cpp:model_rpc_server",
+        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
         "@//:using_cuda": [
-            "//maga_transformer/cpp/cuda:allocator_torch",
+            "//rtp_llm/cpp/cuda:allocator_torch",
         ],
         "//conditions:default": [],
     }),
@@ -171,10 +171,10 @@ cc_binary(
 cc_library(
     name = "th_utils",
     hdrs = [
-        "//maga_transformer/cpp:th_op/th_utils.h",
+        "//rtp_llm/cpp:th_op/th_utils.h",
     ],
     deps = [
-        "//maga_transformer/cpp:utils",
+        "//rtp_llm/cpp:utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

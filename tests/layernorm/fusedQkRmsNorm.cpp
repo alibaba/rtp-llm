@@ -1,13 +1,13 @@
-#include "maga_transformer/cpp/kernels/layernorm_kernels.h"
-#include "maga_transformer/cpp/kernels/fused_qk_rmsnorm.h"
-#include "maga_transformer/cpp/devices/DeviceBase.h"
-#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
-#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/kernels/layernorm_kernels.h"
+#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
-#include "maga_transformer/cpp/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/devices/OpData.h"
-#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "maga_transformer/cpp/core/BufferHelper.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp8.h>
 

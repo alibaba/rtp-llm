@@ -15,7 +15,7 @@ py_test(
     ],
     deps = [
         "//rtpllm_master_py:rtpllm_master_lib",
-        "//maga_transformer/test/utils:port_util",
+        "//rtp_llm/test/utils:port_util",
         ":fastapi",
         ":uvicorn",
         ":torch",

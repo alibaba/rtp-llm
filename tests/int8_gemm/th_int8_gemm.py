@@ -17,8 +17,8 @@ class FastGELUActivation(object):
 
 class TestInt8Gemm(unittest.TestCase):
     def setUp(self) -> None:
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/libth_transformer.so")
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/libth_transformer.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.int8_gemm = torch.ops.int8_gemm_ops.int8_gemm
         self.gemm_config_select = torch.ops.int8_gemm_ops.int8_gemm_config_select
 

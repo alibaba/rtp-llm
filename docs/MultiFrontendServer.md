@@ -8,7 +8,7 @@
 * start server的使用方法和之前一样。
 * 执行ps xf，看到前端和后端进程的名字和个数。
 * 也可以手动单独启动前端进程。
-* 使用和start server相同的env，然后执行 /opt/conda310/bin/python3 -m maga_transformer.start_frontend_server
+* 使用和start server相同的env，然后执行 /opt/conda310/bin/python3 -m rtp_llm.start_frontend_server
 
 ## 注意：
 * 在openai，raw 两种请求格式下，会有优势，如果这里的python部分出现了性能瓶颈，可以配置成多进程前端模式。

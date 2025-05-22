@@ -22,19 +22,19 @@ def requirement(names):
 def cache_store_deps():
     native.alias(
         name = "cache_store_arch_select_impl",
-        actual = "//maga_transformer/cpp/disaggregate/cache_store:cache_store_base_impl"
+        actual = "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
     )
 
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",
-        actual = "//maga_transformer/cpp/embedding_engine:embedding_engine_arpc_server_impl"
+        actual = "//rtp_llm/cpp/embedding_engine:embedding_engine_arpc_server_impl"
     )
 
 def subscribe_deps():
     native.alias(
         name = "subscribe_deps",
-        actual = "//maga_transformer/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
+        actual = "//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
     )
 
 def whl_deps():
@@ -116,8 +116,8 @@ def trt_plugins():
     native.alias(
         name = "trt_plugins",
         actual = select({
-            "@//:using_cuda12": "//maga_transformer/cpp/trt_plugins:trt_plugins",
-            "//conditions:default": "//maga_transformer/cpp/trt_plugins:trt_plugins",
+            "@//:using_cuda12": "//rtp_llm/cpp/trt_plugins:trt_plugins",
+            "//conditions:default": "//rtp_llm/cpp/trt_plugins:trt_plugins",
         })
     )
 
@@ -125,7 +125,7 @@ def cuda_register():
     native.alias(
         name = "cuda_register",
         actual = select({
-            "//conditions:default": "//maga_transformer/cpp/devices/cuda_impl:gpu_register",
+            "//conditions:default": "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
         })
     )
 

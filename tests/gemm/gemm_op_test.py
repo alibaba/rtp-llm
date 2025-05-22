@@ -90,7 +90,7 @@ def detailed_assert_close(a, b, rtol, atol, msg=""):
     
 class TestGemmOp(unittest.TestCase):
     def setUp(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.gemm_op = torch.classes.unittest.GemmOp()
 
     def _fp8_gemm_ref(self, A, B):

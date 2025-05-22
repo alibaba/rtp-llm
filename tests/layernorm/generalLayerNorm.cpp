@@ -1,7 +1,7 @@
-#include "maga_transformer/cpp/kernels/layernorm_kernels.h"
+#include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 
-#include "maga_transformer/cpp/cuda/cuda_fp8_utils.h"
-#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>

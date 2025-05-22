@@ -8,7 +8,7 @@ class TestRope(unittest.TestCase):
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.merge_transpose_op = torch.classes.unittest.MergeTransposeOP()
 
     def test_merge_transpose(self):

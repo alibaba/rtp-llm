@@ -23,11 +23,11 @@ os.environ['LOCAL_WORLD_SIZE'] = os.environ['TP_SIZE']
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 
-from maga_transformer.utils.weight_type import WEIGHT_TYPE
-from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.model_factory import AsyncModel, ModelFactory
-from maga_transformer.models.base_model import ModelConfig
-from maga_transformer.distribute.worker_info import update_master_info
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
+from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.model_factory import AsyncModel, ModelFactory
+from rtp_llm.models.base_model import ModelConfig
+from rtp_llm.distribute.worker_info import update_master_info
 from example.perf_test.test_util import (
     origin_prompt, write_odps, get_prompt)
 
@@ -313,7 +313,7 @@ if __name__ == '__main__':
                       args.prec, [int(x) for x in args.batch_size.split(',')],
                       [int(x) for x in args.input_len.split(',')], lora_infos)
 
-    lock_path = '/tmp/maga_transformer/perf_test/gpu_status_lock'
+    lock_path = '/tmp/rtp_llm/perf_test/gpu_status_lock'
     logging.info(f"env is {os.environ}")
     lock = FileLock(lock_path)
 
@@ -337,6 +337,6 @@ if __name__ == '__main__':
             model_type += '_dynamic_lora'
         assert lantency_test_state
         report_latency_test_res(model_type, args.model_size, args.prec,
-                                device_name, 'maga_transformer', lantency_res)
+                                device_name, 'rtp_llm', lantency_res)
 
         break

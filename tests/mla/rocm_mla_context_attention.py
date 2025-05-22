@@ -102,7 +102,7 @@ class DeepSeekConfig:
 class TestRope(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/librocm_test_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/librocm_test_ops.so")
         self.config = DeepSeekConfig()
         
         # self.mla_ops_type = MlaOpsType.FLASH_MLA

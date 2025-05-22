@@ -12,7 +12,7 @@ class TestT5LayerNorm(unittest.TestCase):
         torch.manual_seed(734876213)
         
     def test_logn_attention(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         eps = 1e-6
         for batch_size in range(32, 4096, 512):
@@ -38,7 +38,7 @@ class TestT5LayerNorm(unittest.TestCase):
         return scaling_factor
     
     def test_logn_attention_fp8(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         eps = 1e-6
         for batch_size in range(32, 4096, 512):
@@ -72,7 +72,7 @@ class TestT5LayerNorm(unittest.TestCase):
                 self.assertTrue(loss <= 0.00026, f"scale 1.0, loss is too big, actual:{actual}, expect:{expect_fp16}, loss:{loss}")
 
     def test_stride_norm(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         eps = 1e-6
         for batch_size in [1, 2, 12, 192]:

@@ -35,15 +35,15 @@ fi
 TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
 # TODO: check arm
 if [[ $PLATFORM == "aarch64" ]]; then
-    WHEEL_TARGET=//maga_transformer:maga_transformer_aarch64
+    WHEEL_TARGET=//rtp_llm:rtp_llm_aarch64
     WHEEL_OS=linux
 else
     PLATFORM=x86_64
-    WHEEL_TARGET=//maga_transformer:maga_transformer
+    WHEEL_TARGET=//rtp_llm:rtp_llm
     WHEEL_OS=manylinux1
 fi
 VERSION=`cat $DIR/../../open_source/version`
-WHL_FILE=maga_transformer-$VERSION-cp310-cp310-${WHEEL_OS}_$PLATFORM.whl
+WHL_FILE=rtp_llm-$VERSION-cp310-cp310-${WHEEL_OS}_$PLATFORM.whl
 
 # create temp container
 TEMP_CONTAINER_NAME=packaging_temp_$TAG
@@ -72,7 +72,7 @@ docker exec -i $TEMP_CONTAINER_NAME chown -R root:root /root/.ssh
 docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "ssh-keyscan gitlab.alibaba-inc.com >> ~/.ssh/known_hosts"
 docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG $WHEEL_TARGET"
 rm $DIR/$WHL_FILE -f
-docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/maga_transformer/$WHL_FILE $DIR/
+docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/rtp_llm/$WHL_FILE $DIR/
 
 # prepare start script
 START_SH_DIR="$DIR/../../internal_source/package/maga_start.sh"

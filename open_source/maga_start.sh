@@ -100,5 +100,5 @@ if [ "${CMD}" ]; then
     ${CMD} >> "$STDOUT_FILE" 2>> "$STDERR_FILE";
 else
     echo "use default mode"
-    /opt/conda310/bin/python3 -m maga_transformer.start_server >> "$STDOUT_FILE" 2>> "$STDERR_FILE"
+    /opt/conda310/bin/python3 -m rtp_llm.start_server >> "$STDOUT_FILE" 2>> "$STDERR_FILE"
 fi

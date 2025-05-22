@@ -8,7 +8,7 @@ echo $DIR
 
 # These variables are to replace by your own values
 BASE_IMAGE="kis-registry.cn-wulanchabu.cr.aliyuncs.com/kis/amd:AMD-ROCM_6.3.0.2-alios-py_3.10_2024_12_18_13_42_00"
-IMAGE_NAME=${IMAGE_NAME:-"reg.docker.alibaba-inc.com/isearch/maga_transformer_rocm_base"}
+IMAGE_NAME=${IMAGE_NAME:-"reg.docker.alibaba-inc.com/isearch/rtp_llm_rocm_base"}
 IMAGE_TAG=${IMAGE_TAG:-"rocm6.3.0.2_amdsmi_fix"}
 CONDA_URL=${CONDA_URL:-"https://repo.anaconda.com/miniconda/Miniconda3-py310_23.1.0-1-Linux-x86_64.sh"}
 BAZELISK_URL=${BAZELISK_URL:-https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64}

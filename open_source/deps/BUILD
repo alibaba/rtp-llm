@@ -9,7 +9,7 @@ py_package(
     deps = [
     ],
     packages = [
-        "maga_transformer"
+        "rtp_llm"
     ],
 )
 

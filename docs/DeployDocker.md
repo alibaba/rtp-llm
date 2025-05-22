@@ -27,8 +27,8 @@ cd rtp-llm
 FT_SERVER_TEST=1 python3 example/test.py
 # 也可以启动服务
 # start http service
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
-其中 your_model_type 可以在 maga_transformer/models/__init__.py 中查找到
+其中 your_model_type 可以在 rtp_llm/models/__init__.py 中查找到

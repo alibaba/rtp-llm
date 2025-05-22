@@ -44,7 +44,7 @@ class TestMlaAttentionLayer(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         logging.info(f"cwd: {os.getcwd()}")
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.config = DeepSeekConfig()
         self.mla_attn_layer_op = torch.classes.unittest.MlaAttnLayerOp(
             self.config.head_num,

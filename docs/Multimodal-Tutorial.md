@@ -25,8 +25,8 @@ hf格式下的LLaVA的config.json包含mm_vision_tower关键词作为vit的路�
 
 ``` python
 import os
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory, ModelConfig
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory, ModelConfig
 
 model_name = "Qwen/Qwen-VL-Chat"
 model = ModelFactory.from_huggingface(model_name)
@@ -59,7 +59,7 @@ export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export FT_SERVER_TEST=1
 
-python3 -m maga_transformer.start_server
+python3 -m rtp_llm.start_server
 
 # request to server
 ``` python

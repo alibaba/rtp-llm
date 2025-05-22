@@ -20,7 +20,7 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
-#include "maga_transformer/cpp/cuda/reduce_kernel_utils.cuh"
+#include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "beamSearchKernels.h"
 
 namespace tensorrt_llm

@@ -11,7 +11,7 @@ cc_library(
     ]),
     deps = [
         ":trt_beam_search_header",
-        "//maga_transformer/cpp/kernels:kernels",
+        "//rtp_llm/cpp/kernels:kernels",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

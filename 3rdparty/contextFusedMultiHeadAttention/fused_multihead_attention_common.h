@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "maga_transformer/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "tmaDescriptor.h"
 #include <limits.h>
 #include <stdint.h>

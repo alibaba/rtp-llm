@@ -74,7 +74,7 @@ class TestRope(unittest.TestCase):
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
     def test_LinearScaling(self):
         base = 10000
@@ -96,7 +96,7 @@ class TestRope(unittest.TestCase):
                 torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
 
     def test_DynamicNTKScaling(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         base = 10000
         dim = 64
         headsize = 1
@@ -116,7 +116,7 @@ class TestRope(unittest.TestCase):
                 torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
 
     def test_QWen(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         base = 10000
         dim = 128
@@ -141,7 +141,7 @@ class TestRope(unittest.TestCase):
             if scale < 1.0:
                 return 1.0
             return 0.1 * math.log(scale) + 1.0
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         base = 10000
         dim = 128
@@ -191,7 +191,7 @@ class TestRope(unittest.TestCase):
             torch.testing.assert_close(test, result, atol=1e-3, rtol=1e-5)
 
     def test_deepseek_Yarn(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         base = 10000
         nope_dim = 128
         dim = 64

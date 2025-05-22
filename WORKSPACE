@@ -1,4 +1,4 @@
-workspace(name = "maga_transformer")
+workspace(name = "rtp_llm")
 
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")

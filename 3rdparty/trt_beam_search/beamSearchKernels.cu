@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "beamSearchKernels.h"
 
 #include <cuda_bf16.h>

@@ -45,4 +45,4 @@
 | `ptuning_path` | `Optional[str], default=None` | ptuning ckpt的存储路径 |
 | `lora_infos` | `Optional[Dict[str, str]]` | lora ckpt存储路径 |
 
-目前我们支持的所有模型列表可以在`maga_transformer/models/__init__.py`查看，具体模型对应的`model_type`可以查看模型文件的`register_model`
+目前我们支持的所有模型列表可以在`rtp_llm/models/__init__.py`查看，具体模型对应的`model_type`可以查看模型文件的`register_model`

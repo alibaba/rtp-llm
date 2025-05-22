@@ -1,6 +1,6 @@
-#include "maga_transformer/cpp/kernels/decoder_masked_multihead_attention_utils.h"
+#include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention_utils.h"
 
-#include "maga_transformer/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>

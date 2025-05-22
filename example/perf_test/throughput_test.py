@@ -22,8 +22,8 @@ os.environ['LOCAL_WORLD_SIZE'] = os.environ['TP_SIZE']
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 from example.perf_test.test_util import (
     origin_prompt, write_odps, get_prompt)
-from maga_transformer.model_factory import ModelFactory
-from maga_transformer.start_server import main
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.start_server import main
 
 
 class ThroughputTestResult(BaseModel):
@@ -226,7 +226,7 @@ if __name__ == '__main__':
         logging.info(f"lora_info is {lora_info}")
         if lora_info != '{}':
             lora_infos[lora_info.split(':', 1)[0]] = lora_info.split(':', 1)[1]
-    lock_path = '/tmp/maga_transformer/perf_test/gpu_status_lock'
+    lock_path = '/tmp/rtp_llm/perf_test/gpu_status_lock'
     logging.info(f"env is {os.environ}")
     lock = FileLock(lock_path)
 
@@ -252,6 +252,6 @@ if __name__ == '__main__':
             args.query_num, model_type, args.model_size, lora_infos)
         assert throughput_test_state
         report_throughput_test_res(model_type, args.model_size, args.prec,
-                                   device_name, 'maga_transformer',
+                                   device_name, 'rtp_llm',
                                    throughput_res)
         break

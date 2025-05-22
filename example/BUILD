@@ -7,7 +7,7 @@ py_test(
     data = [
     ],
     deps = [
-        "//maga_transformer:testlib",
+        "//rtp_llm:testlib",
     ],
     exec_properties = {'gpu':'A10'},
 )

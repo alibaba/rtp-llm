@@ -18,8 +18,8 @@
 #include <cstdint>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
-#include "maga_transformer/cpp/utils/StringUtil.h"
-#include "maga_transformer/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 namespace tensorrt_llm
 {
 namespace kernels

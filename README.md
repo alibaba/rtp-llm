@@ -67,7 +67,7 @@ sh CONTAINER_NAME/sshme.sh
 
 cd ../
 # start http service
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
@@ -79,11 +79,11 @@ cd rtp-llm
 # For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
 pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
-pip3 install maga_transformer-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
+pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
 
 cd ../
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
@@ -99,7 +99,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 
 2. libth_transformer.so
 
-    **Error log**: `OSError: /rtp-llm/maga_transformer/libs/libth_transformer.so: cannot open shared object file: No such file or directory`
+    **Error log**: `OSError: /rtp-llm/rtp_llm/libs/libth_transformer.so: cannot open shared object file: No such file or directory`
 
     **Resolution**: If installed via whl or docker(which means not a bazel build), please check your current directory is not rtp-llm, or python will use relative path package instead of installed whl
 

@@ -16,7 +16,7 @@
 
 ## 请求和响应格式
 
-与 openai 格式基本一致，详情参考 [openai embedding](https://platform.openai.com/docs/api-reference/embeddings/create) 和`maga_transformer/models/downstream_modules/embedding/api_datatype.py` 
+与 openai 格式基本一致，详情参考 [openai embedding](https://platform.openai.com/docs/api-reference/embeddings/create) 和`rtp_llm/models/downstream_modules/embedding/api_datatype.py` 
 
 # all embedding
 
@@ -24,7 +24,7 @@
 
 # reranker
 
-支持部署 bge-reranker-large 等重排模型，请求和响应格式如下，具体可参考 `maga_transformer/models/downstream_modules/reranker/api_datatype.py`
+支持部署 bge-reranker-large 等重排模型，请求和响应格式如下，具体可参考 `rtp_llm/models/downstream_modules/reranker/api_datatype.py`
 
 ## 请求
 
@@ -51,7 +51,7 @@
 ### load model ###
 # 进入容器之后, cd 到 FasterTransformer目录
 # start http service
-TASK_TYPE=ALL_EMBEDDING  TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TASK_TYPE=ALL_EMBEDDING  TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"input": ["hello world", "my name is jack"], "model": "your_model_type"}'
 ```

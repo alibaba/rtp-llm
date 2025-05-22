@@ -1,7 +1,7 @@
 
-#include "maga_transformer/cpp/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "maga_transformer/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/OpData.h"
 
 
 using namespace rtp_llm;

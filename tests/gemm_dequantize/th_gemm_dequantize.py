@@ -8,8 +8,8 @@ def random_tensor(shape, dtype, device, mean=0, std=1):
 
 class TestGemmDequantize(unittest.TestCase):
     def setUp(self) -> None:
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/libth_transformer.so")
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/libth_transformer.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.unpack_packed_int4s = torch.ops.gemm_dq_unit_ops.unpack_int4_packed_tensor_to_int8
         self.pack_int4s = torch.ops.gemm_dq_unit_ops.pack_int8_tensor_to_packed_int4
         self.fused_gemm_dq = torch.ops.gemm_dq_unit_ops.fused_gemm_dq

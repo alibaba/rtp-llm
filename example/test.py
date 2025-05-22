@@ -3,12 +3,12 @@ import json
 import asyncio
 import logging
 
-from maga_transformer.pipeline import Pipeline
-from maga_transformer.model_factory import ModelFactory
-from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
-from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
-from maga_transformer.distribute.worker_info import update_master_info, g_worker_info
-from maga_transformer.test.utils.port_util import get_consecutive_free_ports
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
+from rtp_llm.distribute.worker_info import update_master_info, g_worker_info
+from rtp_llm.test.utils.port_util import get_consecutive_free_ports
 
 async def main():
     start_port = get_consecutive_free_ports(1)[0]

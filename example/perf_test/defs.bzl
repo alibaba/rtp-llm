@@ -32,11 +32,11 @@ def latency_test(model_type,
         timeout = "eternal",
         imports = [],
         deps = [
-            "//maga_transformer:pyodps",
-            "//maga_transformer:testlib",
+            "//rtp_llm:pyodps",
+            "//rtp_llm:testlib",
         ],
         data = [
-            "//maga_transformer:sdk",
+            "//rtp_llm:sdk",
             "ShareGPT_V3_test_data_lens.json"
         ],
         args = [
@@ -88,11 +88,11 @@ def throughput_test(model_type,
         timeout = "eternal",
         imports = [],
         deps = [
-            "//maga_transformer:pyodps",
-            "//maga_transformer:testlib",
+            "//rtp_llm:pyodps",
+            "//rtp_llm:testlib",
         ],
         data = [
-            "//maga_transformer:sdk",
+            "//rtp_llm:sdk",
             "ShareGPT_V3_test_data_lens.json"
         ],
         args = [
@@ -127,10 +127,10 @@ def vit_test(model_type, ckpt_path, image_size):
         timeout = "eternal",
         imports = [],
         deps = [
-            "//maga_transformer:testlib"
+            "//rtp_llm:testlib"
         ],
         data = [
-            "//maga_transformer:sdk"
+            "//rtp_llm:sdk"
         ],
         args = [
             "--model_type", model_type,

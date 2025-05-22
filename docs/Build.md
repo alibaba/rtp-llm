@@ -24,15 +24,15 @@ cuda11的环境：
 ```bash
 cd rtp-llm
 pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
-bazel build //maga_transformer:maga_transformer --jobs 100 --verbose_failures
+bazel build //rtp_llm:rtp_llm --jobs 100 --verbose_failures
 # 修改test.py中的模型路径，运行一个实际的模型
 bazel test //example:test --jobs 100
 ```
 cuda12的环境：
 ```bash
 cd rtp-llm
-pip3 install -r ./maga_transformer/requirements_torch_gpu_cuda12.txt
-bazel build //maga_transformer:maga_transformer --jobs 100 --verbose_failures --config=cuda12_2
+pip3 install -r ./rtp_llm/requirements_torch_gpu_cuda12.txt
+bazel build //rtp_llm:rtp_llm --jobs 100 --verbose_failures --config=cuda12_2
 # 修改test.py中的模型路径，运行一个实际的模型
 bazel test //example:test --jobs 100
 ```

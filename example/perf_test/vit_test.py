@@ -1,6 +1,6 @@
-from maga_transformer.model_factory import ModelFactory, ModelConfig
-from maga_transformer.model_factory_register import _model_factory
-from maga_transformer.utils.multimodal_util import (MMUrlType,
+from rtp_llm.model_factory import ModelFactory, ModelConfig
+from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.utils.multimodal_util import (MMUrlType,
                                                     MMPreprocessConfig)
 import os
 import argparse

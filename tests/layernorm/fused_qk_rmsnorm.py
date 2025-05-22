@@ -28,7 +28,7 @@ class TestLayerNorm(unittest.TestCase):
 
     def test_fused_qk_rmsnorm(self):
         torch.manual_seed(0)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
 
         dtype = torch.bfloat16
 

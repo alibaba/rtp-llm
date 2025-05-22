@@ -7,7 +7,7 @@ export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export START_PORT=port
 
-python3 -m maga_transformer.start_server
+python3 -m rtp_llm.start_server
 ```
 
 在客户端对应位置填写API URL：`{server_ip}:{port}`即可

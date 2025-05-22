@@ -14,7 +14,7 @@ export FT_SERVER_TEST=1
 export GUARANTE_GENERATE_MEM=1
 export WEIGHT_TYPE=fp16
 export INT8_KV_CACHE=0
-python3 -m maga_transformer.start_server
+python3 -m rtp_llm.start_server
 
 # benchmark service
 python3 ./benchmark_serving.py --dataset /path/to/ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer /path/to/tokenizer --num-prompts 10000 --trust-remote-code --backend rtp-llm --max-batch-size 64

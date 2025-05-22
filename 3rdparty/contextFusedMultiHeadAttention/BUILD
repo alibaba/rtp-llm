@@ -14,7 +14,7 @@ cc_library(
     deps = [
         ":trt_fmha_header",
         "//3rdparty:cuda_driver",
-        "//maga_transformer/cpp/kernels:kernels",
+        "//rtp_llm/cpp/kernels:kernels",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

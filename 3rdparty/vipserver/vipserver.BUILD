@@ -9,7 +9,7 @@ cc_library(
         "src/**/*.cpp",
     ]),
     implementation_deps = [
-        "@maga_transformer//3rdparty/easy:easy",
+        "@rtp_llm//3rdparty/easy:easy",
         "@havenask//aios/alog:alog",
         "@boost//:headers-base",
         "@boost//:interprocess",

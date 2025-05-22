@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import List
 import random
 
-from maga_transformer.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
+from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 from rotary_util import apply_rotary_pos_emb
 from test_util import compare_tensor_diff_with_ratio, MlaOpsType
 
@@ -65,7 +65,7 @@ def trans(x: torch.Tensor):
 class TestRotaryKVcacheTest(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/librocm_test_ops.so")        
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/librocm_test_ops.so")        
         self.config = DeepSeekConfig()
         # self.mla_ops_type = MlaOpsType.FLASH_MLA
         self.mla_ops_type = MlaOpsType.FLASH_INFER

@@ -10,8 +10,8 @@ class TestFp8Gemm(unittest.TestCase):
     FP8_E4M3_MAX = 448.0
     FP8_E4M3_MIN = -352.0
     def setUp(self) -> None:
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/libth_transformer.so")
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/libth_transformer.so")
+        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
         self.fp8_gemm = torch.ops.fp8_gemm_ops.fp8_gemm
         self.fp8_quant_gemm = torch.ops.fp8_gemm_ops.fp8_quant_gemm
         torch.manual_seed(734876213)
