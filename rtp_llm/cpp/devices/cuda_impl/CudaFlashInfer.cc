@@ -550,9 +550,9 @@ void FlashInferAttnParams::run(
                 params.configs.rope_config.base,
                 stream);
     }
-
-    const auto &scale = params.weights.static_scale_reciprocal_weight;
-    if (scale) {
+    if (params.configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        const auto &scale = params.weights.static_scale_reciprocal_weight;
+        RTP_LLM_CHECK_WITH_INFO(scale != nullptr, "static_scale_reciprocal_weight is not set");
         auto scale_t = Buffer2torchTensor(scale->kernel, false);
         auto fp8_out = Buffer2torchTensor(params.output, false);
         fp8_out.copy_((scale_t * out).to(torch::kFloat8_e4m3fn));

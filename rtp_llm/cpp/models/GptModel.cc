@@ -465,7 +465,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     auto hidden_dtype = hidden->type();
     auto attn_dtype = hidden_dtype;
-    if (description_.act_qscheme == QScheme::Qfp8PerTensor) {
+    if (description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8) {
         attn_dtype = DataType::TYPE_QFP8_E4M3;
     }
 

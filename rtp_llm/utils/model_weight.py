@@ -930,7 +930,9 @@ class W:
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,
-        token_type_embedding: sp_neg1
+        token_type_embedding: sp_neg1,
+
+        attention_output_static_quant_reciprocal: sp_id,
     }
 
 class CkptWeightInfo:

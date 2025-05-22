@@ -68,11 +68,17 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             BufferPtr tmp_fmha_output;
             if (need_quant_fmha_out) {
                 // for sm89 cannot use fp8_fmha, but attention output should be fp8
-                tmp_fmha_output = allocateBuffer({DataType::TYPE_FP16,
+                tmp_fmha_output = allocateBuffer({datatype,
                                                   {batch_size, head_num * seq_len_with_prefix * size_per_head},
                                                   AllocationType::DEVICE},
                                                  {"fmha_fp16_output"});
                 cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
+                fmha_output_ptr = tmp_fmha_output->data();
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_FP8_E4M3) {
+                tmp_fmha_output = allocateBuffer({DataType::TYPE_FP8_E4M3,
+                                                  {batch_size, head_num * seq_len_with_prefix * size_per_head},
+                                                  AllocationType::DEVICE},
+                                                 {"fmha_fp8_output"});
                 fmha_output_ptr = tmp_fmha_output->data();
             }
             RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
@@ -103,6 +109,14 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 auto quant_output = quantize(quant_params);
                 cudaMemcpyAsync(
                     params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_FP8_E4M3) {
+                RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
+                printBufferData(*tmp_fmha_output, "tmp_fmha_output");
+                auto quant_fmha_output_t = Buffer2torchTensor(*tmp_fmha_output, false);
+                auto dequant_fmha_output_t = quant_fmha_output_t.to(dataTypeToTorchType(datatype));
+                cudaMemcpyAsync(
+                    params.output.data(), dequant_fmha_output_t.data_ptr(), params.output.sizeBytes(), cudaMemcpyDeviceToDevice, stream);
+                printBufferData(params.output, "params.output");
             }
             break;
         }

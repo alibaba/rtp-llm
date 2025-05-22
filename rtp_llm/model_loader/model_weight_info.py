@@ -13,6 +13,7 @@ from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight, Compo
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from rtp_llm.model_loader.attn_weight import AttnConfig
 from rtp_llm.distribute.worker_info import ParallelInfo
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
@@ -183,6 +184,8 @@ class ModelDeployWeightInfo:
         # for moe
         self._use_stack_weight = False
 
+        self.kv_cache_data_type = config.kv_cache_data_type
+
     @property
     def support_lora(self):
         return False
@@ -193,7 +196,8 @@ class ModelDeployWeightInfo:
             hidden_size=self._hidden_size,
             size_per_head=self._size_per_head,
             head_num=self._head_num,
-            head_num_kv=self._head_num_kv
+            head_num_kv=self._head_num_kv,
+            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
         )
         return attn_config
 
