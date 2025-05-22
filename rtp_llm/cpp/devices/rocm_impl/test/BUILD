@@ -63,6 +63,7 @@ cc_test(
         "//rtp_llm/cpp/devices/base_tests:basic_test_cases"
     ],
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -76,6 +77,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -89,6 +91,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -102,6 +105,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 # cc_test(
@@ -115,6 +119,7 @@ cc_test(
 #     linkopts = test_linkopts,
 #     deps = test_deps,
 #     tags = ["rocm"],
+#     exec_properties = {'gpu':'MI308X'},
 # )
 
 cc_test(
@@ -128,6 +133,7 @@ cc_test(
     linkopts=test_linkopts,
     deps=test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -141,6 +147,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -154,6 +161,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 
@@ -168,6 +176,7 @@ cc_test(
     linkopts=test_linkopts,
     deps=test_deps,
     tags=["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -181,6 +190,7 @@ cc_test(
     linkopts=test_linkopts,
     deps=test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
 
 cc_test(
@@ -194,4 +204,5 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
 )
