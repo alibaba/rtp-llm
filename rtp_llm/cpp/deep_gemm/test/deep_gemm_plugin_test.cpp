@@ -8,6 +8,7 @@
 #include <cuda_fp8.h>
 
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
+#include "rtp_llm/cpp/deep_gemm/JIT.h"
 
 
 using namespace rtp_llm;
@@ -19,9 +20,7 @@ public:
         EXPECT_NEAR(1, (2 * torch::sum(x * y) / sum).item<double>(), 0.1);
     }
 
-    void RunDeepGemmPluginTest() {
-        int m = 128, n = 4096, k = 7168;
-
+    void RunDeepGemmPluginTest(int m, int n, int k) {
         auto input =  torch::randn({(int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::rand({m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
         auto weight = torch::randn({n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
@@ -47,10 +46,8 @@ public:
         printBufferData(*output, "output");
         calcDiff(ref_output, gemm_output);
     }
-    void RunDeepGemmPluginGroupedContiguousTest() {
-        int m = 128, n = 4096, k = 1536, num_groups = 16;
-
-        auto input =  torch::randn({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
+    void RunDeepGemmPluginGroupedContiguousTest(int m, int n, int k, int num_groups) {
+        auto input =  torch::ones({(int)num_groups, (int)m, (int)k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto input_scale = torch::randn({num_groups, m, int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
         auto weight = torch::randn({num_groups, n, k}, torch::device(torch::kCUDA)).to(torch::kFloat8_e4m3fn);
         auto weight_scale = torch::randn({num_groups, int(n / 128), int(k / 128)}, torch::device(torch::kCUDA)).to(torch::kFloat32);
@@ -121,9 +118,17 @@ public:
     }
 };
 
-TEST_F(DeepGemmPluginTest, Test1) {
-    RunDeepGemmPluginTest();
-    RunDeepGemmPluginGroupedContiguousTest();
+TEST_F(DeepGemmPluginTest, NormalTest) {
+    RunDeepGemmPluginTest(128, 7168, 4096);
+}
+
+TEST_F(DeepGemmPluginTest, JITTest) {
+    RunDeepGemmPluginTest(128, 512, 1024);
+    RunDeepGemmPluginTest(64, 1024, 1024);
+}
+
+TEST_F(DeepGemmPluginTest, GroupedTest){
+    RunDeepGemmPluginGroupedContiguousTest(128, 4096, 7168, 2);
     RunDeepGeemPluginGroupedMaskedTest(16, 3072, 4096, 16);
     RunDeepGeemPluginGroupedMaskedTest(16, 4096, 1536, 16);
     RunDeepGeemPluginGroupedMaskedTest(32, 3072, 4096, 16);

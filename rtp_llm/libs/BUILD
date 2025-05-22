@@ -1,5 +1,6 @@
 load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
 load("//bazel:arch_select.bzl", "kernel_so_deps")
+load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_so("//:th_transformer")
@@ -17,8 +18,8 @@ copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
 copy_so("@flashinfer//:flashinfer_batch_paged_decode")
 copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
 # num of so
-copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_dpsk", 32)
-copy_so("//rtp_llm/cpp/deep_gemm:deepgemm_qwen_inst")
+copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
+copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
 copy_so("@flashinfer//:flashinfer_sm90")
 copy_so("@acext//:acext_1")
 copy_so("@acext//:acext_2")

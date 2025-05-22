@@ -307,6 +307,7 @@ py_library(
         ":portalocker",
         ":concurrent_log_handler",
     ],
+    data = ["//rtp_llm/cpp/deep_gemm:jit_includes"],
     imports = ["."],
 )
 
@@ -383,7 +384,8 @@ py_library(
 py_package(
     name = "rtp_llm_package",
     deps = [
-        ":rtp_llm_lib"
+        ":rtp_llm_lib",
+        "//rtp_llm/cpp/deep_gemm:jit_includes"
     ],
     packages = [
         "rtp_llm"
@@ -455,6 +457,7 @@ py_wheel(
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package",
+        "//rtp_llm/cpp/deep_gemm:jit_includes"
     ],
     requires = whl_reqs,
 )

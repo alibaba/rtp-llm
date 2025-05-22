@@ -12,6 +12,28 @@ preloaded_deps = [
 
 sm90_cuda_copts = ["-x", "cuda", "-std=c++17", "-shared", "--cuda-include-ptx=sm_90a", "--cuda-gpu-arch=sm_90a", "--compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi"]
 
+def _copy_filegroup_impl(ctx):
+    outputs = []
+    for src in ctx.attr.srcs:
+        for file in src.files.to_list():
+            out_path = ctx.attr.out + '/' + file.short_path.split('../')[1]
+            out = ctx.actions.declare_file(out_path)
+            ctx.actions.run_shell(
+                inputs = [file],
+                outputs = [out],
+                command = "cp -f '{}' '{}'".format(file.path, out.path),
+            )
+            outputs.append(out)
+    return [DefaultInfo(files = depset(outputs))]
+
+copy_filegroup = rule(
+    implementation = _copy_filegroup_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "out": attr.string(),
+    },
+)
+
 def sub_lib(name, srcs):
     native.cc_library(
         name = name + "_cu",

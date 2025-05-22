@@ -29,3 +29,14 @@ cc_library(
     strip_include_prefix = "tools/util/include/",
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "cutlass_origin",
+    srcs = glob([
+        "include/**/*.h",
+        "include/**/*.cuh",
+        "include/**/*.hpp",
+        "include/**/*.inl"
+    ]),
+    visibility = ["//visibility:public"],
+)
