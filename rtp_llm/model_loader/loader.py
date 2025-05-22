@@ -328,7 +328,7 @@ class ModelLoader:
         layer_num = self._load_config.num_layers
         phy2log = self._load_config.phy2log
 
-        if expert_num == 0 or redundant_expert == 0:
+        if expert_num == 0 or not self._weights_info.config.enable_eplb:
             return
 
         # init logic_expert_cnt and log2phy

@@ -142,6 +142,9 @@ private:
     size_t ep_rank_     = 0;
     size_t ep_size_     = 1;
 
+    size_t balance_layer_cnt_ = 0;
+    size_t balance_layer_per_step_ = 1;
+
     BalanceStatsBuffers stats_;
     EplbPlanBuffers     eplb_plan_buffers_;
     EplbPlanTensors     eplb_plan_tensors_;

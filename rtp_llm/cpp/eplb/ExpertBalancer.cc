@@ -193,6 +193,11 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
         test_mode_ = strcmp(eplb_test_mode, "0") != 0;
     }
 
+    const char* balance_layer_per_step_str = getenv("EPLB_BALANCE_LAYER_PER_STEP");
+    if (balance_layer_per_step_str) {
+        balance_layer_per_step_ = atoi(balance_layer_per_step_str);
+    }
+
     resetPlan(true);
 }
 
@@ -292,8 +297,17 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                     processPlanWeights();
                     applyPlanWeights(model);
                     load_flags_.setReady(false, device_);
+                    balance_layer_cnt_++;
+
+                    if (balance_layer_cnt_ >= balance_layer_per_step_) {
+                        update_cnt_ = 0;
+                        balance_layer_cnt_ = 0;
+                    } else {
+                        update_cnt_ = eplb_control_data_.update_time; // quick update
+                    }
+
                     setPlanStatus(EplbPlanStatus::INIT);
-                    update_cnt_ = 0;
+
                     resetPlan();
                 }
                 break;
