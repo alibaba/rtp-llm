@@ -4,7 +4,7 @@
 namespace rtp_llm {
 
 void* ICudaAllocator::reMalloc(void* ptr, size_t size) {
-    size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
+    size              = ((size + 127) / 128) * 128;  // make the buffer align with 128 bytes
     void* void_ptr    = (void*)ptr;
     void* ptr_address = void_ptr;
     if (isExist(ptr_address)) {
@@ -126,13 +126,13 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     void* ptr      = nullptr;
-    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 128.)) * 128));
     return ptr;
 }
 
 void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
     void* ptr      = nullptr;
-    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 128.)) * 128));
     return ptr;
 }
 
@@ -151,7 +151,7 @@ Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size) {
     void* ptr = nullptr;
-    check_cuda_value(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_value(cudaMallocHost(&ptr, (size_t)(ceil(size / 128.)) * 128));
     return ptr;
 }
 

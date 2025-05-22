@@ -6,6 +6,7 @@
 #include <set>
 #include <shared_mutex>
 #include <mutex>
+#include <queue>
 
 namespace rtp_llm {
 
@@ -31,7 +32,7 @@ public:
 // Note: this class is not responsible for memory allocation and free.
 class MemoryTracker {
 public:
-    MemoryTracker(void* ptr, const size_t size, const size_t align_size);
+    MemoryTracker(void* ptr, size_t size, const size_t align_size, bool use_small_chunk=true);
     ~MemoryTracker();
 
     void* allocate(const size_t size);
@@ -50,6 +51,10 @@ private:
     size_t align_size_;
     std::map<void*, MemoryChunk*> chunk_map_;
     std::set<std::pair<size_t, MemoryChunk*>> free_chunk_;
+    void* base_ptr_;
+    size_t small_chunk_size_ = 256 * 1024;
+    size_t small_chunk_num_ = 2048;
+    std::queue<size_t> small_chunk_queue_;
 };
 
 } // namespace rtp_llm
