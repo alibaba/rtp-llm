@@ -197,7 +197,7 @@ class ModelDeployWeightInfo:
             size_per_head=self._size_per_head,
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
-            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
+            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str() and os.environ.get('BLOCKWISE_USE_FP8_KV_CACHE', '0') == '1'
         )
         return attn_config
 
