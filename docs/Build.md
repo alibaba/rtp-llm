@@ -4,40 +4,6 @@
 * Python: 3.10
 * NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)
 
-<<<<<<< HEAD
-# 进入docker
-如果接下来是准备使用whl包来安装，那么进入docker是可选的。如果是从源代码构建，那么进入docker是必选的。
-如果本机环境比较复杂，建议进入docker，环境比较干净。
-镜像地址见: [镜像发布历史](./DockerHistory.md)
-```bash
-git clone https://github.com/alibaba/rtp-llm.git
-cd docker
-# 注意：以下两条指令，不要使用sudo执行
-# 如果是cuda11的环境(默认配置)，IMAGE_NAME为 registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:cuda11
-# 如果是cuda12的环境，IMAGE_NAME为 registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:cuda12
-sh ./create_container.sh <CONTAINER_NAME> <IMAGE_NAME>
-sh CONTAINER_NAME/sshme.sh
-```
-
-# 构建
-您也可以通过源代码来进行编译。源码构建使用bazel作为构建系统，推荐版本`5.2.0`。
-cuda11的环境：
-```bash
-cd rtp-llm
-pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
-bazel build //rtp_llm:rtp_llm --jobs 100 --verbose_failures
-# 修改test.py中的模型路径，运行一个实际的模型
-bazel test //example:test --jobs 100
-```
-cuda12的环境：
-```bash
-cd rtp-llm
-pip3 install -r ./rtp_llm/requirements_torch_gpu_cuda12.txt
-bazel build //rtp_llm:rtp_llm --jobs 100 --verbose_failures --config=cuda12_2
-# 修改test.py中的模型路径，运行一个实际的模型
-bazel test //example:test --jobs 100
-```
-=======
 ## 一. 环境搭建
 在这篇文章我们将为大家介绍完整的RTP-LLM推理引擎系统的部署和使用路径。本文以一台单机4卡A10的机器为例子进行介绍。首先是我们的机器配置，我们给出GPU和CPU架构配置情况如下:
 ```shell
@@ -102,14 +68,14 @@ NUMA node1 CPU(s):     64-127
 Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves wbnoinvd arat avx512vbmi avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm arch_capabilities
 ```
 接下来我们需要拉取容器环境用于配置安装RTP-LLM。我们准备的容器如下:
-gpu_cuda12_base_image: hub.docker.alibaba-inc.com/isearch/maga_transformer_base_gpu_cuda12:2025_05_07_23_49_9789d20
+registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f
 
-镜像名: hub.docker.alibaba-inc.com/isearch/maga_transformer_base_gpu_cuda12
+镜像名: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm
 版本号: 2025_05_07_23_49_9789d20
 
 ### 1.1 拉取容器
 ```shell
-docker pull hub.docker.alibaba-inc.com/isearch/maga_transformer_dev_gpu_cuda12:2025_05_07_23_50_9789d20
+docker pull registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f
 ```
 
 ### 1.2 创建 Docker 容器，具体表现挂载盘根据自己本地机器存储来进行
@@ -136,7 +102,7 @@ docker run \
   --runtime=nvidia --gpus all \
   --name user_gpu \
   --net=host -dit \
-  hub.docker.alibaba-inc.com/isearch/maga_transformer_dev_gpu_cuda12:2025_05_07_23_50_9789d20 \
+  registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f \
   /bin/bash
 ```
 
@@ -393,4 +359,3 @@ ps xauww  | grep maga_ft | awk '{print $2}' | xargs kill -9;
 ### 2.4 运行结果
 可以看到下面类似的相应返回即可视为成功
 ![](pics/response_success_example.png)
->>>>>>> fde795828... add open source docs:
