@@ -176,3 +176,19 @@ cc_test(
     copts = copts(),
     exec_properties = {'gpu':'A10'},
 )
+
+cc_binary(
+    name = "blas_perf",
+    srcs = [
+        "blas_perf.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda",
+        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/cuda:allocator_cuda",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)

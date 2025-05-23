@@ -17,6 +17,7 @@
 #include "cublasMMWrapper.h"
 #include "rtp_llm/cpp/utils/ScopeGuard.h"
 #include <algorithm>
+#include "nvToolsExt.h"
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -81,7 +82,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            float             f_beta,
                            int               math_sm_count,
                            cudaStream_t      stream) {
-    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta, nullptr, nullptr, math_sm_count, 0, stream);                            
+    Gemm(transa, transb, m, n, k, A, Atype_, lda, B, Btype_, ldb, C, Ctype_, ldc, computeType_, f_alpha, f_beta, nullptr, nullptr, math_sm_count, 0, stream);
 }
 
 void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
@@ -140,7 +141,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
 
     // --------------------------------------
     // Create descriptors for the original matrices
-    check_cuda_value(cublasLtMatrixLayoutCreate(&Adesc, Atype, 
+    check_cuda_value(cublasLtMatrixLayoutCreate(&Adesc, Atype,
             transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda));
     FT_SCOPE_GUARD([&](){ cublasLtMatrixLayoutDestroy(Adesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Bdesc, Btype,
@@ -154,7 +155,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
 #else
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType));
-#endif    
+#endif
     FT_SCOPE_GUARD([&](){ cublasLtMatmulDescDestroy(operationDesc); });
 
     if (math_sm_count > 0) {
@@ -177,7 +178,7 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t        handle,
                     CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &B_scale, sizeof(void*)));
     }
 
-  
+
     cublasLtMatmulAlgo_t algo;
     void*                workSpace     = cublas_workspace_;
     uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
@@ -615,7 +616,7 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   const float        alpha,
                                   const float        beta) {
     std::lock_guard<std::mutex> lock(*mutex_);
-                
+
     float f_alpha = static_cast<float>(alpha);
     float f_beta  = static_cast<float>(beta);
 
@@ -771,7 +772,8 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
     check_cuda_value(cudaEventCreate(&stop_event));
     FT_SCOPE_GUARD([&]() { cudaEventDestroy(stop_event); });
 
-    for (const auto& heuristic : heuristics) {
+    for (int i = 0; i < int(heuristics.size()); i++) {
+        const auto &heuristic = heuristics[i];
         cublasLtMatmulAlgo_t algo = heuristic.algo;
         int32_t algo_id;
         check_cuda_value(cublasLtMatmulAlgoConfigGetAttribute(
