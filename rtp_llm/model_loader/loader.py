@@ -45,7 +45,7 @@ class ModelLoader:
     @property
     def weights_info(self):
         return self._weights_info
-    
+
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
     def load_weights(self, device: str):
@@ -328,7 +328,8 @@ class ModelLoader:
         layer_num = self._load_config.num_layers
         phy2log = self._load_config.phy2log
 
-        if expert_num == 0 or not self._weights_info.config.enable_eplb:
+        if expert_num == 0 or (not self._weights_info.config.enable_eplb and redundant_expert == 0):
+            logging.info("don't need to init eplb weight, skip...")
             return
 
         # init logic_expert_cnt and log2phy
@@ -346,7 +347,7 @@ class ModelLoader:
             weight.weights[layer_id][W.log2phy] = log2phy.contiguous().to(device)
 
 
-def get_model_loader(task_type: TaskType, 
+def get_model_loader(task_type: TaskType,
                      weights_info: ModelDeployWeightInfo,
                      misc_weights_info: Optional[CustomAtomicWeight],
                      compute_dtype: torch.dtype,
