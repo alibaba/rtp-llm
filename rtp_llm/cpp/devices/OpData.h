@@ -413,7 +413,7 @@ struct CacheStoreInputs {
     BufferPtr host_kv_cache_offset;
 };
 
-using FlashInferAttnParamsPtr = std::shared_ptr<void>;
+using ParamsPtr = std::shared_ptr<void>;
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
@@ -452,8 +452,10 @@ struct AttentionCommonInputs {
 
     bool warmup;
 
-    FlashInferAttnParamsPtr prefill_flash_infer_attn_params;
-    FlashInferAttnParamsPtr decode_flash_infer_attn_params;
+    ParamsPtr prefill_flash_infer_attn;
+    ParamsPtr decode_flash_infer_attn;
+    ParamsPtr prefill_trt_attn;
+    ParamsPtr decode_trt_attn;
 };
 
 struct AttentionConfigs {
@@ -505,7 +507,7 @@ struct MlaRotaryWriteKVCacheParams {
     BufferPtr                       fused_dest_q;
     const Buffer&                   fused_qkv;
     const int64_t                   kv_offset;
-    FlashInferAttnParamsPtr         flash_infer_params; // prefill or decode
+    ParamsPtr         flash_infer; // prefill or decode
 
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
@@ -914,20 +916,22 @@ struct DevicePrepParams {
     const BufferPtr &sequence_lengths;
     const BufferPtr &input_lengths;
     const BufferPtr &kv_cache_block_id;
-    const BufferPtr &kv_cache_block_id_device;
+    const BufferPtr &kv_cache_block_id_d;
+    const BufferPtr &k_cache;
 
     DataType attn_dtype = DataType::TYPE_INVALID;
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
-    bool has_kv_cache     = true;
     bool diff_qkv_len     = false;
     bool has_alibi_slopes = false;
 };
 
 struct DevicePrepOutput {
     bool need_mask = true;
-    FlashInferAttnParamsPtr decode_flash_infer_attn_params;
-    FlashInferAttnParamsPtr prefill_flash_infer_attn_params;
+    ParamsPtr decode_flash_infer_attn;
+    ParamsPtr prefill_flash_infer_attn;
+    ParamsPtr decode_trt_attn;
+    ParamsPtr prefill_trt_attn;
 };
 
 struct LoraLinearOutput {

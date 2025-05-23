@@ -239,10 +239,10 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(
             inputs.input_lengths,
             inputs.kv_cache_block_id,
             attention_inputs.kv_cache ? attention_inputs.kv_cache->kv_cache_block_id : nullptr,
+            k_cache_buffer_,
             attn_dtype,
             context_batch_size,
             decoder_batch_size,
-            (bool)k_cache_buffer_,
             attention_inputs.max_prefix_length > 0,
             (bool)weights_.linear_bias_slopes
         });
@@ -252,8 +252,10 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(
         vector<int64_t> cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
         attention_inputs.cache_keys = transVectorToString(cache_keys_vec);
     }
-    attention_inputs.decode_flash_infer_attn_params.swap(prep_output.decode_flash_infer_attn_params);
-    attention_inputs.prefill_flash_infer_attn_params.swap(prep_output.prefill_flash_infer_attn_params);
+    attention_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
+    attention_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
+    attention_inputs.decode_trt_attn.swap(prep_output.decode_trt_attn);
+    attention_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
     attention_inputs.request_id = inputs.request_id;
     attention_inputs.request_pd_separation = inputs.request_pd_separation;
     attention_inputs.k_block_size = inputs.k_block_size;

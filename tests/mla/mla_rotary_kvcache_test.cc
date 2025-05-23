@@ -30,8 +30,8 @@ public:
     void applyRotaryKVCache(
         torch::Tensor q, torch::Tensor fused_qkv, int64_t kv_offset, torch::Tensor ckv_cache, torch::Tensor kpe_cache, torch::Tensor cos_sin_cache);
     DeviceBase* device_;
-    FlashInferAttnParamsPtr context_params_;
-    FlashInferAttnParamsPtr decode_params_;
+    ParamsPtr context_params_;
+    ParamsPtr decode_params_;
     int64_t context_batch_size_;
     int64_t decoder_batch_size_;
 };

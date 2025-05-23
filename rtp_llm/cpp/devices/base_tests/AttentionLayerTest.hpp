@@ -3,17 +3,14 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/devices/torch_impl/GptModel.hpp"
-
 #include "rtp_llm/cpp/models/GptModel.h"
 
-using namespace std;
-using namespace rtp_llm;
-
+namespace rtp_llm {
 
 template <typename TestT>
 class AttentionLayerTest : public DeviceTestBase {
@@ -30,7 +27,14 @@ public:
 
     AttentionLayerWeights getAttentionWeights(const GptAttention& gpt_attention);
 
-
+    virtual ParamsPtr prepareTrtAttn(
+            const AttentionConfigs& configs,
+            const BufferPtr &k_cache,
+            const BufferPtr &kv_cache_block_id,
+            int batch_size)
+    {
+        return nullptr;
+    }
 };
 
 torch::Tensor fakeAttentionInputs(const int64_t hidden_size, const int64_t token_num) {
@@ -141,7 +145,10 @@ void AttentionLayerTest<T>::testAttentionLayer(
         attention_weights,
         common_inputs
     };
+    params.common.prefill_trt_attn = prepareTrtAttn(attention_conf, layer_k_cache_buffer, model_inputs.kv_cache_block_id, input_lengths.size());
     auto attn_output = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
     assertTensorClose(output_tensor, torch_output, 1e-3, 2);
+}
+
 }

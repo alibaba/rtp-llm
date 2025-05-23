@@ -37,7 +37,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     } else {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
-    } 
+    }
     torch_comm_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     at::cuda::setCurrentCUDAStream(*torch_default_stream_);
     stream_ = torch_default_stream_->stream();
@@ -383,7 +383,8 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
 }
 
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
-    DevicePrepOutput output;
+    DevicePrepOutput output = prepareModelRunCommon(params);
+
     fmha_type_ = FMHAType::NONE;
     if (params.attn_dtype == DataType::TYPE_FP32) {
         fmha_type_       = FMHAType::NONE;
@@ -391,7 +392,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     } else if (params.context_batch_size) {
         selectCuFMHARunner(params);
         bool paged_kv_fmha =
-            params.diff_qkv_len && params.has_kv_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
+            params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
@@ -412,27 +413,46 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         }
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
+    return output;
+}
 
-    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepare(
+DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& params) {
+    DevicePrepOutput output;
+
+    auto decode_kv_cache_block_id_d = params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
+    auto prefill_kv_cache_block_id_d = params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(params.decoder_batch_size, params.context_batch_size) : nullptr;
+
+    output.decode_flash_infer_attn = FlashInferAttnParams::prepare(
             this,
             params.configs,
             nullptr,
-            params.sequence_lengths->slice(0, params.decoder_batch_size, false),
-            params.input_lengths->slice(0, params.decoder_batch_size, false),
-            params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size, false) : nullptr,
-            params.kv_cache_block_id_device ? params.kv_cache_block_id_device->slice(0, params.decoder_batch_size, false) : nullptr,
+            params.sequence_lengths->slice(0, params.decoder_batch_size),
+            params.input_lengths->slice(0, params.decoder_batch_size),
+            params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
+            decode_kv_cache_block_id_d,
             params.attn_dtype,
             false);
-    output.prefill_flash_infer_attn_params = FlashInferAttnParams::prepare(
+    output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
             this,
             params.configs,
             params.prefix_lengths,
             nullptr,
-            params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size, false),
-            params.kv_cache_block_id ? params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size, false) : nullptr,
-            params.kv_cache_block_id_device ? params.kv_cache_block_id_device->slice(params.decoder_batch_size, params.context_batch_size, false) : nullptr,
+            params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size),
+            params.kv_cache_block_id ? params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) : nullptr,
+            prefill_kv_cache_block_id_d,
             params.attn_dtype,
             true);
+
+    output.decode_trt_attn = prepareTrtAttn(
+            params.configs,
+            params.k_cache,
+            decode_kv_cache_block_id_d,
+            params.decoder_batch_size);
+    output.prefill_trt_attn = prepareTrtAttn(
+            params.configs,
+            params.k_cache,
+            prefill_kv_cache_block_id_d,
+            params.context_batch_size);
 
     return output;
 }

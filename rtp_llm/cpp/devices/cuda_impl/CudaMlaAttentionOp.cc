@@ -45,7 +45,7 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
                            fused_q_input,
                            params.fused_qkv,
                            params.kv_offset,
-                           params.is_prefill ? params.common.prefill_flash_infer_attn_params : params.common.decode_flash_infer_attn_params,
+                           params.is_prefill ? params.common.prefill_flash_infer_attn : params.common.decode_flash_infer_attn,
                            params.common,
                            params.weights,
                            params.configs,
@@ -62,15 +62,15 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     printBufferData(*fused_q_input, "fused_q_input");
 
     auto ckv = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
-    auto flash_infer_attn_params = params.is_prefill ? (FlashInferAttnParams*)params.common.prefill_flash_infer_attn_params.get() : (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
-    if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mla");
+    auto flash_infer_attn = params.is_prefill ? (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get() : (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
+    if (!flash_infer_attn) {
+        throw std::runtime_error("flash_infer_attn must be setting when using mla");
     }
     const auto &ckv_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
     auto datatype = params.q.type();
     at::Tensor attn_out_t;
     BufferPtr attn_out;
-    const auto &flashinfer = *flash_infer_attn_params;
+    const auto &flashinfer = *flash_infer_attn;
     // maybe some shape check ?
 
 
@@ -180,7 +180,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
                            nullptr,
                            fused_qkv,
                            params.kv_offset,
-                           params.common.prefill_flash_infer_attn_params,
+                           params.common.prefill_flash_infer_attn,
                            params.common,
                            params.weights,
                            params.configs,
@@ -241,11 +241,11 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
 
 void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.flash_infer_params.get();
-    if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mlaRotaryWriteKVCache");
+    auto flash_infer_attn = (FlashInferAttnParams*)params.flash_infer.get();
+    if (!flash_infer_attn) {
+        throw std::runtime_error("flash_infer_attn must be setting when using mlaRotaryWriteKVCache");
     }
-    const auto &flashinfer = *flash_infer_attn_params;
+    const auto &flashinfer = *flash_infer_attn;
     // apply rotary embedding to qk
     auto& q = params.q;
 

@@ -106,6 +106,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
 
     BufferPtr kv_cache_block_id_host;
     BufferPtr kv_cache_block_id_device;
+    BufferPtr k_cache_buffer;
 
     auto device_prep_params = DevicePrepParams({
         attn_configs,
@@ -114,6 +115,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         input_lengths,
         kv_cache_block_id_host,
         kv_cache_block_id_device,
+        k_cache_buffer,
         datatype,
         batch_size,
         0,
@@ -136,7 +138,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     attn_common_inputs.context_batch_size  = batch_size;
     attn_common_inputs.decoder_batch_size  = 0;
     attn_common_inputs.context_max_seq_len = token_num;
-    attn_common_inputs.prefill_flash_infer_attn_params.swap(prep_output.prefill_flash_infer_attn_params);
+    attn_common_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
 
     auto mla_params = MlaAttentionModuleParams{
         0, *q_b, *fused_qkv_b, kv_offset, output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};

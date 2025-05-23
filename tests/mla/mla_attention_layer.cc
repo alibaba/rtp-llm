@@ -78,7 +78,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         BufferPtr sequence_lengths_host   = torchTensor2Buffer(sequence_length_t);
         BufferPtr kvcache_block_id_host   = torchTensor2Buffer(kvcache_block_id);
         BufferPtr kvcache_block_id_device   = device_->clone({*kvcache_block_id_host});
-        auto      decode_flash_infer_attn_params =
+        auto      decode_flash_infer_attn =
             FlashInferAttnParams::prepare(device_,
                                           attn_configs,
                                           nullptr,
@@ -87,8 +87,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           kvcache_block_id_host,
                                           kvcache_block_id_device,
                                           DataType::TYPE_BF16,
-                                         false);
-        auto context_flash_infer_attn_params =
+                                          false);
+        auto context_flash_infer_attn =
             FlashInferAttnParams::prepare(device_,
                                           attn_configs,
                                           prefix_lengths_host,
@@ -133,8 +133,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
         attn_common_inputs.kv_cache =
             std::make_optional<KvCacheInfo>({1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer,
             nullptr, nullptr});
-        attn_common_inputs.prefill_flash_infer_attn_params = context_flash_infer_attn_params;
-        attn_common_inputs.decode_flash_infer_attn_params = decode_flash_infer_attn_params;
+        attn_common_inputs.prefill_flash_infer_attn = context_flash_infer_attn;
+        attn_common_inputs.decode_flash_infer_attn = decode_flash_infer_attn;
         attn_common_inputs.input_lengths = input_lengths_host;
         attn_common_inputs.sequence_lengths = sequence_lengths_host;
         LayerNormConfig layernorm_config = LayerNormConfig();

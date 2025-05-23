@@ -170,14 +170,14 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     output.need_mask = false;
-    output.decode_flash_infer_attn_params = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
+    output.decode_flash_infer_attn = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
              this,
              params.configs,
              params.sequence_lengths,
              params.input_lengths,
              params.kv_cache_block_id,
              params.attn_dtype);
-     output.prefill_flash_infer_attn_params = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
+     output.prefill_flash_infer_attn = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
              this,
              params.configs,
              params.prefix_lengths,

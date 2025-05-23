@@ -315,15 +315,15 @@ void FlashInferAttnParams::genPlan(int batch_size,
     }
 }
 
-FlashInferAttnParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
-                                                      const rtp_llm::AttentionConfigs& attn_configs,
-                                                      const BufferPtr&                 prefix_lengths_host,
-                                                      const BufferPtr&                 sequence_lengths_host,
-                                                      const BufferPtr&                 input_lengths_host,
-                                                      const BufferPtr&                 kv_cache_block_id_host,
-                                                      const BufferPtr&                 kv_cache_block_id_device,
-                                                      DataType                         dtype,
-                                                      bool                             is_prefill) {
+ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
+                                        const rtp_llm::AttentionConfigs& attn_configs,
+                                        const BufferPtr&                 prefix_lengths_host,
+                                        const BufferPtr&                 sequence_lengths_host,
+                                        const BufferPtr&                 input_lengths_host,
+                                        const BufferPtr&                 kv_cache_block_id_host,
+                                        const BufferPtr&                 kv_cache_block_id_device,
+                                        DataType                         dtype,
+                                        bool                             is_prefill) {
     if (rtp_llm::get_sm() < 80) {
         return nullptr;
     }
@@ -396,7 +396,7 @@ FlashInferAttnParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*      
                                                max(MIN_CACHE_BATCH_SIZE, batch_size),
                                                max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
                                                MIN_CACHE_PAGE_NUM);
-    FlashInferAttnParamsPtr ret(params, recycle);
+    ParamsPtr ret(params, recycle);
 
     if (kv_cache_block_id_device) {
         params->kv_cache_block_id_d = Buffer2torchTensor(kv_cache_block_id_device, false);

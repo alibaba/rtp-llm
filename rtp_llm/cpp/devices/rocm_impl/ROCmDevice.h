@@ -75,7 +75,7 @@ namespace rtp_llm {
         bool decode = true;
         torch::Tensor plan;
     
-        static FlashInferAttnParamsPtr prepareDecodeFlashInferAttnParams(
+        static ParamsPtr prepareDecodeFlashInferAttnParams(
             rtp_llm::DeviceBase *device,
             const rtp_llm::AttentionConfigs &attn_configs,
             const BufferPtr &sequence_lengths_host,
@@ -83,7 +83,7 @@ namespace rtp_llm {
             const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
     
-        static FlashInferAttnParamsPtr preparePrefillFlashInferAttnParams(
+        static ParamsPtr preparePrefillFlashInferAttnParams(
             rtp_llm::DeviceBase *device,
             const rtp_llm::AttentionConfigs &attn_configs,
             const BufferPtr &prefix_lengths_host,

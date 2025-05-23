@@ -62,6 +62,19 @@ private:
     cudaStream_t comm_stream_;
 };
 
+struct TRTAttn {
+    KVBlockArray kv_block_array;
+    BufferPtr kv_cache_offset;
+    BufferPtr kv_cache_offset_h;
+
+    static void setKvCache(KVBlockArray &kv_block_array, const KvCacheInfo &kv_cache) {
+        kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
+        if (kv_cache.k_scale_buffer) {
+            kv_block_array.scale = kv_cache.k_scale_buffer->data();
+        }
+    }
+};
+
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -188,7 +201,15 @@ public:
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
+
+public:
+    ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
+                             const BufferPtr &k_cache,
+                             const BufferPtr &kv_cache_block_id,
+                             int batch_size);
+
 protected:
+    DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);
 
     void InvokeSmoothQaunt(const GemmParams&       params,
                            const CudaGemmArguments arguments,
@@ -203,11 +224,6 @@ protected:
                         const CudaGemmArguments arguments,
                         BufferPtr&              output);
     void selectCuFMHARunner(const DevicePrepParams& params);
-
-    KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
-                                 const Buffer&                kv_cache_offset_pointers,
-                                 int                          batch_size,
-                                 bool                         use_fp8_fmha);
 
     void prefillAttention(const AttentionModuleParams& params,
                           KVBlockArray                 kv_block_array,

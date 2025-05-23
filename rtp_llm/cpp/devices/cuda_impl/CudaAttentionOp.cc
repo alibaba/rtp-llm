@@ -26,6 +26,74 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
+ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
+                                     const BufferPtr &k_cache,
+                                     const BufferPtr &kv_cache_block_id,
+                                     int batch_size)
+{
+    if (!k_cache || !kv_cache_block_id || 0 == batch_size) {
+        return nullptr;
+    }
+
+    auto trt_attn = std::make_shared<TRTAttn>();
+
+    const int layer_num = k_cache->shape()[0];
+    const int block_num = k_cache->shape()[1];
+    const int kv_block_offset = block_num * layer_num;
+
+    int ele_size = 2;
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+#ifdef ENABLE_FP8
+    if (use_fp8_fmha_) {
+        cache_type = KvCacheDataType::FP8;
+        ele_size = 1;
+    } else
+#endif
+    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        cache_type = KvCacheDataType::INT8;
+        ele_size = 1;
+    }
+
+    RUNTIME_ASSERT_OP_ARG(kv_cache_block_id->shape()[0] == batch_size,
+                          "context attention kv blocks batch size expected [%d] but buffer[%s]",
+                          (int)batch_size,
+                          kv_cache_block_id->debugString().c_str());
+    const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
+
+    trt_attn->kv_cache_offset = allocateBuffer(
+            {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+            {"kv_cache_offset"});
+    trt_attn->kv_block_array = KVBlockArray(batch_size,
+                                            max_blocks_per_batch,
+                                            configs.tokens_per_block,
+                                            configs.kv_head_num * configs.size_per_head * ele_size,
+                                            0,
+                                            0,
+                                            nullptr, // (uint64_t*)k_cache.data(),
+                                            nullptr,
+                                            (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset->data<int>());
+    trt_attn->kv_block_array.cache_type = cache_type;
+    trt_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
+
+    invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset->data<int>(),
+                                        kv_cache_block_id->data<int>(),
+                                        batch_size,
+                                        max_blocks_per_batch,
+                                        kv_block_offset,
+                                        stream_);
+
+    if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
+        trt_attn->kv_cache_offset_h = allocateBuffer(
+                {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},
+                {"kv_cache_offset_h"});
+        copy({*trt_attn->kv_cache_offset_h, *trt_attn->kv_cache_offset});
+        trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h->data();
+    }
+
+    check_cuda_error();
+    return trt_attn;
+}
+
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
@@ -70,23 +138,13 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     BufferPtr kv_cache_block_id = nullptr;
     BufferPtr kv_cache_offset_host = nullptr;
 
-    KVBlockArray                  kv_block_array;
+    KVBlockArray kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
     if (params.common.kv_cache) {
-        const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
-        kv_cache_block_id = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                                         {"kv_cache_block_id"});
-
-        kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, use_fp8_fmha_);
-
-        if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
-            kv_cache_offset_host = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::HOST},
-                                            {"kv_cache_offset_host"});
-            this->copy({*kv_cache_offset_host, *kv_cache_block_id});
-            kv_block_array.pagedKVBlockOffsetsOnHost = kv_cache_offset_host->data();
-        }
-
+        auto trt_attn = ((TRTAttn*)params.common.prefill_trt_attn.get());
+        kv_block_array = trt_attn->kv_block_array;
+        TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
         prefix_prompt_param.kv_block_array = kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {
@@ -325,10 +383,10 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
 
     RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
-    const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
-    auto       kv_cache_block_id      = allocateBuffer(
-        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_block_id"});
-    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, use_fp8_fmha_);
+    auto trt_attn = ((TRTAttn*)params.common.decode_trt_attn.get());
+    auto kv_block_array = trt_attn->kv_block_array;
+    TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
+
 
 #ifdef USING_CUDA12
     size_t local_kv_head_num = params.configs.kv_head_num;
@@ -351,7 +409,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     }
 #endif
 
-    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
+    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
     if (flash_infer && flash_infer->plan.numel() > 0) {
         BufferPtr f16_out;
         if (use_fp8_fmha_) {

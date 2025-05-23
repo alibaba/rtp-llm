@@ -10,76 +10,12 @@
 
 namespace rtp_llm {
 
-KVBlockArray CudaDevice::getKVBlockArray(const AttentionModuleParams& params,
-                             const Buffer&                kv_cache_offset_pointers,
-                             int                          batch_size,
-                             bool                         use_fp8_fmha) {
-    const auto& kv_cache         = params.common.kv_cache;
-    const auto& kv_blocks_offset = *(kv_cache->kv_cache_block_id);
-    const auto& kv_block_offset  = (kv_cache->k_cache_buffer)->shape()[0] * kv_cache->layer_num;
-    RUNTIME_ASSERT_OP_ARG(kv_blocks_offset.shape()[0] == batch_size,
-                          "context attention kv blocks batch size expected [%d] but buffer[%s]",
-                          (int)batch_size,
-                          kv_blocks_offset.debugString().c_str());
-    const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
-    const auto& k_cache              = *(kv_cache->k_cache_buffer);
-    const auto& v_cache              = *(kv_cache->v_cache_buffer);
-    auto const  elemSize             = kv_cache->k_scale_buffer || use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
-    // RTP_LLM_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
-    RTP_LLM_LOG_DEBUG(
-        "kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, kv_block_offset:%d",
-        kv_blocks_offset.size(),
-        (uint64_t*)k_cache.data(),
-        (uint64_t)v_cache.data(),
-        k_cache[0].sizeBytes(),
-        params.configs.tokens_per_block,
-        kv_block_offset);
-    auto const   sizePerToken = params.configs.kv_head_num * params.configs.size_per_head * elemSize;
-    KVBlockArray kv_cache_buffer =
-        KVBlockArray(batch_size,
-                     max_blocks_per_batch,
-                     params.configs.tokens_per_block,
-                     sizePerToken,
-                     0,
-                     0,
-                     (uint64_t*)k_cache.data(),
-                     nullptr,
-                     (rtp_llm::KVBlockArrayForContextFMHA::DataType*)kv_cache_offset_pointers.data());
-    invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_offset_pointers.data(),
-                                        (int*)kv_blocks_offset.data(),
-                                        batch_size,
-                                        max_blocks_per_batch,
-                                        kv_block_offset,
-                                        stream_);
-    check_cuda_error();
-    if (kv_cache->k_scale_buffer) {
-        RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
-                              "v scale buffer should has value when use k scale buffer has value");
-        const auto& k_scale = *(kv_cache->k_scale_buffer);
-        kv_cache_buffer.scale = k_scale.data();
-        kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
-    }
-    KvCacheDataType cache_type = KvCacheDataType::BASE;
-#ifdef ENABLE_FP8
-    if (use_fp8_fmha) {
-        cache_type = KvCacheDataType::FP8;
-    } else
-#endif
-    if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
-        RTP_LLM_LOG_DEBUG("now use kv_cache int8");
-        cache_type = KvCacheDataType::INT8;
-    }
-    kv_cache_buffer.cache_type = cache_type;
-    check_cuda_error();
-    return kv_cache_buffer;
-}
-
 void CudaDevice::prefillAttention(const AttentionModuleParams& params,
-                            KVBlockArray                 kv_block_array,
-                            const BufferPtr&             q_output,
-                            const BufferPtr&             k_output,
-                            const BufferPtr&             v_output,
-                            const BufferPtr&             qkv_buf_fp8) {
+                                  KVBlockArray                 kv_block_array,
+                                  const BufferPtr&             q_output,
+                                  const BufferPtr&             k_output,
+                                  const BufferPtr&             v_output,
+                                  const BufferPtr&             qkv_buf_fp8) {
     auto fmha_type = fmha_type_;
     auto stream  = stream_;
     auto cufmha_runner = cufmha_runner_;

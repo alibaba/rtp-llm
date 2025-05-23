@@ -22,11 +22,11 @@ namespace rtp_llm {
 
 void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
-    auto              flash_infer_attn_params = (FlashInferAttnParams*)params.flash_infer_params.get();
-    if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mlaRotaryWriteKVCachela");
+    auto              flash_infer_attn = (FlashInferAttnParams*)params.flash_infer.get();
+    if (!flash_infer_attn) {
+        throw std::runtime_error("flash_infer_attn must be setting when using mlaRotaryWriteKVCachela");
     }
-    const auto& f = *flash_infer_attn_params;
+    const auto& f = *flash_infer_attn;
     // apply rotary embedding to qk
     auto& q = params.q;
 
@@ -118,7 +118,7 @@ void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
                            fused_q_input,
                            params.fused_qkv,
                            params.kv_offset,
-                           params.common.decode_flash_infer_attn_params,
+                           params.common.decode_flash_infer_attn,
                            params.common,
                            params.weights,
                            params.configs,
@@ -127,15 +127,15 @@ void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     QInputBatchMatmulWrapper(fused_q_input_t, params);
     printBufferData(*fused_q_input, "fused_q_input");
 
-    auto flash_infer_attn_params = (FlashInferAttnParams*)params.common.decode_flash_infer_attn_params.get();
-    if (!flash_infer_attn_params) {
-        throw std::runtime_error("flash_infer_attn_params must be setting when using mla");
+    auto flash_infer_attn = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
+    if (!flash_infer_attn) {
+        throw std::runtime_error("flash_infer_attn must be setting when using mla");
     }
     const auto& ckv_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
     auto        datatype        = params.q.type();
     at::Tensor  attn_out_t;
     BufferPtr   attn_out;
-    const auto& flashinfer = *flash_infer_attn_params;
+    const auto& flashinfer = *flash_infer_attn;
     // maybe some shape check ?
 
     auto q_reshape = params.q.reshape(
@@ -236,7 +236,7 @@ AttentionModuleOutput ROCmDevice::mlaContextAttention(const MlaAttentionModulePa
                            nullptr,
                            fused_qkv,
                            params.kv_offset,
-                           params.common.prefill_flash_infer_attn_params,
+                           params.common.prefill_flash_infer_attn,
                            params.common,
                            params.weights,
                            params.configs,

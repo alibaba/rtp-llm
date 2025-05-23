@@ -159,7 +159,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
 }
  
  
- FlashInferAttnParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(
+ParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(
          rtp_llm::DeviceBase *device,
          const rtp_llm::AttentionConfigs &attn_configs,
          const BufferPtr &prefix_lengths_host,
@@ -180,14 +180,14 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
      const size_t prefill_token_num    = std::accumulate(input_lengths_host->data<int>() + batch_size,
                                                       input_lengths_host->data<int>() + context_batch_size + batch_size,
                                                       0);
-     auto ret = FlashInferAttnParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
+     auto ret = ParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
      auto params = (FlashInferAttnParams*)ret.get();
      prepareContextMLAFlashInferAttnParamsImpl(params, device, attn_configs, sequence_lengths_host, input_lengths_host, kv_cache_block_id_host, prefill_token_num, context_batch_size, tokens_per_block, max_batch_blocks, batch_size);
      return ret;
  }
  
  
- FlashInferAttnParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
+ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
          rtp_llm::DeviceBase *device,
          const rtp_llm::AttentionConfigs &attn_configs,
          const BufferPtr &sequence_lengths_host,
@@ -226,7 +226,7 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
      }
  
      const int    max_batch_blocks   = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
-     auto ret = FlashInferAttnParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
+     auto ret =  ParamsPtr(new FlashInferAttnParams, flashInferAttnParamsDeleter);
      auto params = (FlashInferAttnParams*)ret.get();
      if (group_size > 5) {
          params->decode = false;
