@@ -5,44 +5,10 @@
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
-#include "torch/csrc/autograd/profiler_kineto.h"
 
 using namespace std;
 
 namespace rtp_llm {
-namespace tap = torch::autograd::profiler;
-namespace tpi = torch::profiler::impl;
-
-class CudaProfiler {
-public:
-    CudaProfiler(const std::string& prefix): prefix_(prefix) {
-        tap::prepareProfiler(config_, activities_);
-    }
-    ~CudaProfiler() {
-        if (!stoped_) {
-            stoped_ = true;
-            stop();
-        }
-    }
-    void start() {
-        count += 1;
-        stoped_ = false;
-        tap::enableProfiler(config_, activities_);
-    }
-    void stop() {
-        std::unique_ptr<tap::ProfilerResult> res = tap::disableProfiler();
-        std::string file_name = prefix_ + std::to_string(count) + ".json";
-        res->save(file_name);
-        stoped_ = true;
-    }
-protected:
-    static size_t count;
-    std::string   prefix_;
-    tpi::ProfilerConfig config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
-    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CUDA};
-    bool stoped_ = true;
-};
-size_t CudaProfiler::count = 0;
 
 NormalExecutor::NormalExecutor(const EngineInitParams& params,
                                const std::shared_ptr<CacheManager>& cache_manager,
@@ -53,7 +19,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
-    gen_timeline_sync_(autil::EnvUtil::getEnv("GEN_TIMELINE_SYNC", 0L)),
     use_all_gather_(params.gpt_init_parameter.use_all_gather_),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
@@ -109,20 +74,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
-    bool gen_timeline = stream_groups.genTimeline();
-    if (gen_timeline_sync_) {
-        auto gen_timeline_buffer = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_BOOL, {device_->getDeviceProperties().dp_size}, rtp_llm::AllocationType::HOST});
-        *(gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_rank)) = gen_timeline;
-        device_->allGather({{gen_timeline_buffer}, rtp_llm::ParallelMode::DP_AND_TP});
-        device_->syncCommunication();
-        gen_timeline = std::any_of(gen_timeline_buffer->data<bool>(), gen_timeline_buffer->dataWithOffset<bool>(device_->getDeviceProperties().dp_size), [](auto s) { return s;});
-    }
-    std::shared_ptr<CudaProfiler> profiler;
-    if (gen_timeline) {
-        profiler = std::make_shared<CudaProfiler>("cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
-        profiler->start();
-    }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector tps_collector;
     GptModelInputs model_input;

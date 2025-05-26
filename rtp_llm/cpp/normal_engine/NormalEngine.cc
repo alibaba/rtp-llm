@@ -21,7 +21,9 @@ namespace rtp_llm {
 NormalEngine::NormalEngine(const EngineInitParams& params) :
     EngineBase(params),
     params_(params.gpt_init_parameter),
-    metrics_reporter_(params.metrics_reporter)
+    metrics_reporter_(params.metrics_reporter),
+    profiler_step_(0),
+    gen_timeline_sync_(autil::EnvUtil::getEnv("GEN_TIMELINE_SYNC", 0L))
 {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
@@ -274,6 +276,28 @@ absl::Status NormalEngine::step() {
         }
     }
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    bool gen_timeline = !streams.empty() && std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->genTimeline(); });
+    if (gen_timeline_sync_) {
+        auto world_size = device_->getDeviceProperties().dp_size * device_->getDeviceProperties().tp_size;
+        auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size + device_->getDeviceProperties().tp_rank;
+        auto gen_timeline_buffer = device_->allocateBuffer(
+                {DataType::TYPE_BOOL, {world_size}, AllocationType::HOST});
+        *(gen_timeline_buffer->dataWithOffset<bool>(world_rank)) = gen_timeline;
+        device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
+        device_->syncCommunication();
+        gen_timeline = std::any_of(gen_timeline_buffer->data<bool>(), gen_timeline_buffer->dataWithOffset<bool>(world_size), [](auto s) { return s;});
+    }
+    profiler_step_--;
+    if (profiler_step_ <= 0) {
+        profiler_.reset();
+        profiler_step_ = 0;
+    }
+    if (gen_timeline && profiler_step_ <= 0) {
+        auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size + device_->getDeviceProperties().tp_rank;        
+        profiler_ = std::make_shared<CudaProfiler>("normal_profiler_wr" + std::to_string(world_rank) + "_");
+        profiler_->start();
+        profiler_step_ = 3;
+    }
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status;
     if (params_.world_size_ > 1) {

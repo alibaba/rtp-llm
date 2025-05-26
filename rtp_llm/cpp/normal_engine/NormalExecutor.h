@@ -42,7 +42,6 @@ private:
     std::shared_ptr<lora::LoraManager>          lora_manager_;
     std::shared_ptr<ExpertBalancer>             expert_balancer_;
     bool                                        warm_up_;
-    bool                                        gen_timeline_sync_ = false;
     bool                                        use_all_gather_;
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;

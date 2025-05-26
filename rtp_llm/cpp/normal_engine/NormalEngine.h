@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
@@ -61,6 +62,9 @@ private:
     const rtp_llm::GptInitParameter     params_;
     StepRecorder                   step_recorder_;
     kmonitor::MetricsReporterPtr   metrics_reporter_;
+    std::shared_ptr<CudaProfiler>  profiler_;
+    int                            profiler_step_ = 0;
+    bool                           gen_timeline_sync_ = false;
 };
 
 }  // namespace rtp_llm
