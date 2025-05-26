@@ -17,7 +17,7 @@ async def main():
     g_worker_info.reload()
     os.environ["MODEL_TYPE"] = os.environ.get("MODEL_TYPE", "qwen_2")
     os.environ["CHECKPOINT_PATH"] = os.environ.get("CHECKPOINT_PATH", "Qwen/Qwen2-0.5B-Instruct")
-    os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(2 * 1024 * 1024 * 1024)
+    os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(12 * 1024 * 1024 * 1024)
     model_config = ModelFactory.create_normal_model_config()
     model = ModelFactory.from_huggingface(model_config.ckpt_path, model_config=model_config)
     pipeline = Pipeline(model, model.config, model.tokenizer)
