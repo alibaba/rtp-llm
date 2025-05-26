@@ -32,7 +32,7 @@ protected:
         return std::unique_ptr<::anet::HTTPPacket, std::function<void(::anet::HTTPPacket*)>>(
             packet, [](::anet::HTTPPacket* packet) { packet->free(); });
     }
-    
+
     void SetToMaster() {
         autil::EnvGuard tp_size_env("TP_SIZE", "1");
         autil::EnvGuard pp_size_env("PP_SIZE", "1");
@@ -310,7 +310,8 @@ TEST_F(TokenizerServiceTest, TokenizerEncodeRequest) {
     TokenizerEncodeRequest req2;
     EXPECT_NO_THROW(autil::legacy::FromJsonString(req2, json_str));
     EXPECT_EQ(req2.prompt, req.prompt);
-    EXPECT_EQ(req2.return_offsets_mapping, req.return_offsets_mapping);
+    EXPECT_TRUE(req2.return_offsets_mapping);
+    EXPECT_TRUE(req.return_offsets_mapping);
 }
 
 }  // namespace rtp_llm
