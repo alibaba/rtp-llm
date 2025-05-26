@@ -52,6 +52,36 @@ class Fuser:
         self._mount_src_map = {}  # Maps mount path to (original path, ref count)
         self.lock = threading.RLock()  # 使用重入锁
         atexit.register(self.umount_all)
+        self._available: bool = self._check_valid()
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def _check_valid(self) -> bool:
+        try:
+            response = requests.post(
+                f"{self._fuse_uri}/FuseService/mount",
+                json={},  # 空请求体
+                headers={"Content-Type": "application/json"},
+                timeout=5
+            )
+            # 验证响应状态码和错误码
+            if response.status_code == 200:
+                logging.info(f"check fuse is valid:{self._fuse_uri}, response: {response}, {response.status_code}")
+                return True
+            else:
+                logging.warning(f"fuse is not valid:{self._fuse_uri}, {response.status_code} != 200, response: {response}")
+                return False
+        except requests.ConnectionError:
+            logging.warning(f"fuse is not valid: connet {self._fuse_uri} error")
+            return False
+        except requests.Timeout:
+            logging.warning(f"fuse is not valid: connet {self._fuse_uri} timeout")
+            return False
+        except Exception:
+            logging.warning(f"fuse is not valid: connet {self._fuse_uri}  unknown err")
+            return False
 
     @retry_with_timeout()
     def mount_dir(self, path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO) -> Optional[str]:
@@ -212,3 +242,6 @@ def umount_file(path: str, force: bool = False):
     logging.info(f"umount file {path}")
     _fuser.umount_fuse_dir(path, force=force)
     _nfs_manager.unmount_nfs_path(path)
+
+def fuse_available() -> bool:
+    return _fuser.available
