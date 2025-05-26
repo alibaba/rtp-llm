@@ -74,7 +74,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                                  {"fmha_fp16_output"});
                 cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
                 fmha_output_ptr = tmp_fmha_output->data();
-            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_FP8_E4M3) {
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 tmp_fmha_output = allocateBuffer({DataType::TYPE_FP8_E4M3,
                                                   {batch_size, head_num * seq_len_with_prefix * size_per_head},
                                                   AllocationType::DEVICE},
@@ -109,7 +109,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 auto quant_output = quantize(quant_params);
                 cudaMemcpyAsync(
                     params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
-            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_FP8_E4M3) {
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
                 printBufferData(*tmp_fmha_output, "tmp_fmha_output");
                 auto quant_fmha_output_t = Buffer2torchTensor(*tmp_fmha_output, false);
