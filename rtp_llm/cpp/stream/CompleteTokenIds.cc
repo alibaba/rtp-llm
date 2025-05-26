@@ -151,18 +151,10 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens, int64_t begi
                 return false;
             }
         }
-        int complete_token_dim2 = complete_token_ids_->shape()[1];
-        int new_token_dim2 = new_tokens->shape()[1];
         if (num_beams > 1) {
             memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
         } else {
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
-        }
-
-        int32_t* CompleteTokenIds::data(int batch_id) {
-            // eq to (*comple_token_ids).[batch_id].data<int32_t>();
-            // avoid construct Buffer to reduce overhead
-            return complete_token_ids_->data<int32_t>() + batch_id * complete_token_ids_->shape()[1];
         }
     }
     setSeqLength(seq_length_ + num_new_tokens);
