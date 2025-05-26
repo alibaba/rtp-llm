@@ -19,7 +19,7 @@ namespace rtp_llm {
 BufferPtr getKVCacheScale(CudaDevice *device) {
     float scale = 1.;
     BufferPtr kv_cache_scale = device->allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});
-    check_cuda_error(cudaMemcpyAsync(kv_cache_scale->data(), &scale, sizeof(float), cudaMemcpyHostToDevice, device->getStream()));
+    check_cuda_value(cudaMemcpyAsync(kv_cache_scale->data(), &scale, sizeof(float), cudaMemcpyHostToDevice, device->getStream()));
 
     return kv_cache_scale;
 }
@@ -55,7 +55,7 @@ BufferPtr getRopeCosSin(CudaDevice *device, int rope_theta, int rope_dim, int ma
     BufferPtr rope_cos_sin = device->allocateBuffer({DataType::TYPE_UINT8, {max_position_embeddings * sizeof(Vec<float, validElemsPerHead>)}, AllocationType::DEVICE}, {"rope_cos_sin"});
     auto rope_cos_sin_ptr = reinterpret_cast<Vec<float, validElemsPerHead>*>(rope_cos_sin->data());
     for (size_t i = 0; i < max_position_embeddings; ++i) {
-        check_cuda_error(cudaMemcpyAsync(&(rope_cos_sin_ptr[i].data[0]),
+        check_cuda_value(cudaMemcpyAsync(&(rope_cos_sin_ptr[i].data[0]),
                                          reinterpret_cast<char*>(emb.data_ptr()) + i * sizeof(float) * rope_dim,
                                          sizeof(float) * rope_dim,
                                          cudaMemcpyHostToDevice,
@@ -121,7 +121,7 @@ void runXqa(void* input,
                       scratch,
                       device->getStream());
 
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 }
