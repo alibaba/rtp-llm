@@ -247,6 +247,14 @@ void DeviceOps::noBlockCopy(const CopyParams& params) {
     copy(params);
 }
 
+void DeviceOps::multiMergeCopy(const MultiMergeCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::multiCopy(const MultiCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 torch::Tensor DeviceOps::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

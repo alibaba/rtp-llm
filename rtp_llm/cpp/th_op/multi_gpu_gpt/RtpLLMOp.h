@@ -57,6 +57,7 @@ private:
     std::thread                                   grpc_server_thread_;
     std::atomic<bool>                             is_server_ready_{false};
     std::atomic<bool>                             is_server_shutdown_{false};
+    size_t                                        model_id_ = 0;
 };
 
 void registerRtpLLMOp(const py::module& m);

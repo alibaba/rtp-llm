@@ -11,7 +11,7 @@ CompleteTokenIds::CompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, 
     , seq_size_per_block_(seq_size_per_block) {
 }
 
-CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
+CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, int shift_token_num)
     : device_(other.device_)
     , batch_size_(other.batch_size_)
     , max_seq_len_(other.max_seq_len_)
@@ -21,10 +21,24 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other)
     , start_check_seq_length_(other.start_check_seq_length_)
     , first_token_time_us_(other.first_token_time_us_)
     , first_token_latency_us_(other.first_token_latency_us_) {
-    complete_token_ids_ = device_->clone({*(other.complete_token_ids_), rtp_llm::AllocationType::HOST});
+    if (share) {
+        if (shift_token_num == 0) {
+            complete_token_ids_ = other.complete_token_ids_;
+        } else {
+            RTP_LLM_CHECK(batch_size_ == 1);
+            complete_token_ids_ = rtp_llm::BufferPtr(
+                new rtp_llm::Buffer(other.complete_token_ids_->where(),
+                               other.complete_token_ids_->type(),
+                               {other.complete_token_ids_->shape()[0], other.complete_token_ids_->shape()[1] - shift_token_num},
+                               other.complete_token_ids_->data<int>() + shift_token_num));
+        }
+    } else {
+        complete_token_ids_ = device_->clone({*(other.complete_token_ids_), rtp_llm::AllocationType::HOST});
+    }
 }
 
-void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input) {
+
+void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(device_ != nullptr && generate_input != nullptr);
 
     seq_length_ = generate_input->inputLength();
@@ -33,10 +47,9 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
 
     common_len_ = seq_length_;
     start_check_seq_length_ = seq_length_;
-    init_seq_size_ = seq_length_;
 
     complete_token_ids_ = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size_, (size_t)max_seq_len_ + extra_reserve_token_num}, rtp_llm::AllocationType::HOST}, {});
 
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
     for (int i = 0; i < batch_size_; ++i) {
@@ -138,10 +151,18 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens, int64_t begi
                 return false;
             }
         }
+        int complete_token_dim2 = complete_token_ids_->shape()[1];
+        int new_token_dim2 = new_tokens->shape()[1];
         if (num_beams > 1) {
             memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
         } else {
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
+        }
+
+        int32_t* CompleteTokenIds::data(int batch_id) {
+            // eq to (*comple_token_ids).[batch_id].data<int32_t>();
+            // avoid construct Buffer to reduce overhead
+            return complete_token_ids_->data<int32_t>() + batch_id * complete_token_ids_->shape()[1];
         }
     }
     setSeqLength(seq_length_ + num_new_tokens);
@@ -173,12 +194,11 @@ void CompleteTokenIds::copyTokensTo(int batch_id, void *dst, int offset, size_t 
 }
 
 void CompleteTokenIds::appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer &src) {
+    int token_dim2 = complete_token_ids_->shape()[1];
     if (src.dim() == 2 && src.shape()[0] == 1) {
-        device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num),
-                        src[0].view(0, token_num)});
+        std::memcpy(complete_token_ids_->dataWithOffset<int>(batch_id * token_dim2 + seq_length_), src.data<int>(), token_num * sizeof(int));
     } else {
-        device_->copy({(*complete_token_ids_)[batch_id].view(seq_length_, token_num),
-                        src.view(0, token_num)});
+        std::memcpy(complete_token_ids_->dataWithOffset<int>(batch_id * token_dim2 + seq_length_), src.data<int>(), token_num * sizeof(int));
     }
 
     setSeqLength(seq_length_ + token_num);

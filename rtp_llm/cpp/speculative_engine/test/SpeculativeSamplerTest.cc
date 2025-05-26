@@ -1,9 +1,8 @@
-#include "rtp_llm/cpp/speculative_engine/SpeculativeStreamOutput.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <memory>
 #define private public
-#include "rtp_llm/cpp/speculative_engine/speculative_sampler/RejectionSampler.h"
+#include "rtp_llm/cpp/speculative_engine/speculative_sampler/SpeculativeSampler.h"
 
 
 using namespace std;
@@ -15,7 +14,7 @@ public:
 };
 
 TEST_F(SpeculativeSamplerTest, top1Sample) {
-    std::unique_ptr<RejectionSampler> sampler = std::make_unique<RejectionSampler>(device_);
+    std::unique_ptr<SpeculativeSampler> sampler = std::make_unique<SpeculativeSampler>(device_);
     size_t propose_step = 5;
     SpeculativeExecutorStreamOutputPtr propose_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
     SpeculativeExecutorStreamOutputPtr score_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -28,7 +27,7 @@ TEST_F(SpeculativeSamplerTest, top1Sample) {
 
 
 TEST_F(SpeculativeSamplerTest, stochasticSample) {
-    std::unique_ptr<RejectionSampler> sampler = std::make_unique<RejectionSampler>(device_);
+    std::unique_ptr<SpeculativeSampler> sampler = std::make_unique<SpeculativeSampler>(device_);
     size_t propose_step = 5;
     SpeculativeExecutorStreamOutputPtr propose_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
     SpeculativeExecutorStreamOutputPtr score_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -53,7 +52,7 @@ TEST_F(SpeculativeSamplerTest, stochasticSample) {
 }
 
 TEST_F(SpeculativeSamplerTest, stochasticSampleError) {
-        std::unique_ptr<RejectionSampler> sampler = std::make_unique<RejectionSampler>(device_);
+        std::unique_ptr<SpeculativeSampler> sampler = std::make_unique<SpeculativeSampler>(device_);
     size_t propose_step = 5;
     SpeculativeExecutorStreamOutputPtr propose_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();
     SpeculativeExecutorStreamOutputPtr score_stream_output = std::make_shared<SpeculativeExecutorStreamOutput>();

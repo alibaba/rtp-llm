@@ -148,6 +148,18 @@ struct CopyParams {
     }
 };
 
+struct MultiMergeCopyParams {
+    void* dst_ptr;
+    std::vector<void*> src_ptrs;
+    std::vector<size_t> copy_size;
+    std::vector<size_t> dst_offsets;
+};
+
+struct MultiCopyParams {
+    std::vector<BufferPtr> multi_dst;
+    std::vector<BufferPtr> multi_src;
+};
+
 using SelectOutput = BufferPtr;
 
 enum SelectType {
@@ -449,6 +461,7 @@ struct AttentionCommonInputs {
     size_t                                    v_block_size = 0;
     size_t                                    scale_block_size = 0;
     bool                                      pd_separation = false;
+    size_t                                    model_id = 0;
 
     bool warmup;
 
@@ -527,17 +540,6 @@ struct MlaAttentionModuleParams {
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
     bool                            is_prefill = false;
-};
-
-struct WriteMTPHiddenStatesParams {
-    bool pd_separation = false;
-    bool warmup;
-    size_t context_batch_size = 0;
-    size_t decoder_batch_size = 0;
-    BufferPtr request_pd_separation;
-    BufferPtr request_id;
-    BufferPtr hidden_states;
-    BufferPtr lm_output_indexes;
 };
 
 struct WriteCacheParams {
@@ -623,7 +625,6 @@ struct MoeCombineParams {
     std::shared_ptr<MoeGateSelectOutput> select_output;
     BufferPtr expert_ids;
     BufferPtr expert_scales;
-    bool sp_model = false;
     DeviceEventPtr compute_stream_event = nullptr;
 };
 
@@ -647,10 +648,9 @@ struct FfnLayerParams {
                    const OptionalConstBufferRef residual = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
                    BufferPtr                    output = nullptr,
-                   bool                         enable_sp = false,
-                   bool                         sp_model = false):
+                   bool                         enable_sp = false):
         input(input), configs(configs), weights(weights), residual(residual),
-        qscheme(qscheme), output(std::move(output)), enable_sp(enable_sp), sp_model(sp_model) {}
+        qscheme(qscheme), output(std::move(output)), enable_sp(enable_sp) {}
 
     const Buffer& input;
     const FfnConfigs&            configs;
@@ -665,7 +665,6 @@ struct FfnLayerParams {
 
     lora::FfnLayerLoraInput      lora_input;
     bool enable_sp;
-    bool sp_model = false;
 };
 
 struct MoeDispatchOutput {
@@ -698,7 +697,6 @@ struct MoeDispatchParams {
     bool              overlapped = false;
     const QScheme     qscheme;
     OptionalExpertStats expert_stats = std::nullopt;
-    bool sp_model = false;
     DeviceEventPtr compute_stream_event = nullptr;
 };
 

@@ -28,22 +28,19 @@ public:
 
     ~DeterministicExecutor() {}
 
-    absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams) override;
+    absl::Status propose(const std::list<GenerateStreamPtr>& streams, bool skip_check = false) override;
 
     absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) override {
         return absl::OkStatus();
     }
 
-    void dynamicUpdateConfig(const ProposeDynamicConfig& config) override {
-        return;
-    }
 
     size_t reserveStep() const override {
         return propose_step_;
     }
 
 private:
-    void ruleBasedTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output);
+    void ruleBasedTokenSelector(const GenerateStreamPtr& stream);
 
     void SpEditTokenSelector(const GenerateStreamPtr& stream, SpeculativeExecutorStreamOutputPtr& stream_output, bool use_sp_advice_prompt);
 

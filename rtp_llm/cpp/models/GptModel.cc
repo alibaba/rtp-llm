@@ -64,7 +64,8 @@ GptModel::GptModel(const GptModelInitParams& params):
     device_props_(params.device->getDeviceProperties()),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
-    weights_(params.weights) {
+    weights_(params.weights),
+    model_id_(params.model_id) {
     if (params.kv_cache_buffer) {
         k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
         v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
@@ -262,6 +263,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(
     attention_inputs.v_block_size = inputs.v_block_size;
     attention_inputs.scale_block_size = inputs.scale_block_size;
     attention_inputs.pd_separation = inputs.pd_separation;
+    attention_inputs.model_id = model_id_;
 
     if (context_batch_size && prep_output.need_mask) {
         attention_inputs.attention_mask = device_->attentionMask({
@@ -281,10 +283,6 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
         return {false, {}};
     }
 
-    if (layer_num_ == 1) {
-        return {false, {}};
-    }
-
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
     const auto decoder_batch_size = sequence_lengths->shape()[0];
@@ -299,8 +297,41 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
 
     // disable micro batching if both context and decoder query exists.
     if (context_batch_size && decoder_batch_size) {
-        RTP_LLM_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
-        return {false, {}};
+        if (layer_num_ == 1) {
+            size_t total_token_num = decoder_batch_size;
+            for (size_t i = 0; i < context_batch_size; i++) {
+                total_token_num += input_lengths->data<int32_t>()[i + decoder_batch_size];
+            }
+            RTP_LLM_LOG_DEBUG("total_token_num %d, decode_batch_size %d, context_batch_size", total_token_num, decoder_batch_size, context_batch_size);
+            size_t context_batch_0_size = 0;
+            size_t context_batch_1_size = 0;
+            size_t decode_batch_0_size = 0;
+            size_t decode_batch_1_size = 0;
+            if (total_token_num > decoder_batch_size * 2) {
+                decode_batch_0_size = decoder_batch_size;
+                decode_batch_1_size = 0;
+                size_t acc_token_num = decoder_batch_size;
+                size_t context_split_point = 0;
+                for (context_split_point = 0; context_split_point < context_batch_size; context_split_point++) {
+                    acc_token_num += input_lengths->data<int32_t>()[context_split_point + decoder_batch_size];
+                    if (acc_token_num * 2 >= total_token_num) {
+                        break;
+                    }
+                }
+                context_batch_0_size = context_split_point;
+                context_batch_1_size = context_batch_size - context_split_point;
+            } else {
+                decode_batch_0_size = total_token_num / 2;
+                decode_batch_1_size = decoder_batch_size - total_token_num / 2;
+                context_batch_0_size = 0;
+                context_batch_1_size = context_batch_size;
+            }
+            RTP_LLM_LOG_DEBUG("split [c]%d:[d]%d in micro batch 0 and [c]%d:[d]%d in micro batch 1", context_batch_0_size, decode_batch_0_size, context_batch_1_size, decode_batch_1_size);
+            return MicroBatchPlan{true, {{context_batch_0_size, decode_batch_0_size}, {context_batch_1_size, decode_batch_1_size}}};
+        } else {
+            RTP_LLM_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
+            return {false, {}};
+        }
     }
 
     const auto batch_size_to_split = context_batch_size ? context_batch_size : decoder_batch_size;
@@ -321,6 +352,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
 {
     vector<LayerMicroBatchInputs> micro_batch_inputs;
     size_t sliced_token_idx = 0;
+    size_t sliced_lm_output_index = 0;
     size_t sliced_batch_idx = 0; // for input_lengths and kv cache block id
     size_t decode_batch_idx = 0; // for sequence_lengths
     size_t prefill_batch_idx = 0; // for lm_output_indexes and prefix_lengths
@@ -346,15 +378,52 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
+            // Notes: p_micro_batch_size and d_micro_batch_size are continuous batch
             const auto& p_micro_batch_size = micro_batch_plan.batch_infos[i].prefill_num;
             const auto& d_micro_batch_size = micro_batch_plan.batch_infos[i].decoder_num;
-            RUNTIME_ASSERT_OP_ARG(!(p_micro_batch_size && d_micro_batch_size),
-                "one micro batch can not contain both p and d tokens, but got %ld and %ld",
-                p_micro_batch_size, d_micro_batch_size);
+            // RUNTIME_ASSERT_OP_ARG(!(p_micro_batch_size && d_micro_batch_size),
+            //     "one micro batch can not contain both p and d tokens, but got %ld and %ld",
+            //     p_micro_batch_size, d_micro_batch_size);
             RTP_LLM_LOG_DEBUG("micro batch index %ld, prefill size %ld, decode size %ld",
                         i, p_micro_batch_size, d_micro_batch_size);
 
-            if (d_micro_batch_size) {
+            if (d_micro_batch_size && p_micro_batch_size) {
+                GptModelInputs micro_model_inputs = inputs;
+                size_t total_batch_size = d_micro_batch_size + p_micro_batch_size;
+                RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx, prefill_batch_idx);
+                micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, total_batch_size);
+                micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, total_batch_size);
+                micro_model_inputs.prefix_lengths = inputs.prefix_lengths->slice(prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.attention_mask = inputs.attention_mask ? inputs.attention_mask->slice(sliced_batch_idx, total_batch_size) : nullptr;
+                micro_model_inputs.lm_output_lengths = inputs.lm_output_lengths->slice(sliced_batch_idx, total_batch_size);
+                int32_t slice_token_num = std::accumulate(
+                    micro_model_inputs.input_lengths->data<int32_t>() + d_micro_batch_size,
+                    micro_model_inputs.input_lengths->data<int32_t>() + total_batch_size,
+                    0) + d_micro_batch_size;
+                int32_t slice_lm_output_num = std::accumulate(
+                    micro_model_inputs.lm_output_lengths->data<int32_t>(),
+                    micro_model_inputs.lm_output_lengths->data<int32_t>() + total_batch_size,
+                    0);
+                micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(sliced_lm_output_index, slice_lm_output_num);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, slice_token_num);
+                micro_model_inputs.request_id = inputs.request_id ? inputs.request_id->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.request_pd_separation = inputs.request_pd_separation ? inputs.request_pd_separation->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.cache_keys = inputs.cache_keys ? inputs.cache_keys->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
+
+                auto micro_hidden = hidden->slice(sliced_token_idx, slice_token_num);
+                auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
+                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
+                micro_batch_inputs.push_back({
+                    move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
+                sliced_lm_output_index += slice_lm_output_num;
+                sliced_token_idx += slice_token_num;
+                sliced_batch_idx += total_batch_size;
+                prefill_batch_idx += p_micro_batch_size;
+                decode_batch_idx += d_micro_batch_size;
+                RTP_LLM_LOG_DEBUG("micro batch %ld sliced context and decode, batch idx %ld, token idx %ld, prefill batch idx %d, decode batch idx %d",
+                            i, sliced_batch_idx, sliced_token_idx, prefill_batch_idx, decode_batch_idx);
+            } else if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, d_micro_batch_size);
@@ -362,6 +431,8 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 micro_model_inputs.sequence_lengths = inputs.sequence_lengths->slice(decode_batch_idx, d_micro_batch_size);
                 micro_model_inputs.attention_mask = inputs.attention_mask ? inputs.attention_mask->slice(sliced_batch_idx, d_micro_batch_size) : nullptr;
                 micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.prefix_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {0}, rtp_llm::AllocationType::HOST}, {});
+                micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(sliced_batch_idx, d_micro_batch_size);
                 auto micro_hidden = hidden->slice(sliced_token_idx, d_micro_batch_size);
                 auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, d_micro_batch_size) : nullptr;
                 auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
@@ -370,6 +441,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 sliced_token_idx += d_micro_batch_size;
                 sliced_batch_idx += d_micro_batch_size;
                 decode_batch_idx += d_micro_batch_size;
+                sliced_lm_output_index += d_micro_batch_size;
                 RTP_LLM_LOG_DEBUG("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
                             i, sliced_batch_idx, sliced_token_idx);
             } else {
@@ -377,23 +449,29 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths->slice(sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id = inputs.kv_cache_block_id->slice(sliced_batch_idx, p_micro_batch_size);
-                micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.prefix_lengths = inputs.prefix_lengths->slice(prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask = inputs.attention_mask ? inputs.attention_mask->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
-                auto slice_token_num = std::accumulate(
+                micro_model_inputs.sequence_lengths = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {0}, rtp_llm::AllocationType::HOST}, {});
+                micro_model_inputs.lm_output_lengths = inputs.lm_output_lengths->slice(sliced_batch_idx, p_micro_batch_size);
+                int32_t slice_token_num = std::accumulate(
                     micro_model_inputs.input_lengths->data<int32_t>(),
                     micro_model_inputs.input_lengths->data<int32_t>() + p_micro_batch_size,
                     0);
+                int32_t slice_lm_output_num = std::accumulate(
+                    micro_model_inputs.lm_output_lengths->data<int32_t>(),
+                    micro_model_inputs.lm_output_lengths->data<int32_t>() + p_micro_batch_size,
+                    0);
+                micro_model_inputs.lm_output_indexes = inputs.lm_output_indexes->slice(sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens->slice(sliced_token_idx, slice_token_num);
-                micro_model_inputs.request_id = inputs.request_id ? inputs.request_id->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
-                micro_model_inputs.request_pd_separation = inputs.request_pd_separation ? inputs.request_pd_separation->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
-                micro_model_inputs.cache_keys = inputs.cache_keys ? inputs.cache_keys->slice(sliced_batch_idx, p_micro_batch_size) : nullptr;
-
+                micro_model_inputs.request_id = inputs.request_id ? inputs.request_id->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.request_pd_separation = inputs.request_pd_separation ? inputs.request_pd_separation->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
+                micro_model_inputs.cache_keys = inputs.cache_keys ? inputs.cache_keys->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
                 auto micro_hidden = hidden->slice(sliced_token_idx, slice_token_num);
                 auto micro_pre_decoder_residual = pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
                 auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
                 micro_batch_inputs.push_back({
                     move(micro_hidden), move(micro_pre_decoder_residual), move(attention_common_inputs)});
+                sliced_lm_output_index += slice_lm_output_num;
                 sliced_token_idx += slice_token_num;
                 sliced_batch_idx += p_micro_batch_size;
                 prefill_batch_idx += p_micro_batch_size;
@@ -584,7 +662,6 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                 device_props_.enable_comm_overlap,
                 description_.act_qscheme,
                 ffn_layer_params.expert_stats,
-                false,
                 move(ep_input.compute_event),
             });
 
@@ -652,7 +729,6 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                 std::make_shared<MoeGateSelectOutput>(batch_ep_input.gate_output),
                 dispatched_output.expert_ids,
                 dispatched_output.expert_scales,
-                false,
                 move(moe_ffn_outputs[micro_batch_idx].compute_event),
             });
             device_->checkError();
@@ -768,7 +844,6 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
                 device_props_.enable_comm_overlap,
                 description_.act_qscheme,
                 ep_input.moe_ffn_params.expert_stats,
-                false,
                 std::move(ep_input.compute_event),
             });
 
@@ -900,8 +975,7 @@ GptLayerOutputs GptModel::forwardGptLayer(
                                             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                                             description_.act_qscheme,
                                             std::move(ffn_output_buf),
-                                            enable_sp,
-                                            layer_num_ == 1});
+                                            enable_sp});
 
     // expert stats
     prepareExpertStats(layer_id, ffn_layer_params);
@@ -1231,20 +1305,6 @@ GptModelOutputs GptModel::forwardPostLayers(
     }
     printBufferData(*hidden, "final_hidden");
 
-    if (device_->getDeviceProperties().is_mtp) {
-        const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
-        const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
-
-        device_->writeHiddenStatesStore({inputs.pd_separation,
-                                        inputs.warmup,
-                                        context_batch_size,
-                                        decoder_batch_size,
-                                        inputs.request_pd_separation,
-                                        inputs.request_id,
-                                        hidden,
-                                        lm_output_indexes});
-    }
-
     const auto& lm_head = weights_.lm_head;
 
     if (lm_head) {
@@ -1341,6 +1401,7 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::prefixLengths] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::lmOutputLengthes] = inputs.lm_output_lengths.get() ? inputs.lm_output_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraIds] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraInputLengths] = inputs.lora_input_lengths.get() ? inputs.lora_input_lengths->size() : 0;
@@ -1405,6 +1466,8 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
             {rtp_llm::DataType::TYPE_BOOL, {context_batch_size}, rtp_llm::AllocationType::HOST});
         inputs.lm_output_indexes = device->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, rtp_llm::AllocationType::HOST});
+        inputs.lm_output_lengths = device->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputLengthes]}, rtp_llm::AllocationType::HOST});
         if (combo_position_ids_size) {
             inputs.combo_position_ids = device->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size}, rtp_llm::AllocationType::HOST});
@@ -1461,6 +1524,7 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     buffers.emplace_back(inputs.request_id);
     buffers.emplace_back(inputs.request_pd_separation);
     buffers.emplace_back(inputs.lm_output_indexes);
+    buffers.emplace_back(inputs.lm_output_lengths);
     if (combo_position_ids_size) {
         buffers.emplace_back(inputs.combo_position_ids);
     }

@@ -19,7 +19,7 @@ RtpEmbeddingOp::RtpEmbeddingOp() {}
 void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
-        rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
+        rtp_llm::EngineInitParams params(0, gpt_init_params, std::move(*gpt_weight));
         py::object custom_module = model.attr("custom_module");
         py::object py_render     = model.attr("custom_module").attr("renderer");
         py::object py_handler    = model.attr("custom_module").attr("handler");

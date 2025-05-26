@@ -2,14 +2,63 @@
 
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/speculative_engine/SpeculativeOnlineAdaptor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/speculative_sampler/SpeculativeSampler.h"
-#include "rtp_llm/cpp/speculative_engine/speculative_updater/SpeculativeUpdater.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "torch/csrc/autograd/profiler_kineto.h"
 
 namespace rtp_llm {
+
+namespace tap = torch::autograd::profiler;
+namespace tpi = torch::profiler::impl;
+class CudaProfiler_E {
+public:
+    CudaProfiler_E(const std::string& prefix): prefix_(prefix) {
+        tap::prepareProfiler(config_, activities_);
+    }
+    ~CudaProfiler_E() {
+        if (!stoped_) {
+            stoped_ = true;
+            stop();
+        }
+    }
+    void start() {
+        count += 1;
+        stoped_ = false;
+        tap::enableProfiler(config_, activities_);
+    }
+    void stop() {
+        std::unique_ptr<tap::ProfilerResult> res = tap::disableProfiler();
+        std::string file_name = prefix_ + std::to_string(count) + ".json";
+        res->save(file_name);
+        stoped_ = true;
+    }
+protected:
+    static size_t count;
+    std::string   prefix_;
+    tpi::ProfilerConfig config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
+    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CUDA};
+    bool stoped_ = true;
+};
+
+
+struct SpeculativeEngineStepMetrics {
+    void reset() {
+        propose_time_us = 0;
+        score_time_us = 0;
+        sampler_time_us = 0;
+        propose_token_num = 0;
+        accept_token_num = 0;
+    }
+    int64_t propose_time_us = 0;
+    int64_t score_time_us = 0;
+    int64_t sampler_time_us = 0;
+    int64_t propose_token_num  = 0;
+    int64_t accept_token_num = 0;
+};
+
+
 
 class SpeculativeEngine: public EngineBase {
 public:
@@ -38,18 +87,18 @@ public:
     }
 
 private:
-    WarmUpResult       warmUp();
+    WarmUpResult warmUp();
     void         initLoadBalance();
     absl::Status step();
 
     // do not walk through speculative process.
     absl::Status normStep(std::list<GenerateStreamPtr>& streams);
 
-    // walk through sp process, but prefill do not propose.
-    absl::Status noPrefillProposeStep(std::list<GenerateStreamPtr>& streams);
+    absl::Status mtpStep(std::list<GenerateStreamPtr>& streams);
 
-    // walk through sp process, prefill can propose.
-    absl::Status prefillProposeStep(std::list<GenerateStreamPtr>& streams);
+    absl::Status prefillMtpStep(std::list<GenerateStreamPtr>& streams);
+
+    absl::Status spStep(std::list<GenerateStreamPtr>& streams);
 
     std::list<GenerateStreamPtr> extractPrefillStreams(std::list<GenerateStreamPtr>& streams) {
         std::list<GenerateStreamPtr> need_prefill_streams;
@@ -73,17 +122,9 @@ private:
     absl::Status initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status initSystemPrompt();
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
-
-    void         dpAndTpSyncNeedHiddenStates(bool& need_hidden_states);
-    void         reportMetrics(int64_t                         propose_begin_time_us,
-                               int64_t                         score_begin_time_us,
-                               int64_t                         sampler_begin_time_us,
-                               int64_t                         update_begin_time_us,
-                               int64_t                         total_propose_token_num,
-                               int64_t                         total_accepted_token_num);
+    void         reportMetrics();
 
 
-    bool checkAllHasHiddenStates(std::list<GenerateStreamPtr>& streams);
     std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
@@ -95,18 +136,20 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_model_params_;
     const EngineInitParams                        score_model_params_;
 
-    std::unique_ptr<ProposeExecutor>          propose_executor_    = nullptr;
-    std::unique_ptr<ScoreExecutor>            score_executor_      = nullptr;
-    std::unique_ptr<SpeculativeOnlineAdaptor> online_adaptor_      = nullptr;
-    std::unique_ptr<SpeculativeSampler>       speculative_sampler_ = nullptr;
-    std::unique_ptr<SpeculativeUpdater>       speculative_updater_ = nullptr;
-    std::shared_ptr<SystemPrompt>             system_prompt_       = nullptr;
+    std::unique_ptr<ProposeExecutor>    propose_executor_    = nullptr;
+    std::unique_ptr<ScoreExecutor>      score_executor_      = nullptr;
+    std::unique_ptr<SpeculativeSampler> speculative_sampler_ = nullptr;
+    std::shared_ptr<SystemPrompt>       system_prompt_       = nullptr;
 
-    const std::string sp_type_;
-    std::thread       loop_thread_;
-    std::atomic<bool> running_{false};
-    ResourceContext   resource_context_;
-    StepRecorder      step_recorder_;
+    SpeculativeEngineStepMetrics metrics_;
+
+    const std::string               sp_type_;
+    std::thread                     loop_thread_;
+    std::atomic<bool>               running_{false};
+    ResourceContext                 resource_context_;
+    StepRecorder                    step_recorder_;
+    std::shared_ptr<CudaProfiler_E> profiler_;
+    int                             profiler_step_ = 0;
 };
 
 }  // namespace rtp_llm

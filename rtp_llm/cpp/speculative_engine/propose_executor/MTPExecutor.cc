@@ -2,49 +2,57 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/stream/GenerateStream.h"
 #include "rtp_llm/cpp/stream/StreamGroups.h"
-#include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeOutput.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 
 namespace rtp_llm {
 
-absl::StatusOr<ProposeOutput> MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
-    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, bool skip_check) {
     std::list<GenerateStreamPtr> propose_streams;
-    ProposeOutput propose_output;
 
     for (auto& stream: streams) {
-        RTP_LLM_LOG_DEBUG("before create mtp stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before create mtp stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    for (auto& stream : streams) {
-        size_t stream_id = stream->streamId();
-        propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
-        propose_output.outputs[stream_id]->propose_step = propose_step_;
-        propose_streams.emplace_back(std::make_shared<MTPStream>(
-            *stream, std::make_shared<ProposeOutput>(propose_output), propose_step_));
+    for (auto& stream : streams) { 
+        if (!skip_check) {
+            if (stream->stoppedWithoutLock() || stream->finishedWithoutLock()) {
+                continue;
+            }
+        }
+
+        GenerateStreamPtr propose_stream;
+        if (stream->containProposeStream()) {
+            propose_stream = stream->getProposeStream();
+            dynamic_cast<MTPStream*>(propose_stream.get())->updateStream(*stream, propose_step_);
+        } else {
+            propose_stream = std::make_shared<MTPStream>(*stream, propose_step_);
+            stream->setProposeStream(propose_stream);
+        }
+        propose_streams.push_back(propose_stream);
     }
 
     for (auto& stream: propose_streams) {
-        RTP_LLM_LOG_DEBUG("before propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
 
     for (size_t i = 0; i < propose_step_; i++) {
-        RETURN_IF_STATUS_ERROR(mtp_executors_[i]->process(propose_streams));
-        for (auto& stream : propose_streams) {
-            auto mtp_stream = std::static_pointer_cast<MTPStream>(stream);
-            mtp_stream->shiftRightOneToken();
-            mtp_stream->updatePrefixLen();
+        if (i > 0) {
+            for (auto& stream : propose_streams) {
+                auto mtp_stream = std::static_pointer_cast<MTPStream>(stream);
+                mtp_stream->shiftRightOneToken(*stream);
+            }
         }
+        RETURN_IF_STATUS_ERROR(mtp_executors_[i]->process(propose_streams));
     }
 
     for (auto& stream: propose_streams) {
-        RTP_LLM_LOG_DEBUG("after propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("after propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RTP_LLM_LOG_DEBUG("propose done");
 
-    return propose_output;
+    return absl::OkStatus();
 }
 
 bool MTPExecutor::updateEplbConfig(const EplbConfig& config) {

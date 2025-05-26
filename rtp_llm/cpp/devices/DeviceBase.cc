@@ -150,51 +150,6 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
     cache_store_ = cache_store;
 }
 
-void DeviceBase::writeHiddenStatesStore(const WriteMTPHiddenStatesParams& params) {
-    if (params.warmup) {
-        RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheStore");
-        return;
-    }
-    if (!params.pd_separation || params.context_batch_size == 0) {
-        RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
-            params.pd_separation, params.context_batch_size);
-        return;
-    }
-    RTP_LLM_LOG_DEBUG("start writeHiddenStatesStore");
-    auto context_lm_output_indexes = params.lm_output_indexes->slice(params.decoder_batch_size,
-                                                                     params.context_batch_size);
-
-    size_t last_token_index = 0;
-
-    for (size_t batch_id = 0; batch_id < params.context_batch_size; batch_id++) {
-        if (*(params.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
-            continue;
-        }
-        auto request_id = *(params.request_id->dataWithOffset<int64_t>(batch_id));
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
-        auto lm_index = *(context_lm_output_indexes->dataWithOffset<int32_t>(batch_id));
-        auto token_num = lm_index + 1 - params.decoder_batch_size - last_token_index;
-        auto hidden_states = params.hidden_states->slice(last_token_index, token_num);
-        RTP_LLM_LOG_DEBUG("request_id is %d", request_id);
-        RTP_LLM_LOG_DEBUG("token_num is %d", token_num);
-        last_token_index = token_num;
-        std::shared_ptr<void> hidden_states_addr(hidden_states->data(), [](void* p) { });
-        request_blocks->addBlock("hidden_states",
-                                 hidden_states_addr,
-                                 hidden_states->sizeBytes(), true, true);
-
-        auto storeCallback = [request_id, params](bool success, CacheStoreErrorCode ec) {
-            auto keep_lift_cycle = params.hidden_states;
-            if (!success) {
-                RTP_LLM_LOG_WARNING("query [%ld],"
-                               "call store kv cache failed, ec is %d, error msg is [%s]",
-                               request_id, ec, ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
-            }
-        };
-        cache_store_->store(request_blocks, storeCallback);
-    }
-}
-
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     auto& param = params.common;
     if (param.warmup) {
@@ -240,7 +195,8 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
         RTP_LLM_LOG_DEBUG("write cache store, blocks num is %ld", block_num + reuse_block_num);
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
-            auto cache_key = makeCacheKey(param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            auto cache_key = makeCacheKey(params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
             void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
             std::shared_ptr<void> k_block_addr(k_addr, [](void* p) { });

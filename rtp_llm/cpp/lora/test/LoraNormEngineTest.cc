@@ -99,7 +99,7 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
         layer_weights.push_back(std::move(weights));
     }
     auto convert = rtp_llm::WeightsConverter(false);
-    rtp_llm::EngineInitParams rtp_llm_params(params,
+    rtp_llm::EngineInitParams rtp_llm_params(0, params,
                                              std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                                                                  std::make_unique<ConstBufferPtrMap>(global_weights))));
     return rtp_llm_params;

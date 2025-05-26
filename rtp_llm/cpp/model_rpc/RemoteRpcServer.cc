@@ -10,13 +10,14 @@ namespace rtp_llm {
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    py::object                                             mm_process_engine,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+    rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
     auto ret = LocalRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params.gpt_init_parameter);
+    initCacheStore(maga_init_params.gpt_init_parameter, propose_params_ptr);
     return grpc::Status::OK;
 }
 
@@ -62,7 +63,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
     RTP_LLM_LOG_INFO(worker_grpc_info);
 }
 
-void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
+void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params, rtp_llm::ProposeModelEngineInitParams* propose_params) {
     RTP_LLM_LOG_INFO("init_params.use_cache_store = %d, init_params.pd_separation = %d",
                 init_params.use_cache_store_,
                 init_params.pd_separation_);
@@ -91,6 +92,14 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params) {
 
     device->setCacheStore(cache_store_);
     cache_manager->regUserMr();
+    if (propose_params) {
+        if (propose_params->mtp_model_params_) {
+            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) { 
+                const std::shared_ptr<CacheManager>& mtp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
+                mtp_cache_manager->regUserMr();
+            }
+        }
+    }
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

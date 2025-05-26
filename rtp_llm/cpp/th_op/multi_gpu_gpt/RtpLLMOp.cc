@@ -40,7 +40,8 @@ void RtpLLMOp::init(py::object model,
 rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
-        rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
+        rtp_llm::EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight));
+        model_id_++;
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
             (void)rtp_llm::initKmonitorFactory();
@@ -65,12 +66,15 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
         size_t gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(model_id_, 
+                                                                             sp_type,
                                                                              gen_num_per_circle,
                                                                              gpt_init_params,
                                                                              std::move(*gpt_weight));
+            model_id_++;
         } else if (sp_type == "mtp") {
-            params = rtp_llm::prepareMTPEngineInitParams(propose_model);
+            params = rtp_llm::prepareMTPEngineInitParams(model_id_, propose_model);
+            model_id_ += gen_num_per_circle;
         } else if (sp_type == "deterministic") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle);
         } else if (sp_type == "eagle") {

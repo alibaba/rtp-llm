@@ -198,7 +198,7 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     // mla weights
     attention_weights.fusedqkrope_weight = mayCreateDenseWeights(map, W::mla_fusedqkrope, "", W::mla_fusedqkrope_s);
     attention_weights.fusedqkrope_no_lora_weight = mayCreateDenseWeights(map, W::mla_fusedqkrope_no_lora, "", W::mla_fusedqkrope_no_lora_s);
-    attention_weights.q_b_weight = mayCreateDenseWeights(map, W::attn_q_b, "", W::attn_q_b_s);    
+    attention_weights.q_b_weight = mayCreateDenseWeights(map, W::attn_q_b, "", W::attn_q_b_s);
     attention_weights.k_nope_weight = mayCreateDenseWeights(map, W::attn_k_nope, "", W::attn_k_nope_s);
     attention_weights.v_weight = mayCreateDenseWeights(map, W::attn_v, "", W::attn_v_s);
     attention_weights.q_a_norm_weight = mayCreateLayerNormWeights(map, W::q_a_ln_gamma, W::q_a_ln_beta);
@@ -378,7 +378,7 @@ std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepare
 }
 
 
-std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::object model) {
+std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model) {
     auto sp_model = model.attr("model");
     std::string sp_type = model.attr("sp_type").cast<std::string>();
     size_t gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
@@ -391,12 +391,22 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::obj
     py::object                  py_global_weights = sp_model.attr("weight").attr("global_weights");
     auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
     auto py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    size_t model_num = py_layers_weights_vec.size();
+    if (gpt_init_params.gen_num_per_circle_ != py_layers_weights_vec.size()) {
+        RTP_LLM_LOG_WARNING("gpt_init_params.gen_num_per_circle_: %d  != py_layers_weights_vec.size(): %d",
+            gpt_init_params.gen_num_per_circle_, py_layers_weights_vec.size());
+            model_num = std::min(model_num, size_t(gpt_init_params.gen_num_per_circle_));
+    }
+    auto no_cast_gpt_init_params = const_cast<rtp_llm::GptInitParameter&>(gpt_init_params);
+    no_cast_gpt_init_params.num_layers_ = 1;
 
-    for (auto& layer_weigths : py_layers_weights_vec) {
+    for (int i = 0; i < model_num; i++) {
+        auto layer_weigths = py_layers_weights_vec[i];
         py::list tmp;
         tmp.append(layer_weigths);
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
-        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(gpt_init_params, std::move(*gpt_weight))));
+        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id, gpt_init_params, std::move(*gpt_weight))));
+        model_id++;
     }
 
     return std::move(std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type,

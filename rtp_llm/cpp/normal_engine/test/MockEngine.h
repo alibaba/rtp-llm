@@ -122,7 +122,7 @@ rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const Custo
     auto convert = rtp_llm::WeightsConverter(false);
     auto weights = convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                             std::make_unique<ConstBufferPtrMap>(global_weights));
-    rtp_llm::EngineInitParams rtp_llm_params(params, std::move(*weights));
+    rtp_llm::EngineInitParams rtp_llm_params(0, params, std::move(*weights));
     return rtp_llm_params;
 }
 

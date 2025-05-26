@@ -32,6 +32,7 @@ struct GptModelInitParams {
     const rtp_llm::Weights                                weights;
     const GptModelDescription                        description;
     const std::optional<CacheManager::KVCacheBuffer> kv_cache_buffer;
+    size_t                                           model_id;
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -45,7 +46,8 @@ struct GptModelInputs {
     mutable rtp_llm::BufferPtr combo_tokens;      // [cumulated_seq_len]
     rtp_llm::BufferPtr input_lengths;     // [batch_size]
     rtp_llm::BufferPtr sequence_lengths;  // [decoder_batch_size]
-    rtp_llm::BufferPtr lm_output_indexes; // [context_batch_size]
+    rtp_llm::BufferPtr lm_output_indexes; // [sum(lm_output_lengths)]
+    rtp_llm::BufferPtr lm_output_lengths; // [total_batch_size]
     rtp_llm::BufferPtr prefix_lengths;    // [context_batch_size]
 
     rtp_llm::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
@@ -92,6 +94,7 @@ enum GptModelInputIndex : size_t{
     prefixLengths,
     maxBlocksPerBatch,
     lmOutputIndexes,
+    lmOutputLengthes,
     comboPositionIds,
     loraIds,
     loraInputLengths,
@@ -268,8 +271,9 @@ protected:
     rtp_llm::BufferPtr              residual_scale_;
 
 public:
-    rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
+    rtp_llm::Weights                weights_;
+    rtp_llm::OverallExpertStats     overall_expert_stats_;
+    size_t                          model_id_ = 0;
 };
 
 }  // namespace rtp_llm

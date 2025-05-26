@@ -6,12 +6,12 @@
 namespace rtp_llm {
 
 std::unique_ptr<ProposeExecutor>
-createProposeExecutor(const EngineInitParams&                        score_model_engine_init_params,
-                      std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                      rtp_llm::DeviceBase*                                device,
-                      const std::shared_ptr<CacheManager>&           cache_manager,
+createProposeExecutor(const EngineInitParams&                           score_model_engine_init_params,
+                      std::unique_ptr<ProposeModelEngineInitParams>&    propose_model_engine_init_params,
+                      rtp_llm::DeviceBase*                              device,
+                      const std::shared_ptr<CacheManager>&              cache_manager,
                       const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_manager,
-                      const std::shared_ptr<lora::LoraManager>&      lora_manager) {
+                      const std::shared_ptr<lora::LoraManager>&         lora_manager) {
     const std::string&               sp_type          = propose_model_engine_init_params->sp_type;
     std::unique_ptr<ProposeExecutor> propose_executor = nullptr;
     if (sp_type == "vanilla") {

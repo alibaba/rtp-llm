@@ -23,12 +23,11 @@ using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
 struct EngineInitParams: public th::jit::CustomClassHolder {
     EngineInitParams() {};
    // This class is the only one that holds gpt_weights object globally.
-    EngineInitParams(const rtp_llm::GptInitParameter&    gpt_init_parameter,
-                     rtp_llm::Weights&&                  gpt_weights) :
-                     gpt_init_parameter(gpt_init_parameter),
-                     gpt_weights(std::move(gpt_weights)) {}
-
-
+    EngineInitParams(size_t                           model_id,
+                     const rtp_llm::GptInitParameter& gpt_init_parameter,
+                     rtp_llm::Weights&&               gpt_weights):
+        model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {}
+    size_t model_id;
     rtp_llm::GptInitParameter         gpt_init_parameter;
     rtp_llm::Weights                  gpt_weights;
 
@@ -39,13 +38,14 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     ProposeModelEngineInitParams() {};
 
     // Constructor for vanilla propose model
-    ProposeModelEngineInitParams(std::string sp_type,
-                     size_t gen_num_per_circle,
-                     const rtp_llm::GptInitParameter&    gpt_init_parameter,
-                     rtp_llm::Weights&&                  gpt_weights) :
-                     sp_type(sp_type),
-                     gen_num_per_circle(gen_num_per_circle),
-                     vanilla_model_params(new EngineInitParams(gpt_init_parameter, std::move(gpt_weights))) {}
+    ProposeModelEngineInitParams(size_t                           model_id,
+                                 std::string                      sp_type,
+                                 size_t                           gen_num_per_circle,
+                                 const rtp_llm::GptInitParameter& gpt_init_parameter,
+                                 rtp_llm::Weights&&               gpt_weights):
+        sp_type(sp_type),
+        gen_num_per_circle(gen_num_per_circle),
+        vanilla_model_params(new EngineInitParams(model_id, gpt_init_parameter, std::move(gpt_weights))) {}
 
     // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle) :
@@ -186,6 +186,6 @@ std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepare
 // Note: keep mtp sequence.
 std::deque<std::unique_ptr<rtp_llm::Weights>> prepareMTPModelWeights(py::object model);
 
-std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(py::object model);
+std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model);
 
 }  // namespace rtp_llm

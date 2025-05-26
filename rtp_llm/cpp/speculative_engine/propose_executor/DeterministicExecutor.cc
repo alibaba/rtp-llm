@@ -2,24 +2,36 @@
 #include <vector>
 
 #include "rtp_llm/cpp/speculative_engine/propose_executor/DeterministicExecutor.h"
-#include "ProposeOutput.h"
+#include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeStream.h"
 
 namespace rtp_llm {
 
-absl::StatusOr<ProposeOutput> DeterministicExecutor::propose(const std::list<GenerateStreamPtr>& streams) {
-    ProposeOutput output;
+absl::Status DeterministicExecutor::propose(const std::list<GenerateStreamPtr>& streams, bool skip_check) {
     for (auto& stream : streams) {
-        output.outputs[stream->streamId()] = std::make_shared<SpeculativeExecutorStreamOutput>();
-        ruleBasedTokenSelector(stream, output.outputs[stream->streamId()]);
-    }
+        if (!skip_check) {
+            if (stream->finishedWithoutLock() || stream->stoppedWithoutLock()) {
+                continue;
+            }
+        }
 
-    return output;
+        if (!stream->containProposeStream()) {
+            GenerateStreamPtr propose_stream = std::make_shared<ProposeStream>(*stream, 0);
+            stream->setProposeStream(propose_stream);
+        }
+        ruleBasedTokenSelector(stream);
+    }
+    return absl::OkStatus();
 }
 
-void DeterministicExecutor::ruleBasedTokenSelector(const GenerateStreamPtr&            stream,
-                                                   SpeculativeExecutorStreamOutputPtr& stream_output) {
+void DeterministicExecutor::ruleBasedTokenSelector(const GenerateStreamPtr& stream) {
     auto& config = stream->generateConfig();
     bool use_sp_advice_prompt = config->sp_advice_prompt_token_ids.size() > 0;
+
+    SpeculativeExecutorStreamOutputPtr stream_output = stream->getProposeStream()->getSPOutputBuffer();
+    stream_output->propose_step = 0;
+    stream_output->tokens = nullptr;
+    stream_output->all_probs = nullptr;
+
     if (config->sp_edit) {
         SpEditTokenSelector(stream, stream_output, use_sp_advice_prompt);
     } else {

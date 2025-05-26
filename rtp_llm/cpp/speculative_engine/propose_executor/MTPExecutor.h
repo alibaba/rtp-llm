@@ -30,6 +30,7 @@ public:
 
         size_t index = 0;
         for (auto& mtp_params : *propose_model_engine_init_params->mtp_model_params_) {
+            RTP_LLM_LOG_INFO("index %d, mtp model_id %d", index, mtp_params->model_id);
             auto cache_manager = (index < mtp_cache_managers.size()) ? mtp_cache_managers[index] : nullptr;
             auto executor = std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
 
@@ -39,7 +40,8 @@ public:
                 mtp_params->gpt_init_parameter, cache_config, warm_up)));
             auto model_params = GptModelInitParams({device_, mtp_params->gpt_weights,
                 Executor::genModelDescription(mtp_params->gpt_init_parameter),
-                cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : std::nullopt});
+                cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : std::nullopt,
+                mtp_params->model_id});
             auto new_model = std::make_unique<MTPModel>(model_params);
             executor->setGptModel(std::move(new_model));
             normal_mtp_executors_.push_back(norm_executor);
@@ -65,9 +67,7 @@ public:
         return absl::OkStatus();
     }
 
-    absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams) override;
-
-    void dynamicUpdateConfig(const ProposeDynamicConfig& config) override {}
+    absl::Status propose(const std::list<GenerateStreamPtr>& streams, bool skip_check = false) override;
 
     size_t reserveStep() const override {
         return propose_step_;

@@ -424,7 +424,6 @@ public:
     int64_t propose_step_latency_us = 0;
     int64_t score_step_latency_us = 0;
     int64_t speculative_sampler_latency_us = 0;
-    int64_t updater_step_latency_us = 0;
     int64_t total_propose_token_num = 0;
     int64_t total_accepted_token_num = 0;
 };
@@ -439,7 +438,6 @@ public:
     kmonitor::MutableMetric* propose_step_latency_us_metric = nullptr;
     kmonitor::MutableMetric* score_step_latency_us_metric = nullptr;
     kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* updater_step_latency_us_metric = nullptr;
     kmonitor::MutableMetric* total_propose_token_num_metric = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric = nullptr;
 private:

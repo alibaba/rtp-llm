@@ -134,8 +134,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     if (needReturnHiddenStates()) {
         RTP_LLM_CHECK(update_info.all_hidden_states != nullptr);
-        last_hidden_states_ = device_->clone(
-            {*update_info.all_hidden_states, rtp_llm::AllocationType::DEVICE});
+        last_hidden_states_ = update_info.all_hidden_states;
     }
 
 
@@ -157,7 +156,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     //TODO: move it to better position
-    if (!finished_ && queryPdSep()) {
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
         need_remote_generate_ = true;
     }
 

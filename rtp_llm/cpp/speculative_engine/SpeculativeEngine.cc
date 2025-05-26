@@ -5,20 +5,20 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/speculative_engine/SpeculativeOnlineAdaptor.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "rtp_llm/cpp/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 using namespace std;
 
-
 namespace rtp_llm {
+
+size_t CudaProfiler_E::count = 0;
 
 SpeculativeEngine::SpeculativeEngine(const EngineInitParams&                       engine_init_params,
                                      std::unique_ptr<ProposeModelEngineInitParams> propose_model_engine_init_params):
@@ -65,9 +65,11 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
         BufferPtr new_tokens = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
         *new_tokens->dataWithOffset<int32_t>(0) = distribution(generator);
-        StreamUpdateInfo update_info{new_tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, fake_hidden_states};
+        StreamUpdateInfo update_info{new_tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, fake_hidden_states, false};
         stream->update(update_info);
         stream->setIsContextStream(false);
+        stream->setReuseLength(1);
+        stream->setFallbackPrefixLength(1);
     }
 
     enqueue(stream);
@@ -105,12 +107,8 @@ absl::Status SpeculativeEngine::init() {
     scheduler_.reset(
         new SpeculativeScheduler(score_model_params_.gpt_init_parameter, resource_context_.cache_manager, metrics_reporter_));
     RTP_LLM_LOG_INFO("create fifo scheduler done");
-    online_adaptor_.reset(new SpeculativeOnlineAdaptor());
-    RTP_LLM_LOG_INFO("create online adaptor");
-    speculative_sampler_ = createSpeculativeSampler(propose_model_params_, device_);
+    speculative_sampler_ = std::make_unique<SpeculativeSampler>(device_);
     RTP_LLM_LOG_INFO("create speculative sampler");
-    speculative_updater_.reset(
-        new SpeculativeUpdater(resource_context_, createSpeculativeUpdaterConfig(propose_model_params_)));
     RETURN_IF_STATUS_ERROR(startLoop());
     if (device_->getDeviceProperties().tp_rank == 0) {
         initLoadBalance();
@@ -120,7 +118,7 @@ absl::Status SpeculativeEngine::init() {
 
 void SpeculativeEngine::initLoadBalance() {
     RTP_LLM_LOG_INFO("init load balance start");
-    auto stream = enqueueMinFakeQuery(3,  false);
+    auto stream = enqueueMinFakeQuery(1,  false);
     while(!stream->finished() && !stream->stopped()) {
         RTP_LLM_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
@@ -279,7 +277,15 @@ absl::Status SpeculativeEngine::trySaveStepError() const {
 }
 
 std::shared_ptr<GenerateStream> SpeculativeEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, score_model_params_.gpt_init_parameter, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream =
+        std::make_shared<NormalGenerateStream>(input,
+                                               score_model_params_.gpt_init_parameter,
+                                               resource_context_,
+                                               metrics_reporter_,
+                                               propose_model_params_->gen_num_per_circle);
+    if (sp_type_ == "mtp") {
+        stream->setReturnLastHiddenStates(true);
+    }
     return stream;
 }
 
@@ -288,8 +294,7 @@ void SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> SpeculativeEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, score_model_params_.gpt_init_parameter, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = makeStream(input);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -306,26 +311,6 @@ void SpeculativeEngine::tpSyncDisableSPRun(bool& all_streams_disable_sp_run) {
     device_->syncCommunication(false);
     device_->syncAndCheck();
     all_streams_disable_sp_run = disable_sp_run_ptr[(size_t)0];
-}
-
-void SpeculativeEngine::dpAndTpSyncNeedHiddenStates(bool& need_hidden_states) {
-    const auto properties = device_->getDeviceProperties();
-    size_t world_size = properties.dp_size;
-    if (world_size <= 1) {
-        return;
-    }
-    size_t local_rank = properties.dp_rank;
-    RTP_LLM_LOG_DEBUG("local_rank is %d", local_rank);
-    auto flag = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
-    auto flag_ptr = flag->data<int32_t>();
-    flag_ptr[(size_t)local_rank] = need_hidden_states;
-    printBufferData(*flag, "before dp flag");
-
-    device_->allGather({{flag}, ParallelMode::DP});
-    device_->syncCommunication(false);
-    device_->syncAndCheck();
-    printBufferData(*flag, "after dp flag");
-    need_hidden_states = (std::accumulate(flag_ptr, flag_ptr + world_size, 0) >= 1);
 }
 
 absl::Status SpeculativeEngine::step() {
@@ -373,43 +358,58 @@ absl::Status SpeculativeEngine::step() {
     }
 
     bool all_streams_disable_sp_run = !streams.empty() && std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
+    bool gen_timeline = !streams.empty() && std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->genTimeline(); });
+    // std::shared_ptr<CudaProfiler_E> profiler;
+    profiler_step_--;
+    if (profiler_step_ <= 0) {
+        profiler_.reset();
+        profiler_step_ = 0;
+    }
+    if (gen_timeline && profiler_step_ <= 0) {
+        profiler_ = std::make_shared<CudaProfiler_E>("sp_cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
+        profiler_->start();
+        profiler_step_ = 3;
+    }
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 
+    absl::Status status;
     if (all_streams_disable_sp_run) {
-        if (sp_type_ == "mtp") {
-            for (auto& stream : streams) {
-                stream->setReturnLastHiddenStates(true);
+        status = normStep(streams);
+    } else if (sp_type_ == "mtp") {
+        status = mtpStep(streams);
+    } else {
+        status = spStep(streams);
+    }
+
+
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        reportMetrics();
+        for (auto& stream : streams) {
+            if (stream->finished()) {
+                step_recorder_.addStepCount(stream->iterCount());
             }
         }
-        return normStep(streams);
+
+        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), metrics_.accept_token_num / streams.size());
+
+        metrics_.reset();
     }
-    if (sp_type_ == "mtp") {
-        // Make sure each stream is able to save the hidden states value in each calculation result
-        for (auto& stream : streams) {
-            stream->setReturnLastHiddenStates(true);
-        }
-        return noPrefillProposeStep(streams);
-    } else {
-        return prefillProposeStep(streams);
-    }
+
+    return status;
 
 }
 
 
 absl::Status SpeculativeEngine::normStep(std::list<GenerateStreamPtr>& streams) {
-    int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t score_begin_time_us = 0;
-    int64_t sampler_begin_time_us = 0;
-    int64_t update_begin_time_us = 0;
-    int64_t total_propose_token_num  = 0;
-    int64_t total_accepted_token_num = 0;
+    int64_t score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    for (auto& stream : streams) {
+        RTP_LLM_LOG_DEBUG("before normal process stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
     THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
-    sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    update_begin_time_us = sampler_begin_time_us;
-    total_propose_token_num = 0;
-    total_accepted_token_num = streams.size();
+
+    // stream post process
     for (auto& stream : streams) {
         stream->setReuseLength(stream->seqLength() - 1);
         stream->setFallbackPrefixLength(stream->reuseLength());
@@ -418,128 +418,121 @@ absl::Status SpeculativeEngine::normStep(std::list<GenerateStreamPtr>& streams) 
                 stream->streamId(),
                 stream->generateConfig()->top_k,
                 stream->generateConfig()->top_p);
-    }
-    for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+
+        RTP_LLM_LOG_DEBUG("after normal process stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    if (device_->getDeviceProperties().tp_rank == 0) {
-        reportMetrics(propose_begin_time_us,
-                    score_begin_time_us,
-                    sampler_begin_time_us,
-                    update_begin_time_us,
-                    total_propose_token_num,
-                    total_accepted_token_num);
-
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), total_accepted_token_num / streams.size());
-    }
+    metrics_.score_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - score_begin_time_us;
+    metrics_.accept_token_num = streams.size();
 
     return absl::OkStatus();
 }
 
-absl::Status SpeculativeEngine::prefillProposeStep(std::list<GenerateStreamPtr>& streams) {
+absl::Status SpeculativeEngine::spStep(std::list<GenerateStreamPtr>& streams) {
     int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     int64_t score_begin_time_us = 0;
     int64_t sampler_begin_time_us = 0;
-    int64_t update_begin_time_us = 0;
-    int64_t total_propose_token_num  = 0;
-    int64_t total_accepted_token_num = 0;
-    ProposeOutput propose_output;
-    CHECK_AND_ASSIGN(propose_output, propose_executor_->propose(streams));
-    RTP_LLM_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
-    if (propose_output.hasNoPropose()) {
-        score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
+
+    for (auto& stream : streams) {
+        RTP_LLM_LOG_DEBUG("before sp step stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
+    THROW_IF_STATUS_ERROR(propose_executor_->propose(streams));
+
+    score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+    THROW_IF_STATUS_ERROR(score_executor_->score(streams));
+
+    if (device_->getDeviceProperties().tp_rank == 0) {
         sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        update_begin_time_us = sampler_begin_time_us;
-        total_propose_token_num = 0;
-        total_accepted_token_num = streams.size();
-        for (auto& stream : streams) {
-            stream->setReuseLength(stream->seqLength() - 1);
-            stream->setFallbackPrefixLength(stream->reuseLength());
-            stream->setSpEditRun(false);
-            RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_tokens = 0, accept_tokens = 1",
-                    stream->streamId(),
-                    stream->generateConfig()->top_k,
-                    stream->generateConfig()->top_p);
-        }
-    } else {
-        score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
-        RTP_LLM_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());
+        CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams));
 
-        if (device_->getDeviceProperties().tp_rank == 0) {
-            sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams, propose_output, score_output));
-            RTP_LLM_LOG_DEBUG("sampler_output: %s", sampler_output.debugString().c_str());
-
-            update_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            RETURN_IF_STATUS_ERROR(speculative_updater_->update(streams, sampler_output));
-
-            for (const auto& output : sampler_output.outputs) {
-                total_propose_token_num += output.propose_step;
-                total_accepted_token_num += output.accepted_token_nums;
-            }
-        }
+        metrics_.propose_token_num += sampler_output.propose_token_num;
+        metrics_.accept_token_num += sampler_output.accept_token_num;
     }
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post sp step stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
+ 
 
-    if (device_->getDeviceProperties().tp_rank == 0) {
-        reportMetrics(propose_begin_time_us,
-                    score_begin_time_us,
-                    sampler_begin_time_us,
-                    update_begin_time_us,
-                    total_propose_token_num,
-                    total_accepted_token_num);
-
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), total_accepted_token_num / streams.size());
-    }
+    metrics_.propose_time_us = score_begin_time_us - propose_begin_time_us;
+    metrics_.score_time_us = sampler_begin_time_us - score_begin_time_us;
+    metrics_.sampler_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - sampler_begin_time_us;
 
     return absl::OkStatus();
 }
 
-bool SpeculativeEngine::checkAllHasHiddenStates(std::list<GenerateStreamPtr>& streams) {
-    bool flag = true;
-    for (auto& stream : streams) {
-        if (stream->getLastHiddenStates() == nullptr) {
-            flag = false;
-        }
-    }
-    flag = !streams.empty() && flag;
-    tpSyncDisableSPRun(flag);
-    return flag;
-};
+absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& streams) {
+    int64_t propose_begin_time_us = 0;
+    int64_t score_begin_time_us   = 0;
 
-std::list<GenerateStreamPtr> SpeculativeEngine::extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams) {
-    std::list<GenerateStreamPtr> need_prefill;
     for (auto& stream : streams) {
-        if (stream->getLastHiddenStates() == nullptr) {
-            need_prefill.push_back(stream);
+        RTP_LLM_LOG_DEBUG("before mtp prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
+    {
+        RTP_LLM_LOG_DEBUG("score model prefill");
+        score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        THROW_IF_STATUS_ERROR(score_executor_->score(streams, true));
+
+
+        RTP_LLM_LOG_DEBUG("update stream");
+        for (GenerateStreamPtr& stream: streams) {
+            SpeculativeExecutorStreamOutputPtr score_output = stream->getScoreStream()->getSPOutputBuffer();
+            StreamUpdateInfo update_info{score_output->tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, score_output->hidden_states, false, true};
+            stream->update(update_info);
+            stream->setIsContextStream(true);
+        }
+
+        for (auto& stream : streams) {
+            RTP_LLM_LOG_DEBUG("after update stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        }
+
+        propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_LOG_DEBUG("propose model prefill");
+        THROW_IF_STATUS_ERROR(propose_executor_->propose(streams, true));
+
+        for (const GenerateStreamPtr& stream : streams) {
+            if (stream->queryPdSep()) {
+                stream->setNeedRemoteGenerate(true);
+            }
+            BufferPtr propose_tokens = stream->getProposeStream()->getSPOutputBuffer()->tokens;
+            stream->setProposeToken(propose_tokens->data<int>()[0]);
+            stream->setReuseLength(stream->seqLength() - 1);
+            stream->setFallbackPrefixLength(stream->reuseLength());
+            stream->setSpEditRun(false);
+            stream->setLastHiddenStates(nullptr);
         }
     }
-   return need_prefill;
+
+    for (auto& stream : streams) {
+        RTP_LLM_LOG_DEBUG("post mtp prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
+    metrics_.propose_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - propose_begin_time_us;
+    metrics_.score_time_us = propose_begin_time_us - score_begin_time_us;
+
+    return absl::OkStatus();
 }
 
+absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
+    if (score_model_params_.gpt_init_parameter.pd_separation_ == 1) {
+        return prefillMtpStep(streams);
+    }
 
-absl::Status SpeculativeEngine::noPrefillProposeStep(std::list<GenerateStreamPtr>& streams) {
+    int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    int64_t score_begin_time_us = 0;
+    int64_t sampler_begin_time_us = 0;
+
     std::list<GenerateStreamPtr> propose_streams;
     std::list<GenerateStreamPtr> prefill_streams;
+    std::list<GenerateStreamPtr> pre_propose_streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
         for (auto& stream: streams) {
-            if (stream->getLastHiddenStates() != nullptr) {
+            if (stream->getContainProposeToken()) {
+                pre_propose_streams.emplace_back(stream);
+            } else if (stream->getLastHiddenStates() != nullptr) {
                 propose_streams.emplace_back(stream);
             } else {
                 prefill_streams.emplace_back(stream);
@@ -547,45 +540,50 @@ absl::Status SpeculativeEngine::noPrefillProposeStep(std::list<GenerateStreamPtr
         }
 
         for (auto& stream : propose_streams) {
-            RTP_LLM_LOG_DEBUG("pre propose stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("begin propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
         }
 
-
         for (auto& stream : prefill_streams) {
-            RTP_LLM_LOG_DEBUG("pre prefill stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("begin prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        }
+
+        for (auto& stream : pre_propose_streams) {
+            RTP_LLM_LOG_DEBUG("begin pre propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
         }
 
     }
 
-    // base model generate current hidden states.
-    // mtp model according to last hidden states from base model,
-    // generate one token.
-    // TODO(lidongjin) support multi mtp model.
-    int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t total_propose_token_num  = 0;
-    int64_t total_accepted_token_num = 0;
-    int64_t score_begin_time_us      = 0;
-    int64_t sampler_begin_time_us  = 0;
-    int64_t update_begin_time_us  = 0;
-
-    ProposeOutput propose_output;
     {
         bool skip_propose = propose_streams.empty();
         tpSyncDisableSPRun(skip_propose);
         if (!skip_propose) {
             RTP_LLM_LOG_DEBUG("propose step");
-            CHECK_AND_ASSIGN(propose_output, propose_executor_->propose(propose_streams));
-            RTP_LLM_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
+            THROW_IF_STATUS_ERROR(propose_executor_->propose(propose_streams));
         } else {
             RTP_LLM_LOG_DEBUG("skip propose");
         }
 
-
         for (const GenerateStreamPtr& stream : prefill_streams) {
-            size_t stream_id = stream->streamId();
-            propose_output.outputs[stream_id] = std::make_shared<SpeculativeExecutorStreamOutput>();
-            propose_output.outputs[stream_id]->propose_step = 0;
+            size_t propose_step = 0;
+            GenerateStreamPtr propose_stream = std::make_shared<MTPStream>(*stream, propose_step);
 
+            SpeculativeExecutorStreamOutputPtr sp_output_buffer_ = propose_stream->getSPOutputBuffer();
+            sp_output_buffer_->propose_step = 0;
+            sp_output_buffer_->tokens = nullptr;
+
+            stream->setProposeStream(propose_stream);
+        }
+
+        for (const GenerateStreamPtr& stream : pre_propose_streams) {
+            size_t propose_step = 1;
+            GenerateStreamPtr propose_stream = std::make_shared<MTPStream>(*stream, propose_step);
+
+            SpeculativeExecutorStreamOutputPtr sp_output_buffer_ = propose_stream->getSPOutputBuffer();
+            sp_output_buffer_->propose_step = propose_step;
+            sp_output_buffer_->tokens = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::HOST}, {});
+            *((int*)sp_output_buffer_->tokens->data()) = stream->getProposeToken();
+
+            stream->setProposeStream(propose_stream);
         }
     }
 
@@ -593,73 +591,50 @@ absl::Status SpeculativeEngine::noPrefillProposeStep(std::list<GenerateStreamPtr
     {
         RTP_LLM_LOG_DEBUG("score step");
         score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
-        RTP_LLM_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());
+        THROW_IF_STATUS_ERROR(score_executor_->score(streams));
+
 
         if (device_->getDeviceProperties().tp_rank == 0) {
             RTP_LLM_LOG_DEBUG("sample step");
             sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams, propose_output, score_output));
-            RTP_LLM_LOG_DEBUG("sampler_output: %s", sampler_output.debugString().c_str());
-            RTP_LLM_LOG_DEBUG("update step");
-            update_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            RETURN_IF_STATUS_ERROR(speculative_updater_->update(streams, sampler_output));
-            for (const auto& output : sampler_output.outputs) {
-                total_propose_token_num += output.propose_step;
-                total_accepted_token_num += output.accepted_token_nums;
-            }
+            CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams));
+
+            metrics_.propose_token_num += sampler_output.propose_token_num;
+            metrics_.accept_token_num += sampler_output.accept_token_num;
+        }
+
+        for (auto& stream : pre_propose_streams) {
+            stream->setContainProposeToken(false);
         }
 
         for (auto& stream : streams) {
-            RTP_LLM_LOG_DEBUG("post stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("post stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
         }
     }
+    
 
-    if (device_->getDeviceProperties().tp_rank == 0) {
-        reportMetrics(propose_begin_time_us,
-                      score_begin_time_us,
-                      sampler_begin_time_us,
-                      update_begin_time_us,
-                      total_propose_token_num,
-                      total_accepted_token_num);
-
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(), total_accepted_token_num / streams.size());
-    }
+    metrics_.propose_time_us = score_begin_time_us - propose_begin_time_us;
+    metrics_.score_time_us = sampler_begin_time_us - score_begin_time_us;
+    metrics_.sampler_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - sampler_begin_time_us;
 
     return absl::OkStatus();
 }
 
 
-void SpeculativeEngine::reportMetrics(int64_t                         propose_begin_time_us,
-                                      int64_t                         score_begin_time_us,
-                                      int64_t                         sampler_begin_time_us,
-                                      int64_t                         update_begin_time_us,
-                                      int64_t                         total_propose_token_num,
-                                      int64_t                         total_accepted_token_num) {
+void SpeculativeEngine::reportMetrics() {
     if (!metrics_reporter_) {
         return;
     }
 
-    int64_t                                 current_time    = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t                                 propose_time    = score_begin_time_us - propose_begin_time_us;
-    int64_t                                 score_time      = sampler_begin_time_us - score_begin_time_us;
-    int64_t                                 sampler_time    = update_begin_time_us - sampler_begin_time_us;
-    int64_t                                 update_time     = current_time - update_begin_time_us;
-    int64_t                                 total_step_time = current_time - propose_begin_time_us;
-    RTP_LLM_LOG_DEBUG("total_step_time: %ld, propose_time: %ld, score_time: %ld, sampler_time: %ld, update_time: %ld",
-                total_step_time, propose_time, score_time, sampler_time, update_time);
+    int64_t                                 total_step_time = metrics_.propose_time_us + metrics_.score_time_us + metrics_.sampler_time_us;
+    RTP_LLM_LOG_DEBUG("total_step_time: %ld, propose_time: %ld, score_time: %ld, sampler_time: %ld",
+                total_step_time, metrics_.propose_time_us, metrics_.score_time_us, metrics_.sampler_time_us);
     RtpLLMSpeculativeEngineMetricsCollector collector{total_step_time,
-                                                      propose_time,
-                                                      score_time,
-                                                      sampler_time,
-                                                      update_time,
-                                                      total_propose_token_num,
-                                                      total_accepted_token_num};
+        metrics_.propose_time_us,
+        metrics_.score_time_us,
+        metrics_.sampler_time_us,
+        metrics_.propose_token_num,
+        metrics_.accept_token_num};
     metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(nullptr,
                                                                                                        &collector);
 }

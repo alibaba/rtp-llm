@@ -3,25 +3,39 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/stream/GenerateStream.h"
-#include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeOutput.h"
-#include "rtp_llm/cpp/speculative_engine/score_executor/ScoreOutput.h"
-#include "rtp_llm/cpp/speculative_engine/speculative_sampler/SpeculativeSamplerOutput.h"
 
 namespace rtp_llm {
+
+struct SpeculativeSamplerOutput {
+public:
+    std::string debugString() const {
+        std::stringstream debug_string;
+        debug_string << "SpeculativeSamplerOutput { ";
+        debug_string << "propose_token_num: " << propose_token_num << ", accept_token_num: " << accept_token_num << "}";
+        return debug_string.str();
+    }
+
+public:
+    size_t propose_token_num = 0;
+    size_t accept_token_num  = 0;
+};
 
 class SpeculativeSampler {
 public:
     SpeculativeSampler(rtp_llm::DeviceBase* device): device_(device) {}
-    virtual absl::StatusOr<SpeculativeSamplerOutput> sample(const std::list<GenerateStreamPtr>& streams,
-                                                            const ProposeOutput&                proposer_output,
-                                                            const ScoreOutput& scorer_output) const = 0;
+    absl::StatusOr<SpeculativeSamplerOutput> sample(const std::list<GenerateStreamPtr>& streams) const;
+
+private:
+    absl::StatusOr<size_t> top1Sample(size_t                                    propose_step,
+                        const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                        const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
+    absl::StatusOr<size_t> stochasticSample(size_t                                    propose_step,
+                            const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
 
 protected:
     rtp_llm::DeviceBase* device_;
 };
 
-std::unique_ptr<SpeculativeSampler>
-createSpeculativeSampler(const std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_param,
-                         rtp_llm::DeviceBase*                                      device);
 
 }  // namespace rtp_llm

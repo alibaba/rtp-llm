@@ -8,10 +8,10 @@ namespace rtp_llm {
 class CompleteTokenIds {
 public:
     CompleteTokenIds(rtp_llm::DeviceBase* device, int batch_size, int max_seq_len, int seq_size_per_block);
-    CompleteTokenIds(const CompleteTokenIds& other);
+    CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
 
 public:
-    void init(const std::shared_ptr<GenerateInput>& generate_input);
+    void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
 
     std::vector<int> completeTokenIdsVec(int batch_id);
     std::vector<int> commonCompleteTokenIdsVec(int batch_id);
@@ -47,7 +47,6 @@ private:
     int batch_size_; 
     int max_seq_len_;
     int seq_size_per_block_;
-    int init_seq_size_;
 
     int seq_length_; 
     int common_len_;

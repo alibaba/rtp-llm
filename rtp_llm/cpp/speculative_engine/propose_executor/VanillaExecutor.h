@@ -28,9 +28,7 @@ public:
         return normal_executor_.process(streams);
     }
 
-    absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams) override;
-
-    void dynamicUpdateConfig(const ProposeDynamicConfig& config) override {}
+    absl::Status propose(const std::list<GenerateStreamPtr>& streams, bool skip_check = false) override;
 
     size_t reserveStep() const override {
         return propose_step_;

@@ -47,17 +47,25 @@ absl::StatusOr<GptModelInputs> MTPBatchStreamProcessor::gatherModelInput(const S
     // Here, for the MTP model, we must ensure that the input contains the result of the last hidden states.
     // The second is to ensure that the first dimension of the token is aligned with the hidden states,
     // that is, each execution must be truncated
-    auto all_hidden_states = device_->allocateBuffer({type,
+    BufferPtr all_hidden_states = device_->allocateBuffer({type,
                                                  {all_hidden_tokens_num, hidden_size},
                                                  rtp_llm::AllocationType::DEVICE}, {});
-    size_t index = 0;
+    MultiMergeCopyParams params;
+    params.dst_ptr = all_hidden_states->data();
+    size_t accu_dst_offset = 0;
     for (auto& stream : all_streams) {
-        auto hidden_states = stream->getLastHiddenStates();
-        auto hidden_num = hidden_states->shape()[0];
-        device_->copy({all_hidden_states->view(index, hidden_num),
-                       *hidden_states});
-        index += hidden_num;
+        BufferPtr hidden_states = stream->getLastHiddenStates();
+        size_t hidden_copy_size = hidden_states->sizeBytes();
+        params.src_ptrs.push_back(hidden_states->data());
+        params.copy_size.push_back(hidden_copy_size);
+        params.dst_offsets.push_back(accu_dst_offset);
+        accu_dst_offset += hidden_copy_size;
     }
+
+    if (accu_dst_offset > 0) {
+        device_->multiMergeCopy(params);
+    }
+
     model_input.value().last_hidden_states = all_hidden_states;
     return model_input;
 };

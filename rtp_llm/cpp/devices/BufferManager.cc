@@ -78,13 +78,13 @@ void BufferManager::setTraceMemory(bool trace_memory) {
 }
 
 void BufferManager::recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer) {
-    auto stack_trace_id = trace_malloc_stack_ ? autil::StackTracer::getInstance()->getTraceId() : 0;
-    {
-        WriteLock lock(mutex_);
-        AllocationRecord record = {params.allocation, buffer->sizeBytes(), hints, stack_trace_id};
-        allocation_records_[buffer->data()] = record;
-    }
     if (trace_memory_) {
+        auto stack_trace_id = trace_malloc_stack_ ? autil::StackTracer::getInstance()->getTraceId() : 0;
+        {
+            WriteLock lock(mutex_);
+            AllocationRecord record = {params.allocation, buffer->sizeBytes(), hints, stack_trace_id};
+            allocation_records_[buffer->data()] = record;
+        }
         RTP_LLM_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
                      buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
         auto status = queryStatus();
@@ -104,12 +104,11 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
 
 void BufferManager::recordRecycle(void* data) {
     if (trace_memory_) {
-        RTP_LLM_LOG_DEBUG("record recycle: %p [%s]",
-                     data, allocation_records_[data].hints.tag.c_str());
-    }
-    {
-        WriteLock lock(mutex_);
-        allocation_records_.erase(data);
+        {
+            WriteLock lock(mutex_);
+            allocation_records_.erase(data);
+        }
+        RTP_LLM_LOG_DEBUG("record recycle: %p [%s]", data, allocation_records_[data].hints.tag.c_str());
     }
 }
 

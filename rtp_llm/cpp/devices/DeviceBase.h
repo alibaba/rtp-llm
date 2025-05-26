@@ -107,8 +107,6 @@ public:
 
     void writeCacheStore(const WriteCacheParams& params);
 
-    void writeHiddenStatesStore(const WriteMTPHiddenStatesParams& params);
-
     DeviceInitParams initParams() {
         return init_params_;
     }

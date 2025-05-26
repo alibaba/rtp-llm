@@ -158,6 +158,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
         generate_stream->setSpEditRun(false);
+        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+        generate_stream->setContainProposeToken(true);
+        generate_stream->setProposeToken(generate_request.propose_generate_token_id());
     }
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG("decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
@@ -271,8 +274,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     min_timeout_ms,
                                     1,
                                     0,
-                                    decode_context.server_context,
-                                    generate_stream->returnEmptyHiddenStates()};
+                                    decode_context.server_context};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -535,9 +537,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
             auto block_num = load_context.block_ids.size();
+            size_t model_id = maga_init_params_.model_id;
 
             for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
-                auto  cache_key = makeCacheKey(std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                auto  cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto  block_id  = load_context.block_ids[block_pos];
                 auto  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
                 void* k_addr    = (void*)((int64_t)addr_info.k_addr + i * k_block_size);
@@ -563,6 +567,48 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             layer_caches.push_back(load_layer_cache);
         }
 
+        if (engine_->isMTP()) {
+            for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size(); mtp_model_id++) { 
+                EngineInitParams* mtp_engine_init_params = propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
+                size_t layer_num = mtp_engine_init_params->gpt_init_parameter.num_layers_;
+                const std::shared_ptr<CacheManager>& cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
+                for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+                    auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
+                    auto load_layer_cache =
+                        std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
+                    auto block_num = load_context.block_ids.size();
+                    size_t model_id = mtp_engine_init_params->model_id;
+        
+                    for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
+                        auto  cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                        // FT_LOG_DEBUG("small model load cache_key %s", cache_key.c_str());
+                        auto  block_id  = load_context.block_ids[block_pos];
+                        auto  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
+                        void* k_addr    = (void*)((int64_t)addr_info.k_addr + i * k_block_size);
+                        std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
+                        load_layer_cache->addBlock("k_" + cache_key, k_block_addr, k_block_size, true, true);
+                        if (addr_info.k_scale_addr) {
+                            void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);
+                            std::shared_ptr<void> k_block_scale_addr(k_scale_addr, [](void* p) {});
+                            load_layer_cache->addBlock("k_scale" + cache_key, k_block_scale_addr, scale_block_size, true, true);
+                        }
+                        if (cache_manager->cacheConfig().use_mla) {
+                            continue;
+                        }
+                        void* v_addr    = (void*)((int64_t)addr_info.v_addr + i * v_block_size);
+                        std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
+                        load_layer_cache->addBlock("v_" + cache_key, v_block_addr, v_block_size, true, true);
+                        if (addr_info.v_scale_addr) {
+                            void* v_scale_addr = (void*)((int64_t)addr_info.v_scale_addr + i * scale_block_size);
+                            std::shared_ptr<void> v_block_scale_addr(v_scale_addr, [](void* p) {});
+                            load_layer_cache->addBlock("v_scale" + cache_key, v_block_scale_addr, scale_block_size, true, true);
+                        }
+                    }
+                    layer_caches.push_back(load_layer_cache);
+                }
+            }
+        }
+
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
             RTP_LLM_LOG_WARNING("invalid peer ip to load [%s]", peer_addr.c_str());
@@ -584,38 +630,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         load_contexts.push_back(layer_cache_load_context);
 
-        if (engine_->isMTP() &&
-            engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
-            load_context.hidden_states_ != nullptr)
-        {
-            RTP_LLM_LOG_DEBUG("mtp hidden states rdma get.");
-            std::vector<std::shared_ptr<RequestBlockBuffer>> hidden_states_caches;
-            auto load_layer_cache =
-                std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), "");
-            auto hidden_states_ptr = load_context.hidden_states_->data();
-            auto hidden_states_size = load_context.hidden_states_->sizeBytes();
-            RTP_LLM_LOG_DEBUG("token_num is %d", load_context.hidden_states_->shape()[0]);
-            RTP_LLM_LOG_DEBUG("decoder need hidden states size is %d", hidden_states_size);
-            std::shared_ptr<void> hidden_states_addr(hidden_states_ptr, [](void* p) {});
-            load_layer_cache->addBlock("hidden_states", hidden_states_addr, hidden_states_size, true, true);
-            hidden_states_caches.push_back(load_layer_cache);
-            auto hidden_states_load_context =
-                resource_.cache_store->loadBuffers(hidden_states_caches,
-                                                    ip_parts[0],
-                                                    autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
-                                                    autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
-                                                    load_context.timeout_ms,
-                                                    cancel_check_func,
-                                                    load_context.partition_count,
-                                                    load_context.partition_id);
-            if (!hidden_states_load_context) {
-                RTP_LLM_LOG_WARNING("request [%s] load hidden_states failed, layer cache load context is nullptr", request_key.c_str());
-                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load hidden_states failed");
-            }
-            load_contexts.push_back(hidden_states_load_context);
-            RTP_LLM_LOG_DEBUG("mtp hidden states rdma end.");
-        }
-
 
     }
 
@@ -630,8 +644,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                            request_key.c_str(),
                            layer_cache_load_context->getErrorInfoString().c_str(),
                            (load_done_time_us - start_load_time_us) / 1000);
+            return layer_cache_load_context->getErrorInfo();
         }
-        return layer_cache_load_context->getErrorInfo();
     }
 
     return ErrorInfo::OkStatus();
@@ -659,8 +673,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->timeout_ms(),
                                  request->partition_count(),
                                  request->partition_id(),
-                                 server_context,
-                                 nullptr});
+                                 server_context});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

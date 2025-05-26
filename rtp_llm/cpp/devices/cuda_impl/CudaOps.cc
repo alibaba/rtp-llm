@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
+#include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
@@ -63,6 +64,28 @@ void CudaDevice::copy(const CopyParams& params) {
     }
 
     check_cuda_error();
+}
+
+void CudaDevice::multiMergeCopy(const MultiMergeCopyParams& params) {
+    std::vector<void*> multi_src_ptrs(params.src_ptrs.size());
+    std::vector<size_t> multi_src_copy_sizes(params.src_ptrs.size());
+    for (size_t i = 0; i < params.src_ptrs.size(); i++) {
+        multi_src_ptrs[i] = params.src_ptrs[i];
+        multi_src_copy_sizes[i] = params.copy_size[i];
+    }
+    InvokeMultiMergeCopyKernel(params.dst_ptr, multi_src_ptrs, multi_src_copy_sizes, params.dst_offsets, stream_);
+}
+
+void CudaDevice::multiCopy(const MultiCopyParams& params) {
+    std::vector<void*> multi_src_ptrs(params.multi_src.size());
+    std::vector<void*> multi_dst_ptrs(params.multi_dst.size());
+    std::vector<size_t> multi_copy_sizes(params.multi_src.size());
+    for (size_t i = 0; i < params.multi_src.size(); i++) {
+        multi_src_ptrs[i] = params.multi_src[i]->data();
+        multi_dst_ptrs[i] = params.multi_dst[i]->data();
+        multi_copy_sizes[i] = params.multi_src[i]->sizeBytes();
+    }
+    InvokeMultiCopyKernel(multi_src_ptrs, multi_dst_ptrs, multi_copy_sizes, stream_);
 }
 
 void CudaDevice::noBlockCopy(const CopyParams& params) {

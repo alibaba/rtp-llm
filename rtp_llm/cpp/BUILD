@@ -304,14 +304,12 @@ cc_library(
         "speculative_engine/propose_executor/*.h",
         "speculative_engine/score_executor/*.h",
         "speculative_engine/speculative_sampler/*.h",
-        "speculative_engine/speculative_updater/*.h"
     ]),
     srcs = glob([
         "speculative_engine/*.cc",
         "speculative_engine/propose_executor/*.cc",
         "speculative_engine/score_executor/*.cc",
         "speculative_engine/speculative_sampler/*.cc",
-        "speculative_engine/speculative_updater/*.cc"
     ]),
     deps = torch_deps() + [
         ":dataclass",

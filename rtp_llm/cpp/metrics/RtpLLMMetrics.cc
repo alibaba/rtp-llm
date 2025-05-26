@@ -254,7 +254,6 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager *manager
     REGISTER_GAUGE_MUTABLE_METRIC(propose_step_latency_us_metric, "rtp_llm_sp_propose_step_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(score_step_latency_us_metric, "rtp_llm_sp_score_step_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(speculative_sampler_latency_us_metric, "rtp_llm_sp_speculative_sampler_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(updater_step_latency_us_metric, "rtp_llm_sp_updater_step_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(total_propose_token_num_metric, "rtp_llm_sp_total_propose_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(total_accepted_token_num_metric, "rtp_llm_sp_total_accepted_token_num");
     return true;
@@ -266,7 +265,6 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags* tags, R
     REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
-    REPORT_MUTABLE_METRIC(updater_step_latency_us_metric, collector->updater_step_latency_us);
     REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
     REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
 

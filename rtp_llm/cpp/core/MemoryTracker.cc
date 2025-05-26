@@ -7,9 +7,24 @@ using WriteLock = std::unique_lock<std::shared_mutex>;
 
 namespace rtp_llm {
 
-MemoryTracker::MemoryTracker(void* ptr, const size_t size, const size_t align_size) {
+MemoryTracker::MemoryTracker(void* ptr, size_t size, const size_t align_size, bool use_small_chunk) {
     total_size_ = size;
     align_size_ = align_size;
+    if (use_small_chunk && size > small_chunk_size_ * small_chunk_num_) {
+        base_ptr_ = ptr;
+        MemoryChunk* small_chunk = new MemoryChunk();
+        small_chunk->ptr = base_ptr_;
+        small_chunk->size = small_chunk_size_ * small_chunk_num_;
+        small_chunk->used = true;
+        chunk_map_[base_ptr_] = small_chunk;
+        size -= small_chunk_size_ * small_chunk_num_;
+        ptr = (int8_t *)ptr + small_chunk_size_ * small_chunk_num_;
+        for (auto i = 0; i < small_chunk_num_; ++i) {
+            small_chunk_queue_.push(i);
+        }
+    } else {
+        small_chunk_num_ = 0;
+    }
     MemoryChunk* chunk = new MemoryChunk();
     chunk->ptr = ptr;
     chunk->size = size;
@@ -27,6 +42,9 @@ MemoryTracker::~MemoryTracker() {
         delete pair.second;
     }
     free_chunk_.clear();
+    while(!small_chunk_queue_.empty()) {
+        small_chunk_queue_.pop();
+    }
 }
 
 void* MemoryTracker::allocate(const size_t alloc_size) {
@@ -35,6 +53,11 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
         return nullptr;
     }
     WriteLock lock(mutex_);
+    if (small_chunk_num_ && alloc_size <= small_chunk_size_ && !small_chunk_queue_.empty()) {
+        size_t chunk_idx = small_chunk_queue_.front();
+        small_chunk_queue_.pop();
+        return (int8_t *)base_ptr_ + chunk_idx * small_chunk_size_;
+    }    
     MemoryChunk* chunk_to_use = nullptr;
     const auto aligned_size = align(alloc_size);
     // 1. find the smallest chunk that holds the requested size
@@ -70,13 +93,21 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
 
 bool MemoryTracker::isTracking(void* ptr) const {
     ReadLock lock(mutex_);
+    if (ptr >= base_ptr_ && ptr < (int8_t *)base_ptr_ + small_chunk_num_ * small_chunk_size_) {
+        return true;
+    }
     auto iter = chunk_map_.find(ptr);
     return (iter != chunk_map_.end()) && iter->second->used;
 }
 
 void MemoryTracker::deallocate(void* ptr) {
     WriteLock lock(mutex_);
-
+    if (ptr >= base_ptr_ && ptr < (int8_t *)base_ptr_ + small_chunk_num_ * small_chunk_size_) {
+        assert(((int8_t *)ptr - (int8_t *)base_ptr_) % small_chunk_size_ == 0);
+        small_chunk_queue_.push(((int8_t *)ptr - (int8_t *)base_ptr_) / small_chunk_size_);
+        return;
+    }
+    
     // 1. find the chunk and free
     auto chunk_iter = chunk_map_.find(ptr);
     if (chunk_iter == chunk_map_.end()) {

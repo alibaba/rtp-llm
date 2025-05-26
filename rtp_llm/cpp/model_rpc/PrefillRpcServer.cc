@@ -208,7 +208,11 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation = true;
-    input->generate_config->force_disable_sp_run = true;
+    if (engine_->isMTP()) {
+        input->generate_config->force_disable_sp_run = false;
+    } else {
+        input->generate_config->force_disable_sp_run = true;
+    }
     prefill_context.generate_input = input;
 
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
@@ -310,11 +314,16 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
-    auto first_token = prefill_context.getStream()->currentExecuteTokens()[0];
+    std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
+    RTP_LLM_LOG_DEBUG("remote generate stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    vector<int> all_token = stream->currentExecuteTokens();
+    int first_token = all_token[all_token.size() - 1]; 
+    RTP_LLM_LOG_DEBUG("first token token id %d", first_token);
     GenerateRequestPB generate_request;
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
+    generate_request.set_propose_generate_token_id(stream->getProposeToken());
     generate_request.set_stage(RemoteStage::GENERATE);
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Write(generate_request),
