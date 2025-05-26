@@ -17,6 +17,8 @@ class EmbeddingEndpoint(object):
         self.custom_model_: CustomModule = model.model.custom_module
 
     async def handle(self, request: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        #from remote_pdb import RemotePdb
+        #RemotePdb('0.0.0.0', 4444).set_trace()
         if isinstance(request, str):
             request = json.loads(request)
         renderer = self.custom_model_.get_renderer(request)

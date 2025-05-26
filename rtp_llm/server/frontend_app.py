@@ -23,7 +23,7 @@ from anyio import CapacityLimiter
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.distribute.worker_info import g_worker_info
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
 from rtp_llm.embedding.frontend_embedding_app import register_frontend_embedding_api
 from rtp_llm.utils.version_info import VersionInfo

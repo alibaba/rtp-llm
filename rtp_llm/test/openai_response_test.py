@@ -22,7 +22,7 @@ from rtp_llm.openai.api_datatype import (
     ContentPartTypeEnum,
     RendererInfo,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, CustomChatRenderer, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
@@ -82,7 +82,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ["MODEL_TYPE"] = "qwen"
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         test_ids = [198, 84169, 25, 49434, 239, 73670, 37029, 633, 11080, 69364, 5333, 8997, 2512, 25, 633, 11080, 69364, 198, 2512, 5571, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707]
         render_params = RendererParams(
             model_type="qwen",
@@ -124,7 +124,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ["MODEL_TYPE"] = "qwen"
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -148,7 +148,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ["MODEL_TYPE"] = "qwen_agent"
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         test_ids = [25, 220, 35946, 85106, 47872, 11622, 455, 11080, 69364, 5333, 36407, 45912, 104307, 144575, 18149, 144575, 25, 633, 11080, 69364, 198, 144575, 47483, 144575, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707, 144575, 14098, 144575]
         # print(f"===test ids decode {tokenizer.decode(test_ids)}")
         # print(tokenizer.encode("你好啊✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}\n✿RESULT✿"))
@@ -235,7 +235,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         test_ids = [
             25,
             220,
@@ -399,7 +399,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer",
             encode_special_tokens=True)
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
         self.assertEqual(self.endpoint.stop_words_str_list, ['<|user|>', '<|observation|>'])
 
@@ -409,7 +409,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ['MODEL_TYPE'] = 'qwen'
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         
         test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
         render_params = RendererParams(
@@ -460,7 +460,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ['MODEL_TYPE'] = 'qwen'
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         
         test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
         render_params = RendererParams(
@@ -511,7 +511,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         os.environ['MODEL_TYPE'] = 'qwen_2'
         tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer")
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndopoint(self.model.config, self.model.tokenizer, None)
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         
         test_ids = [151648, 198, 73670, 73670, 73670, 151649, 271, 37029, 37029, 37029]
         render_params = RendererParams(

@@ -22,6 +22,7 @@ public:
 
     absl::Status enqueue(EmbeddingStreamPtr stream);
     std::shared_ptr<EmbeddingOutput> decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features = std::nullopt);
+    std::shared_ptr<EmbeddingOutput> decode(std::shared_ptr<EmbeddingInput> input);
     // absl::Status update_streams(std::list<EmbeddingStreamPtr>& streams);
     absl::Status stop();
 

@@ -25,7 +25,7 @@ from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
 from rtp_llm.utils.version_info import VersionInfo
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.server.misc import format_exception
 from rtp_llm.config.task_type import TaskType
@@ -74,7 +74,7 @@ class BackendServer(object):
                 self._embedding_endpoint = EmbeddingEndpoint(self.model)
             else:
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(self.model.config)
-                self._openai_endpoint = OpenaiEndopoint(
+                self._openai_endpoint = OpenaiEndpoint(
                     self.model.config,
                     self.model.tokenizer,
                     self.backend_rpc_server_visitor)

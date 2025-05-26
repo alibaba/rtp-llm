@@ -23,7 +23,7 @@ from rtp_llm.utils.complete_response_async_generator import CompleteResponseAsyn
 from rtp_llm.metrics import kmonitor, AccMetrics, GaugeMetrics
 from rtp_llm.utils.version_info import VersionInfo
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.server.frontend_worker import FrontendWorker, TokenizerEncodeResponse
@@ -58,7 +58,7 @@ class FrontendServer(object):
                     and self._frontend_worker.model_config.task_type != TaskType.LANGUAGE_MODEL:
                 self.is_embedding = True
             else:
-                self._openai_endpoint = OpenaiEndopoint(
+                self._openai_endpoint = OpenaiEndpoint(
                     self._frontend_worker.model_config,
                     self._frontend_worker.tokenizer,
                     self._frontend_worker.backend_rpc_server_visitor)

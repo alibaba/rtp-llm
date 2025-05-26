@@ -24,7 +24,7 @@ from rtp_llm.utils.mm_process_engine import MMProcessEngine
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
 
-class OpenaiEndopoint():
+class OpenaiEndpoint(object):
     def __init__(self, model_config: GptInitModelParameters,
                  tokenizer: PreTrainedTokenizerBase,
                  backend_rpc_server_visitor: BackendRPCServerVisitor):

@@ -5,7 +5,7 @@ import logging
 
 from rtp_llm.pipeline import Pipeline
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
 from rtp_llm.distribute.worker_info import update_master_info, g_worker_info
 from rtp_llm.test.utils.port_util import PortsContext
@@ -28,7 +28,7 @@ async def main():
             print(res.generate_texts)
 
         # openai request
-        openai_endpoint = OpenaiEndopoint(model.config, model.tokenizer, pipeline.backend_rpc_server_visitor)
+        openai_endpoint = OpenaiEndpoint(model.config, model.tokenizer, pipeline.backend_rpc_server_visitor)
         messages = [
             ChatMessage(**{
                 "role": RoleEnum.user,

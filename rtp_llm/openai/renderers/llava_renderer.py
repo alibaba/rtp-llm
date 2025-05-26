@@ -25,6 +25,7 @@ class SeparatorStyle(Enum):
     TWO = auto()
     LLAMA_3 = auto()
 
+
 @dataclass
 class Conversation:
     system_content: str
@@ -32,6 +33,7 @@ class Conversation:
     sep_style: SeparatorStyle
     seps: List[str]
     connector: List[str]
+    image_sep: str = '<image>\n'
 
     def render_messages(self, messages: List[ChatMessage], tokenizer) -> PromptWithMMInput:
         prompt: str = ""
@@ -87,14 +89,14 @@ class Conversation:
                         mm_types.append(MMUrlType.IMAGE)
                         if content_part.preprocess_config:
                             preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
-                        now_prompt = now_prompt + "<image>\n"
+                        now_prompt = now_prompt + self.image_sep
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert (content_part.video_url != None)
                         images.append(content_part.video_url.url)
                         mm_types.append(MMUrlType.VIDEO)
                         if content_part.preprocess_config:
                             preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
-                        now_prompt = now_prompt + "<image>\n"
+                        now_prompt = now_prompt + self.image_sep
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
                 prompt += self.seps[index % 2]

@@ -308,6 +308,9 @@ class MiniCPMVHandler(CustomHandler):
         input_lens = input_lengths.tolist()
         token_ids = 0
         reps = []
+        print(f"input_lengths: {input_lengths}")
+        print(f"token_ids: {token_ids}")
+
         for length in input_lens:
             hidden_state = hidden_states[token_ids:token_ids + length]
             attention_mask = torch.range(1, length).float().cuda()

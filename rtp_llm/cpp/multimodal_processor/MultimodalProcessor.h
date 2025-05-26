@@ -3,6 +3,7 @@
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/dataclass/Query.h"
+#include "rtp_llm/cpp/dataclass/EmbeddingQuery.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/PyUtils.h"
@@ -16,10 +17,11 @@ namespace rtp_llm {
 
 struct ExpandedOutput {
     rtp_llm::BufferPtr expanded_ids;
+    rtp_llm::BufferPtr token_type_ids;
     rtp_llm::BufferPtr text_tokens_mask;
     rtp_llm::BufferPtr locs;
-    ExpandedOutput(rtp_llm::BufferPtr expanded_ids = nullptr, rtp_llm::BufferPtr text_tokens_mask = nullptr, rtp_llm::BufferPtr locs = nullptr):
-        expanded_ids(expanded_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
+    ExpandedOutput(rtp_llm::BufferPtr expanded_ids = nullptr, rtp_llm::BufferPtr token_type_ids = nullptr, rtp_llm::BufferPtr text_tokens_mask = nullptr, rtp_llm::BufferPtr locs = nullptr):
+        expanded_ids(expanded_ids), token_type_ids(token_type_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
 };
 
 class MultimodalProcessor {
@@ -40,7 +42,7 @@ private:
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) = 0;
 
-    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>& mm_embedding, rtp_llm::BufferPtr token_ids, const std::vector<rtp_llm::MultimodalInput> mm_inputs);
+    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>& mm_embedding, rtp_llm::BufferPtr token_ids, const std::vector<rtp_llm::MultimodalInput> mm_inputs, rtp_llm::BufferPtr token_type_ids = nullptr);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(rtp_llm::BufferPtr token_ids);
 
@@ -48,8 +50,10 @@ private:
 
 public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
+    
+    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>& input, const std::vector<rtp_llm::MultimodalInput> &mm_inputs);
 
-    ErrorResult<MultimodalFeature> getMultimodalFeatures(const rtp_llm::BufferPtr& input_ids, const std::vector<MultimodalInput> &mm_inputs);
+    ErrorResult<MultimodalFeature> getMultimodalFeatures(const rtp_llm::BufferPtr& input_ids, const std::vector<rtp_llm::MultimodalInput> &mm_inputs);
 };
 
 }

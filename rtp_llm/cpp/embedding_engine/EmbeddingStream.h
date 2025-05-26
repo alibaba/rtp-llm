@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "autil/TimeUtility.h"
-#include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
+#include "rtp_llm/cpp/dataclass/EmbeddingQuery.h"
 #include "rtp_llm/cpp/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/system_prompt/SystemPrompt.h"

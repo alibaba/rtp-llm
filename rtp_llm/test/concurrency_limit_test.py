@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 from fastapi import FastAPI
 
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.frontend_server import FrontendWorker, FrontendServer
 from rtp_llm.server.frontend_app import FrontendApp
 from rtp_llm.server.backend_server import BackendServer
@@ -66,8 +66,8 @@ BackendServer.ready = fake_ready
 BackendServer.get_load_balance_info = fake_load_balance_info
 BackendServer.model_runtime_meta = lambda x: "fake_model"
 
-OpenaiEndopoint.__init__ = fake_init
-OpenaiEndopoint.chat_completion = fake_inference
+OpenaiEndpoint.__init__ = fake_init
+OpenaiEndpoint.chat_completion = fake_inference
 
 class ConcurrencyLimitTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):

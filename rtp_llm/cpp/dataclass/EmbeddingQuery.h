@@ -23,6 +23,12 @@ public:
                             int64_t                              request_id,
                             std::optional<MultimodalFeature> multimodal_features = std::nullopt);
 
+    explicit EmbeddingInput(const torch::Tensor& token_ids,
+                            const torch::Tensor& token_type_ids,
+                            const torch::Tensor& input_lengths,
+                            int request_id,
+                            std::optional<MultimodalFeature> multimodal_features = std::nullopt);
+
     std::shared_ptr<rtp_llm::Buffer>         token_ids;
     std::shared_ptr<rtp_llm::Buffer>         token_type_ids;
     std::shared_ptr<rtp_llm::Buffer>         input_lengths;
@@ -36,6 +42,8 @@ public:
         debug_string << "GenerateInput {"
                      << ", input_ids: " << token_ids->debugString()
                      << ", token_type_ids: " << token_type_ids->debugString()
+                     << ", input_lengths: " << input_lengths->debugString()
+                     << ", total_length: " << total_length
                      << "}";
         return debug_string.str();
     }

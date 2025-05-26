@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -51,7 +50,13 @@ void EmbeddingEngine::loop() {
 }
 
 std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features) {
-    auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    auto input =
+        std::make_shared<EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    return decode(input);
+}
+
+std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(std::shared_ptr<EmbeddingInput> input) {
+    auto embedding_stream = std::make_shared<EmbeddingStream>(input);
     embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
     embedding_stream->waitFinish();

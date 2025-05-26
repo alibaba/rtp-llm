@@ -96,15 +96,14 @@ py::object RtpEmbeddingOp::decode(th::Tensor token_ids,
         throw std::runtime_error("server is shut down, can't handle request");
     }
     std::optional<rtp_llm::MultimodalFeature> multimodal_features = std::nullopt;
+    auto embedding_input = std::make_shared<rtp_llm::EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
-        auto mm_res = mm_processor_->getMultimodalFeatures(rtp_llm::torchTensor2Buffer(token_ids), multimodal_inputs);
+        auto mm_res = mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs);
         if (!mm_res.ok()) {
-            throw std::runtime_error(mm_res.status().ToString());
+            throw std::runtime_error(mm_res.ToString());
         }
-        token_ids = rtp_llm::Buffer2torchTensor(mm_res.value().expanded_ids, true);
-        multimodal_features.emplace(mm_res.value());
     }
-    auto embedding_output = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    auto embedding_output = embedding_engine_->decode(embedding_input);
     py::gil_scoped_acquire acquire;
     if (embedding_output->output.isTensor) {
         RTP_LLM_CHECK_WITH_INFO(embedding_output->output.t.has_value(), "embedding output has null tensor value");

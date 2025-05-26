@@ -18,7 +18,7 @@ torch.cuda.set_device = lambda x:None
 from rtp_llm.distribute.gang_info import get_c2_members
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
-from rtp_llm.openai.openai_endpoint import OpenaiEndopoint
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.frontend_server import FrontendWorker, FrontendServer
 from rtp_llm.distribute.test.fake_model import FakeModel
 from rtp_llm.start_backend_server import main
@@ -31,7 +31,7 @@ def fake_init(self, *args, **kwargs):
     self.backend_rpc_server_visitor = None
 
 FrontendWorker.__init__ = fake_init
-OpenaiEndopoint.__init__ = fake_init
+OpenaiEndpoint.__init__ = fake_init
 
 class GangTest(unittest.TestCase):
     def __init__(self, *args, **kwargs):
