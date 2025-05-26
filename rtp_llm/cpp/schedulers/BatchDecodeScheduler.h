@@ -9,7 +9,7 @@
 
 namespace rtp_llm {
 
-struct BatchDecodeSchedulerConfig: public autil::legacy::Jsonizable {
+struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
@@ -30,8 +30,9 @@ public:
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_ = std::getenv("SCHEDULER_RUN_BATCH_SIZE") ? std::atoi(std::getenv("SCHEDULER_RUN_BATCH_SIZE")) : 1;
+        batch_size_ = GlobalConfig::get().batch_decode_scheduler_config.batch_decode_scheduler_batch_size; 
         scheduler_type_ = SchedulerType::kBatchDecode;
+        
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -62,7 +63,7 @@ public:
     }
 
     void updateSchedulerInfo(const std::string& scheduler_info) override {
-        BatchDecodeSchedulerConfig config;
+        BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {

@@ -2,6 +2,8 @@
 #include <nvtx3/nvToolsExt.h>
 #include <string>
 #include <iostream>
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+
 namespace rtp_llm {
 namespace fmha {
 class FmhaProfParam {
@@ -152,30 +154,8 @@ private:
   ProfilingInterface() {
     // TODO: add print log
     domain_ = nvtxDomainCreateA("fmha");
-    use_nvtx_ = false;
-    show_params_ = false;
-    char *pEnv_perf = std::getenv("FMHA_PERF_INSTRUMENT");
-    if (pEnv_perf && isdigit(*pEnv_perf)) {
-      int value = std::stoi(std::string(pEnv_perf));
-      if (value == 0) {
-        use_nvtx_ = false;
-      } else if (value == 1) {
-        use_nvtx_ = true;
-      } else {
-        printf("Invalid value for FMHA_PERF_INSTRUMENT : %d\n", value);
-      }
-    }
-    char *pEnv_params = std::getenv("FMHA_SHOW_PARAMS");
-    if (pEnv_params && isdigit(*pEnv_params)) {
-      int value = std::stoi(std::string(pEnv_params));
-      if (value == 0) {
-        show_params_ = false;
-      } else if (value == 1) {
-        show_params_ = true;
-      } else {
-        printf("Invalid value for FMHA_SHOW_PARAMS : %d\n", value);
-      }
-    }
+    show_params_ = GlobalConfig::get().fmha_config.fmha_show_params;
+    use_nvtx_ = GlobalConfig::get().fmha_config.fmha_perf_instrument;
   }
   ~ProfilingInterface() {
     nvtxDomainDestroy(domain_);

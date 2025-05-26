@@ -18,7 +18,7 @@
 #include "nccl_utils_torch.h"
 #include <chrono>
 #include <string>
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 using namespace std;
 
 namespace rtp_llm {
@@ -277,14 +277,19 @@ void ftNcclParamDestroy(NcclParam& param) {
 void ftNcclInitialize(NcclParam& tensor_para,
                       NcclParam& pipeline_para,
                       const int  tensor_para_size,
-                      const int  pipeline_para_size) {
-    ftNcclInitialize(tensor_para, pipeline_para, tensor_para_size, pipeline_para_size, "", 0);
+                      const int  pipeline_para_size,
+                      const int64_t      world_size,
+                      const int64_t      world_rank
+                    ) {
+    ftNcclInitialize(tensor_para, pipeline_para, tensor_para_size, pipeline_para_size, world_size, world_rank, "", 0);
 }
 
 void ftNcclInitialize(NcclParam&         tensor_para,
                       NcclParam&         pipeline_para,
                       const int          tensor_para_size,
                       const int          pipeline_para_size,
+                      const int64_t      world_size,
+                      const int64_t      world_rank,
                       const std::string& master_ip,
                       const int          master_port) {
     RTP_LLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
@@ -306,17 +311,15 @@ void ftNcclInitialize(NcclParam&         tensor_para,
         pipeline_para.world_size_ = pipeline_para_size;
         return;
     }
-    int rank       = std::stoi(std::string(getenv("WORLD_RANK")));
-    int world_size = std::stoi(std::string(getenv("WORLD_SIZE")));
     RTP_LLM_CHECK_WITH_INFO(tensor_para_size * pipeline_para_size == world_size,
                        rtp_llm::fmtstr("tensor_para_size (%d) * pipeline_para_size (%d) should equal to the world size (%d).",
                               tensor_para_size,
                               pipeline_para_size,
                               world_size));
-    auto tcpStore = createTcpStore(master_ip, master_port, world_size, rank);
+    auto tcpStore = createTcpStore(master_ip, master_port, world_size, world_rank);
 
-    int pp_rank = rank / tensor_para_size;
-    int tp_rank = rank % tensor_para_size;
+    int pp_rank = world_rank / tensor_para_size;
+    int tp_rank = world_rank % tensor_para_size;
 
     std::string  pp_group_name = "PP_GROUP_" + std::to_string(tp_rank);
     std::string  tp_group_name = "TP_GROUP_" + std::to_string(pp_rank);
@@ -324,20 +327,20 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     ncclUniqueId pp_uid;
 
     if (tp_rank == 0) {
-        RTP_LLM_LOG_INFO("rank %d tp rank %d creates nccl uid in group %s.", rank, tp_rank, tp_group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d tp rank %d creates nccl uid in group %s.", world_rank, tp_rank, tp_group_name.c_str());
         NCCLCHECK(ncclGetUniqueId(&tp_uid));
         setUniqueId(&tp_uid, tp_group_name, tcpStore);
     } else {
-        RTP_LLM_LOG_INFO("rank %d tp rank %d get nccl uid in group %s.", rank, tp_rank, tp_group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d tp rank %d get nccl uid in group %s.", world_rank, tp_rank, tp_group_name.c_str());
         getUniqueId(&tp_uid, tp_group_name, tcpStore);
     }
 
     if (pp_rank == 0) {
-        RTP_LLM_LOG_INFO("rank %d pp rank %d creates nccl uid in group %s.", rank, pp_rank, pp_group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d pp rank %d creates nccl uid in group %s.", world_rank, pp_rank, pp_group_name.c_str());
         NCCLCHECK(ncclGetUniqueId(&pp_uid));
         setUniqueId(&pp_uid, pp_group_name, tcpStore);
     } else {
-        RTP_LLM_LOG_INFO("rank %d pp rank %d get nccl uid in group %s.", rank, pp_rank, pp_group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d pp rank %d get nccl uid in group %s.", world_rank, pp_rank, pp_group_name.c_str());
         getUniqueId(&pp_uid, pp_group_name, tcpStore);
     }
 
@@ -355,7 +358,7 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     pipeline_para.nccl_uid_   = pp_uid;
     pipeline_para.nccl_comm_  = pp_nccl_comm;
     RTP_LLM_LOG_INFO("NCCL initialized rank=%d world_size=%d tensor_para=%s pipeline_para=%s",
-                rank,
+                world_rank,
                 world_size,
                 tensor_para.toString().c_str(),
                 pipeline_para.toString().c_str());

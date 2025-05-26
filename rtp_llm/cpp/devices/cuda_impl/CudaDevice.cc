@@ -15,11 +15,11 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 using namespace std;
 using namespace rtp_llm;
 using namespace tensorrt_llm;
@@ -33,7 +33,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_value(cudaSetDevice(device_id_));
-    if (getenv("NOT_USE_DEFAULT_STREAM") && std::string(getenv("NOT_USE_DEFAULT_STREAM")) == "1") {
+    if (GlobalConfig::get().device_resource_config.not_use_default_stream) {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     } else {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
@@ -56,7 +56,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 
     moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
 
-    if (std::getenv("HACK_MOE_EXPERT") && std::string(std::getenv("HACK_MOE_EXPERT")) == "1") {
+    if (GlobalConfig::get().moe_config.hack_moe_expert) {
         hack_moe_expert_ = true;
     }
 
@@ -88,9 +88,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
-
-    auto fmha_env = std::getenv("ENABLE_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_fmha;
+    if (!fmha_env) {
         RTP_LLM_LOG_WARNING("FMHA is not enbaled");
     } else {
         checkUseTrtV1FMHA();
@@ -166,10 +165,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
         mla_ops_type = device_prop_.major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
     }
 
-    auto stable_scatter_add_env = std::getenv("ENABLE_STABLE_SCATTER_ADD");
-    if (stable_scatter_add_env && std::string(stable_scatter_add_env) == "ON") {
-        use_stable_scatter_add = true;
-    }
+    use_stable_scatter_add = GlobalConfig::get().hw_kernel_config.enable_stable_scatter_add;
+
     RTP_LLM_LOG_INFO("use_stable_scatter_add: %d", use_stable_scatter_add);
 }
 
@@ -482,17 +479,17 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         return;
     }
 
-    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_open_source_fmha;
+    if (!fmha_env) {
         RTP_LLM_LOG_WARNING("opensource FMHA is disabled for by env");
         return;
     }
 
     RTP_LLM_LOG_INFO("use opensource fmha");
     use_open_source_fmha = true;
-    char* paged_fmha_env = std::getenv("ENABLE_PAGED_OPEN_SOURCE_FMHA");
-    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
-        RTP_LLM_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
+    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_open_source_fmha;
+    if (!paged_fmha_env) {
+        RTP_LLM_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_OPEN_SOURCE_TRT_FMHA=OFF env");
         return;
     }
     if (init_params_.tokens_per_block % 256 != 0) {
@@ -507,8 +504,8 @@ void CudaDevice::checkUseTrtV1FMHA() {
     if (!CompileConfig::use_old_trt_fmha) {
         return;
     }
-    char* fmha_env = std::getenv("ENABLE_TRTV1_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_trtv1_fmha;
+    if (!fmha_env) {
         RTP_LLM_LOG_WARNING("TRTV1 FMHA is not enbaled");
         return;
     }
@@ -521,8 +518,8 @@ void CudaDevice::checkUseTrtV2FMHA() {
         RTP_LLM_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
         return;
     }
-    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_trt_fmha;
+    if (!fmha_env)  {
         RTP_LLM_LOG_WARNING("TRT FMHA is disabled for by env");
         return;
     }
@@ -536,8 +533,8 @@ void CudaDevice::checkUseTrtV2FMHA() {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for sm %d", get_sm());
         return;
     }
-    char* paged_fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
-    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
+    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_trt_fmha;
+    if (!paged_fmha_env) {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         return;
     }
@@ -551,9 +548,8 @@ void CudaDevice::checkUseXQA() {
         RTP_LLM_LOG_WARNING("xqa is disabled for sm %d < 90", sm);
         return;
     }
-    char* xqa_env = std::getenv("ENABLE_XQA");
-    if (xqa_env && std::string(xqa_env) == "OFF") {
-        RTP_LLM_LOG_WARNING("xqa is disabled by env");
+    if (!GlobalConfig::get().fmha_config.enable_xqa) {
+        RTP_LLM_LOG_WARNING("XQA is disabled by env");
         return;
     }
     RTP_LLM_LOG_INFO("use xqa");
@@ -580,8 +576,8 @@ bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
 }
 
 void CudaDevice::checkUseFlashinferSampleKernel() {
-    char* flashinfer_sample_env = std::getenv("ENABLE_FLASHINFER_SAMPLE_KERNEL");
-    if (flashinfer_sample_env && std::string(flashinfer_sample_env) == "OFF") {
+    bool flashinfer_sample_env = GlobalConfig::get().sampler_config.enable_flashinfer_sample_kernel;
+    if (!flashinfer_sample_env) {
         RTP_LLM_LOG_WARNING("Flashinfer sample is disabled for by env");
         return;
     }
@@ -595,8 +591,8 @@ void CudaDevice::checkUseMultiBlockMode() {
         use_multi_block_mode = false;
         return;
     }
-    char* multi_block_mode_env = std::getenv("ENABLE_MULTI_BLOCK_MODE");
-    if (multi_block_mode_env != nullptr && std::string(multi_block_mode_env) == "OFF") {
+    
+    if (!GlobalConfig::get().hw_kernel_config.enable_multi_block_mode) {
         RTP_LLM_LOG_WARNING("MMHA multi_block_mode is disabled");
         use_multi_block_mode = false;
         return;

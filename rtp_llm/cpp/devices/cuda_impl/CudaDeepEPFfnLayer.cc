@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 using namespace std;
 
@@ -67,7 +68,7 @@ bool CudaDevice::initDeepEPBuffer() {
             RTP_LLM_LOG_ERROR("Failed to initialize DeepEPBuffer");
             return false;
         }
-        auto deep_ep_num_sm = autil::EnvUtil::getEnv("DEEP_EP_NUM_SM", 0UL);
+        auto deep_ep_num_sm = GlobalConfig::get().moe_config.deep_ep_num_sm;
         if (deep_ep_num_sm) {
             RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", deep_ep_num_sm);
             deepep_buffer_->setNumSMs(deep_ep_num_sm);

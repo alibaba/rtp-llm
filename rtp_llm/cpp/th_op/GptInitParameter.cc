@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
+#include "autil/Log.h"
 
 namespace rtp_llm {
 
@@ -115,6 +116,45 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     if (group_size_ != 0 && group_size_ != 64 && group_size_ != 128) {
         throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
     }
+}
+
+void GptInitParameter::showDebugInfo() const{
+        std::ostringstream oss;
+        oss << "\n========== ParallelismDistributedConfig ==========\n"
+            << parallelism_distributed_config.to_string() << "\n"
+            << "========== ConcurrencyConfig ==========\n"
+            << concurrency_config.to_string() << "\n"
+            << "========== FMHAConfig ==========\n"
+            << fmha_config.to_string() << "\n"
+            << "========== KVCacheConfig ==========\n"
+            << kv_cache_config.to_string() << "\n"
+            << "========== ProfilingDebugLoggingConfig ==========\n"
+            << profiling_debug_logging_config.to_string() << "\n"
+            << "========== HWKernelConfig ==========\n"
+            << hw_kernel_config.to_string() << "\n"
+            << "========== DeviceResourceConfig ==========\n"
+            << device_resource_config.to_string() << "\n"
+            << "========== SamplerConfig ==========\n"
+            << sampler_config.to_string() << "\n"
+            << "========== MoeConfig ==========\n"
+            << moe_config.to_string() << "\n"
+            << "========== ModelSpecificConfig ==========\n"
+            << model_specific_config.to_string() << "\n"
+            << "========== SpeculativeExecutionConfig ==========\n"
+            << sp_config.to_string() << "\n"
+            << "========== ServiceDiscoveryConfig ==========\n"
+            << service_discovery_config.to_string() << "\n"
+            << "========== CacheStoreConfig ==========\n"
+            << cache_store_config.to_string() << "\n"
+            << "========== SchedulerConfig ==========\n"
+            << scheduler_config.to_string() << "\n"
+            << "========== BatchDecodeSchedulerConfig ==========\n"
+            << batch_decode_scheduler_config.to_string() << "\n"
+            << "========== FIFOSchedulerConfig ==========\n"
+            << fifo_scheduler_config.to_string() << "\n"
+            << "========== MiscellaneousConfig ==========\n"
+            << misc_config.to_string() << "\n";
+        RTP_LLM_LOG_INFO(oss.str());
 }
 
 RopeConfig GptInitParameter::getRopeConfig() const {
@@ -416,8 +456,28 @@ void registerGptInitParameter(py::module m) {
     .def("setTaskType", &GptInitParameter::setTaskType,
         py::arg("task"))
     .def("setKvCacheDataType", &GptInitParameter::setKvCacheDataType)
+    .def("showDebugInfo", &GptInitParameter::showDebugInfo)
     .def("isGatedActivation", &GptInitParameter::isGatedActivation)
-    .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)  REGISTER_PROPERTYS;
+    .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)  
+    // 新增配置结构体成员暴露
+    .def_readwrite("parallelism_distributed_config", &GptInitParameter::parallelism_distributed_config)
+    .def_readwrite("concurrency_config", &GptInitParameter::concurrency_config)
+    .def_readwrite("fmha_config", &GptInitParameter::fmha_config)
+    .def_readwrite("kv_cache_config", &GptInitParameter::kv_cache_config)
+    .def_readwrite("profiling_debug_logging_config", &GptInitParameter::profiling_debug_logging_config)
+    .def_readwrite("hw_kernel_config", &GptInitParameter::hw_kernel_config)
+    .def_readwrite("device_resource_config", &GptInitParameter::device_resource_config)
+    .def_readwrite("sampler_config", &GptInitParameter::sampler_config)
+    .def_readwrite("moe_config", &GptInitParameter::moe_config)
+    .def_readwrite("model_specific_config", &GptInitParameter::model_specific_config)
+    .def_readwrite("sp_config", &GptInitParameter::sp_config)
+    .def_readwrite("service_discovery_config", &GptInitParameter::service_discovery_config)
+    .def_readwrite("cache_store_config", &GptInitParameter::cache_store_config)
+    .def_readwrite("scheduler_config", &GptInitParameter::scheduler_config)
+    .def_readwrite("batch_decode_scheduler_config", &GptInitParameter::batch_decode_scheduler_config)
+    .def_readwrite("fifo_scheduler_config", &GptInitParameter::fifo_scheduler_config)
+    .def_readwrite("misc_config", &GptInitParameter::misc_config)
+    REGISTER_PROPERTYS;
 }
 
 }

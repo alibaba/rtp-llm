@@ -78,6 +78,7 @@ protected:
         autil::EnvGuard world_rank_env("WORLD_RANK", "0");
         autil::EnvGuard world_size_env("WORLD_SIZE", "1");
         autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
+        GlobalConfig::update_from_env_for_test();
         auto&           parallel_info = ParallelInfo::globalParallelInfo();
         parallel_info.reload();
     }
@@ -87,6 +88,7 @@ protected:
         autil::EnvGuard world_rank_env("WORLD_RANK", "1");
         autil::EnvGuard world_size_env("WORLD_SIZE", "2");
         autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
+        GlobalConfig::update_from_env_for_test();
         auto&           parallel_info = ParallelInfo::globalParallelInfo();
         parallel_info.reload();
     }

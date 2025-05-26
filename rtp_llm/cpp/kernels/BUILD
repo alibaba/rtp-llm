@@ -286,7 +286,6 @@ cc_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",

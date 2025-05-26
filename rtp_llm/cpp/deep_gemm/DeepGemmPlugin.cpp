@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 using namespace std;
 
@@ -90,7 +91,10 @@ inline int DeepGemmPlugin::getNumSms() {
     num_sms = properties.multiProcessorCount;
     RTP_LLM_LOG_INFO("cuda device property has sm num %d", num_sms);
 
-    num_sms = autil::EnvUtil::getEnv("DEEP_GEMM_NUM_SM", num_sms);
+    int num_sms_from_config = GlobalConfig::get().hw_kernel_config.deep_gemm_num_sm;
+    if (num_sms_from_config != -1) {
+        num_sms = num_sms_from_config;
+    }
     RTP_LLM_LOG_INFO("deep gemm uses sm num %d", num_sms);
 
     return num_sms;

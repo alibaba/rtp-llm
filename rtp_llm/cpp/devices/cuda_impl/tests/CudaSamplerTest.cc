@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/kernels/banRepeatNgram.h"
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace std;
 using namespace rtp_llm;
 
@@ -12,7 +12,8 @@ protected:
 };
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
 
@@ -55,7 +56,8 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
 }
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
 
@@ -107,7 +109,8 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
 }
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     size_t batch_size = 4;
@@ -161,7 +164,8 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
 }
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
 
@@ -216,7 +220,8 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
 }
 
 TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
 
@@ -270,7 +275,8 @@ TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
 }
 
 TEST_F(CudaSamplerTest, testFlashInferTopKAllProbs) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     size_t batch_size = 4;
     BufferPtr logits = createBuffer<float>({batch_size, 10}, {
         0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
@@ -326,7 +332,8 @@ TEST_F(CudaSamplerTest, testFlashInferTopKAllProbs) {
 }
 
 TEST_F(CudaSamplerTest, testFlashInferTopPAllProb) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     size_t batch_size = 4;
     BufferPtr logits = createBuffer<float>({batch_size, 10}, {
         0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
@@ -384,7 +391,8 @@ TEST_F(CudaSamplerTest, testFlashInferTopPAllProb) {
 }
 
 TEST_F(CudaSamplerTest, testFlashInferTopKTopPBatchAllProb) {
-    setenv("ENABLE_FLASHINFER_SAMPLE_KERNEL", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.sampler_config.enable_flashinfer_sample_kernel = true;
     size_t batch_size = 4;
     BufferPtr logits = createBuffer<float>({batch_size, 10}, {
         0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,

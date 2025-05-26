@@ -41,11 +41,24 @@ config_setting(
     values = {"define": "xft_use_icx=true"},
 )
 
+cc_library(
+    name = "config_modules",
+    srcs = [
+        "//rtp_llm/cpp:th_op/ConfigModules.cc"
+    ],
+    hdrs = [
+        "//rtp_llm/cpp:th_op/ConfigModules.h",
+        "//rtp_llm/cpp:th_op/GlobalConfig.h",
+    ],
+    deps = torch_deps() + ["@havenask//aios/autil:env_util"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
 
 cc_library(
     name = "gpt_init_params",
     srcs = [
-        "//rtp_llm/cpp:th_op/GptInitParameter.cc"
+        "//rtp_llm/cpp:th_op/GptInitParameter.cc",
     ],
     hdrs = [
         "//rtp_llm/cpp:th_op/GptInitParameter.h",
@@ -53,7 +66,8 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp:utils",
-	    "//rtp_llm/cpp/core:types"
+	    "//rtp_llm/cpp/core:types",
+        "//:config_modules"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

@@ -57,7 +57,6 @@ cc_test(
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
-        "DISABLE_FLASH_INFER": "1",
     },
     exec_properties = {'gpu':'A10'},
 )

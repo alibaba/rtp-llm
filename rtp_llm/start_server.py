@@ -15,6 +15,7 @@ sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
 from rtp_llm.config.log_config import LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo, DEFAULT_START_PORT
+from rtp_llm.server.server_args import setup_args
 from rtp_llm.start_backend_server import start_backend_server
 from rtp_llm.start_frontend_server import start_frontend_server
 from rtp_llm.utils.concurrency_controller import ConcurrencyController, init_controller
@@ -91,7 +92,11 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     return frontend_processes
 
+
+
 def main():
+    setup_args()
+
     try:
         multiprocessing.set_start_method('spawn')
     except RuntimeError as e:

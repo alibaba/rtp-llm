@@ -16,11 +16,11 @@
 
 #include <iostream>
 #include <vector>
-
 #include "nvtx_utils.h"
 #ifdef USE_NVTX
 #include "nvToolsExt.h"
 #endif
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 namespace ft_nvtx {
 
@@ -59,8 +59,7 @@ int getDeviceDomain() {
 
 bool isEnableNvtx() {
     if (!has_read_nvtx_env) {
-        static char* ft_nvtx_env_char = std::getenv("FT_NVTX");
-        is_enable_ft_nvtx = (ft_nvtx_env_char != nullptr && std::string(ft_nvtx_env_char) == "ON") ? true : false;
+        is_enable_ft_nvtx = rtp_llm::GlobalConfig::get().profiling_debug_logging_config.ft_nvtx;
         has_read_nvtx_env = true;
     }
     return is_enable_ft_nvtx;

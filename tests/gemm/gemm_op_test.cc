@@ -22,6 +22,7 @@ private:
 
 GemmOp::GemmOp() {
     rtp_llm::initLogger();
+    GlobalConfig::update_from_env_for_test();
     DeviceFactory::initDevices(GptInitParameter());
     device = DeviceFactory::getDefaultDevice();
 }

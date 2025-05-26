@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/th_op/common/NcclOp.h"
+#include <cstdint>
 #include <vector>
 
 namespace th = torch;
@@ -7,10 +8,12 @@ namespace th = torch;
 namespace torch_ext {
 NcclOp::NcclOp(const int64_t     tensor_para_size,
                const int64_t     pipeline_para_size,
+               const int64_t     world_size,
+               const int64_t     world_rank,
                const std::string master_ip,
                const int64_t     master_port)
 {
-    rtp_llm::ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, pipeline_para_size, master_ip, master_port);
+    rtp_llm::ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, pipeline_para_size,world_size, world_rank, master_ip, master_port);
 }
 
 NcclOp::~NcclOp()
@@ -49,5 +52,5 @@ static auto rtpLlmNcclTHS =
 #else
     torch::jit::class_<torch_ext::NcclOp>("RtpLlm", "NcclOp")
 #endif
-        .def(torch::jit::init<int64_t, int64_t, std::string, int64_t>())
+        .def(torch::jit::init<int64_t, int64_t,int64_t, int64_t, std::string, int64_t>())
         .def("broadcast_tp", &torch_ext::NcclOp::broadcast_tp);

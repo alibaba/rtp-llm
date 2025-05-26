@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 using namespace std;
 using namespace rtp_llm;
 
@@ -351,8 +351,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         }
     }
 
-    const char* disable_flash_infer_env = getenv("DISABLE_FLASH_INFER");
-    const bool disable_flash_infer (disable_flash_infer_env && strcmp(disable_flash_infer_env, "1") == 0);
+    const bool disable_flash_infer = GlobalConfig::get().fmha_config.disable_flash_infer;
     if ((!attn_configs.use_mla || mla_ops_type == MlaOpsType::FLASH_INFER) && disable_flash_infer) {
         return nullptr;
     }

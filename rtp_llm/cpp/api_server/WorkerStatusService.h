@@ -40,7 +40,7 @@ public:
     WorkerStatusService(const std::shared_ptr<EngineBase>&            engine,
                         const std::shared_ptr<ConcurrencyController>& controller);
     ~WorkerStatusService() = default;
-
+    int getLoadBalanceEnv() { return load_balance_env_; }
 public:
     void workerStatus(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                       const http_server::HttpRequest&                         request);

@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include <climits>
 #include <cstdint>
 #include <sys/types.h>
@@ -201,9 +202,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
         return false;
     }
 
-    char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    bool  disable_custom_ar     = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
-    if (disable_custom_ar) {
+    if (GlobalConfig::get().hw_kernel_config.ft_disable_custom_ar) {
         RTP_LLM_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
     }

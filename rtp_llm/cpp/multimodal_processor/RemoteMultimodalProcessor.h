@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 
 namespace py = pybind11;
@@ -45,13 +46,11 @@ private:
     }
 
     LoadBalancerInitParams makeConfig() {
-        char* use_local_env = std::getenv("USE_LOCAL");
         SubscribeServiceConfig subscribe_config;
-        if (use_local_env) {
+        if (GlobalConfig::get().service_discovery_config.use_local) {
             // fake test
-            char* remote_vit_server_ip_env = std::getenv("REMOTE_VIT_SERVER_IP");
-            RTP_LLM_CHECK_WITH_INFO(remote_vit_server_ip_env, "multimodal server ip must be not empty");
-            std::string remote_ip = std::string(remote_vit_server_ip_env);
+            std::string remote_ip = GlobalConfig::get().service_discovery_config.remote_vit_server_ip;
+            RTP_LLM_CHECK_WITH_INFO(!remote_ip.empty(), "multimodal server ip must be not empty");
             uint32_t remote_port = gpt_init_parameter_.remote_rpc_server_port_;
             RTP_LLM_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
 
@@ -61,9 +60,8 @@ private:
             local_config.nodes.push_back(node1);
             subscribe_config.local_configs.push_back(local_config);
         } else {
-            char* vit_cm2_config_env = std::getenv("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG");
-            RTP_LLM_CHECK_WITH_INFO(vit_cm2_config_env, "vit_cm2_config_env must be not empty");
-            std::string vit_cm2_config_str = std::string(vit_cm2_config_env);
+            std::string vit_cm2_config_str = GlobalConfig::get().service_discovery_config.rtp_llm_multimodal_part_cm2_config;
+            RTP_LLM_CHECK_WITH_INFO(!vit_cm2_config_str.empty(), "vit_cm2_config must be not empty");
 
             Cm2ClusterConfig vit_cm2_config;
             try {

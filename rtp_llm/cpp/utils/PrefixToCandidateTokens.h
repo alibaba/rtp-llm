@@ -9,6 +9,7 @@
 #include <mutex>
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 namespace rtp_llm {
 
@@ -64,7 +65,7 @@ public:
         return old_key + std::to_string(next);
     }
     void reloadPrefixDictWithPrefix(std::string dir_path) {
-        std::string tree_decode_config_file = autil::EnvUtil::getEnv("TREE_DECODE_CONFIG", "");
+        std::string tree_decode_config_file = GlobalConfig::get().sp_config.tree_decode_config;
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load filepath : %s", tree_decode_config_file.c_str());
         if (tree_decode_config_file.size() > 0) {
             std::string prefix_dict_path = dir_path + "/" + tree_decode_config_file;
@@ -80,7 +81,7 @@ public:
         static std::shared_ptr<PrefixToCandidateTokens> t(new PrefixToCandidateTokens());
         return t;
     }
-    
+
 private:
     PrefixToCandidateTokens() {}
     PrefixToCandidateTokens(PrefixToCandidateTokens&)                  = delete;

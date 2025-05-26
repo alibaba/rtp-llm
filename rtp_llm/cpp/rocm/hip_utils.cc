@@ -1,5 +1,5 @@
 #include "hip_utils.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 namespace rtp_llm {
 namespace rocm {
 
@@ -55,7 +55,7 @@ void throwRocmError(const char* const file, int const line, std::string const& i
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
-    if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+    if (GlobalConfig::get().profiling_debug_logging_config.ft_core_dump_on_exception) {
         abort();
     }
     throw FT_EXCEPTION(error_msg);

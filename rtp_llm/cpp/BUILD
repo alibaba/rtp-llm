@@ -27,11 +27,11 @@ cc_library(
         "@com_google_absl//absl/debugging:stacktrace",
         "@com_google_absl//absl/debugging:symbolize",
         "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
+        "//:config_modules",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
 
 cc_library(
     name = "dataclass",

@@ -5,9 +5,9 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
-
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -36,8 +36,9 @@ static bool UseTrtFMHA(const rtp_llm::GptInitParameter& gpt_init_parameter) {
         RTP_LLM_LOG_INFO("TRT FMHA is disabled for sparse");
         use_trt_fmha = false;
     }
-    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_trt_fmha;
+    if (!fmha_env) {
         RTP_LLM_LOG_INFO("TRT FMHA is disabled for by env");
         use_trt_fmha = false;
     }
@@ -95,8 +96,8 @@ static bool UsePagedTrtFMHA(const rtp_llm::GptInitParameter& gpt_init_parameter)
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for int8 kvcache");
         use_paged_trt_fmha = false;
     }
-    char* paged_fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
-    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
+    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_trt_fmha;
+    if (!paged_fmha_env) {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         use_paged_trt_fmha = false;
     }
@@ -110,8 +111,8 @@ static bool UseOpenSourceFMHA(const rtp_llm::GptInitParameter& gpt_init_paramete
         RTP_LLM_LOG_INFO("opensource FMHA is disabled for sm %d", get_sm());
         use_open_source_fmha = false;
     }
-    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
+    bool fmha_env = GlobalConfig::get().fmha_config.enable_open_source_fmha;
+    if (!fmha_env) {
         RTP_LLM_LOG_INFO("opensource FMHA is disabled for by env");
         use_open_source_fmha = false;
     }
@@ -121,8 +122,8 @@ static bool UseOpenSourceFMHA(const rtp_llm::GptInitParameter& gpt_init_paramete
 protected:
 template<typename T>
 static bool CheckUseFMHA(const rtp_llm::GptInitParameter& params) {
-    char* fmha_env        = std::getenv("ENABLE_FMHA");
-    bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
+    
+    bool  fmha_enable     = GlobalConfig::get().fmha_config.enable_fmha;
     if (!fmha_enable){
         RTP_LLM_LOG_INFO("FMHA is not enbaled");
         return false;
@@ -136,21 +137,19 @@ static bool CheckUseFMHA(const rtp_llm::GptInitParameter& params) {
 
 template<typename T>
 static bool CheckQKVLengthEqual(const rtp_llm::GptInitParameter& params)  {
-    char* reuse_cache_env = std::getenv("REUSE_CACHE");
+    bool reuse_cache_env = GlobalConfig::get().kv_cache_config.reuse_cache;
     bool  not_prefix =
-        params.pre_seq_len_ == 0 && (reuse_cache_env == nullptr || std::string(reuse_cache_env) != "1");
-    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
-    char* multi_task_prompt_str_env = std::getenv("MULTI_TASK_PROMPT_STR");
-    char* sp_model_env = std::getenv("SP_MODEL_TYPE");
+        params.pre_seq_len_ == 0 && !reuse_cache_env;
+    std::string& multi_task_prompt_env = GlobalConfig::get().kv_cache_config.multi_task_prompt;
+    std::string& multi_task_prompt_str_env = GlobalConfig::get().kv_cache_config.multi_task_prompt_str;
 
-    char* enable_partial_fallback_env = std::getenv("ENABLE_PARTIAL_FALLBACK");
-    if (enable_partial_fallback_env != nullptr && std::string(enable_partial_fallback_env) == "1") {
+    bool enable_partial_fallback_env = GlobalConfig::get().fifo_scheduler_config.enable_partial_fallback;
+    if (enable_partial_fallback_env) {
         RTP_LLM_LOG_INFO("QKV length not equal: enable part fallback");
         return false;
     }
 
-    char* enable_fast_gen_env = std::getenv("ENABLE_FAST_GEN");
-    if (enable_fast_gen_env != nullptr && std::string(enable_fast_gen_env) == "1") {
+    if (GlobalConfig::get().fifo_scheduler_config.enable_fast_gen) {
         RTP_LLM_LOG_INFO("QKV length not equal: enable fast gen");
         return false;
     }
@@ -159,15 +158,15 @@ static bool CheckQKVLengthEqual(const rtp_llm::GptInitParameter& params)  {
         RTP_LLM_LOG_INFO("QKV length not equal: use kv cache reuse");
         return false;
     }
-    if (sp_model_env != nullptr){
+    if (!GlobalConfig::get().sp_config.sp_model_type.empty()){
         RTP_LLM_LOG_INFO("QKV length not equal: use sp_model");
         return false;
     }
-    if (multi_task_prompt_env && strcmp(multi_task_prompt_env, "") != 0) {
+    if (multi_task_prompt_env != "") {
         RTP_LLM_LOG_INFO("QKV length not equal: use multi_task_prompt");
         return false;
     }
-    if (multi_task_prompt_str_env && strcmp(multi_task_prompt_str_env, "") != 0) {
+    if (multi_task_prompt_str_env != "") {
         RTP_LLM_LOG_INFO("QKV length not equal: use multi_task_prompt_str");
         return false;
     }

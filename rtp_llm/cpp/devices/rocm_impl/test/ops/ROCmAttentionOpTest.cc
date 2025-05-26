@@ -18,7 +18,8 @@ using namespace rtp_llm;
 TEST_F(AttentionOpTest, SelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
     printf("Runing SelfAttentionOpTest\n");
-    setenv("ENABLE_MULTI_BLOCK_MODE", "OFF", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.hw_kernel_config.enable_multi_block_mode = false;
     device_ = new ROCmDevice(DeviceInitParams());
     device_->init();
     // ASSERT_FALSE(static_cast<ROCmDevice*>(device_)->use_multi_block_mode);
@@ -44,7 +45,8 @@ TEST_F(AttentionOpTest, SelfAttentionOpTest) {
 
 TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
-    setenv("ENABLE_MULTI_BLOCK_MODE", "ON", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.hw_kernel_config.enable_multi_block_mode = true;
     device_ = new ROCmDevice(DeviceInitParams());
     device_->init();
     // ASSERT_TRUE(static_cast<ROCmDevice*>(device_)->use_multi_block_mode);
@@ -70,9 +72,10 @@ TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
 
 TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     printf("Runing ContextAttentionOpTest\n");
-    setenv("ENABLE_TRT_FMHA", "OFF", 1);
-    setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
-    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.fmha_config.enable_trt_fmha = false;
+    config_collection.fmha_config.enable_trtv1_fmha = false;
+    config_collection.fmha_config.enable_open_source_fmha = false;
     device_ = new ROCmDevice(DeviceInitParams());
     device_->init();
     // ASSERT_TRUE(!static_cast<ROCmDevice*>(device_)->use_trtv2_fmha);

@@ -13,6 +13,7 @@ from rtp_llm.config.task_type import TaskType, check_task_type
 from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
 from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
 from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode
+from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, preset_quant_config
 
@@ -230,12 +231,13 @@ class GptInitModelParameters:
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
+    sync_status_interval_ms: int
     tokenizer_path: str
     tp_nccl_port: int
-    num_nodes: int
     tp_rank: int
     tp_size: int
     type_vocab_size: int
+    use_all_gather: bool
     use_attention_linear_bias: bool
     use_cache_store: bool
     use_cross_attn: bool
@@ -258,6 +260,24 @@ class GptInitModelParameters:
     world_size: int
     quant_config: QuantizationConfig
 
+    batch_decode_scheduler_config: BatchDecodeSchedulerConfig
+    cache_store_config: CacheStoreConfig
+    concurrency_config: ConcurrencyConfig
+    device_resource_config: DeviceResourceConfig
+    fifo_scheduler_config: FIFOSchedulerConfig
+    fmha_config: FMHAConfig
+    hw_kernel_config: HWKernelConfig
+    kv_cache_config: KVCacheConfig
+    misc_config: MiscellaneousConfig
+    model_specific_config: ModelSpecificConfig
+    moe_config: MoeConfig
+    parallelism_distributed_config: ParallelismDistributedConfig
+    profiling_debug_logging_config: ProfilingDebugLoggingConfig
+    sampler_config: SamplerConfig
+    scheduler_config: SchedulerConfig
+    service_discovery_config: ServiceDiscoveryConfig
+    speculative_decoding_config: SpeculativeExecutionConfig
+
     def __init__(self,
                  head_num: int,
                  size_per_head: int,
@@ -275,6 +295,7 @@ class GptInitModelParameters:
             "activation_type": "setActivationType",
             "kv_cache_data_type": "setKvCacheDataType"
         }
+        self.update_gpt_init_params_from_env()
         self.has_lm_head_bias = False
         self.normalize_lm_head_weight = False
         self.src_quantization_bit = 0
@@ -357,6 +378,171 @@ class GptInitModelParameters:
                     f"{member.cache_store_rdma_listen_port} to local rank {self.local_rank}, world rank {member.world_rank}")
         self.worker_grpc_addrs = worker_grpc_addrs
         self.worker_addrs = worker_addrs
+
+    def update_gpt_init_params_from_env(self):
+        ## after setup_args, update gpt init params XXXConfig from env
+        """
+        从环境变量读取所有 Config 字段，未设置的int/float为-1，str为""，bool为False
+        """
+        def get_env_int(name:str, default:int=-1):
+            v = os.environ.get(name, None)
+            return int(v) if v is not None and v != "" else default
+
+        def get_env_str(name:str, default:str=""):
+            v = os.environ.get(name, None)
+            return v if v is not None else default
+
+        def get_env_bool(name:str, default:bool=False):
+            ## in fact, we can always get value from env, if that's not specified, we return default value
+            v = os.environ.get(name, None)
+            if v is None or v == "":
+                return default
+            return v.lower() == "1" or v.lower() == "on" or v.lower() == "true" 
+
+        # ParallelismDistributedConfig
+        self.gpt_init_params.parallelism_distributed_config = ParallelismDistributedConfig(
+            tp_size=g_parallel_info.tp_size,
+            ep_size=g_parallel_info.ep_size,
+            dp_size=g_parallel_info.dp_size,
+            world_size=g_parallel_info.world_size,
+            world_rank=g_parallel_info.world_rank,
+            local_world_size=g_parallel_info.local_world_size,
+            pp_size=g_parallel_info.pp_size,
+        )
+        logging.info(f"parallelism_distributed_config.world_size: {self.gpt_init_params.parallelism_distributed_config.world_size}")
+        
+        # CacheStoreConfig
+        self.gpt_init_params.cache_store_config = CacheStoreConfig(
+            cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", False),
+            wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
+            rank_factor=get_env_int("RANK_FACTOR", 0),
+        )
+        
+        # ConcurrencyConfig
+        self.gpt_init_params.concurrency_config = ConcurrencyConfig(
+            concurrency_with_block=get_env_bool("CONCURRENCY_WITH_BLOCK",False),
+            concurrency_limit=get_env_int("CONCURRENCY_LIMIT",32),
+        )
+
+        # FMHAConfig
+        self.gpt_init_params.fmha_config = FMHAConfig(
+            enable_fmha=get_env_bool("ENABLE_FMHA", True),
+            enable_trt_fmha=get_env_bool("ENABLE_TRT_FMHA", True),
+            enable_paged_trt_fmha=get_env_bool("ENABLE_PAGED_TRT_FMHA", True),
+            enable_open_source_fmha=get_env_bool("ENABLE_OPENSOURCE_FMHA", True),
+            enable_paged_open_source_fmha=get_env_bool("ENABLE_PAGED_OPEN_SOURCE_FMHA", True),
+            enable_trtv1_fmha=get_env_bool("ENABLE_TRTV1_FMHA", True),
+            fmha_perf_instrument=get_env_bool("FMHA_PERF_INSTRUMENT",False),
+            fmha_show_params=get_env_bool("FMHA_SHOW_PARAMS",False),
+            disable_flash_infer=get_env_bool("DISABLE_FLASH_INFER",False),
+            enable_xqa=get_env_bool("ENABLE_XQA", True),
+        )
+
+        # KVCacheConfig
+        self.gpt_init_params.kv_cache_config = KVCacheConfig(
+            reuse_cache=get_env_bool("REUSE_CACHE",False),
+            multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
+            multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
+        )
+
+        # ProfilingDebugLoggingConfig
+        self.gpt_init_params.profiling_debug_logging_config = ProfilingDebugLoggingConfig(
+            ft_nvtx=get_env_bool("FT_NVTX", False),
+            py_inference_log_response=get_env_bool("PY_INFERENCE_LOG_RESPONSE",False),
+            rtp_llm_trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
+            rtp_llm_trace_malloc_stack=get_env_bool("RTP_LLM_TRACE_MALLOC_STACK", False),
+            enable_device_perf=get_env_bool("ENABLE_DEVICE_PERF", False),
+            ft_core_dump_on_exception=get_env_bool("FT_CORE_DUMP_ON_EXCEPTION", False),
+            ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
+            log_level=get_env_str("LOG_LEVEL", "INFO"),
+        )
+
+        # HWKernelConfig
+        self.gpt_init_params.hw_kernel_config = HWKernelConfig(
+            deep_gemm_num_sm=get_env_int("DEEP_GEMM_NUM_SM"),
+            arm_gemm_use_kai=get_env_bool("ARM_GEMM_USE_KAI"),
+            enable_stable_scatter_add=get_env_bool("ENABLE_STABLE_SCATTER_ADD", False),
+            enable_multi_block_mode=get_env_bool("ENABLE_MULTI_BLOCK_MODE", True),
+            rocm_hipblaslt_config=get_env_str("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"),
+        )
+
+        # DeviceResourceConfig
+        self.gpt_init_params.device_resource_config = DeviceResourceConfig(
+            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES",0),
+            host_reserve_memory_bytes=get_env_int("HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024),
+            overlap_math_sm_count=get_env_int("OVERLAP_MATH_SM_COUNT",0),
+            overlap_comm_type=get_env_int("OVERLAP_COMM_TYPE",0),
+            m_split=get_env_int("M_SPLIT",0),
+            enable_comm_overlap=get_env_bool("ENABLE_COMM_OVERLAP", True),
+            enable_layer_micro_batch=get_env_int("ENABLE_LAYER_MICRO_BATCH",0),
+            not_use_default_stream=get_env_bool("NOT_USE_DEFAULT_STREAM",False),
+        )
+
+        # MoeConfig
+        self.gpt_init_params.moe_config = MoeConfig(
+            use_deepep_moe=get_env_bool("USE_DEEPEP_MOE",False),
+            use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE",False),
+            use_deepep_low_latency=get_env_bool("USE_DEEPEP_LOW_LATENCY", True),
+            eplb_control_step=get_env_int("EPLB_CONTROL_STEP",100),
+            eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
+            eplb_test_mode=get_env_bool("EPLB_TEST_MODE",False),
+            fake_balance_expert=get_env_bool("FAKE_BALANCE_EXPERT",False),
+        )
+
+        # ModelSpecificConfig
+        self.gpt_init_params.model_specific_config = ModelSpecificConfig(
+            max_lora_model_size=get_env_int("MAX_LORA_MODEL_SIZE"),
+        )
+
+        # ServiceDiscoveryConfig
+        self.gpt_init_params.service_discovery_config = ServiceDiscoveryConfig(
+            use_local=get_env_bool("USE_LOCAL"),
+            remote_rpc_server_ip=get_env_str("REMOTE_RPC_SERVER_IP"),
+            rtp_llm_decode_cm2_config=get_env_str("RTP_LLM_DECODE_CM2_CONFIG"),
+            remote_vit_server_ip=get_env_str("REMOTE_VIT_SERVER_IP"),
+            rtp_llm_multimodal_part_cm2_config=get_env_str("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"),
+        )
+
+        # SchedulerConfig
+        self.gpt_init_params.scheduler_config = SchedulerConfig(
+            use_batch_decode_scheduler=get_env_bool("USE_BATCH_DECODE_SCHEDULER"),
+        )
+
+        # BatchDecodeSchedulerConfig
+        self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(
+            batch_decode_scheduler_batch_size=get_env_int("BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1),
+        )
+
+        # FIFOSchedulerConfig
+        self.gpt_init_params.fifo_scheduler_config = FIFOSchedulerConfig(
+            max_context_batch_size=get_env_int("MAX_CONTEXT_BATCH_SIZE", 1),
+            scheduler_reserve_resource_ratio=get_env_int("SCHEDULER_RESERVE_RESOURCE_RATIO", 5),
+            enable_fast_gen=get_env_bool("ENABLE_FAST_GEN", False),
+            enable_partial_fallback=get_env_bool("ENABLE_PARTIAL_FALLBACK", False),
+            fast_gen_context_budget=get_env_int("FAST_GEN_MAX_CONTEXT_LEN", 0),
+        )
+
+        # SamplerConfig
+        self.gpt_init_params.sampler_config = SamplerConfig(
+            max_batch_size=get_env_int("SAMPLER_MAX_BATCH_SIZE", 0),
+            enable_flashinfer_sample_kernel=get_env_bool("ENABLE_FLASHINFER_SAMPLE_KERNEL", True),
+        )
+
+        # SpeculativeExecutionConfig
+        self.gpt_init_params.sp_config = SpeculativeExecutionConfig(
+            sp_model_type=get_env_str("SP_MODEL_TYPE", ""),
+            sp_type=get_env_str("SP_TYPE", ""),
+            sp_min_token_match=get_env_int("SP_MIN_TOKEN_MATCH", 2),
+            sp_max_token_match=get_env_int("SP_MAX_TOKEN_MATCH", 2),
+            tree_decode_config=get_env_str("TREE_DECODE_CONFIG", ""),
+        )
+
+        # MiscellaneousConfig
+        self.gpt_init_params.misc_config = MiscellaneousConfig(
+            load_balance=get_env_int("LOAD_BALANCE",0),
+            step_records_time_range=get_env_int("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000),
+            step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
+        )
 
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None

@@ -1,12 +1,13 @@
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 namespace rtp_llm {
 
 // default 1 minute and 1000
 const size_t StepRecorder::STEP_RECORDS_TIME_RANGE =
-    autil::EnvUtil::getEnv("STEP_RECORDS_TIME_RANGE", 60l * 1000 * 1000);
-const size_t StepRecorder::STEP_RECORDS_MAX_SIZE = autil::EnvUtil::getEnv("STEP_RECORDS_MAX_SIZE", 1000);
+    GlobalConfig::get().misc_config.step_records_time_range;
+const size_t StepRecorder::STEP_RECORDS_MAX_SIZE = GlobalConfig::get().misc_config.step_records_max_size;
 
 PIController::PIController(float kp, float ki): kp_(kp), ki_(ki) {}
 

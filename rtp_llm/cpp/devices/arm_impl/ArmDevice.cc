@@ -44,7 +44,7 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
         allocator_.reset(allocator_ptr);
     }
 
-    if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
+    if (!GlobalConfig::get().hw_kernel_config.arm_gemm_use_kai) {
         isKAIenabled = false;
         gemmFunc = &ArmCpuDevice::gemm_opt;
     } else {

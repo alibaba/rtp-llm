@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/utils/QuantInfo.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <vector>
 #include <map>
 
@@ -248,13 +248,32 @@ public:
     //multi machine
     std::vector<std::string> worker_addrs_;
     std::vector<std::string> worker_grpc_addrs_;
+    // GlobalConfig replication
+    ParallelismDistributedConfig parallelism_distributed_config;
+    ConcurrencyConfig concurrency_config;
+    FMHAConfig  fmha_config;
+    KVCacheConfig kv_cache_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    DeviceResourceConfig device_resource_config;
+    SamplerConfig sampler_config;
+    MoeConfig moe_config;
+    ModelSpecificConfig  model_specific_config;
+    SpeculativeExecutionConfig sp_config;
+    ServiceDiscoveryConfig service_discovery_config;
+    CacheStoreConfig cache_store_config;
+    SchedulerConfig scheduler_config;
+    BatchDecodeSchedulerConfig batch_decode_scheduler_config;
+    FIFOSchedulerConfig fifo_scheduler_config;
+    MiscellaneousConfig misc_config;
 
     GptInitParameter();
 
     GptInitParameter(
         int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len,
         int64_t vocab_size, int64_t hidden_size);
-
+    
+    void showDebugInfo() const;
     void insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     void setLayerNormType();
     void setNormType();

@@ -11,6 +11,8 @@ class NcclOp: public th::jit::CustomClassHolder {
 public:
     NcclOp(const int64_t     tensor_para_size,
            const int64_t     pipeline_para_size,
+           const int64_t     world_size,
+           const int64_t     world_rank,
            const std::string master_ip,
            const int64_t     master_port);
 

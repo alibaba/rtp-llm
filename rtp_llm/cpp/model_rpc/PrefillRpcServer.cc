@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -95,14 +96,11 @@ void PrefillRpcServer::initLoadBalancer() {
 }
 
 LoadBalancerInitParams PrefillRpcServer::makeConfig() {
-    char* use_local_env = std::getenv("USE_LOCAL");
     SubscribeServiceConfig subscribe_config;
-    if (use_local_env) {
+    if (GlobalConfig::get().service_discovery_config.use_local) {
         // fake test
-        char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-        RTP_LLM_CHECK_WITH_INFO(remote_rpc_server_ip_env, "rpc server ip must be not empty");
 
-        vector<string> remote_addrs = split(string(remote_rpc_server_ip_env), ',');
+        vector<string> remote_addrs = split(GlobalConfig::get().service_discovery_config.remote_rpc_server_ip, ',');
         RTP_LLM_CHECK_WITH_INFO(!remote_addrs.empty(), "REMOTE_RPC_SERVER_IP contains no valid addresses");
 
         decode_cluster_name_ = "LOCAL";
@@ -138,9 +136,8 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
 
         subscribe_config.local_configs.push_back(local_config);
     } else {
-        char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
-        RTP_LLM_CHECK_WITH_INFO(decode_cm2_config_env, "decode_cm2_config_env must be not empty");
-        string decode_cm2_config_str = string(decode_cm2_config_env);
+        string decode_cm2_config_str = GlobalConfig::get().service_discovery_config.rtp_llm_decode_cm2_config;
+        RTP_LLM_CHECK_WITH_INFO(!decode_cm2_config_str.empty(), "decode_cm2_config must be not empty");
 
         Cm2ClusterConfig decode_cm2_config;
         try {

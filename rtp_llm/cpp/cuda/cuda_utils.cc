@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <cuda.h>
 
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include <mutex>
 #include <stdio.h>
 #include <stdlib.h>
@@ -399,8 +400,8 @@ bool shared_mem_sufficient(int smem_size) {
 }
 
 bool should_print() {
-    static char* tp_rank = std::getenv("WORLD_RANK");
-    if (tp_rank && (strcmp(tp_rank, "0") != 0)) {
+    int tp_rank = GlobalConfig::get().parallelism_distributed_config.world_rank;
+    if (tp_rank != 0) {
         return false;
     }
 
@@ -670,8 +671,8 @@ void print_bsd_sum_and_square(const int   layer_id,
         return;
     }
 
-    static char* tp_rank = std::getenv("WORLD_RANK");
-    if (tp_rank && (strcmp(tp_rank, "0") != 0 && strcmp(tp_rank, "1") != 0)) {
+    auto tp_rank = GlobalConfig::get().parallelism_distributed_config.world_rank;
+    if (tp_rank != 0 && tp_rank != 1) {
         return;
     }
 
@@ -691,7 +692,7 @@ void print_bsd_sum_and_square(const int   layer_id,
             double sum1 = 0;
             double sum2 = 0;
             for (int k = start; k < end; k++) {
-                printf("layer_id: %d %s [%d %d %d %d], rank = %s, k = %d, value = %f ",
+                printf("layer_id: %d %s [%d %d %d %d], rank = %d, k = %d, value = %f ",
                        layer_id,
                        name,
                        batch_size,
@@ -704,7 +705,7 @@ void print_bsd_sum_and_square(const int   layer_id,
                 sum1 += float(md_array_ptr[i][j][k]);
                 sum2 += float(md_array_ptr[i][j][k]) * float(md_array_ptr[i][j][k]);
             }
-            printf("\nlayer_id: %d %s [%d %d %d %d], rank = %s, sum1 = %f, square sum2 = %lf\n",
+            printf("\nlayer_id: %d %s [%d %d %d %d], rank = %d, sum1 = %f, square sum2 = %lf\n",
                    layer_id,
                    name,
                    batch_size,

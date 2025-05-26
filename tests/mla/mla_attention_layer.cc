@@ -39,7 +39,8 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                int64_t hidden_size,
                                double  softmax_extra_scale) {
     rtp_llm::initLogger();
-
+    // Todo(tanboyu.tby): Need to remove GptInitParameter, only use GlobalConfig
+    GlobalConfig::update_from_env_for_test();
     rtp_llm::DeviceFactory::initDevices(GptInitParameter());
     device_      = rtp_llm::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({

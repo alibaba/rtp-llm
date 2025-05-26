@@ -6,13 +6,29 @@
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-
 using namespace rtp_llm;
 
 namespace torch_ext {
 PYBIND11_MODULE(libth_transformer, m) {
     rtp_llm::registerLoadBalanceInfo(m);
     rtp_llm::registerEngineScheduleInfo(m);
+    register_parallelism_distributed_config(m);
+    register_concurrency_config(m);
+    register_fmha_config(m);
+    register_kvcache_config(m);
+    register_profiling_debug_logging_config(m);
+    register_hwkernel_config(m);
+    register_device_resource_config(m);
+    register_sampler_config(m);
+    register_moe_config(m);
+    register_model_specific_config(m);
+    register_speculative_execution_config(m);
+    register_service_discovery_config(m);
+    register_cache_store_config(m);
+    register_scheduler_config(m);
+    register_batch_decode_scheduler_config(m);
+    register_fifo_scheduler_config(m);
+    register_misc_config(m);   
     registerGptInitParameter(m);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);

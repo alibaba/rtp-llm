@@ -53,7 +53,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
 }
 
 void NormalEngine::initScheduler() {
-    if (getenv("USE_BATCH_DECODE_SCHEDULER") && std::string(getenv("USE_BATCH_DECODE_SCHEDULER")) == "1") {
+    if (GlobalConfig::get().scheduler_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {

@@ -96,6 +96,7 @@ cc_library(
         "//rtp_llm/cpp/kernels:kernels_cu",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
+        "//:gpt_init_params",
     ],
     copts = copts(),
     include_prefix = "src",
@@ -141,7 +142,9 @@ cc_library(
                            "@local_config_cuda//cuda:cudart",],
         "@//:using_rocm": ["//rtp_llm/cpp/rocm:rocm_utils"],
         "//conditions:default": [],
-    }),
+    }) 
+    + ["//:gpt_init_params"]
+    ,
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -248,6 +251,7 @@ cc_library(
         "//rtp_llm/cpp/core:types",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
+        "//:gpt_init_params",
     ],
     copts = copts(),
     include_prefix = "src",

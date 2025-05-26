@@ -27,6 +27,8 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     rtp_llm::EngineInitParams params = initModel(model);
+    RTP_LLM_LOG_INFO("init engine params success");
+    params.showGptInitParameter();
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
     pybind11::gil_scoped_release release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer, this,

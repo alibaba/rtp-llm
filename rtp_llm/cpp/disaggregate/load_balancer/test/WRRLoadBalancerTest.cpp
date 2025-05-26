@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/http_server/http_server/HttpServer.h"
 #include "autil/NetUtil.h"
 #include "autil/StringUtil.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 namespace rtp_llm {
 class WRRLoadBalancerTest: public ::testing::Test {
 public:
@@ -117,7 +117,8 @@ TEST_F(WRRLoadBalancerTest, testChooseHost) {
 
 TEST_F(WRRLoadBalancerTest, testChangeWeight) {
     // 10 host* 200 available kv cache, 20 host* 400 available kv cache
-    autil::EnvUtil::setEnv("WRR_AVAILABLE_RATIO", "0");
+    ConfigCollection& config_collection =  GlobalConfig::get();
+    config_collection.cache_store_config.wrr_available_ratio = 0;
     initTest();
 
     sleep(5);

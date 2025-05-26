@@ -7,7 +7,7 @@ namespace rtp_llm {
 namespace lora {
 
 LoraManager::LoraManager() {
-    max_lora_model_size_ = autil::EnvUtil::getEnv("MAX_LORA_MODEL_SIZE", -1);
+    max_lora_model_size_ = GlobalConfig::get().model_specific_config.max_lora_model_size;
 }
 
 rtp_llm::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {

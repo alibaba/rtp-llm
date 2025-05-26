@@ -58,7 +58,6 @@ inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
 typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreStoreDoneCallback;
 typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreLoadDoneCallback;
 typedef std::function<void(bool)>                      WriteBlockDoneCallback;
-
 const std::string kEnvRdmaMode     = "CACHE_STORE_RDMA_MODE";
 const std::string kEnvRdmaWriteBlockConcat = "CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT";
 const uint32_t    kTcpRdmaPortDiff = 100;

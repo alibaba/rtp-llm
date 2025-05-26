@@ -1,4 +1,5 @@
 #include "hipblasMMWrapper.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 namespace rtp_llm {
 namespace rocm {
@@ -10,8 +11,8 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
     hipblas_handle_(hipblas_handle), hipblaslt_handle_(hipblaslt_handle), stream_(stream), allocator_(allocator) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     hipblas_workspace_ = allocator_->malloc(HIPBLAS_WORKSPACE_SIZE);
-    const char* config_path = std::getenv("ROCM_HIPBLASLT_CONFIG");
-    if (config_path == nullptr) {
+    std::string config_path = GlobalConfig::get().hw_kernel_config.rocm_hipblaslt_config;
+    if (config_path.empty()) {
         RTP_LLM_LOG_WARNING("ROCM_HIPBLASLT_CONFIG not set. Defaulting to gemm_config.csv.");
         config_path = "gemm_config.csv";
     }

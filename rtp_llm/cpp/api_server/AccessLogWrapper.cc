@@ -1,8 +1,8 @@
 #include <sstream>
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "autil/TimeUtility.h"
-
 using namespace autil::legacy::json;
 using namespace autil::legacy;
 
@@ -129,11 +129,7 @@ bool AccessLogWrapper::logResponse() {
     static bool checked = false;
     static bool log_response = false;
     if (!checked) {
-        if (autil::EnvUtil::getEnv("PY_INFERENCE_LOG_RESPONSE", 0) == 1) {
-            log_response = true;
-        } else {
-            log_response = false;
-        }
+        log_response = GlobalConfig::get().profiling_debug_logging_config.py_inference_log_response;
         checked = true;
     }
     return log_response;

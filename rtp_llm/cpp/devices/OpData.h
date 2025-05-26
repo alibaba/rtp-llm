@@ -15,7 +15,7 @@
 #include "rtp_llm/cpp/utils/layernorm_types.h"
 #include "rtp_llm/cpp/utils/EnumUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include <cstddef>
 #include <optional>
 #include <functional>
@@ -82,7 +82,7 @@ public:
         RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
         ss << stack;
         detail_str_ = ss.str();
-        if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+        if (GlobalConfig::get().profiling_debug_logging_config.ft_core_dump_on_exception) {
             fflush(stdout);
             fflush(stderr);
             abort();

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/devices/arm_impl/ArmDevice.h"
 #include "rtp_llm/cpp/models_weight/W.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/kai_matmul_clamp_f32_bf16p_bf16p_interface.h"
 #include "kai/ukernels/matmul/matmul_clamp_f16_bf16p_bf16p/kai_matmul_clamp_f16_bf16p8x4_bf16p12x4b_8x12_neon_mmla.h"
@@ -123,7 +124,7 @@ static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32
 
 ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
     if (armPrepareWeightFunc == nullptr) {
-        if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
+        if (!GlobalConfig::get().hw_kernel_config.arm_gemm_use_kai) {
             armPrepareWeightFunc = prepareGemmOptWeight;
         } else {
             RTP_LLM_LOG_INFO("KleidiAI enabled.\n");

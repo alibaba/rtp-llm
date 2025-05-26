@@ -7,7 +7,7 @@
 
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 namespace rtp_llm {
 
 [[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
@@ -22,7 +22,7 @@ namespace rtp_llm {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
     RTP_LLM_LOG_ERROR("FATAIL ERROR!!! %s", error_msg.c_str());
-    if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+    if (GlobalConfig::get().profiling_debug_logging_config.ft_core_dump_on_exception) {
         fflush(stdout);
         fflush(stderr);
         abort();

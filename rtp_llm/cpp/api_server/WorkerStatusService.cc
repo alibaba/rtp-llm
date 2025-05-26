@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/api_server/WorkerStatusService.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 using namespace autil::legacy;
 using namespace autil::legacy::json;
@@ -7,7 +8,7 @@ namespace rtp_llm {
 
 WorkerStatusService::WorkerStatusService(const std::shared_ptr<EngineBase>&            engine,
                                          const std::shared_ptr<ConcurrencyController>& controller):
-    engine_(engine), controller_(controller), load_balance_env_(autil::EnvUtil::getEnv("LOAD_BALANCE", 0)) {}
+    engine_(engine), controller_(controller), load_balance_env_(GlobalConfig::get().misc_config.load_balance) {}
 
 void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                        const http_server::HttpRequest&                         request) {

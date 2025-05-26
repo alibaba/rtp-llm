@@ -1,5 +1,5 @@
 #pragma once
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "autil/EnvUtil.h"
 
 namespace rtp_llm {
@@ -24,13 +24,14 @@ public:
 public:
     static ParallelInfo& globalParallelInfo() {
 
-        int tp_size          = autil::EnvUtil::getEnv("TP_SIZE", 1);
-        int pp_size          = autil::EnvUtil::getEnv("PP_SIZE", 1);
-        int ep_size          = autil::EnvUtil::getEnv("EP_SIZE", 1);
-        int dp_size          = autil::EnvUtil::getEnv("DP_SIZE", 1);
-        int world_size       = autil::EnvUtil::getEnv("WORLD_SIZE", 1);
-        int world_rank       = autil::EnvUtil::getEnv("WORLD_RANK", 0);
-        int local_world_size = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
+        int tp_size          = GlobalConfig::get().parallelism_distributed_config.tp_size;
+        // in fact pipeline parallelism is not supported yet
+        int pp_size          = GlobalConfig::get().parallelism_distributed_config.pp_size;
+        int ep_size          = GlobalConfig::get().parallelism_distributed_config.ep_size;
+        int dp_size          = GlobalConfig::get().parallelism_distributed_config.dp_size;
+        int world_size       = GlobalConfig::get().parallelism_distributed_config.world_size;
+        int world_rank       = GlobalConfig::get().parallelism_distributed_config.world_rank;
+        int local_world_size = GlobalConfig::get().parallelism_distributed_config.local_world_size;
 
         static ParallelInfo parallel_info(tp_size, pp_size, ep_size, dp_size, world_size, world_rank, local_world_size);
         return parallel_info;
@@ -78,13 +79,14 @@ public:
     }
     // only for test
     void reload() {
-        tp_size_          = autil::EnvUtil::getEnv("TP_SIZE", 1);
-        pp_size_          = autil::EnvUtil::getEnv("PP_SIZE", 1);
-        dp_size_          = autil::EnvUtil::getEnv("DP_SIZE", 1);
-        ep_size_          = autil::EnvUtil::getEnv("EP_SIZE", 1);
-        world_size_       = autil::EnvUtil::getEnv("WORLD_SIZE", 1);
-        world_rank_       = autil::EnvUtil::getEnv("WORLD_RANK", 0);
-        local_world_size_ = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
+        tp_size_          = GlobalConfig::get().parallelism_distributed_config.tp_size;
+        // in fact pipeline parallelism is not supported yet
+        pp_size_         =  GlobalConfig::get().parallelism_distributed_config.pp_size;
+        ep_size_          = GlobalConfig::get().parallelism_distributed_config.ep_size;
+        dp_size_          = GlobalConfig::get().parallelism_distributed_config.dp_size;
+        world_size_       = GlobalConfig::get().parallelism_distributed_config.world_size;
+        world_rank_       = GlobalConfig::get().parallelism_distributed_config.world_rank;
+        local_world_size_ = GlobalConfig::get().parallelism_distributed_config.local_world_size;
     }
 
 private:

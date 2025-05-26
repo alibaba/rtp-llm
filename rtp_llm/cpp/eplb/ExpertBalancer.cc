@@ -2,6 +2,7 @@
 #include <thread>
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 
 using namespace std;
 
@@ -98,11 +99,7 @@ bool LoadFlags::isReady(DeviceBase* device) {
 void EplbController::init(const EplbConfig& eplb_control_data, DeviceBase* device) {
     this->eplb_control_data = eplb_control_data;
 
-    // load control step from env
-    const char* control_step_env = getenv("EPLB_CONTROL_STEP");
-    if (control_step_env != nullptr) {
-        control_step = atoi(control_step_env);
-    }
+    control_step = GlobalConfig::get().moe_config.eplb_control_step;
     RTP_LLM_LOG_INFO("EPLB control step: %d", control_step);
 
     auto eplb_control_data_list = eplb_control_data.toList();
@@ -188,15 +185,9 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     load_flags_.setReady(false, device_);
     eplb_controller_.init(eplb_control_data_, device);
 
-    const char* eplb_test_mode = getenv("EPLB_TEST_MODE");
-    if (eplb_test_mode) {
-        test_mode_ = strcmp(eplb_test_mode, "0") != 0;
-    }
+    test_mode_ = GlobalConfig::get().moe_config.eplb_test_mode;
 
-    const char* balance_layer_per_step_str = getenv("EPLB_BALANCE_LAYER_PER_STEP");
-    if (balance_layer_per_step_str) {
-        balance_layer_per_step_ = atoi(balance_layer_per_step_str);
-    }
+    balance_layer_per_step_ = GlobalConfig::get().moe_config.eplb_balance_layer_per_step;
 
     resetPlan(true);
 }

@@ -85,8 +85,9 @@ public:
     }
 
     virtual void initTestDevices() {
-        autil::EnvUtil::setEnv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(device_reserve_memory_size_));
-        autil::EnvUtil::setEnv("HOST_RESERVE_MEMORY_BYTES", std::to_string(host_reserve_memory_size_));
+        ConfigCollection& config_collection =  GlobalConfig::get();
+        config_collection.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
+        config_collection.device_resource_config.host_reserve_memory_bytes = host_reserve_memory_size_;
         rtp_llm::DeviceFactory::initDevices(rtp_llm::GptInitParameter());
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }

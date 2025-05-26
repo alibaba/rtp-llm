@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "autil/EnvUtil.h"
 #include <cassert>
 
@@ -81,36 +82,36 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
 
-    device_params.overlap_math_sm_count = autil::EnvUtil::getEnv("OVERLAP_MATH_SM_COUNT", 0UL);
-    device_params.overlap_comm_type = autil::EnvUtil::getEnv("OVERLAP_COMM_TYPE", 0UL);
+    device_params.overlap_math_sm_count = GlobalConfig::get().device_resource_config.overlap_math_sm_count;
+    device_params.overlap_comm_type = GlobalConfig::get().device_resource_config.overlap_comm_type;
     device_params.max_seq_len       = params.max_seq_len_;
     RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.overlap_comm_type);
-    device_params.m_split = autil::EnvUtil::getEnv("M_SPLIT", 0UL);
+    device_params.m_split = GlobalConfig::get().device_resource_config.m_split;
     device_params.max_generate_batch_size = params.max_generate_batch_size_;
     device_params.max_batch_size =
-        std::max((size_t)autil::EnvUtil::getEnv("MAX_BATCH_SIZE", 0L), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
+        std::max(static_cast<size_t>(GlobalConfig::get().sampler_config.max_batch_size), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 
-    const auto device_mem_reserve_env = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0L);
+    const auto device_mem_reserve_env = GlobalConfig::get().device_resource_config.device_reserve_memory_bytes;
     RTP_LLM_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);
     device_params.device_reserve_memory_bytes = device_mem_reserve_env
                                                 ? device_mem_reserve_env
                                                 : getDefaultDeviceReserveMemoryBytes(params);
     RTP_LLM_LOG_INFO("Device reserve memory bytes: %ld", device_params.device_reserve_memory_bytes);
 
-    device_params.host_reserve_memory_bytes = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", (int64_t)(4L * 1024 * 1024 * 1024)); // 4GB
+    device_params.host_reserve_memory_bytes = GlobalConfig::get().device_resource_config.host_reserve_memory_bytes; // 4GB
     RTP_LLM_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
 
-    device_params.enable_comm_overlap = autil::EnvUtil::getEnv("ENABLE_COMM_OVERLAP", 1L);
-    device_params.enable_layer_micro_batch = static_cast<MicroBatchType>(autil::EnvUtil::getEnv("ENABLE_LAYER_MICRO_BATCH", 0));
+    device_params.enable_comm_overlap = GlobalConfig::get().device_resource_config.enable_comm_overlap;
+    device_params.enable_layer_micro_batch = static_cast<MicroBatchType>(GlobalConfig::get().device_resource_config.enable_layer_micro_batch);
 
     RTP_LLM_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                 device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
 
-    device_params.use_deepep_moe = autil::EnvUtil::getEnv("USE_DEEPEP_MOE", 0L);
-    device_params.use_deepep_internode = autil::EnvUtil::getEnv("USE_DEEPEP_INTERNODE", 0L);
-    device_params.use_deepep_low_latency = autil::EnvUtil::getEnv("USE_DEEPEP_LOW_LATENCY", 1L);
-    auto sp_type = autil::EnvUtil::getEnv("SP_TYPE", "");
-    auto sp_model_type = autil::EnvUtil::getEnv("SP_MODEL_TYPE", "");
+    device_params.use_deepep_moe = GlobalConfig::get().moe_config.use_deepep_moe;
+    device_params.use_deepep_internode = GlobalConfig::get().moe_config.use_deepep_internode;
+    device_params.use_deepep_low_latency = GlobalConfig::get().moe_config.use_deepep_low_latency;;
+    auto sp_type = GlobalConfig::get().sp_config.sp_type;
+    auto sp_model_type = GlobalConfig::get().sp_config.sp_model_type;
     RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
     RTP_LLM_LOG_INFO("device_params sp_model_type is %s", sp_model_type.c_str());
     if (((sp_type == "vanilla") && (sp_model_type == "mixtbstars-mtp"))      ||

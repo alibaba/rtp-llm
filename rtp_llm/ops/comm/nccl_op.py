@@ -18,6 +18,8 @@ class NcclOp():
         self.ft_op_ = torch.classes.RtpLlm.NcclOp( # type: ignore
             g_parallel_info.tp_size,
             g_parallel_info.pp_size,
+            g_parallel_info.world_size,
+            g_parallel_info.world_rank,
             g_master_info.ip,
             g_master_info.nccl_op_port)
 

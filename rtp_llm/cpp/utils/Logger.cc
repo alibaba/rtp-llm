@@ -20,11 +20,11 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 namespace rtp_llm {
 
 bool initLogger() {
-    std::string log_conf_file = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
+    std::string log_conf_file = GlobalConfig::get().profiling_debug_logging_config.ft_alog_conf_path;
     if ("" == log_conf_file) {
         std::string alog_conf_full_path = std::filesystem::current_path().string() + "/rtp_llm/config/alog.conf";
         bool exist = std::filesystem::exists(alog_conf_full_path);
@@ -64,7 +64,7 @@ Logger::Logger(const std::string& submodule_name) {
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
     }
-    std::string log_level = autil::EnvUtil::getEnv("LOG_LEVEL", "");
+    std::string& log_level = GlobalConfig::get().profiling_debug_logging_config.log_level;
     if (log_level != "") {
         uint32_t log_level = getLevelfromstr("LOG_LEVEL");
         logger_->setLevel(log_level);

@@ -110,13 +110,18 @@ void ftNcclInitialize(NcclParam&         tensor_para,
                       NcclParam&         pipeline_para,
                       const int          tensor_para_size,
                       const int          pipeline_para_size,
+                      const int64_t      world_size,
+                      const int64_t      world_rank,
                       const std::string& master_ip,
                       const int          master_port);
 
 void ftNcclInitialize(NcclParam& tensor_para,
                       NcclParam& pipeline_para,
                       const int  tensor_para_size,
-                      const int  pipeline_para_size);
+                      const int  pipeline_para_size,
+                      const int64_t      world_size,
+                      const int64_t      world_rank
+                    );
 
 std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream);
 

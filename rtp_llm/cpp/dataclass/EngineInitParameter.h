@@ -3,6 +3,7 @@
 #include <pybind11/pytypes.h>
 #include <tuple>
 
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/Weights.h"
@@ -20,18 +21,50 @@ using TensorMaps = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
 
+static void initialize(const rtp_llm::GptInitParameter& config) {
+    static std::once_flag flag;
+    std::call_once(flag, [&]() {
+        auto& global_config = GlobalConfig::get();
+        global_config.parallelism_distributed_config = config.parallelism_distributed_config;
+        global_config.scheduler_config = config.scheduler_config;
+        global_config.concurrency_config = config.concurrency_config;
+        global_config.fmha_config = config.fmha_config;
+        global_config.kv_cache_config = config.kv_cache_config;
+        global_config.profiling_debug_logging_config = config.profiling_debug_logging_config;
+        global_config.hw_kernel_config = config.hw_kernel_config;
+        global_config.device_resource_config = config.device_resource_config;
+        global_config.model_specific_config = config.model_specific_config;
+        global_config.service_discovery_config = config.service_discovery_config;
+        global_config.misc_config = config.misc_config;
+        global_config.sampler_config = config.sampler_config;
+        global_config.moe_config = config.moe_config;
+        global_config.sp_config = config.sp_config;
+        global_config.cache_store_config = config.cache_store_config;
+        global_config.batch_decode_scheduler_config = config.batch_decode_scheduler_config;
+        global_config.fifo_scheduler_config = config.fifo_scheduler_config;
+        RTP_LLM_LOG_INFO("\nGlobal GptInitParameter initialized.\n");
+    });
+}
+
 struct EngineInitParams: public th::jit::CustomClassHolder {
     EngineInitParams() {};
    // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(size_t                           model_id,
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
                      rtp_llm::Weights&&               gpt_weights):
-        model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {}
+        model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
+            initialize(gpt_init_parameter);
+    }
+
     size_t model_id;
     rtp_llm::GptInitParameter         gpt_init_parameter;
     rtp_llm::Weights                  gpt_weights;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+public:
+    void showGptInitParameter() {
+        gpt_init_parameter.showDebugInfo();
+    }
 };
 
 struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {

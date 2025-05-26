@@ -213,9 +213,6 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:flash_attn",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     exec_properties = {'gpu':'A10'},
 )
 
@@ -235,9 +232,6 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     exec_properties = {'gpu':'A10'},
 )
 
@@ -291,9 +285,6 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     tags = [
         "rocm",
     ],
@@ -313,9 +304,6 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     tags = [
         "rocm",
     ],
@@ -354,9 +342,6 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     tags = [
         "manual",
     ],
@@ -375,9 +360,6 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:rtp_llm_lib",
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
     tags = [
         "manual",
 		"rocm",

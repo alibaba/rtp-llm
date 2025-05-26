@@ -6,7 +6,7 @@
 #define private public
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-
+#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 using namespace std;
 using namespace rtp_llm;
 
@@ -190,7 +190,8 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
             part_sz_vec.push_back(s * h);
         }
 
-        setenv("FT_DISABLE_CUSTOM_AR", "0", 1);
+        ConfigCollection& config_collection =  GlobalConfig::get();
+        config_collection.misc_config.ft_disable_custom_ar = false;
         auto device = initTestDevices(rank, world_size, port2 + k);
         RTP_LLM_LOG_INFO("[Custom AR] Start hot run");
         executeBenchmarkRun(device, rank, world_size, 100, 0, 1024, false, false);
@@ -203,7 +204,7 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
             part_custom_ar_times.push_back(time);
         }
 
-        setenv("FT_DISABLE_CUSTOM_AR", "1", 1);
+        config_collection.misc_config.ft_disable_custom_ar = true;
 
         device = initTestDevices(rank, world_size, port + k);
         RTP_LLM_LOG_INFO("[NCCL] Start hot run");
