@@ -19,7 +19,6 @@ from rtp_llm.server.frontend_app import FrontendApp
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.distribute.worker_info import g_worker_info, g_parallel_info
-from rtp_llm.test.utils.port_util import get_consecutive_free_ports
 from rtp_llm.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from rtp_llm.ops import LoadBalanceInfo
 

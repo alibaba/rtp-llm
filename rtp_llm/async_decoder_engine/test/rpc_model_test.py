@@ -3,19 +3,18 @@ import time
 import socket
 import random
 import torch
-from contextlib import closing
 import unittest
-from unittest import TestCase, main
+from contextlib import closing
+from unittest import TestCase, main, mock
+from concurrent.futures import ThreadPoolExecutor
+
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
-from rtp_llm.test.utils.port_util import get_consecutive_free_ports
+from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.pipeline.pipeline import Pipeline
-from concurrent.futures import ThreadPoolExecutor
 from rtp_llm.distribute.worker_info import update_master_info, g_worker_info
 from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
-
-from unittest import mock
 
 os.environ['KV_CACHE_MEM_MB'] = '100'
 @mock.patch.dict('os.environ', {'RESERVER_RUNTIME_MEM_MB': '1', 'DEVICE_RESERVE_MEMORY_BYTES': str(64 * 1024 * 1024)})
@@ -28,7 +27,8 @@ class RpcModelTest(TestCase):
 
     def create_pipeline(self, max_seq_len: int = 100):
         set_global_controller(init_controller())
-        free_port = get_consecutive_free_ports(1)[0]
+        ports, _ = PortManager().get_consecutive_ports(1)
+        free_port = ports[0]
         os.environ['START_PORT'] = str(free_port)
         update_master_info("", free_port)
         g_worker_info.reload()

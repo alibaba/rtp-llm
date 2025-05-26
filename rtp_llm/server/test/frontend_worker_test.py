@@ -12,7 +12,7 @@ from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.distribute.worker_info import DEFAULT_START_PORT, update_master_info, g_worker_info
 
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
-from rtp_llm.test.utils.port_util import get_consecutive_free_ports
+from rtp_llm.test.utils.port_util import PortManager
 
 class FakeFrontendWorker(FrontendWorker):
     def __init__(self, model, pipeline):
@@ -32,7 +32,7 @@ class FrontendWorkerTest(TestCase):
         self.frontend_worker.stop()
 
     def create_frontend_worker(self):
-        port_list = get_consecutive_free_ports(1)
+        port_list, _ = PortManager().get_consecutive_ports(1)
         os.environ['START_PORT'] = str(port_list[0])
         update_master_info('0.0.0.0', int(port_list[0]))
         g_worker_info.reload()

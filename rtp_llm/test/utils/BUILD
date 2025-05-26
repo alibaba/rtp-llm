@@ -4,11 +4,18 @@ py_library(
     name = "device_resource",
     deps = [],
     srcs = ["device_resource.py"],
-    visibility = ["//visibility:public"],
 )
+
 py_library(
     name = "port_util",
     deps = [],
     srcs = ["port_util.py"],
-    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "port_util_test",
+    srcs = ["port_util_test.py"],
+    deps = [
+        ":port_util",
+    ],
 )

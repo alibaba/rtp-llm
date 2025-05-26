@@ -10,9 +10,9 @@ from multiprocessing import Process
 from io import TextIOWrapper
 import subprocess
 import os
-
-from rtp_llm.test.utils.port_util import get_consecutive_free_ports
 from concurrent.futures import ThreadPoolExecutor
+
+from rtp_llm.test.utils.port_util import PortsContext
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -41,16 +41,17 @@ class MasterStartTest(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.worker_port = get_consecutive_free_ports(1)[0]
-        cls.worker_process = cls._start_fake_sever(cls.worker_port, [])
-        cls.master_proc = cls._start_master(cls.worker_port)
-        try:
-            cls._check_server_start(cls.master_proc.port)
-        except:
-            with open(cls.master_proc.log_file_path) as f:
-                content = f.read()
-            logging.warning("----------------server output--------------------")
-            logging.warning(f"{content}")
+        with PortsContext(None, 1) as ports:
+            cls.worker_port = ports[0]
+            cls.worker_process = cls._start_fake_sever(cls.worker_port, [])
+            cls.master_proc = cls._start_master(cls.worker_port)
+            try:
+                cls._check_server_start(cls.master_proc.port)
+            except:
+                with open(cls.master_proc.log_file_path) as f:
+                    content = f.read()
+                logging.warning("----------------server output--------------------")
+                logging.warning(f"{content}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -73,18 +74,19 @@ class MasterStartTest(TestCase):
         os.makedirs(server_log_path, exist_ok=True)        
         log_file_path = os.path.join(server_log_path, "process.log")
 
-        random_port = get_consecutive_free_ports(1)[0]
-        args = ["/opt/conda310/bin/python", "-m", "rtpllm_master_py.entry"]
-        args.extend(["--local_port", str(worker_port)])
-        args.extend(["--port", str(random_port)])
-        args.extend(["--use_local", "1"])
-        args.extend(["--model_size", "7"])
-        args.extend(["--model_type", "FAKE_MODEL"])
-        args.extend(["--force_replace_data_dir", str(os.path.join(CUR_PATH, "testdata"))])
-        f = open(log_file_path, 'w')        
-        p = subprocess.Popen(args, stdout=f, stderr=f)
-        logging.info(f"master log write in file: {log_file_path}")
-        return ServerProcess(p, random_port, f, log_file_path)
+        with PortsContext(1) as ports:
+            random_port = ports[0]
+            args = ["/opt/conda310/bin/python", "-m", "rtpllm_master_py.entry"]
+            args.extend(["--local_port", str(worker_port)])
+            args.extend(["--port", str(random_port)])
+            args.extend(["--use_local", "1"])
+            args.extend(["--model_size", "7"])
+            args.extend(["--model_type", "FAKE_MODEL"])
+            args.extend(["--force_replace_data_dir", str(os.path.join(CUR_PATH, "testdata"))])
+            f = open(log_file_path, 'w')
+            p = subprocess.Popen(args, stdout=f, stderr=f)
+            logging.info(f"master log write in file: {log_file_path}")
+            return ServerProcess(p, random_port, f, log_file_path)
 
     @staticmethod
     def _check_server_start(port: int, timeout: int = 20):
