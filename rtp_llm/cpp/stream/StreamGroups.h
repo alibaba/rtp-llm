@@ -19,11 +19,7 @@ public:
         for (auto& stream : streams) {
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
-                model_execute_token_size_ += stream->currentExecuteTokenSize();
                 total_context_batch_size_ += stream->batchSize();
-                total_sampler_batch_size_ += stream->tileNum();
-                max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
-                max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
                 max_reuse_length_ = std::max(max_reuse_length_, (size_t)stream->reuseLength());
                 cum_context_seq_len_ += (size_t)stream->contextLength();
@@ -31,23 +27,20 @@ public:
                 if (!has_multimodal_input_ && multimodal_features_len_ > 0) {
                     has_multimodal_input_ = true;
                 }
-                total_score_batch_size_   += stream->scoreLen();
-                adapter_names.push_back(stream->adapterName());
-                gen_timeline_ |= stream->genTimeline();
             } else {
                 decode_streams_.push_back(stream);
-                model_execute_token_size_ += stream->currentExecuteTokenSize();
-                total_sampler_batch_size_ += stream->tileNum();
                 total_decode_batch_size_  += stream->batchSize();
-                max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
-                max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
                 if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
-                total_score_batch_size_   += stream->scoreLen();
-                adapter_names.push_back(stream->adapterName());
-                gen_timeline_ |= stream->genTimeline();
             }
+            model_execute_token_size_ += stream->currentExecuteTokenSize();            
+            total_sampler_batch_size_ += stream->tileNum();
+            max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
+            max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
+            total_score_batch_size_   += stream->scoreLen();
+            adapter_names.push_back(stream->adapterName());
+            gen_timeline_ |= stream->genTimeline();
         }
     }
 

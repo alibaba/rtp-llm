@@ -29,7 +29,3 @@ def start_frontend_server(server_id: int, global_controller: ConcurrencyControll
         logging.error(f'start frontend server error: {e}, trace: {traceback.format_exc()}')
         raise e
     return app
-
-if __name__ == '__main__':
-    os.makedirs('logs', exist_ok=True)
-    start_frontend_server(init_controller())

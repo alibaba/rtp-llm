@@ -2,14 +2,14 @@ import os
 import time
 import logging
 from multiprocessing import Process, Lock, Value
+from rtp_llm.distribute.worker_info import g_parallel_info
 
 class ConcurrencyException(Exception):
     pass
 
 class ConcurrencyController:
-    def __init__(self, max_concurrency: int = 1, block: bool = False) -> None:
+    def __init__(self, max_concurrency: int = 1) -> None:
         self.max_concurrency = max_concurrency
-        self.block = block
         self.lock = Lock()
         self.current_concurrency = Value('i', 0)
         self.request_counter = Value('i', 0)
@@ -25,11 +25,8 @@ class ConcurrencyController:
                     self.current_concurrency.value += 1
                     self.request_counter.value += 1
                     return self.request_counter.value
-
-            if not self.block:
+    
                 raise ConcurrencyException(f"Concurrency limit {self.max_concurrency} reached")
-            else:
-                time.sleep(0.1)
 
     def decrement(self) -> None:
         with self.lock:
@@ -48,10 +45,10 @@ class ConcurrencyController:
 global_controller = None
 
 def init_controller():
-    concurrency_with_block = bool(int(os.environ.get('CONCURRENCY_WITH_BLOCK', 0)))
     concurrency_limit = int(os.environ.get('CONCURRENCY_LIMIT', 32))
-    logging.info(f"concurrency_limit : {concurrency_limit}, concurrency_with_block : {concurrency_with_block}")
-    controller = ConcurrencyController(concurrency_limit, block=concurrency_with_block)
+    global_concurrency_limit = concurrency_limit * g_parallel_info.dp_size
+    logging.info(f"concurrency_limit : {concurrency_limit}, global_concurrency_limit : {global_concurrency_limit}")
+    controller = ConcurrencyController(global_concurrency_limit)
     return controller
 
 def set_global_controller(_global_controller):
