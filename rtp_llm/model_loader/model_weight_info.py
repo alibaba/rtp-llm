@@ -417,7 +417,7 @@ class ModelDeployWeightInfo:
         if database.has_lora() and not self.support_lora:
             raise Exception(f"current weights_info: {self.__class__} not support lora, but database has lora")
 
-        if database.is_ft_style and database.ft_weight_params:
+        if database.is_ft_style and database.ft_weight_params and self.vit_separation != 1:
             # check ft_style ParallelInfo is match weight's ParallelInfo
             src_tp_size = int(database.ft_weight_params.get('TP_SIZE', self.tp_size))
             src_dp_size = int(database.ft_weight_params.get('DP_SIZE', self.dp_size))

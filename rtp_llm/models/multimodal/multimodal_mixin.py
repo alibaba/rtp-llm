@@ -73,7 +73,7 @@ class BaseMultiModalWeightInfo:
 
                 for w in weight_names:
                     w_name = ckpt_prefix + w
-                    llm_weights.weights.append(MMAtomicWeight(w_name, [CkptWeightInfo(w_name, identity)], identity, split_func=sp_id))
+                    llm_weights.weights.append(MMAtomicWeight(w, [CkptWeightInfo(w_name, identity)], identity, split_func=sp_id))
 
         return llm_weights
 
@@ -151,7 +151,6 @@ class MultiModalMixin:
         # Load weight only for self.mm_part
 
         vit_weight = vit_params.vit_weights
-        ckpt_prefix = vit_weight.ckpt_prefix
         ft_prefix = vit_weight.ft_prefix
         weight_names = vit_weight.weight_names
 
@@ -164,7 +163,7 @@ class MultiModalMixin:
             w_name = ft_prefix + w
             w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
             param = eval(w_name)
-            _safe_load_from_module(param, ckpt_prefix + w, ctype)
+            _safe_load_from_module(param, w, ctype)
 
     def init_mm_trt(
             self, ckpt_path: str,
