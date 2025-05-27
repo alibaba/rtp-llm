@@ -35,7 +35,7 @@ bool DeepEPBuffer::init() {
     buffer_->sync_string(device_ids, ipc_handles, root_unique_id);
 #if USE_ACCL_EP
     if (buffer_->is_low_latency_optimize()) {
-        RTP_LLM_LOG_INFO_INFO("aclcep low latency optimized, start get pxn handle");
+        RTP_LLM_LOG_INFO("aclcep low latency optimized, start get pxn handle");
         std::string              local_pxn_ipc_handle = buffer_->get_local_pxn_ipc_handle_string();
         std::vector<std::string> pxn_ipc_handles      = allGatherIpcHandles(local_pxn_ipc_handle);
         buffer_->sync_pxn_handles_string(device_ids, pxn_ipc_handles);
