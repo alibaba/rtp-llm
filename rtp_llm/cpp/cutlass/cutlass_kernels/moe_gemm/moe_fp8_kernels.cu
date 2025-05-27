@@ -292,8 +292,6 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
         asm volatile("griddepcontrol.wait;");
 #endif
-    int const max_token = masked_m[batch_idx];
-
     size_t gated_size_mul = gated ? 2 : 1;
     size_t gated_off = gated ? inter_size : 0;
     gemm_result = gemm_result + batch_idx * token_num * inter_size * gated_size_mul;
