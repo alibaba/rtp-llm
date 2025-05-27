@@ -12,6 +12,7 @@ public:
     void stop();
 
 protected:
+    std::string                 dest_dir_;
     static size_t               count;
     std::string                 prefix_;
     tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
