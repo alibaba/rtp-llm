@@ -20,9 +20,9 @@ createProposeExecutor(const EngineInitParams&                           score_mo
     } else if (sp_type == "deterministic") {
         propose_executor.reset(
             new DeterministicExecutor(score_model_engine_init_params, propose_model_engine_init_params, device));
-    } else if (sp_type == "mtp") {
+    } else if (sp_type == "mtp" || sp_type == "eagle3") {
         propose_executor.reset(
-            new MTPExecutor(propose_model_engine_init_params, device, mtp_cache_manager, lora_manager));
+            new MTPExecutor(sp_type, propose_model_engine_init_params, device, mtp_cache_manager, lora_manager));
     } else {
         RTP_LLM_FAIL("invalid sp_type: %s", sp_type);
     }

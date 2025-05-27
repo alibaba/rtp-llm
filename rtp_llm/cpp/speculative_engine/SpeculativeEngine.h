@@ -78,12 +78,12 @@ public:
         return resource_context_;
     }
 
-    bool isMTP() override {
-        if (sp_type_ == "mtp") {
-            return true;
-        } else {
-            return false;
-        }
+    bool isMTPEagle() override {
+        return sp_type_ == "mtp" || sp_type_ == "eagle3";
+    }
+
+    bool isVanilla() {
+        return sp_type_ == "vanilla";
     }
 
 private:

@@ -128,7 +128,7 @@ class CkptDatabase(BaseDatabase):
         for ckpt_file in self.PretrainFileList:
             if name in ckpt_file.get_tensor_names():
                 tensors.append(ckpt_file.load_tensor(name, datatype))
-        logging.debug(f"self.FinetuneFileList: {self.FinetuneFileList}, PretrainFileList: {self.PretrainFileList}")
+        logging.debug(f"name: {name} self.FinetuneFileList: {self.FinetuneFileList}, PretrainFileList: {self.PretrainFileList}")
 
         for ckpt_file in self.FinetuneFileList:
             logging.debug(f"load tensor {name} from {ckpt_file.file_name}")

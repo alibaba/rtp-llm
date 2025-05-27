@@ -337,6 +337,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->use_deepep_internode = init_params_.use_deepep_internode;
         prop->use_deepep_low_latency = init_params_.use_deepep_low_latency;
         prop->is_mtp = init_params_.is_mtp;
+        prop->is_eagle3 = init_params_.is_eagle3;
     }
     return *prop;
 }

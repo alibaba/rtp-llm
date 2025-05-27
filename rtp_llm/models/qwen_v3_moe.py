@@ -1,9 +1,10 @@
-import os
-import json
-from typing import Any
+from typing import Any, List
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
 from rtp_llm.utils.model_weight import W, CkptWeightInfo, identity, transpose, stack_, stack_moe_w1
-from rtp_llm.model_loader.ffn_weight import FfnConfig, MoeConfig, MoeAtomicWeight, MoeWeight
+from rtp_llm.model_loader.ffn_weight import MoeConfig, MoeAtomicWeight, MoeWeight
+from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 
@@ -41,4 +42,39 @@ class Qwen3Moe(Qwen2Moe):
         config.use_qk_norm = True
         return config
 
+class Qwen3MoeEagle3Weight(QWenV2Weight):
+    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+        super().__init__(config, tp_size, tp_rank)
+        self.bias = False
+        self._use_qk_norm = True
+
+    def _get_weight_info(self):
+        layer_weights: List[List[WeightModule]] = []
+        weights = [
+            AtomicWeight(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
+            AtomicWeight(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity)
+        ]
+        assert self._num_layers == 1
+        for layer in range(self._num_layers):
+            layer_weights_tmp = self._get_hf_layer_weight_info(layer)
+            layer_weights_tmp.extend([
+                AtomicWeight(W.eagle3_fc_proj, [CkptWeightInfo('fc.weight', identity)], transpose),
+                AtomicWeight(W.eagle3_fc_norm_gamma, [CkptWeightInfo('model.layers.0.hidden_norm.weight', identity)], identity),
+                AtomicWeight(W.eagle3_input_norm_gamma, [CkptWeightInfo('model.layers.0.input_layernorm.weight', identity)], identity),
+            ])
+            layer_weights.append(layer_weights_tmp)
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+class Qwen3MoeEagle3(QWenV2):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        return config
+
+    @staticmethod
+    def get_weight_cls():
+        return Qwen3MoeEagle3Weight
+
 register_model('qwen_3_moe', Qwen3Moe, ["Qwen3MoeForCausalLM"])
+register_model('qwen_3_moe_eagle3', Qwen3MoeEagle3, ["Qwen3MoeForCausalLMEagle"])

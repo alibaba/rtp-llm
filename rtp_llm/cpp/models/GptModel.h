@@ -35,6 +35,11 @@ struct GptModelInitParams {
     size_t                                           model_id;
 };
 
+struct EmbeddingPostOutput {
+    BufferPtr hidden;
+    BufferPtr residual;
+};
+
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
@@ -156,12 +161,14 @@ struct GptLayerInputs {
     bool enable_sp = false;
     size_t token_num = 0;
     size_t pad_token_num = 0;
+    BufferPtr residual = nullptr;
 };
 
 struct AttentionBlockOutputs {
     rtp_llm::BufferPtr hidden;
     rtp_llm::BufferPtr residual;
     rtp_llm::BufferPtr residual2;
+    rtp_llm::BufferPtr last_layer_hidden;
 };
 
 struct EpFfnInputs {
@@ -172,6 +179,7 @@ struct EpFfnInputs {
     rtp_llm::FfnLayerParams moe_ffn_params;
     rtp_llm::MoeGateSelectOutput gate_output;
     rtp_llm::DeviceEventPtr compute_event;
+    rtp_llm::BufferPtr last_layer_hidden;
 };
 
 struct MoeOutputs {
@@ -214,7 +222,7 @@ protected:
         const rtp_llm::DataType attn_dtype,
         const MicroBatchPlan& micro_batch_plan);
 
-    virtual rtp_llm::BufferPtr embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs);
+    virtual EmbeddingPostOutput embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs);
 
     rtp_llm::BufferPtr tpSyncEmbeddingOrLogits(const rtp_llm::BufferPtr& buffer);
 
@@ -229,19 +237,33 @@ protected:
         const GptLayerInputs& inputs,
         const int32_t layer_id,
         const rtp_llm::lora::LoraModelInputPtr &lora_model_input,
-        const LastLayerDeferedParams& last_layer_defered_params = {});
+        const LastLayerDeferedParams& last_layer_defered_params = {},
+        bool capture_last_hidden = false);
 
     // These methods are dedicated for moe ep micro batching
-    GptLayerOutputs forwardMicroBatchedLayers(const GptLayerInputs& layer_inputs, const GptModelInputs& inputs);
-    std::vector<GptLayerInputs> forwardPrefillMicroBatchedLayers(std::vector<GptLayerInputs> inputs);
-    std::vector<GptLayerInputs> forwardDecodeMicroBatchedLayers(std::vector<GptLayerInputs> inputs);
+    GptLayerOutputs             forwardMicroBatchedLayers(const GptLayerInputs&   layer_inputs,
+                                                          const GptModelInputs&   inputs,
+                                                          std::vector<BufferPtr>& eagle3_selected_hidden);
+
+    std::vector<GptLayerInputs> forwardPrefillMicroBatchedLayers(std::vector<GptLayerInputs> inputs,
+                                                          std::vector<BufferPtr>& eagle3_selected_hidden);
+
+    std::vector<GptLayerInputs> forwardDecodeMicroBatchedLayers(std::vector<GptLayerInputs> inputs,
+                                                          std::vector<BufferPtr>& eagle3_selected_hidden);
+
+    BufferPtr mergeEagle3HiddenState(const GptLayerInputs&   layer_inputs,
+                                     std::vector<BufferPtr>& eagle3_selected_hidden);
 
     EpFfnInputs forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,
         const int32_t layer_id,
-        const size_t micro_batch_idx);
+        const size_t micro_batch_idx,
+        bool capture_last_hidden);
+
     GptLayerOutputs forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id);
+
+    bool containMoeLayer();
 
     GptModelOutputs forwardPostLayers(
         const rtp_llm::BufferPtr hidden,
@@ -250,7 +272,8 @@ protected:
         const rtp_llm::BufferPtr lm_output_indexes,
         bool enable_sp,
         size_t token_num,
-        const GptModelInputs& inputs);
+        const GptModelInputs& inputs,
+        const rtp_llm::BufferPtr merged_eagle3_hidden);
 
     void prepareExpertStats(
         const size_t layer_id,

@@ -13,7 +13,7 @@ public:
             RTP_LLM_LOG_INFO("MTP Model reverse e_h_norm : %d", reverse_e_h_norm_);
         };
 
-    rtp_llm::BufferPtr embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs) override;
+    EmbeddingPostOutput embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs) override;
 
 private:
     bool reverse_e_h_norm_ = false;

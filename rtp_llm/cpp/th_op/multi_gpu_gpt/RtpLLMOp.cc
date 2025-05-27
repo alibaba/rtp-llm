@@ -74,13 +74,11 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
                                                                              gpt_init_params,
                                                                              std::move(*gpt_weight));
             model_id_++;
-        } else if (sp_type == "mtp") {
+        } else if (sp_type == "mtp" || sp_type == "eagle3") {
             params = rtp_llm::prepareMTPEngineInitParams(model_id_, propose_model);
             model_id_ += gen_num_per_circle;
         } else if (sp_type == "deterministic") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle);
-        } else if (sp_type == "eagle") {
-            RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
         } else {
             RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
         }

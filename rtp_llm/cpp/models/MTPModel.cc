@@ -20,13 +20,13 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-rtp_llm::BufferPtr MTPModel::embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs) {
+EmbeddingPostOutput MTPModel::embeddingPost(const rtp_llm::BufferPtr& hidden_states, const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "mtp_embeddingPost");
     auto last_hidden_states = inputs.last_hidden_states;
 
     if (last_hidden_states == nullptr) {
-        RTP_LLM_LOG_WARNING("last hidden states is null in mtp model");
-        return hidden_states;
+        RTP_LLM_LOG_DEBUG("last hidden states is null in mtp model");
+        return {hidden_states, nullptr};
     }
 
 
@@ -34,8 +34,8 @@ rtp_llm::BufferPtr MTPModel::embeddingPost(const rtp_llm::BufferPtr& hidden_stat
         (weights_.layers[0].hnorm == nullptr) ||
         (weights_.layers[0].eh_proj == nullptr))
     {
-        RTP_LLM_LOG_WARNING("mtp model weights is null");
-        return hidden_states;
+        RTP_LLM_LOG_DEBUG("mtp model weights is null");
+        return {hidden_states, nullptr};
     }
 
     auto e_norm = device_->layernorm(LayernormParams(hidden_states, nullptr, *weights_.layers[0].enorm, std::nullopt,
@@ -57,7 +57,7 @@ rtp_llm::BufferPtr MTPModel::embeddingPost(const rtp_llm::BufferPtr& hidden_stat
 
     auto final_hidden_states = device_->gemm({*cat_buffer, *(weights_.layers[0].eh_proj->kernel)});
 
-    return final_hidden_states;
+    return {final_hidden_states, nullptr};
 
 }
 

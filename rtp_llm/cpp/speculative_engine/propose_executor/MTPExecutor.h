@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/dataclass/MergedQuery.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/MTPModel.h"
+#include "rtp_llm/cpp/models/Eagle3Model.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPBatchStreamProcessor.h"
@@ -13,13 +14,14 @@ namespace rtp_llm {
 
 class MTPExecutor: public ProposeExecutor {
 public:
-    explicit MTPExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
-                             rtp_llm::DeviceBase*                                device,
-                             const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
-                             const std::shared_ptr<lora::LoraManager>&      lora_manager,
-                             bool                                           warm_up = false):
-        ProposeExecutor(device)
-    {
+    explicit MTPExecutor(const std::string& sp_type,
+                         std::unique_ptr<ProposeModelEngineInitParams>&    propose_model_engine_init_params,
+                         rtp_llm::DeviceBase*                              device,
+                         const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
+                         const std::shared_ptr<lora::LoraManager>&         lora_manager,
+                         bool                                              warm_up = false):
+        ProposeExecutor(device),
+        sp_type_(sp_type) {
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
                                  propose_model_engine_init_params->mtp_model_params_->size());
 
@@ -42,8 +44,18 @@ public:
                 Executor::genModelDescription(mtp_params->gpt_init_parameter),
                 cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : std::nullopt,
                 mtp_params->model_id});
-            auto new_model = std::make_unique<MTPModel>(model_params);
-            executor->setGptModel(std::move(new_model));
+            std::unique_ptr<GptModel> new_model;
+            if (sp_type_ == "mtp") {
+                RTP_LLM_LOG_INFO("prepare mtp model");
+                executor->setGptModel(std::make_unique<MTPModel>(model_params));
+                norm_executor->setGptModel(std::make_unique<MTPModel>(model_params));
+            } else if (sp_type == "eagle3") {
+                RTP_LLM_LOG_INFO("prepare eagle3 model");
+                executor->setGptModel(std::make_unique<Eagle3Model>(model_params));
+                norm_executor->setGptModel(std::make_unique<Eagle3Model>(model_params));
+            } else {
+                RTP_LLM_LOG_ERROR("unknown sp_type %s", sp_type_.c_str());
+            }
             normal_mtp_executors_.push_back(norm_executor);
             mtp_executors_.push_back((executor));
             index++;
@@ -76,7 +88,8 @@ public:
     bool updateEplbConfig(const EplbConfig& config) override;
 
 private:
-    size_t         propose_step_;
+    std::string                                  sp_type_;
+    size_t                                       propose_step_;
     std::vector<std::shared_ptr<NormalExecutor>> mtp_executors_;
     std::vector<std::shared_ptr<NormalExecutor>> normal_mtp_executors_;
 };

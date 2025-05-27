@@ -647,12 +647,18 @@ class W:
     token_type_embedding = 'token_type_embedding.weight'
     final_ln_gamma = 'final_layernorm.gamma'
     final_ln_beta = 'final_layernorm.beta'
-    # deepseek mtp
+
+    # mtp
     multi_tokens_predict_enorm = 'multi_tokens_predict_enorm.weight'
     multi_tokens_predict_hnorm = 'multi_tokens_predict_hnorm.weight'
     multi_tokens_predict_eh_proj = 'multi_tokens_predict_eh_proj.weight'
     multi_tokens_predict_final_ln_gamma = 'multi_tokens_predict_final_layernorm.gamma'
     multi_tokens_predict_final_ln_beta = 'multi_tokens_predict_final_layernorm.beta'
+
+    # eagle3
+    eagle3_fc_proj = 'eagle3_fc.weight'
+    eagle3_fc_norm_gamma = 'eagle3_fc.gamma'
+    eagle3_input_norm_gamma = 'eagle3_input.gamma'
 
     # attn
     pre_ln_gamma = 'pre_layernorm_weights.gamma'
@@ -835,6 +841,9 @@ class W:
         multi_tokens_predict_final_ln_gamma: sp_id,
         multi_tokens_predict_final_ln_beta: sp_id,
 
+        eagle3_fc_proj: sp_id,
+        eagle3_fc_norm_gamma: sp_id,
+        eagle3_input_norm_gamma: sp_id,
 
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,

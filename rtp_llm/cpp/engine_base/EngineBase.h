@@ -72,7 +72,7 @@ public:
 
     virtual int64_t getLastScheduleTime() { return autil::TimeUtility::currentTimeInMilliSeconds(); }
 
-    virtual bool isMTP() { return false; }
+    virtual bool isMTPEagle() { return false; }
 
     virtual bool updateEplbConfig(const EplbConfig& config) {
         return false;

@@ -205,7 +205,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation = true;
-    if (engine_->isMTP()) {
+    if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
     } else {
         input->generate_config->force_disable_sp_run = true;

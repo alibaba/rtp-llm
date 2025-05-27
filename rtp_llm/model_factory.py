@@ -73,12 +73,15 @@ class ModelFactory:
     def _create_sp_model(score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig):
         model = None
         global _model_factory
-        if model_config.sp_type == "vanilla" or model_config.sp_type == "mtp":
+        if model_config.sp_type == "vanilla" or model_config.sp_type == "mtp" or model_config.sp_type == "eagle3":
             if model_config.model_type not in _model_factory:
                 raise Exception(f"model type {model_config.model_type} not registered!")
             if model_config.model_type == "deepseek-v3-mtp" or model_config.model_type == "mixtbstars-mtp":
                 logging.warning(f"create sp model type is {model_config.model_type}, so change the sp type to mtp")
                 model_config.sp_type = "mtp"
+            if model_config.model_type == "qwen_3_moe-mtp":
+                logging.warning(f"create sp model type is {model_config.model_type}, so change the sp type to eagle3")
+                model_config.sp_type = "eagle3"
             model_cls = _model_factory[model_config.model_type]
             # propose model's max seq len must be equal to score model's max seq len
             model_config.max_seq_len = score_model_gpt_config.max_seq_len
@@ -88,8 +91,6 @@ class ModelFactory:
             model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle, gpt_model)
         elif model_config.sp_type == "deterministic":
             model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
-        elif model_config.sp_type == "eagle":
-            raise NotImplementedError
         return model
 
     #TODO: remove model_config, get all info from gpt_config
@@ -181,7 +182,7 @@ class ModelFactory:
         propose_model_config = None
 
         sp_type = os.environ.get("SP_TYPE", None)
-        if sp_type == "vanilla" or sp_type == "mtp":
+        if sp_type == "vanilla" or sp_type == "mtp" or sp_type == "eagle3":
             logging.info("use vanilla speculative model")
             propose_model_type = os.environ.get("SP_MODEL_TYPE", None)
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
@@ -190,7 +191,7 @@ class ModelFactory:
 
             propose_weight_type = get_propose_weight_type_from_env(os.environ)
             propose_act_type = propose_weight_type if propose_weight_type in [WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
-            SP_ACT_TYPE = "SP_ACT_TYPE"
+            SP_ACT_TYPE = "ACT_TYPE"
             if os.environ.get(SP_ACT_TYPE, None):
                 propose_act_type = WEIGHT_TYPE.from_str(os.environ.get(SP_ACT_TYPE))
             quantization = os.environ.get(ModelConfig.SP_QUANTIZATION_KEY, None)
@@ -209,9 +210,6 @@ class ModelFactory:
             propose_model_config = ModelConfig(sp_type=sp_type,
                                                gen_num_per_circle=gen_num_per_circle)
             logging.info("use deterministic speculative model")
-        elif sp_type == "eagle":
-            logging.info("use eagle speculative model")
-            raise NotImplementedError
 
         return propose_model_config
 

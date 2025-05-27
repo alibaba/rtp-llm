@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/models/Eagle3Model.h"
 #include "rtp_llm/cpp/models_weight/W.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -484,8 +485,8 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(
     return micro_batch_inputs;
 }
 
-rtp_llm::BufferPtr GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {
-    return hidden_states;
+EmbeddingPostOutput GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {
+    return {hidden_states, nullptr};
 };
 
 GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
@@ -508,7 +509,6 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         printBufferData(*pad_combo_tokens, {"pad_combo_tokens"});
     }
     device_->checkError();
-
     const auto combo_tokens = device_->clone(
         {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
 
@@ -539,7 +539,8 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
     device_->checkError();
 
-    hidden = embeddingPost(hidden, inputs);
+    EmbeddingPostOutput output = embeddingPost(hidden, inputs);
+    hidden = output.hidden;
     device_->checkError();
 
     auto hidden_dtype = hidden->type();
@@ -600,18 +601,19 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     device_->checkError();
 
     auto micro_batch_plan = planMicroBatches(inputs);
-    if (int(device_props_.enable_layer_micro_batch)) {
+    if (int(device_props_.enable_layer_micro_batch) && containMoeLayer()) {
         auto micro_batch_inputs = prepareMicroBatchInputs(
             inputs, hidden, pre_decoder_residual, attn_dtype,  micro_batch_plan);
-        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), hidden_dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num};
+        return {move(hidden), move(pre_decoder_residual), AttentionCommonInputs(), hidden_dtype, micro_batch_inputs, enable_sp, token_num, pad_token_num, output.residual};
     } else {
         // prepare resources for all layers
         auto attention_common_inputs = prepareAttentionInputs(inputs, attn_dtype, combo_position_ids);
-        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), hidden_dtype, {}, enable_sp, token_num, pad_token_num};
+        return {move(hidden), move(pre_decoder_residual), move(attention_common_inputs), hidden_dtype, {}, enable_sp, token_num, pad_token_num, output.residual};
     }
 }
 
-vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLayerInputs> micro_batch_layer_inputs) {
+vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLayerInputs>  micro_batch_layer_inputs,
+                                                                  std::vector<BufferPtr>& eagle3_selected_hidden) {
     std::vector<LastLayerDeferedParams> last_layer_defered_params(micro_batch_layer_inputs.size());
 
     for (int32_t i = 0; i < layer_num_; ++i) {
@@ -623,10 +625,12 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             for (auto& layer_input : micro_batch_layer_inputs) {
                 auto layer_outputs = forwardGptLayer(layer_input, i, nullptr);
                 layer_input.hidden = move(layer_outputs.hidden);
+                if (dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3 && device_props_.eagle3_selected_layer.count(i) > 0) {
+                    eagle3_selected_hidden.push_back(device_->clone({*layer_input.hidden, AllocationType::DEVICE}));
+                }
             }
             continue;
         }
-        device_->checkError();
 
         std::vector<EpFfnInputs> ep_inputs;
         for (size_t micro_batch_idx = 0; micro_batch_idx < micro_batch_layer_inputs.size(); ++micro_batch_idx) {
@@ -635,8 +639,12 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             }
 
             auto& layer_input = micro_batch_layer_inputs[micro_batch_idx];
+            bool capture_last_hidden = dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3 && device_props_.eagle3_selected_layer.count(i - 1) > 0;
             auto batch_ep_input = forwardAttentionAndMoeGate(
-                layer_input, last_layer_defered_params[micro_batch_idx], i, micro_batch_idx);
+                layer_input, last_layer_defered_params[micro_batch_idx], i, micro_batch_idx, capture_last_hidden);
+            if (capture_last_hidden) {
+                eagle3_selected_hidden.push_back(device_->clone({*batch_ep_input.last_layer_hidden, AllocationType::DEVICE}));
+            }
 
             if (micro_batch_idx == 0) {
                 // to overlap shared with combine
@@ -796,7 +804,8 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
     return micro_batch_layer_inputs;
 }
 
-vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayerInputs> micro_batch_layer_inputs) {
+vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayerInputs>  micro_batch_layer_inputs,
+                                                                 std::vector<BufferPtr>& eagle3_selected_hidden) {
 
     std::vector<LastLayerDeferedParams> last_layer_defered_params_vec(micro_batch_layer_inputs.size());
     for (int32_t i = 0; i < layer_num_; ++i) {
@@ -809,6 +818,9 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
                 auto layer_outputs = forwardGptLayer(layer_input, i, nullptr);
                 device_->checkError();
                 layer_input.hidden = move(layer_outputs.hidden);
+                if (dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3 && device_props_.eagle3_selected_layer.count(i) > 0) {
+                    eagle3_selected_hidden.push_back(device_->clone({*layer_input.hidden, AllocationType::DEVICE}));
+                }
             }
             continue;
         }
@@ -828,7 +840,11 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
                     ? std::optional<rtp_llm::MoeCombineOutput>(last_layer_moe_ret->combine_output)
                     : nullopt;
 
-            auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx);
+            bool capture_last_hidden = dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3 && device_props_.eagle3_selected_layer.count(i - 1) > 0;
+            auto ep_input = forwardAttentionAndMoeGate(layer_input, last_layer_defered_params, i, micro_batch_idx, capture_last_hidden);
+            if (capture_last_hidden) {
+                eagle3_selected_hidden.push_back(device_->clone({*ep_input.last_layer_hidden, AllocationType::DEVICE}));
+            }
 
             // call combine hook sync
             auto& previous_moe_ret = device_->getMoEInsertionRet();
@@ -906,9 +922,9 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
     return micro_batch_layer_inputs;
 }
 
-GptLayerOutputs GptModel::forwardMicroBatchedLayers(
-        const GptLayerInputs& layer_inputs, const GptModelInputs& inputs)
-{
+GptLayerOutputs GptModel::forwardMicroBatchedLayers(const GptLayerInputs&   layer_inputs,
+                                                    const GptModelInputs&   inputs,
+                                                    std::vector<BufferPtr>& eagle3_selected_hidden) {
     std::vector<GptLayerInputs> micro_batch_layer_inputs;
     for (auto& micro_batch_input : layer_inputs.micro_batch_inputs) {
         micro_batch_layer_inputs.push_back({
@@ -920,9 +936,9 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(
     }
 
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
-        micro_batch_layer_inputs = forwardPrefillMicroBatchedLayers(micro_batch_layer_inputs);
+        micro_batch_layer_inputs = forwardPrefillMicroBatchedLayers(micro_batch_layer_inputs, eagle3_selected_hidden);
     } else if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_DECODE) {
-        micro_batch_layer_inputs = forwardDecodeMicroBatchedLayers(micro_batch_layer_inputs);
+        micro_batch_layer_inputs = forwardDecodeMicroBatchedLayers(micro_batch_layer_inputs, eagle3_selected_hidden);
     } else {
         RUNTIME_ASSERT_OP_ARG(false, "micro batch type %d is not supported", int(device_props_.enable_layer_micro_batch));
     }
@@ -1022,7 +1038,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         const GptLayerInputs& inputs,
         const int32_t layer_id,
         const rtp_llm::lora::LoraModelInputPtr &lora_model_input,
-        const LastLayerDeferedParams& last_layer_defered_params)
+        const LastLayerDeferedParams& last_layer_defered_params,
+        bool capture_last_hidden)
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
@@ -1045,7 +1062,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
 
     // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
     size_t rank_pad_token_num = enable_sp ? inputs.pad_token_num / device_props_.tp_size : hidden->shape()[0];
-    BufferPtr attn_out_buf = device_->allocateBuffer({inputs.dtype, {rank_pad_token_num, hidden->shape()[1]}}, {"attn_out_buf"});
+    size_t attn_out_hidden_size = dynamic_cast<Eagle3Model*>(this) ? hidden->shape()[1] / 2 : hidden->shape()[1];
+    BufferPtr attn_out_buf = device_->allocateBuffer({inputs.dtype, {rank_pad_token_num, attn_out_hidden_size}}, {"attn_out_buf"});
     if (!enable_sp) {
         // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
         // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
@@ -1060,12 +1078,18 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     printBufferData(*residual, "in residual");
     BufferPtr residual2 = nullptr;
     BufferPtr hidden_to_slice = nullptr; // for sp and overlap comm type 2
+    BufferPtr last_layer_hidden = nullptr;
     if (layer.pre_layernorm) {
-        // TODO(wangyin.yx): fuse this clone branch into layernorm(rmsnorm)
-        if (last_layer_defered_params.residual) {
-            residual = device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"});
+        if (inputs.residual) {
+            // this branch for qwen3 eagle3
+            residual = device_->clone({*inputs.residual, AllocationType::DEVICE, {"residual"}});
+            const_cast<GptLayerInputs&>(inputs).residual = nullptr;
         } else {
-            residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+            if (last_layer_defered_params.residual) {
+                residual = device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"});
+            } else {
+                residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+            }
         }
         int m_split = device_props_.m_split;
         size_t overlap_comm_type = device_props_.overlap_comm_type;
@@ -1083,6 +1107,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         description_.act_qscheme,
                                                                         layer_id > 0 ? true: false,
                                                                         false));
+
+        if (capture_last_hidden) {
+            last_layer_hidden = residual;
+        }
 
         if (enable_sp && layer_id == 0) {
             if (overlap_comm_type == 1 && m_split > 0) {
@@ -1121,6 +1149,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         });
         hidden = std::move(prev_ffn_layernorm_output.output);
     }
+
+    printBufferData(*hidden, "pre layer norm hidden");
 
     if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
         attention_common_inputs.kv_cache->k_cache_buffer = k_cache_buffer_->index(layer_id);
@@ -1195,14 +1225,15 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
     }
 
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
-    return {hidden, residual, residual2};
+    return {hidden, residual, residual2, last_layer_hidden};
 }
 
 EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         const GptLayerInputs& inputs,
         LastLayerDeferedParams& last_layer_defered_params,
         const int32_t layer_id,
-        const size_t micro_batch_idx)
+        const size_t micro_batch_idx,
+        bool capture_last_hidden)
 {
     auto hidden = inputs.hidden;
     auto pre_decoder_residual = inputs.pre_decoder_residual;
@@ -1210,7 +1241,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
 
     DevicePerfWrapper wrapper(device_, "mb_forwardGptLayer_" + std::to_string(layer_id) + "_bs_" + std::to_string(hidden->shape()[0]));
 
-    auto attention_block_output = forwardAttentionBlock(inputs, layer_id, nullptr, last_layer_defered_params);
+    auto attention_block_output = forwardAttentionBlock(inputs, layer_id, nullptr, last_layer_defered_params, capture_last_hidden);
     hidden = move(attention_block_output.hidden);
     auto residual = move(attention_block_output.residual);
     auto residual2 = move(attention_block_output.residual2);
@@ -1242,10 +1273,14 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(
         quantized_hidden = device_->quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, description_.act_qscheme});
     }
 
-    return {
-        hidden, quantized_hidden, residual, shared_expert_output,
-        move(ffn_layer_params), move(gate_output),
-    };
+    return {hidden,
+            quantized_hidden,
+            residual,
+            shared_expert_output,
+            move(ffn_layer_params),
+            move(gate_output),
+            nullptr,
+            attention_block_output.last_layer_hidden};
 }
 
 GptLayerOutputs GptModel::forwardMoeFfn(const GptLayerOutputs& inputs, const int32_t layer_id) {
@@ -1259,7 +1294,8 @@ GptModelOutputs GptModel::forwardPostLayers(
     const rtp_llm::BufferPtr lm_output_indexes,
     bool enable_sp,
     size_t token_num,
-    const GptModelInputs& inputs)
+    const GptModelInputs& inputs,
+    rtp_llm::BufferPtr merged_eagle3_hidden)
 {
     DevicePerfWrapper wrapper(device_, "forwardPostLayers");
     BufferPtr all_gather_output = nullptr;
@@ -1339,6 +1375,8 @@ GptModelOutputs GptModel::forwardPostLayers(
             auto last_logits = device_->select({*logits, *device_->clone({*lm_output_indexes})});
             return {std::move(last_logits), std::move(last_hidden), std::move(hidden), std::move(logits), std::move(softmax_result)};
         }
+
+        hidden = merged_eagle3_hidden ? merged_eagle3_hidden : hidden;
         return {std::move(logits), std::move(last_hidden), std::move(hidden), nullptr, std::move(softmax_result)};
     } else {
         return {nullptr, nullptr, std::move(hidden)};
@@ -1351,17 +1389,22 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto layer_inputs = forwardPreLayers(inputs);
 
     GptLayerOutputs layer_outputs;
+    std::vector<BufferPtr> eagle3_selected_hidden;
 
-    if (int(device_props_.enable_layer_micro_batch)) {
-        RUNTIME_ASSERT_OP_ARG(layer_inputs.micro_batch_inputs.size(), "no micro batch inputs when enabled");
-        layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs);
+    if (int(device_props_.enable_layer_micro_batch) && layer_inputs.micro_batch_inputs.size() > 0) {
+        layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs, eagle3_selected_hidden);
     } else {
         for (int32_t i = 0; i < layer_num_; ++i) {
             layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
             layer_inputs.hidden = layer_outputs.hidden;
             layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
+            if (dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3 && device_props_.eagle3_selected_layer.count(i) > 0) {
+                eagle3_selected_hidden.push_back(device_->clone({*layer_inputs.hidden, AllocationType::DEVICE}));
+            }
         }
     }
+
+    BufferPtr merged_eagle3_hidden = mergeEagle3HiddenState(layer_inputs, eagle3_selected_hidden);
 
     auto outputs = forwardPostLayers(
         layer_outputs.hidden,
@@ -1370,7 +1413,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         inputs.lm_output_indexes,
         layer_inputs.enable_sp,
         layer_inputs.token_num,
-        inputs);
+        inputs,
+        merged_eagle3_hidden);
 
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
@@ -1394,6 +1438,46 @@ void GptModel::cleanExpertStats() {
     if (overall_expert_stats_.log_exp_num != 0) {
         device_->cleanMoeExpertStates(overall_expert_stats_);
     }
+}
+
+bool GptModel::containMoeLayer() {
+    for (int32_t i = 0; i < layer_num_; ++i) {
+        if (weights_.layers[i].ffn_weights.moe_gate_weight != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+BufferPtr GptModel::mergeEagle3HiddenState(const GptLayerInputs&   layer_inputs,
+                                           std::vector<BufferPtr>& eagle3_selected_hidden) {
+    if (eagle3_selected_hidden.empty()) {
+        return nullptr;
+    }
+
+    std::vector<torch::Tensor> eagle3_selected_hidden_tensor;
+    for (int i = 0; i < eagle3_selected_hidden.size(); i++) {
+        eagle3_selected_hidden_tensor.push_back(Buffer2torchTensor(eagle3_selected_hidden[i], false));
+        // printBufferData(*eagle3_selected_hidden[i], "eagle3_selected_hidden_tensor");
+    }
+
+    size_t micro_batch_size = layer_inputs.micro_batch_inputs.size();
+    torch::Tensor merged_hidden_states_tensor;
+    if (micro_batch_size == 0) {
+        merged_hidden_states_tensor = torch::cat(eagle3_selected_hidden_tensor, -1);
+    } else {
+        std::vector<std::vector<torch::Tensor>> grouped_hidden_states(micro_batch_size);
+        std::vector<torch::Tensor> merged_row_hidden_states(micro_batch_size);
+        for (size_t i = 0; i < eagle3_selected_hidden.size(); i++) {
+            grouped_hidden_states[i % micro_batch_size].push_back(Buffer2torchTensor(eagle3_selected_hidden[i], false));
+        }
+        for (size_t i = 0; i < merged_row_hidden_states.size(); i++) {
+            merged_row_hidden_states[i] = torch::cat(grouped_hidden_states[i], -1);
+        }
+        merged_hidden_states_tensor = torch::cat(merged_row_hidden_states, 0);
+    }
+
+    return device_->clone({*torchTensor2Buffer(merged_hidden_states_tensor), AllocationType::DEVICE});
 }
 
 void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {

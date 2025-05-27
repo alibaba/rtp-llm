@@ -344,6 +344,11 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
             gpt_weights.final_layernorm = layer_ws.mtp_final_layernorm;
         }
 
+        // eagle3
+        layer_ws.eagle3_fc_norm = mayCreateLayerNormWeights(layer_weights, W::eagle3_fc_norm_gamma);
+        layer_ws.eagle3_input_norm = mayCreateLayerNormWeights(layer_weights, W::eagle3_input_norm_gamma);
+        layer_ws.eagle3_fc_proj = mayCreateDenseWeights(layer_weights, W::eagle3_fc_proj);
+
         gpt_weights.layers.emplace_back(std::move(layer_ws));
     }
     return std::make_unique<rtp_llm::Weights>(gpt_weights);
@@ -382,7 +387,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     auto sp_model = model.attr("model");
     std::string sp_type = model.attr("sp_type").cast<std::string>();
     size_t gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
-    RTP_LLM_CHECK(sp_type == "mtp");
+    RTP_LLM_CHECK(sp_type == "mtp" || sp_type == "eagle3");
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();

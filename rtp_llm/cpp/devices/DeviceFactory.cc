@@ -122,6 +122,12 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
         RTP_LLM_LOG_INFO("device_params.is_mtp true");
     }
 
+    if (((sp_type == "vanilla") && (sp_model_type == "qwen_3_moe_eagle"))      ||
+        (sp_type == "eagle3")) 
+    {
+        device_params.is_eagle3 = true;
+        RTP_LLM_LOG_INFO("device_params.eagle3 true");
+    }
 
     RTP_LLM_LOG_INFO("use deepep moe: %d, use deepep low latency: %d",
                 device_params.use_deepep_moe, device_params.use_deepep_low_latency);

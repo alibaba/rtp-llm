@@ -336,7 +336,6 @@ class GptInitModelParameters:
         self.world_size = g_parallel_info.world_size
         self.phy2log: List[List[int]] = []
 
-        
         self.is_mtp = False
         self.use_qk_norm = False
         self.enable_merge_w13 = False

@@ -567,7 +567,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             layer_caches.push_back(load_layer_cache);
         }
 
-        if (engine_->isMTP()) {
+        if (engine_->isMTPEagle()) {
             for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size(); mtp_model_id++) { 
                 EngineInitParams* mtp_engine_init_params = propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
                 size_t layer_num = mtp_engine_init_params->gpt_init_parameter.num_layers_;

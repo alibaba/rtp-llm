@@ -137,6 +137,11 @@ struct LayerWeights {
     std::shared_ptr<const LayerNormWeights> hnorm;
     std::shared_ptr<const DenseWeights>     eh_proj;
     std::shared_ptr<const LayerNormWeights> mtp_final_layernorm;
+
+    // eagle3
+    std::shared_ptr<const LayerNormWeights> eagle3_input_norm;
+    std::shared_ptr<const LayerNormWeights> eagle3_fc_norm;
+    std::shared_ptr<const DenseWeights>     eagle3_fc_proj;
 };
 
 // TODO: This Weights class might be refactor into a complete model description

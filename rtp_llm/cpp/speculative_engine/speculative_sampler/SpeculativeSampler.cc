@@ -49,8 +49,12 @@ absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::l
                         propose_step,
                         accepted_len);
 
-        printBufferData(*propose_stream_output->tokens, "propose tokens");
-        printBufferData(*scorer_stream_output->tokens, "verify tokens");
+        if (propose_stream_output->tokens) {
+            printBufferData(*propose_stream_output->tokens, "propose tokens");
+        }
+        if (scorer_stream_output->tokens) {
+            printBufferData(*scorer_stream_output->tokens, "verify tokens");
+        }
 
         sampler_output.accept_token_num += accepted_len;
 

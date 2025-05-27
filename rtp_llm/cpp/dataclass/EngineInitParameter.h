@@ -93,22 +93,14 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         vanilla_model_params(nullptr),
         mtp_model_params_(std::move(mtp_model_params)) {};
 
-    bool gpt_model() {
-        return sp_type == "vanilla" || sp_type == "mtp";
-    }
-
-    bool isVanilla() {
-        return sp_type == "vanilla";
-    }
-
-    bool isMTP() {
-        return sp_type == "mtp";
+    bool draftModel() {
+        return sp_type == "vanilla" || sp_type == "mtp" || sp_type == "eagle3";
     }
 
     const rtp_llm::GptInitParameter& getGptInitParameter() {
         if (sp_type == "vanilla") {
             return vanilla_model_params->gpt_init_parameter;
-        } else if (sp_type == "mtp") {
+        } else if (sp_type == "mtp" || sp_type == "eagle3") {
             RTP_LLM_CHECK(!mtp_model_params_->empty());
             RTP_LLM_CHECK(mtp_model_params_->at(0) != nullptr);
             return mtp_model_params_->at(0)->gpt_init_parameter;
@@ -214,10 +206,6 @@ private:
 };
 
 std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
-
-// extract mtp model weights list from model in python world.
-// Note: keep mtp sequence.
-std::deque<std::unique_ptr<rtp_llm::Weights>> prepareMTPModelWeights(py::object model);
 
 std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model);
 

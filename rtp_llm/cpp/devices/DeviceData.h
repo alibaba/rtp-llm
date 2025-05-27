@@ -73,6 +73,7 @@ struct DeviceInitParams {
     bool use_deepep_internode = false;
     bool use_deepep_low_latency = false;
     bool is_mtp = false;
+    bool is_eagle3 =false;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -109,6 +110,9 @@ struct DeviceProperties {
     bool use_deepep_low_latency = false;
     bool is_mtp = false;
     bool use_all_gather = false;
+    bool is_eagle3 = false;
+    std::set<int> eagle3_selected_layer{1, 46, 90};
+    // std::set<int> eagle3_selected_layer{0,1,2};
 };
 
 struct MemoryStatus {

@@ -59,8 +59,14 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
 
     if (fake_hidden_states) {
         auto dtype = rtp_llm::getDataType(score_model_params_.gpt_init_parameter.data_type_);
-        auto fake_hidden_states = device_->allocateBuffer(
-            {dtype, {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_}, rtp_llm::AllocationType::DEVICE});
+        BufferPtr fake_hidden_states;
+        if (sp_type_ == "eagle3") {
+            fake_hidden_states = device_->allocateBuffer(
+                {dtype, {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_ * 3}, rtp_llm::AllocationType::DEVICE}); 
+        } else {
+            fake_hidden_states = device_->allocateBuffer(
+                {dtype, {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_}, rtp_llm::AllocationType::DEVICE}); 
+        }
         stream->setReturnLastHiddenStates(true);
         BufferPtr new_tokens = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
@@ -140,7 +146,7 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
         THROW_IF_STATUSOR_ERROR(score_stream->initKVBlock(0, 0));
     };
 
-    if (propose_model_params_->gpt_model()) {
+    if (propose_model_params_->draftModel()) {
         propose_stream = std::make_shared<NormalGenerateStream>(*score_stream);
     }
 
@@ -148,7 +154,7 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
     THROW_IF_STATUS_ERROR(score_executor_->normalProcess(score_streams));
 
 
-    if (propose_model_params_->gpt_model()) {
+    if (propose_model_params_->draftModel()) {
         THROW_IF_STATUS_ERROR(propose_executor_->normalProcess({propose_stream}));
     }
 
@@ -156,16 +162,16 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
 }
 
 absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    if (propose_model_params_->gpt_model()) {
+    if (propose_model_params_->draftModel()) {
         const auto& config = CacheConfigCreator::createSpConfig(
             score_model_params_.gpt_init_parameter,
             propose_model_params_->getGptInitParameter(),
             warm_up_result,
-            propose_model_params_->isMTP());
+            isMTPEagle());
         auto scorer_cache_config        = std::get<0>(config);
         auto proposer_cache_config      = std::get<1>(config);
         resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_);
-        if (propose_model_params_->isMTP()) {
+        if (isMTPEagle()) {
             auto layer_num = propose_model_params_->getGptInitParameter().num_layers_;
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
@@ -200,16 +206,16 @@ WarmUpResult SpeculativeEngine::warmUp() {
     device_->setTraceMemory(true);
 
     score_executor_.reset(new ScoreExecutor(score_model_params_, device_, nullptr, nullptr, true));
-    if (propose_model_params_->isVanilla()) {
+    if (isVanilla()) {
         propose_executor_.reset(new VanillaExecutor(propose_model_params_, device_, nullptr, nullptr, true));
-    } else if (propose_model_params_->isMTP()) {
-        propose_executor_.reset(new MTPExecutor(propose_model_params_, device_, {nullptr}, nullptr, true));
+    } else if (isMTPEagle()) {
+        propose_executor_.reset(new MTPExecutor(sp_type_, propose_model_params_, device_, {nullptr}, nullptr, true));
     }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
     (void)score_executor_.reset(nullptr);
-    if (propose_model_params_->gpt_model()) {
+    if (propose_model_params_->draftModel()) {
         (void)propose_executor_.reset(nullptr);
     }
     return WarmUpResult({
@@ -283,7 +289,7 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::makeStream(const std::shared_
                                                resource_context_,
                                                metrics_reporter_,
                                                propose_model_params_->gen_num_per_circle);
-    if (sp_type_ == "mtp") {
+    if (isMTPEagle()) {
         stream->setReturnLastHiddenStates(true);
     }
     return stream;
@@ -375,7 +381,7 @@ absl::Status SpeculativeEngine::step() {
     absl::Status status;
     if (all_streams_disable_sp_run) {
         status = normStep(streams);
-    } else if (sp_type_ == "mtp") {
+    } else if (isMTPEagle()) {
         status = mtpStep(streams);
     } else {
         status = spStep(streams);
