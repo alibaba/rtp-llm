@@ -160,18 +160,20 @@ void launch_update_gpu_loads(int*         experts_ids,
     int block_size      = 256;
     int experts_per_gpu = phy_exp_num / ep_size;
     int grid_size       = (total_token_num + block_size - 1) / block_size;
-
-    update_gpu_loads_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
-        experts_ids, gpu_loads, total_token_num, experts_per_gpu, ep_rank);
+    if (grid_size > 0) {
+        update_gpu_loads_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
+                experts_ids, gpu_loads, total_token_num, experts_per_gpu, ep_rank);
+    }
 }
 
 void update_gpu_loads_deepep_kernel(
     int64_t* experts_ids, int* gpu_loads, int total_token_num, int ep_rank, cudaStream_t stream) {
     int block_size = 256;
     int grid_size  = (total_token_num + block_size - 1) / block_size;
-
-    update_gpu_loads_deepep_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
-        experts_ids, gpu_loads, total_token_num, ep_rank);
+    if (grid_size > 0) {
+        update_gpu_loads_deepep_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
+                experts_ids, gpu_loads, total_token_num, ep_rank);
+    }
 }
 
 void launch_update_gpu_loads_ll(
