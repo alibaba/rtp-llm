@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/utils/activation_types.h"
 
 namespace rtp_llm {
-constexpr float FP8_E4M3_MAX = 448.0f;
 
 template<typename T>
 void expandInputRowsKernelLauncherContiguous(T const*       unpermuted_input,
