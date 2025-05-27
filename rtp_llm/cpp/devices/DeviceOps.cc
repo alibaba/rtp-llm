@@ -235,7 +235,7 @@ GreedyOutput DeviceOps::sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::sampleBeamSearch(const BeamSearchParams& params) {
+BeamSearchOutput DeviceOps::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

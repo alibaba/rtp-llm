@@ -96,7 +96,7 @@ GroupedGemmOutput ArmCpuDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void ArmCpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
+BeamSearchOutput ArmCpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

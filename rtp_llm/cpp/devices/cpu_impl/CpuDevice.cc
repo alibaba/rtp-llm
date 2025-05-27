@@ -317,7 +317,7 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
     return ffnout;
 }
 
-void CpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
+BeamSearchOutput CpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

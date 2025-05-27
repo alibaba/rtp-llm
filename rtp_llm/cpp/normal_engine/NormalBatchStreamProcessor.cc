@@ -305,7 +305,8 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     // TODO(lidongjin.ldj) use bufMemset after arm/amd support this op.
     // eg: device_->bufMemset(*sampler_inputs.beam_index, 0);
     sampler_inputs.input_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
-    sampler_inputs.num_beams            = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
+    sampler_inputs.num_beams_in         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
+    sampler_inputs.num_beams_out        = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
     sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size});
     sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
     sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
@@ -329,7 +330,8 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                                                         bool                          score_batch) const {
     int*      input_lengths                = sampler_inputs.input_lengths->data<int32_t>();
     int*      sequence_lengths             = sampler_inputs.sequence_lengths->data<int32_t>();
-    uint64_t* num_beams                    = sampler_inputs.num_beams->data<uint64_t>();
+    uint64_t* num_beams_in                 = sampler_inputs.num_beams_in->data<uint64_t>();
+    uint64_t* num_beams_out                = sampler_inputs.num_beams_out->data<uint64_t>();
     uint32_t* top_k                        = sampler_inputs.top_k->data<uint32_t>();
     float*    top_p                        = sampler_inputs.top_p->data<float>();
     float*    temperature                  = sampler_inputs.temperature->data<float>();
@@ -362,7 +364,8 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
             sequence_lengths[batch_idx]             = stream->seqLength();
             beam_search_sequence_lengths[batch_idx] = stream->seqLength();
             // TODO(xinfei.sxf) fix num beams after sampler support
-            num_beams[batch_idx]          = stream->numBeams();
+            num_beams_in[batch_idx]       = stream->numBeams();
+            num_beams_out[batch_idx]      = stream->numBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;
             top_p[batch_idx]              = stream->generateConfig()->top_p;
             temperature[batch_idx]        = stream->generateConfig()->temperature;
@@ -457,9 +460,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
             auto               all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto               tokens     = stream->currentExecuteTokens(0);
             rtp_llm::BufferPtr label      = device_->clone({{rtp_llm::MemoryType::MEMORY_CPU,
-                                                             rtp_llm::DataType::TYPE_INT32,
-                                                             {tokens.size() - 1},
-                                                             tokens.data() + 1}});
+                                                        rtp_llm::DataType::TYPE_INT32,
+                                                        {tokens.size() - 1},
+                                                        tokens.data() + 1}});
             loss                          = device_->loss({all_logits, *label});
         }
         BufferPtr all_hidden_states = nullptr;

@@ -48,9 +48,7 @@ enum class ParallelMode {
     EPLB      = 5
 };
 
-enum class DeviceStream {
-    DEFAULT = 0,
-};
+enum class DeviceStream { DEFAULT = 0, };
 
 class OpStatus {
 public:
@@ -342,7 +340,7 @@ struct LayernormParams {
         is_inplace(is_inplace),
         qscheme(qscheme),
         attn_swap_comm_buffer(attn_swap_comm_buffer),
-        ffn_swap_comm_buffer(ffn_swap_comm_buffer) {};
+        ffn_swap_comm_buffer(ffn_swap_comm_buffer){};
 
     BufferPtr input;
     BufferPtr before_norm_output;
@@ -866,12 +864,20 @@ struct GreedyOutput {
 };
 
 struct BeamSearchParams {
-    const Buffer& logits;
-    Buffer&       token_ids;
-    Buffer&       input_lengths;
-    Buffer&       sequence_lengths;
-    Buffer&       cum_log_probs;
-    Buffer&       beam_index;
+    const Buffer& logits;            // [batch_size, num_beams_in, vocab_size]
+    BufferPtr     token_ids;         // [batch_size, num_beams_in, max_seq_len]
+    BufferPtr     input_lengths;     // [batch_size, num_beams_in]
+    BufferPtr     sequence_lengths;  // [batch_size, num_beams_in]
+    BufferPtr     cum_log_probs;     // [batch_size, num_beams_in]
+    size_t        num_beams_out = 0;
+};
+
+struct BeamSearchOutput {
+    BufferPtr token_ids;         // [batch_size, num_beams_out, max_seq_len]
+    BufferPtr input_lengths;     // [batch_size, num_beams_out]
+    BufferPtr sequence_lengths;  // [batch_size, num_beams_out]
+    BufferPtr cum_log_probs;     // [batch_size, num_beams_out]
+    BufferPtr beam_indices;      // [batch_size, num_beams_out]
 };
 
 struct BroadcastParams {
@@ -982,7 +988,7 @@ struct ActivationParams {
         bias(std::nullopt),
         gate(std::nullopt),
         gate_bias(std::nullopt),
-        act_scale(std::nullopt) {};
+        act_scale(std::nullopt){};
 };
 
 // softmax op is inplace-update, thus output buffer is same as input

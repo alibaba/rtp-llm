@@ -206,7 +206,7 @@ public:
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr              mlaQKVGemm(const AttentionLayerParams& params) override;
     void                   mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
-    void                   sampleBeamSearch(const BeamSearchParams& params) override;
+    BeamSearchOutput       sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr              quantize(const QuantizeParams& params) override;
     void                   preRun() override;
 

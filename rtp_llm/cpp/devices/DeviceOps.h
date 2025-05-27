@@ -82,8 +82,8 @@ public:
     virtual void                          chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 
     // for sampler
-    virtual GreedyOutput sampleGreedy(const GreedyParams& params);
-    virtual void         sampleBeamSearch(const BeamSearchParams& params);
+    virtual GreedyOutput     sampleGreedy(const GreedyParams& params);
+    virtual BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
 
     // for device communication
     virtual void                   broadcast(const BroadcastParams& params);

@@ -41,7 +41,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     GreedyOutput          sampleGreedy(const GreedyParams& params) override;
-    void                  sampleBeamSearch(const BeamSearchParams& params) override;
+    BeamSearchOutput      sampleBeamSearch(const BeamSearchParams& params) override;
     void                  broadcast(const BroadcastParams& params) override;
     void                  allReduceSum(const AllReduceParams& params);
     DevicePrepOutput      prepareModelRun(const DevicePrepParams& params) override;
@@ -78,21 +78,21 @@ private:
     void       logTime(std::chrono::microseconds diff, size_t index);
     uint64_t   a_cnt_[16]  = {0};
     uint64_t   a_tmin_[16] = {999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999,
-                              999999999};
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999,
+                            999999999};
     uint64_t   a_tmax_[16] = {0};
     uint64_t   a_tave_[16] = {0};
     GemmKernel gemm_kernel_;

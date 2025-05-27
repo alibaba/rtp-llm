@@ -34,7 +34,7 @@ public:
     AttentionLayerOutput  attentionLayer(const AttentionLayerParams& params);
     FfnLayerOutput        ffnLayer(const FfnLayerParams& params);
     GreedyOutput          sampleGreedy(const GreedyParams& params);
-    void                  sampleBeamSearch(const BeamSearchParams& params);
+    BeamSearchOutput      sampleBeamSearch(const BeamSearchParams& params);
     void                  broadcast(const BroadcastParams& params);
     AllReduceOutput       allReduce(const AllReduceParams& params);
 
