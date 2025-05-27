@@ -1,0 +1,195 @@
+diff --git include/flashinfer/attention/prefill.cuh include/flashinfer/attention/prefill.cuh
+index bb82507..c83d969 100644
+--- include/flashinfer/attention/prefill.cuh
++++ include/flashinfer/attention/prefill.cuh
+@@ -1970,7 +1970,9 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
+ 
+     uint32_t q_smem_offset_r = qo_smem.get_permuted_offset<UPCAST_STRIDE_Q>(
+         get_warp_idx_q<KTraits>() * NUM_MMA_Q * 16 + lane_idx % 16, lane_idx / 16);
+-
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++        asm volatile("griddepcontrol.wait;");
++#endif
+     load_q_global_smem<KTraits>(qo_packed_idx_base, qo_upper_bound, q_ptr_base, q_stride_n,
+                                 q_stride_h, group_size, &qo_smem);
+ 
+@@ -2161,6 +2163,9 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithPagedKVC
+ #if (__CUDA_ARCH__ < 800)
+   }
+ #endif
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++    asm volatile("griddepcontrol.launch_dependents;");
++#endif
+ }
+ 
+ template <uint32_t CTA_TILE_Q, uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO,
+@@ -2331,23 +2336,38 @@ cudaError_t BatchPrefillWithPagedKVCacheDispatched(Params params, typename Param
+     } else {
+       size_t smem_size = sizeof(typename KTraits::SharedStorage);
+       auto kernel = BatchPrefillWithPagedKVCacheKernel<KTraits, Params>;
++
++#define LAUNCH_KERNEL_WITH_CONFIG(kernel, nblks, nthrs, params, smem_size, stream)   \
++      if (GetCudaComputeCapability().first >= 9) {                                   \
++        cudaLaunchConfig_t config__;                                                 \
++        config__.gridDim = nblks;                                                    \
++        config__.blockDim = nthrs;                                                   \
++        config__.dynamicSmemBytes = smem_size;                                       \
++        config__.stream = stream;                                                    \
++        cudaLaunchAttribute attrs__[1];                                              \
++        attrs__[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;          \
++        attrs__[0].val.programmaticStreamSerializationAllowed = true;                \
++        config__.numAttrs = 1;                                                       \
++        config__.attrs = attrs__;                                                    \
++        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config__, kernel, params));         \
++      } else {                                                                       \
++        void* args__[] = {(void*)&params};                                                \
++        FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args__, smem_size, stream)); \
++      }
++
+       FLASHINFER_CUDA_CALL(
+           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+       if (tmp_v == nullptr) {
+         // do not partition kv
+         params.partition_kv = false;
+-        void* args[] = {(void*)&params};
+-        FLASHINFER_CUDA_CALL(
+-            cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
++        LAUNCH_KERNEL_WITH_CONFIG(kernel, nblks, nthrs, params, smem_size, stream);
+       } else {
+         params.partition_kv = true;
+         auto o = params.o;
+         auto lse = params.lse;
+         params.o = tmp_v;
+         params.lse = tmp_s;
+-        void* args[] = {(void*)&params};
+-        FLASHINFER_CUDA_CALL(
+-            cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
++        LAUNCH_KERNEL_WITH_CONFIG(kernel, nblks, nthrs, params, smem_size, stream);
+         if constexpr (AttentionVariant::use_softmax) {
+           FLASHINFER_CUDA_CALL(VariableLengthMergeStates(
+               tmp_v, tmp_s, params.merge_indptr, o, lse, params.max_total_num_rows,
+diff --git include/flashinfer/page.cuh include/flashinfer/page.cuh
+index ba3f311..c8d9b1c 100644
+--- include/flashinfer/page.cuh
++++ include/flashinfer/page.cuh
+@@ -268,7 +268,6 @@ __global__ void AppendPagedKVCacheKernel(paged_kv_t<DType, IdType> paged_kv,
+   uint32_t head_idx = ty;
+   uint32_t cta_id = blockIdx.x;
+   uint32_t num_ctas = gridDim.x;
+-
+ #pragma unroll 4
+   for (uint32_t i = cta_id; i < nnz; i += num_ctas) {
+     uint32_t page_iter, entry_idx;
+@@ -276,11 +275,17 @@ __global__ void AppendPagedKVCacheKernel(paged_kv_t<DType, IdType> paged_kv,
+                               page_iter, entry_idx);
+     DType* k_ptr = paged_kv.get_k_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
+     DType* v_ptr = paged_kv.get_v_ptr(page_iter, head_idx, entry_idx, tx * vec_size);
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++        asm volatile("griddepcontrol.wait;");
++#endif
+     vec_t<DType, vec_size>::memcpy(
+         k_ptr, append_key + i * append_k_stride_n + head_idx * append_k_stride_h + tx * vec_size);
+     vec_t<DType, vec_size>::memcpy(
+         v_ptr, append_value + i * append_v_stride_n + head_idx * append_v_stride_h + tx * vec_size);
+   }
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++    asm volatile("griddepcontrol.launch_dependents;");
++#endif
+ }
+ 
+ template <typename IdType>
+@@ -401,11 +406,30 @@ cudaError_t AppendPagedKVCache(paged_kv_t<DType, IdType> paged_kv, DType* append
+     dim3 nblks(num_blocks_per_sm * num_sms);
+     dim3 nthrs(bdx, bdy);
+ 
+-    void* args[] = {(void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
+-                    (void*)&batch_indices,     (void*)&positions,         (void*)&nnz,
+-                    (void*)&append_k_stride_n, (void*)&append_k_stride_h, (void*)&append_v_stride_n,
+-                    (void*)&append_v_stride_h};
+-    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
++    if (GetCudaComputeCapability().first >= 9) {
++      cudaLaunchConfig_t config__;
++      config__.gridDim = nblks;
++      config__.blockDim = nthrs;
++      config__.dynamicSmemBytes = 0;
++      config__.stream = stream;
++      cudaLaunchAttribute attrs__[1];
++      attrs__[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++      attrs__[0].val.programmaticStreamSerializationAllowed = true;
++      config__.numAttrs = 1;
++      config__.attrs = attrs__;
++      FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
++          &config__,
++          kernel,
++          paged_kv, append_key, append_value, batch_indices, positions,
++          nnz, append_k_stride_n, append_k_stride_h, append_v_stride_n, append_v_stride_h
++      ));
++    } else {
++      void* args[] = {(void*)&paged_kv,          (void*)&append_key,        (void*)&append_value,
++                      (void*)&batch_indices,     (void*)&positions,         (void*)&nnz,
++                      (void*)&append_k_stride_n, (void*)&append_k_stride_h, (void*)&append_v_stride_n,
++                      (void*)&append_v_stride_h};
++      FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
++    }
+   });
+   return cudaSuccess;
+ }
+diff --git include/flashinfer/pos_enc.cuh include/flashinfer/pos_enc.cuh
+index 196b5f3..15cbadb 100644
+--- include/flashinfer/pos_enc.cuh
++++ include/flashinfer/pos_enc.cuh
+@@ -366,7 +366,9 @@ __global__ void BatchQKApplyRotaryPosIdsHeadParallelismKernel(
+   }
+ 
+   vec_t<float, vec_size> cos, sin;
+-
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++        asm volatile("griddepcontrol.wait;");
++#endif
+   if (bx * bdy + ty < nnz) {
+     const uint32_t idx = bx * bdy + ty;
+     const IdType pos = pos_ids[idx];
+@@ -405,6 +407,9 @@ __global__ void BatchQKApplyRotaryPosIdsHeadParallelismKernel(
+       k_vec.cast_store(k_rope_ptr + tx * vec_size);
+     }
+   }
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++    asm volatile("griddepcontrol.launch_dependents;");
++#endif
+ }
+ 
+ template <bool interleave, uint32_t head_dim, uint32_t vec_size, uint32_t bdx, typename DType,
+@@ -697,9 +702,30 @@ cudaError_t BatchQKApplyRotaryPosIds(
+         dim3 nblks(nblks_x, num_qo_heads + num_kv_heads);
+         dim3 nthrs(bdx, bdy);
+         auto kernel_1 = BatchQKApplyRotaryPosIdsHeadParallelismKernel<INTERLEAVE, HEAD_DIM,
+-                                                                      vec_size, bdx, DType, IdType>;
+-
+-        FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel_1, nblks, nthrs, args, 0, stream));
++                                                            vec_size, bdx, DType, IdType>;
++        if (GetCudaComputeCapability().first >= 9) {
++          cudaLaunchConfig_t config__;
++          config__.gridDim          = (nblks);
++          config__.blockDim         = (nthrs);
++          config__.dynamicSmemBytes = (0);
++          config__.stream           = (stream);
++          cudaLaunchAttribute attrs__[1];
++          attrs__[0].id                                         = cudaLaunchAttributeProgrammaticStreamSerialization;
++          attrs__[0].val.programmaticStreamSerializationAllowed = true;
++          config__.numAttrs                                     = 1;
++          config__.attrs                                        = attrs__;
++          FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
++              &config__,
++              kernel_1,
++              q, k, q_rope, k_rope, pos_ids,
++              nnz, num_qo_heads, num_kv_heads, rotary_dim,
++              q_stride_n, q_stride_h, k_stride_n, k_stride_h,
++              q_rope_stride_n, q_rope_stride_h, k_rope_stride_n, k_rope_stride_h,
++              smooth_a, smooth_b, rope_rcp_scale, rope_rcp_theta
++          ));
++        } else {
++          FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel_1, nblks, nthrs, args, 0, stream));
++        }
+       }
+     });
+   });

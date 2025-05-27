@@ -26,6 +26,7 @@
 
 #include "rtp_llm/cpp/cuda/cuda_bf16_fallbacks.cuh"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 
 namespace rtp_llm {
 

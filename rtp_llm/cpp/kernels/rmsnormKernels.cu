@@ -82,6 +82,9 @@ __global__ void generalRmsNorm(T* output, T* normed_output, const T* input, cons
 
     for (int i = tidx; i < n_elems; i += blockDim.x)
     {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+        asm volatile("griddepcontrol.wait;");
+#endif
         const int index = bidx * n_elems + i;
         T val = cuda_cast<T>(0.0f);
         // const T val = input[index];
@@ -162,6 +165,9 @@ __global__ void generalRmsNorm(T* output, T* normed_output, const T* input, cons
             scale_orig_quant_per_token[bidx] = abs_max_f / scale_factor;
         }
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 
@@ -227,9 +233,9 @@ void dispatch_rmsnorm_type_square_method(T* output, T* normed_output, const T* i
             cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 #endif
     }
-    generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, QUANT_OUT_T><<<grid, block, shmem_size, stream>>>(output, normed_output,
-        input, bias, residual1, residual2, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
-        scale_orig_quant_per_token, normed_output_quant);
+    LAUNCH_KERNEL_WITH_PDL((generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, QUANT_OUT_T>), grid, block, shmem_size, stream,
+        output, normed_output, input, bias, residual1, residual2, gamma, beta, eps, tokens, hidden_dim,
+        scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant);
 }
 
 template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, typename QUANT_OUT_T=int8_t>

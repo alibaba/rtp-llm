@@ -289,6 +289,10 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
         asm volatile("griddepcontrol.wait;");
 #endif
     int const max_token = masked_m[batch_idx];
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+        asm volatile("griddepcontrol.wait;");
+#endif
+    int const max_token = masked_m[batch_idx];
 
     size_t gated_size_mul = gated ? 2 : 1;
     size_t gated_off = gated ? inter_size : 0;
@@ -339,6 +343,9 @@ __global__ void doActivationMaskedKernel(__nv_fp8_e4m3* output_fp8,
             }
         }
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 template<class GemmOutputType, class ScaleBiasType>
@@ -417,15 +424,16 @@ void doActivationMasked(__nv_fp8_e4m3*        output_fp8,
         &doActivationMaskedKernel<GemmOutputType, ScaleBiasType, cutlass::epilogue::thread::Identity>  // Identity
     };
     auto fn = fn_list[static_cast<int>(activation_type)];
-    fn<<<blocks, threads, 0, stream>>>(output_fp8,
-                                       fp8_scale,
-                                       gemm_result,
-                                       bias,
-                                       bias_is_broadcast,
-                                       token_num,
-                                       inter_size,
-                                       isGatedActivation(activation_type),
-                                       masked_m);
+    LAUNCH_KERNEL_WITH_PDL(*fn, grid, thread, 0, stream,
+        output_fp8,
+        fp8_scale,
+        gemm_result,
+        bias,
+        bias_is_broadcast,
+        token_num,
+        inter_size,
+        isGatedActivation(activation_type),
+        masked_m);
 }
 
 template void doActivationMasked<__nv_bfloat16, __nv_bfloat16>(__nv_fp8_e4m3*       output_fp8,

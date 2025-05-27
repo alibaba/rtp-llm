@@ -234,8 +234,10 @@ cc_library(
     name = "cuda_utils_base",
     srcs = [
         "cuda_utils.cc",
+        "launch_utils.cc",
     ],
     hdrs = [
+        "launch_utils.h",
         "cuda_utils.h",
         "Dispatch.h",
         "trt_utils.h",
@@ -364,8 +366,10 @@ cc_library(
 cc_library(
     name = "cuda_utils_rocm",
     srcs = [
+        "launch_utils.cc",
     ],
     hdrs = [
+        "launch_utils.h",
         "cuda_utils.h",
         "Dispatch.h",
         "memory_utils.h",

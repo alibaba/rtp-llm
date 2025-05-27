@@ -39,6 +39,9 @@ __global__ void addBiasResidual(T*           output,
                                 const int    m,
                                 const int    n)
 {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.wait;");
+#endif
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
     if (col_index < n) {
         T bias_val = (bias == nullptr) ? (T)(0.0f) : bias[col_index];
@@ -58,6 +61,9 @@ __global__ void addBiasResidual(T*           output,
                 in + residual1[blockIdx.x * n + col_index] + residual2[blockIdx.x * n + col_index] + bias_val;
         }
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 template<typename T>
@@ -77,39 +83,21 @@ void invokeAddBiasResidual(T*           output,
     const bool should_scale_input = scale_inter != nullptr;
     int        blocks_per_row     = ceil(float(n) / 1024);
     dim3       grid(m, blocks_per_row);
-    dim3       block(min(n, 1024));
+    dim3       block(std::min(n, 1024));
     if (residual2 == nullptr) {
         if (should_scale_input) {
-            addBiasResidual<T, 1><<<grid, block, 0, stream>>>(output,
-                                                              reinterpret_cast<const int32_t*>(input),
-                                                              residual1,
-                                                              residual2,
-                                                              bias,
-                                                              scale_inter,
-                                                              scale_out,
-                                                              m,
-                                                              n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, scale_inter, scale_out, m, n);
         }
         else {
-            addBiasResidual<T, 1>
-                <<<grid, block, 0, stream>>>(output, input, residual1, residual2, bias, nullptr, nullptr, m, n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, nullptr, nullptr, m, n);
         }
     }
     else {
         if (should_scale_input) {
-            addBiasResidual<T, 2><<<grid, block, 0, stream>>>(output,
-                                                              reinterpret_cast<const int32_t*>(input),
-                                                              residual1,
-                                                              residual2,
-                                                              bias,
-                                                              scale_inter,
-                                                              scale_out,
-                                                              m,
-                                                              n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, scale_inter, scale_out, m, n);
         }
         else {
-            addBiasResidual<T, 2>
-                <<<grid, block, 0, stream>>>(output, input, residual1, residual2, bias, nullptr, nullptr, m, n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, nullptr, nullptr, m, n);
         }
     }
 }
@@ -142,7 +130,7 @@ void invokeAlphaAddBiasResidual(
 {
     int  blocks_per_row = ceil(float(n) / 1024);
     dim3 grid(m, blocks_per_row);
-    dim3 block(min(n, 1024));
+    dim3 block(std::min(n, 1024));
     if (residual) {
         alphaAddBiasResidual<<<grid, block, 0, stream>>>(output, input, residual, bias, alpha, m, n);
     } else {
@@ -202,7 +190,7 @@ void invokeAddBiasAttentionFfnResidual(T*           block_output,
 {
     int  blocks_per_row = ceil(float(n) / 1024);
     dim3 grid(m, blocks_per_row);
-    dim3 block(min(n, 1024));
+    dim3 block(std::min(n, 1024));
     if (block_output == block_input) {
         addBiasAttentionFfnResidual<<<grid, block, 0, stream>>>(
             block_output, ffn_output, attn_output, bias, m, n, block_input_tp_split);

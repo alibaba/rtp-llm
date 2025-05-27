@@ -676,40 +676,15 @@ void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values, IdxT* topk_indice
     int64_t const num_tokens, int64_t const num_experts, int64_t const n_group, int64_t const topk_group,
     int64_t const topk, int norm_node, double const routed_scaling_factor, cudaStream_t const stream)
 {
-    int device;
-    cudaGetDevice(&device);
-
-    int cc_major;
-    cudaDeviceGetAttribute(&cc_major, cudaDeviceAttr::cudaDevAttrComputeCapabilityMajor, device);
-
-#define LAUNCH_KERNEL(kernel, grid_dim, block_dim, smem_size, stream, ...)             \
-    do {                                                                               \
-        if (cc_major >= 9) {                                                           \
-            cudaLaunchConfig_t config__;                                               \
-            config__.gridDim = (grid_dim);                                             \
-            config__.blockDim = (block_dim);                                           \
-            config__.dynamicSmemBytes = (smem_size);                                   \
-            config__.stream = (stream);                                                \
-            cudaLaunchAttribute attrs__[1];                                            \
-            attrs__[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;        \
-            attrs__[0].val.programmaticStreamSerializationAllowed = true;              \
-            config__.numAttrs = 1;                                                     \
-            config__.attrs = attrs__;                                                  \
-            cudaLaunchKernelEx(&config__, &(kernel), __VA_ARGS__);                     \
-        } else {                                                                       \
-            (kernel)<<<(grid_dim), (block_dim), (smem_size), (stream)>>>(__VA_ARGS__); \
-        }                                                                              \
-    } while(0)
-
     int64_t num_cases = num_tokens * n_group;
     int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
-    LAUNCH_KERNEL((topk_with_k2_kernel<T>), topk_with_k2_num_blocks, BLOCK_SIZE, 0, stream,
+    LAUNCH_KERNEL_WITH_PDL((topk_with_k2_kernel<T>), topk_with_k2_num_blocks, BLOCK_SIZE, 0, stream,
         group_scores, scores_with_bias, num_tokens, num_cases, n_group, num_experts / n_group);
     check_cuda_error();
 
     int64_t topk_with_k_group_num_blocks = (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
     size_t dynamic_smem_in_bytes = warp_topk::calc_smem_size_for_block_wide<T, int32_t>(NUM_WARPS_PER_BLOCK, topk);
-    LAUNCH_KERNEL((group_idx_and_topk_idx_kernel<T, IdxT>), topk_with_k_group_num_blocks, BLOCK_SIZE, dynamic_smem_in_bytes, stream,
+    LAUNCH_KERNEL_WITH_PDL((group_idx_and_topk_idx_kernel<T, IdxT>), topk_with_k_group_num_blocks, BLOCK_SIZE, dynamic_smem_in_bytes, stream,
         scores, group_scores, topk_values, topk_indices, scores_with_bias,
         num_tokens, n_group, topk_group, topk, num_experts, num_experts / n_group, norm_node, routed_scaling_factor);
     check_cuda_error();

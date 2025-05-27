@@ -55,7 +55,7 @@ __global__ void scaleMatrix(T_OUT* output, T_S const* input_scale, T_IN const* i
         else if (QUANTIZE_MODE == QuantizeMode::PER_TENSOR)
         {
             output[i] = T_OUT(scale<QUANTIZE>(static_cast<float>(input[i]), static_cast<float>(input_scale[0])));
-	}     
+	}
     }
 }
 
@@ -527,6 +527,9 @@ __global__ void computeFP8Quantize128Kernel(__nv_fp8_e4m3*       fp8_output,
     if (global_idx * ELEM_PER_THREAD >= size) {
         return;
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.wait;");
+#endif
     auto w8 = weights_vec[global_idx];
     float scale = cuda_max((float)1e-4, (float)max_abs_op(w8));
     static constexpr int THREADS_PER_ROW = 128 / ELEM_PER_THREAD;
@@ -547,6 +550,9 @@ __global__ void computeFP8Quantize128Kernel(__nv_fp8_e4m3*       fp8_output,
             quant_ptr[global_idx / THREADS_PER_ROW] = scale;
         }
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
@@ -563,9 +569,9 @@ void invokeComputeFP8Quantize128(__nv_fp8_e4m3*       fp8_output,
     dim3      grid((size / 128 + num_per_grid - 1) / num_per_grid);
     dim3      block(CTA_SIZE);
     if (col_major_scale) {
-        computeFP8Quantize128Kernel<float, true, ELEM_PER_THREAD><<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, dim0, dim1 / 128, size);
+        LAUNCH_KERNEL_WITH_PDL((computeFP8Quantize128Kernel<float, true, ELEM_PER_THREAD>), grid, block, 0, stream, fp8_output, quant_ptr, weights, dim0, dim1 / 128, size);
     } else {
-        computeFP8Quantize128Kernel<float, false, ELEM_PER_THREAD><<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, dim0, dim1, size);
+        LAUNCH_KERNEL_WITH_PDL((computeFP8Quantize128Kernel<float, false, ELEM_PER_THREAD>), grid, block, 0, stream, fp8_output, quant_ptr, weights, dim0, dim1, size);
     }
 }
 
@@ -581,7 +587,9 @@ __global__ void computeFP8ActivationAndQuantizeKernel(__nv_fp8_e4m3*       fp8_o
     if (global_idx * ELEM_PER_THREAD >= size) {
         return;
     }
-
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.wait;");
+#endif
     const int64_t row_idx = global_idx * ELEM_PER_THREAD / dim1;
     const int64_t col_idx = global_idx * ELEM_PER_THREAD % dim1;
     const int64_t row_stride = dim1 * 2;
@@ -590,7 +598,7 @@ __global__ void computeFP8ActivationAndQuantizeKernel(__nv_fp8_e4m3*       fp8_o
     auto weights_vec = reinterpret_cast<InputElem const*>(gate_up_output);
     auto output_vec = reinterpret_cast<OutputElem *>(fp8_output);
 
-    auto gate8 = weights_vec[(row_idx * row_stride + col_idx) / ELEM_PER_THREAD], 
+    auto gate8 = weights_vec[(row_idx * row_stride + col_idx) / ELEM_PER_THREAD],
          up8   = weights_vec[(row_idx * row_stride + col_idx + dim1) / ELEM_PER_THREAD];
 
     auto w8 = act_and_mul(gate8, up8);
@@ -610,6 +618,9 @@ __global__ void computeFP8ActivationAndQuantizeKernel(__nv_fp8_e4m3*       fp8_o
         const int64_t col_idx = now_idx % dim;
         quant_ptr[col_idx * padded_dim0 + row_idx] = scale;
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 void computeFP8ActivationAndQuantize(__nv_fp8_e4m3*       fp8_output,
@@ -624,7 +635,7 @@ void computeFP8ActivationAndQuantize(__nv_fp8_e4m3*       fp8_output,
     const int size = dim0 * dim1;
     dim3      grid((size / 128 + num_per_grid - 1) / num_per_grid);
     dim3      block(CTA_SIZE);
-    computeFP8ActivationAndQuantizeKernel<float, true, ELEM_PER_THREAD><<<grid, block, 0, stream>>>(fp8_output, quant_ptr, weights, dim0, dim1);
+    LAUNCH_KERNEL_WITH_PDL((computeFP8ActivationAndQuantizeKernel<float, true, ELEM_PER_THREAD>), grid, block, 0, stream, fp8_output, quant_ptr, weights, dim0, dim1);
 }
 
 #endif // ENABLE_FP8

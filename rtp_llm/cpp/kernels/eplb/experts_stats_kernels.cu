@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 
 namespace rtp_llm {
 template <typename T>
@@ -94,12 +95,18 @@ __global__ void update_gpu_loads_deepep_kernel(int64_t* experts_ids, int* gpu_lo
 __global__ void
 update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank)
 {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.wait;");
+#endif
     // since the local_experts_num is small, we can use atomicAdd to update the gpu_loads
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= local_experts_num) {
         return;
     }
     atomicAdd(&gpu_loads[ep_rank], experts_cnts[i]);
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 template <typename T>
@@ -171,7 +178,7 @@ void launch_update_gpu_loads_ll(
     int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank, cudaStream_t stream) {
     int block_size = 128;
     int grid_size  = (local_experts_num + block_size - 1) / block_size;
-    update_gpu_loads_ll<<<grid_size, block_size, 0, stream>>>(experts_cnts, gpu_loads, local_experts_num, ep_rank);
+    LAUNCH_KERNEL_WITH_PDL(update_gpu_loads_ll, grid_size, block_size, 0, stream, experts_cnts, gpu_loads, local_experts_num, ep_rank);
 }
 
 };  // namespace rtp_llm

@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 
 #include <cstddef>
 #include <cublasLt.h>

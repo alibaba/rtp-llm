@@ -236,6 +236,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__ void topkGatingSoftmax(co
     float             row_chunk[VPT];
     AccessType*       row_chunk_vec_ptr   = reinterpret_cast<AccessType*>(&row_chunk);
     const AccessType* vec_thread_read_ptr = reinterpret_cast<const AccessType*>(thread_read_ptr);
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.wait;");
+#endif
 #pragma unroll
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
         row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
@@ -348,6 +351,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__ void topkGatingSoftmax(co
             }
         }
     }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 namespace detail {
@@ -384,8 +390,8 @@ void topkGatingSoftmaxLauncherHelper(const float* input,
     const int            num_blocks    = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
-    topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
-        input, finished, topk_scales, num_rows, topk_expertID, topk_rowColID, num_cols, start_expert, end_expert);
+    dim3 grid_dim(num_blocks);
+    LAUNCH_KERNEL_WITH_PDL((topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), grid_dim, block_dim, 0, stream, input, finished, topk_scales, num_rows, topk_expertID, topk_rowColID, num_cols, start_expert, end_expert);
 }
 
 void topkGatingSoftmax_KL(const float* input,
