@@ -1063,6 +1063,8 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         // TODO(wangyin.yx): fuse this clone branch into layernorm(rmsnorm)
         if (last_layer_defered_params.residual) {
             residual = device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"});
+        } else if (enable_sp){
+            residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
         }
         int m_split = device_props_.m_split;
         size_t overlap_comm_type = device_props_.overlap_comm_type;
