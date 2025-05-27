@@ -304,7 +304,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     }
     BufferPtr masked_m = torchTensor2Buffer(deep_ep_ll_output->packed_recv_count);
     DeepGemmPlugin::groupedGemmFp8Masked(
-        *quantize_hidden, *weights.moe_gate_weight->kernel, *fc1_result, *masked_m, token_num, stream_);
+        *quantize_hidden, *weights.moe_gate_weight->kernel, *fc1_result, *masked_m, token_num / moe_conf.ep_size, stream_);
 
     check_cuda_error();
     using GemmOutputType     = __nv_bfloat16;
@@ -337,7 +337,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
                     std::move(fc1_activation_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     DeepGemmPlugin::groupedGemmFp8Masked(
-        *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, token_num, stream_);
+        *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, token_num / moe_conf.ep_size, stream_);
 
     check_cuda_error();
     return {fc2_result};
