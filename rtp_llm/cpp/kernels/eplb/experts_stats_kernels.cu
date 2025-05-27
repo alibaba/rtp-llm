@@ -115,9 +115,10 @@ void launch_equal_expert_balance(T*         experts_ids,
     int max_exp_num = phy_exp_num - log_exp_num + 1;
     int block_size  = 256;
     int grid_size   = (total_tokens + block_size - 1) / block_size;
-
-    euqal_expert_balance_kernel<T><<<grid_size, block_size, 0, stream>>>(
-        experts_ids, log_stats, log2phy, logic_expert_cnt, max_exp_num, total_tokens, ep_rank);
+    if (grid_size > 0) {
+        euqal_expert_balance_kernel<T><<<grid_size, block_size, 0, stream>>>(
+                experts_ids, log_stats, log2phy, logic_expert_cnt, max_exp_num, total_tokens, ep_rank);
+    }
 }
 
 template void launch_equal_expert_balance(int64_t*     experts_ids,
