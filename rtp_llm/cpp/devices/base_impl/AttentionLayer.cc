@@ -162,10 +162,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         gemm_output = allocateBuffer({qkv->type(), {pad_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
         attn_output = params.output;
-    } else {
-        gemm_output = params.output ? params.output
-                : allocateBuffer({qkv->type(), {pad_token_num, output_weight->kernel->shape()[1]}},
-                                 {"attn_layer_out"});
+    } else if (params.output) {
+        gemm_output = params.output;
         attn_output = gemm_output;
     }
      
@@ -217,7 +215,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         printBufferData(*gemm_output, "attn_rs_inter_output");
         printBufferData(*attn_output, "attn_rs_final_output");
     } else {
-        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input));
+        attn_output = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
     return {std::move(attn_output)};
 }

@@ -1052,13 +1052,18 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
         attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
     }
     auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
+    if (device_->initParams().use_deepep_moe) {
+        // avoid attention o gemm copy
+        attn_out_buf.reset();
+    }
     printBufferData(*residual, "in residual");
     BufferPtr residual2 = nullptr;
     BufferPtr hidden_to_slice = nullptr; // for sp and overlap comm type 2
     if (layer.pre_layernorm) {
         // TODO(wangyin.yx): fuse this clone branch into layernorm(rmsnorm)
-        residual = last_layer_defered_params.residual ? device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"})
-                                                      : device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
+        if (last_layer_defered_params.residual) {
+            residual = device_->allocateBufferLike(*hidden, AllocationType::DEVICE, {"residual"});
+        }
         int m_split = device_props_.m_split;
         size_t overlap_comm_type = device_props_.overlap_comm_type;
         auto pre_layernorm_output = device_->layernorm(LayernormParams(hidden,
@@ -1069,7 +1074,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(
                                                                         std::nullopt,
                                                                         0.f,
                                                                         description_.layernorm_eps,
-                                                                        (enable_sp && overlap_comm_type == 2) ? false : true,
+                                                                        false,
                                                                         false,
                                                                         description_.norm_type,
                                                                         description_.act_qscheme,
