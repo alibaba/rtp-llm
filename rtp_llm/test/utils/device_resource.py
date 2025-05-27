@@ -21,7 +21,7 @@ class DeviceResource:
             # TODO: for arm cpu device, how to simulate gpu ?
             self.total_gpus = [0, 1]
         logging.info(f"total gpu: {self.total_gpus}")
-        self.gpu_ids = []
+        self.gpu_ids: List[int] = []
         self.gpu_locks = ExitStack()
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"

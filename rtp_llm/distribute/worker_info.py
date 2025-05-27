@@ -65,8 +65,8 @@ class ParallelInfo(object):
         self.world_rank = world_rank
         self.local_world_size = local_world_size
         logging.info(f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]")
-        assert ep_size <= world_size and world_size % ep_size == 0
-        assert self.world_size == self.tp_size * self.dp_size * self.pp_size
+        assert ep_size <= world_size and world_size % ep_size == 0, f"ep_size:{self.ep_size} <= world_size:{self.world_size} and world_size:{self.world_size} % ep_size:{self.ep_size} != 0"
+        assert self.world_size == self.tp_size * self.dp_size * self.pp_size, f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size}"
         if torch.cuda.is_available():
             self.device = 'cuda:' + str(self.world_rank % self.local_world_size)
         else:

@@ -12,12 +12,17 @@ namespace rtp_llm {
 struct BatchDecodeSchedulerConfig: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("batch_size", batch_size_);
+        json.Jsonize("mode", mode_, "decode");
     }
     uint32_t batch_size_;
+    std::string mode_;
 };
-
 class BatchDecodeScheduler : public SchedulerBase {
 public:
+    enum SchedulerType : std::uint8_t {
+        kBatchDecode = 0,
+        kBatchPrefill = 1
+    };
     BatchDecodeScheduler(const rtp_llm::GptInitParameter&          params,
                          const std::shared_ptr<CacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr   metrics_reporter,
@@ -25,11 +30,8 @@ public:
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_ = 1;
-        char* batch_size = std::getenv("SCHEDULER_RUN_BATCH_SIZE");
-        if (batch_size) {
-            batch_size_ = std::atoi(batch_size);
-        }        
+        batch_size_ = std::getenv("SCHEDULER_RUN_BATCH_SIZE") ? std::atoi(std::getenv("SCHEDULER_RUN_BATCH_SIZE")) : 1;
+        scheduler_type_ = SchedulerType::kBatchDecode;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -59,11 +61,16 @@ public:
         }
     }
 
-    void updateSchedulerInfo(const std::string& scheduler_info) override {        
+    void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfig config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;        
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d", batch_size_);
+        batch_size_ = config.batch_size_;
+        if (config.mode_ == "decode") {
+            scheduler_type_ = SchedulerType::kBatchDecode;
+        } else if (config.mode_ == "prefill") {
+            scheduler_type_ = SchedulerType::kBatchPrefill;
+        }
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
     }
 
     void initRunningStreams() {
@@ -77,9 +84,11 @@ public:
             }
         }
         // incr kvcache block to decode
-        for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            auto stream = *it;
-            stream->setIsContextStream(false);
+        if (scheduler_type_ == SchedulerType::kBatchDecode) {
+            for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+                auto stream = *it;
+                stream->setIsContextStream(false);
+            }
         }
     }
 
@@ -111,7 +120,7 @@ public:
         } else {
             incrRunningStream();
         }
-        evictAllDoneStreams();        
+        evictAllDoneStreams();
         return running_streams_;
     }
 
@@ -151,6 +160,7 @@ private:
     std::shared_ptr<CacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
     rtp_llm::DeviceBase* device_;
+    SchedulerType scheduler_type_;
 };
 
 

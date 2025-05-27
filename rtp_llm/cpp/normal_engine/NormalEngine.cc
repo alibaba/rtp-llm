@@ -296,9 +296,12 @@ absl::Status NormalEngine::step() {
     if (gen_timeline && profiler_step_ <= 0) {
         auto stream_group = StreamGroups(streams);        
         auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size + device_->getDeviceProperties().tp_rank;
-        auto profiler_prefix = autil::StringUtil::formatString(
-            "normal_profiler_wr%d_b%d_s%d_", world_rank, stream_group.totalModelBatchSize(), stream_group.maxSeqLen());
-        profiler_ = std::make_shared<CudaProfiler>(profiler_prefix);
+        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
+                                                               world_rank,
+                                                               stream_group.totalModelBatchSize(),
+                                                               stream_group.maxSeqLen(),
+                                                               int(stream_group.totalContextBatchSize() > 0));
+        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
         profiler_->start();
         profiler_step_ = 3;
     }
