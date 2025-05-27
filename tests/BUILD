@@ -426,6 +426,7 @@ cc_test(
         "-lnvToolsExt",
         "-L/usr/local/cuda/extras/CUPTI/lib64",
         "-lcupti",
+        "-lcuda"
     ],
     exec_properties = {'gpu':'A10'},
 )

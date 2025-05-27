@@ -16,6 +16,8 @@
 
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include <cuda.h>
 
 #include <mutex>
 #include <stdio.h>
@@ -62,6 +64,16 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error) {
     return "<unknown>";
 }
 
+static const char* _cudaGetErrorEnum(CUresult error) {
+    const char* error_name = nullptr;
+    CUresult name_result = cuGetErrorName(error, &error_name);
+    if (name_result != CUDA_SUCCESS) {
+        RTP_LLM_LOG_WARNING("Failed to get error name, %d", int(error));
+        return "Unknown CUDA error (failed to get error name)";
+    }
+    return error_name;
+}
+
 template<typename T>
 void check(T result, const char* const file, int const line) {
     if (result) {
@@ -77,6 +89,7 @@ void check(T result, const char* const file, int const line) {
 
 template void check<cudaError_t>(cudaError_t result, const char* const file, int const line);
 template void check<cublasStatus_t>(cublasStatus_t result, const char* const file, int const line);
+template void check<CUresult>(CUresult result, const char* const file, int const line);
 
 void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {

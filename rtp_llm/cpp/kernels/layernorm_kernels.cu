@@ -606,7 +606,7 @@ void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* g
 {
 #if ENABLE_TRITON && !defined(ENABLE_FP8)
     if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr
-      && beta != nullptr && (out == nullptr || return_normed_output == true) && hidden_dim % 32 == 0) {
+      && beta != nullptr && (out == nullptr || return_normed_output == true) && hidden_dim % 16 == 0) {
        invokeTritonLayerNorm<T, QUANT_OUT_T, false>(out, normed_output, input, (const T*) nullptr, (const T*) nullptr, gamma, beta, eps, tokens, hidden_dim, stream, use_diff_of_squares, scale, dynamic_scale, out_quant, return_normed_output);
        return; 
     }
@@ -648,7 +648,7 @@ void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* inpu
 {
 #if ENABLE_TRITON && !defined(ENABLE_FP8)
     if (hidden_dim <= 4096 && dynamic_scale == nullptr && scale == nullptr
-      && beta != nullptr && (out == nullptr || return_normed_output == true) && hidden_dim % 32 == 0) {
+      && beta != nullptr && (out == nullptr || return_normed_output == true) && hidden_dim % 16 == 0) {
        invokeTritonLayerNorm<T, QUANT_OUT_T, true>(out, norm_output, input, bias, residual, gamma, beta, eps, tokens, hidden_dim, stream, use_diff_of_squares, scale, dynamic_scale, out_quant, return_normed_output);
        return;
     }

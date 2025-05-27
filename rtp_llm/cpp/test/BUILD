@@ -174,6 +174,9 @@ cc_test(
         "@com_google_googletest//:gtest"
     ],
     copts = copts(),
+    linkopts = [
+        "-lcuda"
+    ],
     exec_properties = {'gpu':'A10'},
 )
 

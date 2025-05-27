@@ -41,20 +41,20 @@ unsigned int nextPowerOf2(unsigned int n) {
     do {                                                          \
       if constexpr (std::is_same_v<T, float>) {                   \
         if constexpr (HAS_BIAS)                                    \
-          layernorm_kernel_fp32_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_fp32_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
         else                                                      \
-          layernorm_kernel_fp32_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_fp32_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
       } else if constexpr (std::is_same_v<T, half>) {             \
         if constexpr (HAS_BIAS)                                    \
-          layernorm_kernel_fp16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_fp16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
         else                                                      \
-          layernorm_kernel_fp16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_fp16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
       }                                                           \
       else if constexpr (std::is_same_v<T, __nv_bfloat16>) {      \
         if constexpr (HAS_BIAS)                                    \
-          layernorm_kernel_bf16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_bf16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
         else                                                      \
-          layernorm_kernel_bf16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__); \
+          check_cuda_value(layernorm_kernel_bf16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
       }                                                           \
    } while (0)
 
