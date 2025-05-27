@@ -5,7 +5,7 @@
 * NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)
 
 ## 一. 环境搭建
-在这篇文章我们将为大家介绍完整的RTP-LLM推理引擎系统的部署和使用路径。本文以一台单机4卡A10的机器为例子进行介绍。首先是我们的机器配置，我们给出GPU和CPU架构配置情况如下:
+在这篇文章我们将为大家介绍完整的RTP-LLM推理引擎系统的部署和使用路径。本文以一台单机4卡A10的机器为例子进行介绍。首先是我们的机器配置，我们给出GPU配置情况如下:
 ```shell
 $nvidia-smi
 Fri May 16 14:52:19 2025       
@@ -40,32 +40,6 @@ Fri May 16 14:52:19 2025
 |=============================================================================|
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
-$lscpu
-Architecture:          x86_64
-CPU op-mode(s):        32-bit, 64-bit
-Byte Order:            Little Endian
-CPU(s):                128
-On-line CPU(s) list:   0-127
-Thread(s) per core:    2
-Core(s) per socket:    32
-Socket(s):             2
-NUMA node(s):          2
-Vendor ID:             GenuineIntel
-CPU family:            6
-Model:                 106
-Model name:            Intel(R) Xeon(R) Platinum 8369B CPU @ 2.90GHz
-Stepping:              6
-CPU MHz:               2900.000
-BogoMIPS:              5800.00
-Hypervisor vendor:     KVM
-Virtualization type:   full
-L1d cache:             48K
-L1i cache:             32K
-L2 cache:              1280K
-L3 cache:              49152K
-NUMA node0 CPU(s):     0-63
-NUMA node1 CPU(s):     64-127
-Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves wbnoinvd arat avx512vbmi avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm arch_capabilities
 ```
 接下来我们需要拉取容器环境用于配置安装RTP-LLM。我们准备的容器如下:
 registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f

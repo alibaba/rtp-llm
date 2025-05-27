@@ -13,8 +13,6 @@ RUN yum -y install yum-plugin-ovl && yum clean all && \
 RUN yum clean all && yum -y install clang13-libs clang13 clang13-devel clang13-tools-extra compiler-rt13 --enablerepo taobao.7.x86_64.current -b current
 RUN yum clean all && yum -y install lld13 --enablerepo taobao.7.x86_64.current -b current
 
-RUN yum install http://yum.tbsite.net/taobao/7/noarch/current/t-midware-vipserver-dnsclient/t-midware-vipserver-dnsclient-1.1.11-20240313120706.alios7.noarch.rpm -y
-
 # https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64
 ARG BAZELISK_URL=http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/aios/bazelisk-1.20.0
 RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
