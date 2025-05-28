@@ -34,7 +34,7 @@ BufferPtr getSemaphores(CudaDevice *device, size_t kv_head_num, size_t max_decod
 }
 
 void* getScratch(CudaDevice *device, size_t head_num, size_t kv_head_num, uint32_t beam_width) {
-    size_t scratch_size = (256u << 20);
+    size_t scratch_size = (256u << 20) * 4;
     static BufferPtr scratch = device->allocateBuffer({DataType::TYPE_BYTES, {scratch_size}, AllocationType::DEVICE}, {"scratch"});
     device->bufMemset(*scratch, 0);
     size_t group_size = head_num / kv_head_num;
