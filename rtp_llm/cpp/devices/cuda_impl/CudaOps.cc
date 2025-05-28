@@ -58,7 +58,7 @@ void CudaDevice::copy(const CopyParams& params) {
         cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream);
     }
 
-    if (copyType == cudaMemcpyDeviceToHost || copyType == cudaMemcpyHostToDevice) {
+    if (copyType == cudaMemcpyDeviceToHost) {
         cudaStreamSynchronize(stream);
         check_cuda_value(cudaGetLastError());
     }
