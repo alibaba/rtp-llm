@@ -184,10 +184,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         check_with_info(src_weight_info.name == W.attn_o_w, "src_weight_info.name != W.attn_o_w, actual: {}".format(src_weight_info.name))
         check_with_info(isinstance(src_weight_info, MlaAttnAtomicWeight), "src_weight_info is not MlaAttnAtomicWeight, actual: {}".format(src_weight_info))
         w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
-        kernel = MlaAttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                     functools.partial(mla_pad, head_num=src_weight_info.config.head_num, nope_head_dim=src_weight_info.nope_head_dim, rope_head_dim=0),
                     data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MlaAttnAtomicWeight(W.attn_o_s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.attn_o_s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                     functools.partial(mla_pad_scale, head_num=src_weight_info.config.head_num, nope_head_dim=src_weight_info.nope_head_dim, rope_head_dim=0, group_size=group_size),
                     data_type=torch.float32, config=src_weight_info.config)
 
@@ -202,10 +202,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         else:
             w, s = [W.mla_v_w, W.mla_v_s]
 
-        kernel = MlaAttnAtomicWeight(w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                     functools.partial(kv_split, kv_lora_rank=src_weight_info.kv_lora_rank, nope_head_dim=src_weight_info.nope_head_dim, v_head_dim=src_weight_info.v_head_dim, idx=0 if is_k else 1),
                     data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MlaAttnAtomicWeight(s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                     functools.partial(kv_split, kv_lora_rank=src_weight_info.kv_lora_rank // group_size, nope_head_dim=src_weight_info.nope_head_dim // group_size, v_head_dim=src_weight_info.v_head_dim // group_size, idx= 0 if is_k else 1),
                     data_type=torch.float32, config=src_weight_info.config)
 
@@ -217,7 +217,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
         w = W.mla_kc if is_k else W.mla_vc
 
-        kernel = MlaAttnAtomicWeight(w, [CkptWeightInfo(w_name + QW_SUFFIX, identity), CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+        kernel =create_w8a8_fp8_per_block_weight(src_weight_info, w, [CkptWeightInfo(w_name + QW_SUFFIX, identity), CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                     functools.partial(process_func, block_size=128, head_num=src_weight_info.config.head_num, nope_head_dim=src_weight_info.nope_head_dim, v_head_dim=src_weight_info.v_head_dim, lora_rank=src_weight_info.kv_lora_rank),
                     config=src_weight_info.config)
         return [kernel, None]
@@ -227,9 +227,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         assert src_weight_info.config.q_use_lora
         w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
 
-        kernel = MlaAttnAtomicWeight(W.mla_q_b_w, [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.mla_q_b_w, [CkptWeightInfo(w_name + QW_SUFFIX, src_weight_info.weights[0].merge_fun)],
                 identity, data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MlaAttnAtomicWeight(W.mla_q_b_s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.mla_q_b_s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 identity, data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
@@ -238,11 +238,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         assert src_weight_info.config.q_use_lora
         q_w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
         k_w_name = src_weight_info.weights[1].name[:-len(W_SUFFIX)]
-        kernel = MlaAttnAtomicWeight(W.mla_fusedqkrope_w, [
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.mla_fusedqkrope_w, [
             CkptWeightInfo(q_w_name + QW_SUFFIX, identity),
             CkptWeightInfo(k_w_name + QW_SUFFIX, src_weight_info.weights[1].merge_fun)], concat_0,
             data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MlaAttnAtomicWeight(W.mla_fusedqkrope_s, [
+        scale =create_w8a8_fp8_per_block_weight(src_weight_info, W.mla_fusedqkrope_s, [
             CkptWeightInfo(q_w_name + QS_SUFFIX, identity),
             CkptWeightInfo(k_w_name + QS_SUFFIX, identity)], concat_0, data_type=torch.float32, config=src_weight_info.config)
 
@@ -258,12 +258,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             w3_name = weights[1].name[:-len(W_SUFFIX)]
 
             return [
-                FfnAtomicWeight(
+                create_w8a8_fp8_per_block_weight(src_weight_info, 
                     w, [CkptWeightInfo(w1_name + QW_SUFFIX, identity), CkptWeightInfo(w3_name + QW_SUFFIX, identity)],
                         functools.partial(pad_w13, inter_padding_size=src_weight_info.config.inter_padding_size, dim=0),
                         data_type=torch.float8_e4m3fn,
                         config=src_weight_info.config),
-                FfnAtomicWeight(
+                create_w8a8_fp8_per_block_weight(src_weight_info, 
                     s, [CkptWeightInfo(w1_name + QS_SUFFIX, identity), CkptWeightInfo(w3_name + QS_SUFFIX, identity)],
                     functools.partial(pad_w13, inter_padding_size=src_weight_info.config.inter_padding_size // group_size, dim=0), data_type=torch.float32,
                     config=src_weight_info.config)
@@ -274,18 +274,18 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             else:
                 w, s = [W.ffn_w3, W.ffn_s3]
 
-            kernel = FfnAtomicWeight(w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
+            kernel = create_w8a8_fp8_per_block_weight(src_weight_info, w, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                                      functools.partial(pad, inter_padding_size=src_weight_info.config.inter_padding_size, dim=0),
                                      data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-            scale = FfnAtomicWeight(s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            scale = create_w8a8_fp8_per_block_weight(src_weight_info, s, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                                     functools.partial(pad, inter_padding_size=src_weight_info.config.inter_padding_size // group_size, dim=0),
                                     data_type=torch.float32, config=src_weight_info.config)
             return [kernel, scale]
         else:
-            kernel = FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
+            kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.ffn_w2, [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                                      functools.partial(pad, inter_padding_size=src_weight_info.config.inter_padding_size, dim=1),
                                      data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-            scale = FfnAtomicWeight(W.ffn_s2, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.ffn_s2, [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                                     functools.partial(pad, inter_padding_size=src_weight_info.config.inter_padding_size // group_size, dim=1),
                                     data_type=torch.float32, config=src_weight_info.config)
             return [kernel, scale]
@@ -293,18 +293,18 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
         w_name = src_weight_info.weights[0].name[:-len(W_SUFFIX)]
-        kernel = MoeAtomicWeight(W.moe_w2, [CkptWeightInfo(w_name + QW_SUFFIX, identity)], stack_,
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.moe_w2, [CkptWeightInfo(w_name + QW_SUFFIX, identity)], stack_,
                                  data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MoeAtomicWeight(W.moe_s2, [CkptWeightInfo(w_name + QS_SUFFIX,
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.moe_s2, [CkptWeightInfo(w_name + QS_SUFFIX,
                                 functools.partial(multipy_identity, scale=src_weight_info.config.routed_scaling_factor))], stack_,
                                 data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
-        kernel = MoeAtomicWeight(W.moe_w1, [CkptWeightInfo(w.name[:-len(W_SUFFIX)] + QW_SUFFIX, identity) for w in src_weight_info.weights],
+        kernel = create_w8a8_fp8_per_block_weight(src_weight_info, W.moe_w1, [CkptWeightInfo(w.name[:-len(W_SUFFIX)] + QW_SUFFIX, identity) for w in src_weight_info.weights],
                                 stack_moe_w1, data_type=torch.float8_e4m3fn, config=src_weight_info.config)
-        scale = MoeAtomicWeight(W.moe_s1, [CkptWeightInfo(w.name[:-len(W_SUFFIX)] + QS_SUFFIX, identity) for w in src_weight_info.weights],
+        scale = create_w8a8_fp8_per_block_weight(src_weight_info, W.moe_s1, [CkptWeightInfo(w.name[:-len(W_SUFFIX)] + QS_SUFFIX, identity) for w in src_weight_info.weights],
                                 stack_moe_w1, data_type=torch.float32, config=src_weight_info.config)
         return [kernel, scale]
 
