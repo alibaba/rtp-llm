@@ -141,11 +141,18 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
         return jit_kernels_[kernel_key];
     }
 
-    filesystem::path dir_path = "./deep_gemm_runtime/";
+    const char* rank = getenv("WORLD_RANK");
+    string rank_str;
+    if (!rank) {
+        rank_str = "0";
+    } else {
+        rank_str = string(rank);
+    }
+    filesystem::path dir_path = string("./deep_gemm_runtime/rank_") + rank_str;
     filesystem::create_directories(dir_path);
 
-    string cu_filename = "./deep_gemm_runtime/deepgemm" + params_str + ".cu";
-    string so_name = "./deep_gemm_runtime/libdeepgemm" + params_str + ".so";
+    string cu_filename = dir_path.string() + "/deepgemm" + params_str + ".cu";
+    string so_name = dir_path.string() + "/libdeepgemm" + params_str + ".so";
 
     ofstream cu_file(cu_filename.c_str());
     cu_file << getKernelStr(n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab);
