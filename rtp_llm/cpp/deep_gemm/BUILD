@@ -123,6 +123,5 @@ cc_test(
         "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     ],
-    tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
