@@ -13,7 +13,7 @@ cc_library(
         "utils.h",
     ] + select({
         "@//:using_cuda12": glob([
-	        "deep_gemm_template.h",
+            "deep_gemm_template.h",
             "include/*.cuh"
         ]),
         "//conditions:default": [],
@@ -40,15 +40,16 @@ gen_dispatch_code(
 )
 
 filegroup(
-    name = "deep_gemm_include",
+    name = "deep_gemm_jit_include",
     srcs = [
         "utils.h",
         "deep_gemm_template.h",
         "interleave_ffma.py",
+        "JIT.h",
+        "JIT.cc"
     ] + glob([
         "include/*.cuh"
     ]),
-    visibility = ["//visibility:public"],
 )
 
 copy_filegroup(
@@ -60,7 +61,7 @@ copy_filegroup(
 filegroup(
     name = "jit_includes",
     srcs = [
-        ":deep_gemm_include",
+        ":deep_gemm_jit_include",
         ":cutlass_hdrs"
     ],
     visibility = ["//visibility:public"],

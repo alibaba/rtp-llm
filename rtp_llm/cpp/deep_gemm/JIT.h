@@ -2,6 +2,8 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <fcntl.h>
+#include <unistd.h>
 #include <vector>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -12,6 +14,47 @@
 #include "rtp_llm/cpp/deep_gemm/utils.h"
 
 namespace rtp_llm {
+
+class JITFilelock {
+    int fd = -1;
+    std::string filepath;
+public:
+    explicit JITFilelock(const std::string& path, int timeout_sec) : filepath(path) {
+        fd = open(filepath.c_str(), O_CREAT | O_RDWR, 0666);
+        if (fd == -1) {
+            RTP_LLM_FAIL("Cannot open filelock:" + filepath);
+        }
+
+        struct flock fl {};
+        fl.l_type = F_WRLCK;
+        
+        time_t start = time(nullptr);
+        bool lock_success = false;
+        while (time(nullptr) - start < timeout_sec) {
+            if (fcntl(fd, F_SETLK, &fl) == 0) {
+                lock_success = true;
+                break;
+            }
+            sleep(1);
+        }
+        
+        if (!lock_success) {
+            RTP_LLM_FAIL("Cannot get filelock " + filepath + " in " + std::to_string(timeout_sec) + " secs");
+        }
+    }
+
+    ~JITFilelock() {
+        if (fd != -1) {
+            struct flock fl {};
+            fl.l_type = F_UNLCK;
+            fcntl(fd, F_SETLK, &fl);
+            close(fd);
+        }
+    }
+
+    JITFilelock(const JITFilelock&) = delete;
+    JITFilelock& operator=(const JITFilelock&) = delete;
+};
 
 #ifdef ENABLE_FP8
 typedef void (*runDeepGemmFunc)(__nv_bfloat16*,
