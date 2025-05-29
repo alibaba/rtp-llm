@@ -238,6 +238,61 @@ __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage
     return;
 }
 
+__global__ void populateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* sequenceLengthsOut, int const* parentIdsPtr, int const* outputIdsPtr, 
+                                 size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut, size_t const beamWidthIn) {
+    int const totalBeamNumOut = batchSize * beamWidthOut;
+    for (int beamIdxOut = blockIdx.x; beamIdxOut < totalBeamNumOut; beamIdxOut += gridDim.x) {
+        int beamIdxIn = parentIdsPtr[beamIdxOut];
+        int newTokenId = outputIdsPtr[beamIdxOut];
+        int newTokenPos = sequenceLengthsOut[beamIdxOut] - 1;
+
+        int const* curTokenIdsIn = tokenIdsIn + (beamIdxOut / beamWidthOut * beamWidthIn + beamIdxIn) * maxSeqLen;
+        // TODO(zhangjianning.zjn): only copy idx from 0 to seqlen to reduce copy size
+        for (int i = threadIdx.x; i < maxSeqLen; i += blockDim.x) {
+            int tokenId = i == newTokenPos ? newTokenId : curTokenIdsIn[i];
+            tokenIdsOut[beamIdxOut * maxSeqLen + i] = tokenId;
+        }
+    }
+}
+
+__global__ void populateNewTokenIds(int* tokenIdsOut, int const* sequenceLengthsOut, int const* outputIdsPtr, 
+                                    size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut) {
+    int const totalBeamNumOut = batchSize * beamWidthOut;
+    int const tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int const stride = gridDim.x * blockDim.x;
+    for (int beamIdxOut = tid; beamIdxOut < totalBeamNumOut; beamIdxOut += stride) {
+        int newTokenId = outputIdsPtr[beamIdxOut];
+        int newTokenPos = sequenceLengthsOut[beamIdxOut] - 1;
+        tokenIdsOut[beamIdxOut * maxSeqLen + newTokenPos] = newTokenId;
+    }
+}
+
+void invokePopulateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* sequenceLengthsOut, int const* parentIdsPtr, int const* outputIdsPtr, 
+                            size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut, size_t const beamWidthIn, 
+                            cudaStream_t stream) {
+    if (tokenIdsOut == nullptr || batchSize == 0 || maxSeqLen == 0 || beamWidthIn == 0 || beamWidthOut == 0) {
+        return;
+    }
+
+    constexpr size_t maxBlockSize = 1024;
+
+    int smCount = getMultiProcessorCount();
+
+    if (tokenIdsIn == tokenIdsOut) {
+        int blockSize = maxBlockSize;
+        int blockNum = 0;
+        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateNewTokenIds, blockSize, 0));
+        populateNewTokenIds<<<smCount * blockNum, blockSize, 0, stream>>>(tokenIdsOut, sequenceLengthsOut, outputIdsPtr, batchSize, maxSeqLen, beamWidthOut);
+        sync_check_cuda_error();
+    } else {
+        int blockSize = min(maxSeqLen, maxBlockSize);
+        int blockNum = 0;
+        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateTokenIds, blockSize, 0));
+        populateTokenIds<<<smCount * blockNum, blockSize, 0, stream>>>(tokenIdsOut, tokenIdsIn, sequenceLengthsOut, parentIdsPtr, outputIdsPtr, batchSize, maxSeqLen, beamWidthOut, beamWidthIn);
+        sync_check_cuda_error();
+    }
+}
+
 void BeamHypotheses::print()
 {
 #if BEAM_SEARCH_DEBUG

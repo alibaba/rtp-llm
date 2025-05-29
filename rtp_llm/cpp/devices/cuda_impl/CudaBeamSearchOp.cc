@@ -94,13 +94,16 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
             }
         }
     }
-    BH.cumLogProbsIn  = params.cum_log_probs->data<float>();
-    BH.cumLogProbsOut = params.cum_log_probs->data<float>();
-    auto beam_indices = allocateBuffer(
-        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {});
+    BH.cumLogProbsIn   = params.cum_log_probs->data<float>();
+    BH.cumLogProbsOut  = params.cum_log_probs->data<float>();
+    BH.tokenIdsIn      = params.token_ids->data<int>();
+    auto new_token_ids = allocateBufferLike(*params.token_ids, AllocationType::DEVICE, {"new_token_ids"});
+    BH.tokenIdsOut     = new_token_ids->data<int>();
+    auto beam_indices  = allocateBuffer(
+        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
     BH.parentIdsPtr = beam_indices->data<int>();
     auto output_ids = allocateBuffer(
-        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {});
+        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
     BH.outputIdsPtr = output_ids->data<int>();
 
     // invoke trt kernel
@@ -114,22 +117,6 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     auto output_ids_tensor = Buffer2torchTensor(output_ids, false);
     auto token_ids         = Buffer2torchTensor(params.token_ids, false);
     auto beam_indices_in   = Buffer2torchTensor(beam_indices, false);
-
-    // TODO(zhangjianning.zjn): use custom kernel for better performance
-    auto new_token_ids   = clone({*params.token_ids});
-    auto token_ids_clone = Buffer2torchTensor(new_token_ids, false);
-    for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < beam_width_out; j++) {
-            auto beam_idx_in = beam_indices_in.index({i, j}).item<int>();
-            int  seq_len     = sequence_lengths.index({i, j}).item<int>();
-
-            auto old_tokens = token_ids.index({i, beam_idx_in});
-            token_ids_clone.index_put_({i, j}, old_tokens);
-
-            auto new_token = output_ids_tensor.index({i, j});
-            token_ids_clone.index_put_({i, j, seq_len - 1}, new_token);
-        }
-    }
 
     return BeamSearchOutput({std::move(new_token_ids),
                              std::move(params.input_lengths),

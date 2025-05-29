@@ -509,7 +509,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
 
     // TODO(zhangjianning.zjn): use for loop to support nBMOut > 1024
 
-    // Update inputLengths, sequenceLengths, parentIdsPtr, outputIdsPtr, outputIds, and finished
+    // Update inputLengths, sequenceLengths, parentIdsPtr, outputIdsPtr, and finished
     // TODO(zhangjianning.zjn): use for loop to support nBMOut > 1024
     if (tid < nBMOut)
     {
@@ -771,6 +771,9 @@ void beamSearchKernelLauncher(
             <<<nBS, nThreadStage3, 0, stream>>>(pStage2Ids, pStage2LogProbs, pStage3, bh);
     }
     sync_check_cuda_error();
+
+    invokePopulateTokenIds(bh.tokenIdsOut, bh.tokenIdsIn, bh.sequenceLengthsOut, bh.parentIdsPtr, bh.outputIdsPtr,
+        bh.nBatchSize, bh.nMaxSeqLen, bh.nBeamWidthOut, bh.nBeamWidthIn, stream);
 
     return;
 }

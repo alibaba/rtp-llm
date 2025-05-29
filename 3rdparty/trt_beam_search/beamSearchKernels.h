@@ -71,6 +71,7 @@ struct BeamHypotheses
     int* nBeamWidthOutHost{nullptr};                // [BS], cpu                                                for VBWS, beam width of next forward computation
 
     // Pointers for input
+    int* tokenIdsIn{nullptr};                       // [BS, BMI, MSL]    %%
     int const* inputLengthsIn{nullptr};             // [BS, BMI]         %% context_length
     int const* sequenceLengthsIn{nullptr};          // [BS, BMI]         %% context_length
     int const* endIds{nullptr};                     // [BS, BMI]         %% self.end_ids
@@ -78,7 +79,7 @@ struct BeamHypotheses
     runtime::SizeType32 const* batchSlots{nullptr}; // [BS]
 
     // Pointers for output
-    int* outputIds{nullptr};                        // [BS, BMO, MSL]    %% self.output_ids                      only used in gather_tree
+    int* tokenIdsOut{nullptr};                      // [BS, BMO, MSL]    %%
     float* logProbs{nullptr};                       // [BS, BMO, MSL]    %% self.log_probs                       only used in gather_tree
     float* logProbsTiled{nullptr};                  // [MSL, MBS, BMO]   %% self.log_probs_tiled
     int* inputLengthsOut{nullptr};                  // [BS, BMI]         %% context_length
@@ -147,6 +148,10 @@ __global__ void addCumLogProbs(T* __restrict pStage1Probs, float const* __restri
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
     size_t const nBMIn, size_t const nBMOut, size_t const nV);
 
+void invokePopulateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* sequenceLengthsOut, int const* parentIdsPtr, int const* outputIdsPtr, 
+    size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut, size_t const beamWidthIn, 
+    cudaStream_t stream);
+    
 size_t getBeamSearchWorkspaceSize(const BeamHypotheses &bh);
 
 // void printLogProbs(float const* x, int const nBS, int const nBMIn, int const nBM, int const nV);
