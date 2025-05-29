@@ -170,6 +170,9 @@ public:
                 throw std::out_of_range("Negative token ID encountered");
             }
         }
+        if (token_ids.empty()) {
+            token_ids.push_back(prefixToCandidateTokensPtr_->endTokenId());
+        }
         return token_ids;
     }
 
