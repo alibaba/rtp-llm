@@ -10,13 +10,13 @@
  * its affiliates is strictly prohibited.
  */
 
+#if !defined(__CUDA_ARCH__) || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900)
+
 #include "barriers.cuh"
 #include "cuda_hint.cuh"
 #include "defines.h"
 #include "utils.cuh"
 #include "utils.h"
-
-#if !defined(__CUDA_ARCH__) || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900)
 
 #if SPEC_DEC
 #define Q_HEADS_PER_CTA 64
@@ -610,7 +610,7 @@ CUBIN_EXPORT __global__
 #else
     __launch_bounds__(128 * 3, 1)
 #endif
-        void kernel_mha(uint32_t const nbKHeads,
+        void xqa_kernel_sm90(uint32_t const nbKHeads,
 #if SLIDING_WINDOW
             uint32_t const slidingWinSize,
 #endif
@@ -3076,7 +3076,7 @@ static CUtensorMap makeTensorMapForPagedKVCache(void const* addr, CUtensorMapDat
     return tensorMap;
 }
 
-void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
+void XQA_FUNC_SM90(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW
     uint32_t slidingWinSize,
 #endif
@@ -3119,7 +3119,7 @@ void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
     {
         uint32_t size;
         checkCuda(cudaMemcpyFromSymbol(&size, smemSize, sizeof(smemSize)));
-        checkCuda(cudaFuncSetAttribute(kernel_mha, cudaFuncAttributeMaxDynamicSharedMemorySize, size));
+        checkCuda(cudaFuncSetAttribute(xqa_kernel_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, size));
         return size;
     }();
     // printf("smemSize = %u\n", hostSmemSize);
@@ -3172,7 +3172,7 @@ void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
     }();
     auto const tensorMap
         = makeTensorMapForPagedKVCache(pool, dtype, validElemsPerHead, nbKHeads, tokensPerPage, gemm0CtaTileNbTokens);
-    cudaError_t const err = cudaLaunchKernelEx(&launchCfg, &kernel_mha, nbKHeads,
+    cudaError_t const err = cudaLaunchKernelEx(&launchCfg, &xqa_kernel_sm90, nbKHeads,
 #if SLIDING_WINDOW
         slidingWinSize,
 #endif
@@ -3203,7 +3203,7 @@ void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
     assert(gemm0CtaTileNbTokens == gemm1CtaTileNbTokens);
     auto const tensorMap = makeTensorMapForContiguousKVCache(kvCacheData, CU_TENSOR_MAP_DATA_TYPE_UINT8,
         validElemsPerHead, nbKHeads, maxSeqLen, beamWidth, batchSize, gemm0CtaTileNbTokens);
-    cudaLaunchKernelEx(&launchCfg, kernel_mha, nbKHeads,
+    cudaLaunchKernelEx(&launchCfg, xqa_kernel_sm90, nbKHeads,
 #if SLIDING_WINDOW
         slidingWinSize,
 #endif

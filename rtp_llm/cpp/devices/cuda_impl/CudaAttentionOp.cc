@@ -387,20 +387,23 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
 
-
 #ifdef USING_CUDA12
     size_t local_kv_head_num = params.configs.kv_head_num;
-    if (use_xqa && size_per_head == HEAD_ELEMS && local_head_num / local_kv_head_num == HEAD_GRP_SIZE &&
-        params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3 &&
-        params.input.type() == DataType::TYPE_BF16 && params.output.type() == DataType::TYPE_BF16 &&
-        params.configs.tokens_per_block == TOKENS_PER_PAGE) {
+    size_t local_tokens_per_block = params.configs.tokens_per_block;
+    if (use_xqa && supportXqa(params.input.type(),
+                              params.output.type(),
+                              params.common.kv_cache->k_cache_buffer->type(),
+                              local_head_num / local_kv_head_num,
+                              size_per_head,
+                              local_tokens_per_block)) {
         runXqa(params.input.data(),
                params.output.data(),
                local_head_num,
                local_kv_head_num,
+               size_per_head,
                params.common.decoder_batch_size,
                params.common.decoder_max_seq_len,
-               params.configs.tokens_per_block,
+               local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),

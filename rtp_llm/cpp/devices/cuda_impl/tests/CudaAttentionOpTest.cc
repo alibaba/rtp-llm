@@ -133,7 +133,6 @@ TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
     }
 }
 
-
 TEST_F(AttentionOpTest, TrtV2ContextAttentionOpTest) {
     setenv("ENABLE_TRT_FMHA", "ON", 1);
     setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
@@ -248,21 +247,19 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
-    std::vector<size_t> batch = {2};
-    std::vector<size_t> seq   = {1};
-    std::vector<size_t> kv_seq = {1, TOKENS_PER_PAGE - 1, TOKENS_PER_PAGE, TOKENS_PER_PAGE + 1};
-    for (auto batch_size : batch) {
-        for (auto seq_len : seq) {
-            for (auto kv_seq_len: kv_seq) {
-                size_t num_key_value_heads = 4;
-                size_t num_heads = num_key_value_heads * HEAD_GRP_SIZE;
-                size_t head_dim = HEAD_ELEMS;
-                xqaAttentionOpTest(batch_size,
-                                   seq_len,
-                                   kv_seq_len,
-                                   num_heads,
-                                   num_key_value_heads,
-                                   head_dim);
+    std::vector<size_t> batch_size = {2};
+    size_t head_dim = 128;
+    size_t seq_q = 1;
+    size_t head_q = 64;
+    std::vector<size_t> head_kv = {4, 8, 16, 32, 64};
+    std::vector<size_t> page_size = {16, 32, 64, 128};
+    for (auto bs : batch_size) {
+        for (auto hkv: head_kv) {
+            for (auto ps : page_size) {
+                std::vector<size_t> seq_kv = {1, ps - 1, ps, ps + 1};
+                for (auto skv: seq_kv) {
+                    xqaAttentionOpTest(bs, seq_q, skv, head_q, hkv, head_dim, ps);
+                }
             }
         }
     }

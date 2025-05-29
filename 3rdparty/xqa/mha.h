@@ -108,7 +108,7 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t const nbKHeads,
 #endif
     uint32_t* semaphores, void* scratch, cudaStream_t stream);
 
-void launchHopperF8MHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
+void run_xqa_sm90(uint32_t page_size, uint32_t group_size, cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW
     uint32_t slidingWinSize,
 #endif

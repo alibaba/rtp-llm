@@ -13,6 +13,10 @@
 #pragma once
 #include "mha_stdheaders.cuh"
 
+#ifndef XQA_FUNC_SM90
+#define XQA_FUNC_SM90 xqa_sm90
+#endif
+
 #define STATIC_NB_K_HEADS 0
 #if STATIC_NB_K_HEADS
 #define NB_K_HEADS 2

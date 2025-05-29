@@ -99,7 +99,7 @@ cc_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12": [
-            "//3rdparty/xqa:xqa_impl",
+            "//3rdparty/xqa:xqa",
         ],
         "//conditions:default": [],
     }),
