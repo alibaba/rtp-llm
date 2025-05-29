@@ -132,7 +132,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setLoss(*update_info.loss);
     }
 
-    if (needReturnHiddenStates()) {
+    // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
+    if (needReturnHiddenStates() && update_info.all_hidden_states) {
         RTP_LLM_CHECK(update_info.all_hidden_states != nullptr);
         last_hidden_states_ = update_info.all_hidden_states;
     }
