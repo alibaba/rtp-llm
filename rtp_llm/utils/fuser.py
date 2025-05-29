@@ -84,12 +84,13 @@ class Fuser:
             return False
 
     @retry_with_timeout()
-    def mount_dir(self, path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO) -> Optional[str]:
+    def mount_dir(self, path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO, enable_mnt_ref: bool = False) -> Optional[str]:
         mnt_path = os.path.join(self._fuse_path_prefix, hashlib.md5(path.encode("utf-8")).hexdigest())
         req_json = {
             "uri": path,
             "mountDir":mnt_path,
-            "rwMode":mount_mode.name
+            "rwMode":mount_mode.name,
+            "enableMntRef": enable_mnt_ref
         }
         if mount_mode in [MountRwMode.RWMODE_WO, MountRwMode.RWMODE_RW]:
             req_json.update({"cacheOptions":{"writeMode":"WRITE_THROGH","enableRemove":True}})
@@ -226,7 +227,7 @@ class NfsManager():
 
 _nfs_manager = NfsManager()
 
-def fetch_remote_file_to_local(path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO):
+def fetch_remote_file_to_local(path: str, mount_mode:MountRwMode = MountRwMode.RWMODE_RO, enable_mnt_ref: bool = False):
     parse_result = urlparse(path)
     if parse_result.scheme == '':
         logging.info(f"Local path {path} use directly.")
@@ -236,7 +237,7 @@ def fetch_remote_file_to_local(path: str, mount_mode:MountRwMode = MountRwMode.R
         return _nfs_manager.mount_nfs_dir(path)
     else:
         logging.info(f"try fuse path {path}")
-        return _fuser.mount_dir(path, mount_mode)
+        return _fuser.mount_dir(path, mount_mode, enable_mnt_ref)
 
 def umount_file(path: str, force: bool = False):
     logging.info(f"umount file {path}")
