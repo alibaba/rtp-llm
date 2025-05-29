@@ -202,7 +202,9 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, typename SchedulerType::
     // Block scheduler
     uint32_t m_block_idx, n_block_idx;
     auto scheduler = SchedulerType(problem_input);
-
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+        asm volatile("griddepcontrol.wait;");
+#endif
     if (threadIdx.x >= kNumMathThreads) {
         // TMA warp-group for loading data
         cutlass::arch::warpgroup_reg_dealloc<kNumTMARegisters>();
@@ -431,6 +433,9 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, typename SchedulerType::
 
             __syncwarp();
         }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
     }
 #else
     if (blockIdx.x == 0 and threadIdx.x == 0)
@@ -556,7 +561,9 @@ fp8_gemm_kernel_swapAB(__nv_bfloat16* gmem_d, float* scales_a, typename Schedule
     // Block scheduler
     uint32_t m_block_idx, n_block_idx;
     auto scheduler = SchedulerType(problem_input);
-
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+        asm volatile("griddepcontrol.wait;");
+#endif
     if (threadIdx.x >= kNumMathThreads) {
         // TMA warp-group for loading data
         cutlass::arch::warpgroup_reg_dealloc<kNumTMARegisters>();
@@ -803,6 +810,9 @@ fp8_gemm_kernel_swapAB(__nv_bfloat16* gmem_d, float* scales_a, typename Schedule
 
             __syncwarp();
         }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
     }
 
 #else
@@ -852,12 +862,14 @@ public:
         config.stream = stream;
 
         // Clusters for TMA multicast
-        // NOTES: `>= 4` cluster size will cause performance degradation
-        cudaLaunchAttribute attr;
-        attr.id = cudaLaunchAttributeClusterDimension;
-        attr.val.clusterDim = {kNumTMAMulticast, 1, 1};
-        config.attrs = &attr;
-        config.numAttrs = 1;
+        // NOTES: `>= 4` cluster size will cause performance degradation        
+        cudaLaunchAttribute attr[2];
+        attr[0].id = cudaLaunchAttributeClusterDimension;
+        attr[0].val.clusterDim = {kNumTMAMulticast, 1, 1};
+        attr[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr[1].val.programmaticStreamSerializationAllowed = 1;        
+        config.attrs = attr;
+        config.numAttrs = 2;
 
         InputType input;
         input.shape_m = shape_m;
@@ -901,11 +913,13 @@ public:
 
         // Clusters for TMA multicast
         // NOTES: `>= 4` cluster size will cause performance degradation
-        cudaLaunchAttribute attr;
-        attr.id = cudaLaunchAttributeClusterDimension;
-        attr.val.clusterDim = {kNumTMAMulticast, 1, 1};
-        config.attrs = &attr;
-        config.numAttrs = 1;
+        cudaLaunchAttribute attr[2];
+        attr[0].id = cudaLaunchAttributeClusterDimension;
+        attr[0].val.clusterDim = {kNumTMAMulticast, 1, 1};
+        attr[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr[1].val.programmaticStreamSerializationAllowed = 1;        
+        config.attrs = attr;
+        config.numAttrs = 2;
 
         InputType input;
         input.problem_m_offsets = problem_m_offsets;
@@ -943,11 +957,13 @@ public:
 
         // Clusters for TMA multicast
         // NOTES: `>= 4` cluster size will cause performance degradation
-        cudaLaunchAttribute attr;
-        attr.id = cudaLaunchAttributeClusterDimension;
-        attr.val.clusterDim = {kNumTMAMulticast, 1, 1};
-        config.attrs = &attr;
-        config.numAttrs = 1;
+        cudaLaunchAttribute attr[2];
+        attr[0].id = cudaLaunchAttributeClusterDimension;
+        attr[0].val.clusterDim = {kNumTMAMulticast, 1, 1};
+        attr[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr[1].val.programmaticStreamSerializationAllowed = 1;        
+        config.attrs = attr;
+        config.numAttrs = 2;
 
         InputType input{shape_m, ld_a, stride_a, ld_b, stride_b, ld_d, stride_d};
         // Launch
@@ -1061,11 +1077,13 @@ public:
 
         // Clusters for TMA multicast
         // NOTES: `>= 4` cluster size will cause performance degradation
-        cudaLaunchAttribute attr;
-        attr.id = cudaLaunchAttributeClusterDimension;
-        attr.val.clusterDim = {kNumTMAMulticast, 1, 1};
-        config.attrs = &attr;
-        config.numAttrs = 1;
+        cudaLaunchAttribute attr[2];
+        attr[0].id = cudaLaunchAttributeClusterDimension;
+        attr[0].val.clusterDim = {kNumTMAMulticast, 1, 1};
+        attr[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr[1].val.programmaticStreamSerializationAllowed = 1;        
+        config.attrs = attr;
+        config.numAttrs = 2;
 
         InputType input;
         input.shape_n = shape_n;
@@ -1109,11 +1127,13 @@ public:
 
         // Clusters for TMA multicast
         // NOTES: `>= 4` cluster size will cause performance degradation
-        cudaLaunchAttribute attr;
-        attr.id = cudaLaunchAttributeClusterDimension;
-        attr.val.clusterDim = {kNumTMAMulticast, 1, 1};
-        config.attrs = &attr;
-        config.numAttrs = 1;
+        cudaLaunchAttribute attr[2];
+        attr[0].id = cudaLaunchAttributeClusterDimension;
+        attr[0].val.clusterDim = {kNumTMAMulticast, 1, 1};
+        attr[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr[1].val.programmaticStreamSerializationAllowed = 1;        
+        config.attrs = attr;
+        config.numAttrs = 2;
 
         InputType input;
         input.problem_n_offsets = problem_n_offsets;
