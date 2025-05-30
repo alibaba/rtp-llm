@@ -157,11 +157,12 @@ class ModelFactory:
 
         weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
-
         # TODO(xinfei.sxf) fix this
         ACT_TYPE = "ACT_TYPE"
         if os.environ.get(ACT_TYPE, None):
             act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
+
+        quantization = os.environ.get(ModelConfig.QUANTIZATION_KEY, None)
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
                                    tokenizer_path=tokenizer_path,
@@ -170,7 +171,8 @@ class ModelFactory:
                                    max_seq_len=max_seq_len,
                                    seq_size_per_block=seq_size_per_block,
                                    lora_infos=lora_infos,
-                                   ptuning_path=ptuning_path)
+                                   ptuning_path=ptuning_path,
+                                   quantization=quantization)
 
         return model_config
 
@@ -191,7 +193,7 @@ class ModelFactory:
             SP_ACT_TYPE = "SP_ACT_TYPE"
             if os.environ.get(SP_ACT_TYPE, None):
                 propose_act_type = WEIGHT_TYPE.from_str(os.environ.get(SP_ACT_TYPE))
-
+            quantization = os.environ.get(ModelConfig.SP_QUANTIZATION_KEY, None)
             propose_model_config = ModelConfig(model_type=propose_model_type,
                                           ckpt_path=propose_ckpt_path,
                                           tokenizer_path=normal_model_config.tokenizer_path,
@@ -200,7 +202,8 @@ class ModelFactory:
                                           act_type=propose_act_type,
                                           max_seq_len=normal_model_config.max_seq_len,
                                           gen_num_per_circle=gen_num_per_circle,
-                                          sp_type=sp_type)
+                                          sp_type=sp_type,
+                                          quantization=quantization)
         elif sp_type == "deterministic":
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
             propose_model_config = ModelConfig(sp_type=sp_type,

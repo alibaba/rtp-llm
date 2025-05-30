@@ -161,7 +161,8 @@ def _load_as_ft_style(model_path, is_from_hf, ft_model_type, env_params) -> Mode
         weight_type=get_weight_type_from_env(env_params),
         ptuning_path=None,
         max_seq_len=int(env_params.get("MAX_SEQ_LEN", "0")),
-        tokenizer_path=None
+        tokenizer_path=None,
+        quantization=env_params.get(ModelConfig.QUANTIZATION_KEY)
     )
     config: GptInitModelParameters = model_cls.create_config(model_config)
     is_quant_weight = config.quant_algo.isQuant()

@@ -5,6 +5,7 @@ import os
 import torch
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from typing import List, Tuple, Union, Optional, Dict, Any
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import W, CkptWeightInfo, WeightStyle, choose_available, identity, tolerate_failed
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -46,23 +47,23 @@ class ModelWeightInfo:
         return None
 
 
-    def to_quant_weight_info(self, quant_algo: Any):
-        if quant_algo is None or not quant_algo.isQuant():
-            raise ValueError("quant_algo is None or not quant_algo.isQuant()")
+    def to_quant_weight_info(self, quant_config: QuantizationConfig):
+        if quant_config is None :
+            raise ValueError("quant_config is None ")
         weights = []
         if self.weights:
             for weight in self.weights:
-                weights.append(weight.create(weight, quant_algo))
+                weights.append(weight.create(weight, quant_config))
         layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = [] if self.layer_weights else None
         if self.layer_weights:
             for weight in self.layer_weights:
                 if isinstance(weight, list):
                     layer_weight = []
                     for w in weight:
-                        layer_weight.append(w.create(w, quant_algo))
+                        layer_weight.append(w.create(w, quant_config))
                     layer_weights.append(layer_weight)
                 else:
-                    layer_weights.append(weight.create(weight, quant_algo))
+                    layer_weights.append(weight.create(weight, quant_config))
 
         return ModelWeightInfo(weights, layer_weights)
 
@@ -143,6 +144,7 @@ class ModelDeployWeightInfo:
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
         self._quant_algo = config.quant_algo
+        self._quant_config = config.quant_config
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size
@@ -231,7 +233,7 @@ class ModelDeployWeightInfo:
             weight_info = self._fix_merge_w1_w3(weight_info)
             
         if self._quant_algo is not None and self._quant_algo.isQuant():
-            weight_info = weight_info.to_quant_weight_info(self._quant_algo)
+            weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
@@ -299,6 +301,7 @@ class ModelDeployWeightInfo:
         def __update_weight_config(weight: WeightModule):
             if isinstance(weight , FfnWeight) or isinstance(weight, MoeWithSharedWeight):
                 weight.config.enable_merge_w13 = True
+                logging.info(f"src_weights: {weight}")
                 params = weight.extract_params(weight.__class__, weight, None)
                 return weight.__class__(**params)
             else:

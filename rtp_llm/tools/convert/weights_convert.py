@@ -114,7 +114,8 @@ class WeightConverter:
                     act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
                     ptuning_path=None,
                     max_seq_len=0,
-                    tokenizer_path=self.model_path
+                    tokenizer_path=self.model_path,
+                    quantization=env_params.get(ModelConfig.QUANTIZATION_KEY)
                 )
                 paralle_info = ParallelInfo.from_params(env_params)
                 config: GptInitModelParameters = self.model_cls.create_config(model_config, paralle_info)
@@ -152,7 +153,8 @@ class WeightConverter:
             act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
             ptuning_path=None,
             max_seq_len=0,
-            tokenizer_path=self.model_path
+            tokenizer_path=self.model_path,
+            quantization=env_params.get(ModelConfig.QUANTIZATION_KEY)
         )
         paralle_info = ParallelInfo.from_params(env_params)
         logging.info(f"begin convert model rank:{paralle_info}")

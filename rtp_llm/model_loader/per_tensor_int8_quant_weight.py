@@ -3,6 +3,7 @@ import logging
 
 import torch
 from typing import Any, Dict, List, Optional, Union
+from rtp_llm.config.quant_config import QuantizationConfig, Int8PerTensorQuantConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import CompositeWeight, QuantWeight, WeightModule, AtomicWeight
@@ -57,13 +58,15 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
     }
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
+        if not quant_config.is_quanted() or not isinstance(quant_config, Int8PerTensorQuantConfig):
+            return False
         name = src_weight_info.name
-        return quant_algo.isPerTensorQuant() and name in cls.w8a8_weight_list and (src_weight_info.weight_style not in [WeightStyle.TRT_ENGINE, WeightStyle.RTP_SMOOTH_LLM_STYLE])
+        return name in cls.w8a8_weight_list and (src_weight_info.weight_style not in [WeightStyle.TRT_ENGINE, WeightStyle.RTP_SMOOTH_LLM_STYLE])
 
 
-    def __init__(self, src_weight_info: AtomicWeight, quant_algo: Any, *args: Any, **kwargs: Any):
-        self.quant_algo = quant_algo
+    def __init__(self, src_weight_info: AtomicWeight, quant_config: QuantizationConfig, *args: Any, **kwargs: Any):
+        self.quant_config = quant_config
         kernel: AtomicWeight = None
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
@@ -76,7 +79,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         elif src_weight_info.name == W.attn_o_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_attn_out_quant_weight_info(src_weight_info)
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13, W.moe_w1, W.moe_w2]:
-            (kernel, scale, act_scale, act_scale_inv) = self._get_ffn_quant_weight_info(src_weight_info, quant_algo)
+            (kernel, scale, act_scale, act_scale_inv) = self._get_ffn_quant_weight_info(src_weight_info, quant_config)
         elif src_weight_info.name == W.pre_decoder_ln_gamma:
             (kernel, scale, act_scale, act_scale_inv) = self.get_pre_decoder_ln_weight(src_weight_info)
         else:
@@ -94,7 +97,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
             sub_weights[act_scale_inv.name] = act_scale_inv
 
 
-        super().__init__(sub_weights, quant_algo=quant_algo, *args, **kwargs)
+        super().__init__(sub_weights, quant_config=quant_config, *args, **kwargs)
         self.kernel = kernel
         self.scale = scale
         self.act_scale = act_scale
@@ -167,7 +170,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
                                        act_s_inv[1], data_type=torch.float32, config=src_weight_info.config)
             ]
 
-    def _get_ffn_quant_weight_info(self, src_weight: Union[FfnAtomicWeight, MoeAtomicWeight], quant_algo: Any) -> List[Optional[W8A8Int8AtomicWeight]]:
+    def _get_ffn_quant_weight_info(self, src_weight: Union[FfnAtomicWeight, MoeAtomicWeight], quant_config: Any) -> List[Optional[W8A8Int8AtomicWeight]]:
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)

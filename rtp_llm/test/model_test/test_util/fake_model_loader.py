@@ -9,12 +9,13 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 
 
 class FakeModelLoader(object):
-    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0) -> None:
+    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0, quantization: str="") -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
         self.weight_type = weight_type
         self.max_seq_len = max_seq_len
+        self.quantization = quantization
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
@@ -35,7 +36,8 @@ class FakeModelLoader(object):
             weight_type=self.weight_type,
             max_seq_len=64,
             seq_size_per_block=8,
-            gen_num_per_circle=1
+            gen_num_per_circle=1,
+            quantization=self.quantization
             )
 
         raw_config: GptInitModelParameters = model_cls.create_config(model_config)
@@ -54,7 +56,7 @@ class FakeModelLoader(object):
             ckpt_path=self.ckpt_path,
             lora_infos=None,
             tokenizer_path=self.tokenizer_path,
-            int8_mode=model_config.int8_mode,
+            quantization= model_config.quantization,
             data_type=model_config.act_type,
             max_seq_len=self.max_seq_len,
             seq_size_per_block=8,

@@ -24,7 +24,8 @@ class ModelTestBase(TestCase):
                         ckpt_path: str = "",
                         weight_type: torch.dtype = torch.float16,
                         test_loss: bool = False,
-                        fake_name: str = ""):
+                        fake_name: str = "",
+                        quantization: str = ""):
         super().__init__(methodName)
 
         self.model_type = model_type
@@ -33,6 +34,7 @@ class ModelTestBase(TestCase):
         self.weight_type = weight_type        
         self.test_loss = test_loss
         self.fake_name = fake_name
+        self.quantization = quantization
 
         os.environ['FT_PLUGIN_PATH'] = os.path.join(os.getcwd(), "rtp_llm/plugins/ret_hidden_states.py")
         plguin_loader.reload()
@@ -172,7 +174,8 @@ class ModelTestBase(TestCase):
             tokenizer_path=self.tokenizer_path,
             ckpt_path=self.ckpt_path,
             weight_type=self.weight_type,
-            max_seq_len=8192))
+            max_seq_len=8192,
+            quantization=self.quantization))
         return model
 
     def simple_test(self, is_fake: bool):

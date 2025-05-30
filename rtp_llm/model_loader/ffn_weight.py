@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Any, Callable, Dict, List, Optional, Union
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.model_weight import (W, CkptWeightInfo, identity)
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.model_loader.weight_module import QuantWeight, WeightModule, AtomicWeight, CompositeWeight
@@ -149,7 +150,7 @@ class FfnWeight(CompositeWeight):
         self.b13 = self.sub_weights.get(W.ffn_b13)
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
         return False
 
     def _split(self, tensor: Union[torch.Tensor, Dict[str, torch.Tensor]], load_config: LoadConfig):
@@ -212,7 +213,7 @@ class MoeWeight(CompositeWeight):
         self.moe_gate = self.sub_weights[W.moe_gate]
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
         return False
 
 class SharedMoeConfig(FfnConfig, MoeConfig):
@@ -251,7 +252,7 @@ class MoeWithSharedWeight(CompositeWeight):
         self.shared_expert_gate = self.sub_weights.get(W.shared_expert_gate)
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
         return False
 
     def _shuff_moe_weight(self, name:str, tensor: Union[torch.Tensor, Dict[str, torch.Tensor]], load_config: LoadConfig):

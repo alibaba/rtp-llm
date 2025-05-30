@@ -14,6 +14,7 @@ from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_mast
 from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
 from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
+from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, preset_quant_config
 
 updated_params: Set[str] = set()
 
@@ -97,7 +98,8 @@ class GptInitModelParameters:
         "is_mtp",
         "num_nodes",
         "use_qk_norm",
-        "enable_merge_w13"
+        "enable_merge_w13",
+        "quant_config"
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -254,6 +256,7 @@ class GptInitModelParameters:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
+    quant_config: QuantizationConfig
 
     def __init__(self,
                  head_num: int,
@@ -316,6 +319,7 @@ class GptInitModelParameters:
         self.is_mtp = False
         self.use_qk_norm = False
         self.enable_merge_w13 = False
+        self.quant_config = None
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -442,7 +446,7 @@ class GptInitModelParameters:
                       lora_infos: Optional[Dict[str, str]],
                       ptuning_path: Optional[str],
                       tokenizer_path: str,
-                      int8_mode: bool,
+                      quantization: str,
                       data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
@@ -452,7 +456,8 @@ class GptInitModelParameters:
                       parallel_info: ParallelInfo=g_parallel_info,
                       config_mode: ConfigMode = ConfigMode.ComplexMode,
                       gang_info: Optional[GangInfo] = None):
-        self._load_quant_config(ckpt_path)
+        self._load_quant_config(ckpt_path, quantization) 
+
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
         self.ep_size = parallel_info.ep_size
@@ -486,8 +491,7 @@ class GptInitModelParameters:
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
-        if not self.quant_algo.isQuant() and int8_mode:
-            self.quant_algo.setQuantAlgo("weight_only_per_col", 8, 0)
+
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
@@ -628,19 +632,19 @@ class GptInitModelParameters:
         logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
                         f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
 
-
-    def _load_quant_config(self, ckpt_path: str):
+    def _load_quant_config_from_ckpt(self, ckpt_path: str) -> Optional[QuantizationConfig]:
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
         if os.path.exists(quant_config_path):
-            self.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
+            return QuantizationConfig.from_config({"bits": 0, "method": "smooth_quant", "group_size": 0, "is_quanted": True})
+            
         per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
 
         if os.path.exists(per_tensor_config_path):
-            self.quant_algo.setQuantAlgo('pertensor_quant', 0, 0)
+            return QuantizationConfig.from_config({"bits": 0, "method": "pertensor_quant", "group_size": 0, "is_quanted": True})
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            return None
 
         config_json = json.load(open(config_path))
         quant_config = None
@@ -653,7 +657,7 @@ class GptInitModelParameters:
             quant_config = config_json["quantization"]
             quant_method = quant_config['quant_algo'].lower()
         if quant_config is None:
-            return
+            return None
 
         group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
         bits = quant_config['bits'] if 'bits' in quant_config else 0
@@ -663,8 +667,26 @@ class GptInitModelParameters:
                 weight_block = quant_config.get("weight_block_size")
                 assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
                 group_size = weight_block[0]
+                quant_method = Fp8BlockWiseQuantConfig.get_method()
+        return QuantizationConfig.from_config({"bits": bits, "method": quant_method, "group_size": group_size, "is_quanted": True})
 
-        self.quant_algo.setQuantAlgo(quant_method, bits, group_size)
+
+    def _load_quant_config(self, ckpt_path: str, quantization: str):
+        self.quant_config = self._load_quant_config_from_ckpt(ckpt_path)
+        if not self.quant_config:
+            if quantization:
+                try: 
+                    quant_config_dict = json.loads(quantization)
+                    self.quant_config: QuantizationConfig = QuantizationConfig.from_config(quant_config_dict)
+                except Exception:
+                    self.quant_config = preset_quant_config.get(quantization.upper(), None)
+                    if self.quant_config is None:
+                        raise ValueError(f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}")
+                logging.info(f"need_load_quant by {self.quant_config.get_method()}")
+        if self.quant_config:
+            self.quant_algo.setQuantAlgo(self.quant_config.get_algo().lower(), self.quant_config.bits(), self.quant_config.group_size()) 
+
+                                
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

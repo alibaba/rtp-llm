@@ -458,6 +458,11 @@ def merge_te_qkv(ts: List[torch.Tensor]):
     qkv_weight = torch.concat([q, k, v], dim=0).contiguous()
     return qkv_weight
 
+def merge_block_scale(ts: List[torch.Tensor]):
+    check_with_info(len(ts) == 3, "qkv scale should have 3 tensors")
+    out_scale = torch.concat(ts, dim=0).contiguous()
+    return out_scale
+
 # from [torch.Size(1), torch.Size(1), torch.Size(1)] to torch.Size(3 * hidden_size)
 def expand_scale(ts: List[torch.Tensor], hidden_size:int):
     new_ts: List[torch.Tensor] = []
@@ -962,3 +967,6 @@ class WeightStyle(Enum):
     RTP_LLM_STYLE = 3
     RTP_SMOOTH_LLM_STYLE = 4   # for ooold weight converted by rtp_llm.utils.smooth_quant_convert
     
+
+FP8_E4M3_MAX = 448.0
+FP8_E4M3_MIN = -352.0

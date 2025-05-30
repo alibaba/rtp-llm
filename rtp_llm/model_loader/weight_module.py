@@ -5,9 +5,10 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 import inspect
 import weakref
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_0, sp_head_lora, sp_id, sp_neg1
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 import traceback
 
 
@@ -18,10 +19,10 @@ class WeightModule(ABC):
     lora_A_suffix = 'lora_A'
     lora_B_suffix = 'lora_B'
 
-    def __init__(self, 
-                 name: str, 
+    def __init__(self,
+                 name: str,
                  lora_a_process_func: Optional[Callable]=None,
-                 lora_b_process_func: Optional[Callable]=None, 
+                 lora_b_process_func: Optional[Callable]=None,
                  lora_a_split_func: Optional[Callable]=None,
                  lora_b_split_func: Optional[Callable]=None,
                  **kwargs: Any):
@@ -46,14 +47,14 @@ class WeightModule(ABC):
     @property
     def lora_b_name(self):
         return f"{self.name}.{self.lora_B_suffix}"
-    
+
     @classmethod
     def create(
         cls,
         weight_info: "WeightModule",
-        quant_algo: Optional[Any] = None
+        quant_config: Optional[QuantizationConfig] = None
     ) -> "WeightModule":
-        if quant_algo is None or not quant_algo.isQuant():
+        if quant_config is None:
             return weight_info
 
         if isinstance(weight_info, QuantWeight):
@@ -62,19 +63,19 @@ class WeightModule(ABC):
         if isinstance(weight_info, AtomicWeight):
             valid_classes = [
                 c for _, c in cls._registry.items()
-                if c.support(quant_algo, weight_info)
+                if c.support(quant_config, weight_info)
             ]
             if not valid_classes:
                 return weight_info
             if  len(valid_classes) > 1:
-                raise ValueError(f"{weight_info.name} fit too many valid_classes:{valid_classes} with quant={quant_algo} for weight: {weight_info}")
+                raise ValueError(f"{weight_info.name} fit too many valid_classes:{valid_classes} with quant={quant_config} for weight: {weight_info}")
             target_cls = valid_classes[0]
 
-            params = cls.extract_params(target_cls, weight_info, quant_algo)
+            params = cls.extract_params(target_cls, weight_info, quant_config)
             return target_cls(**params)
         elif isinstance(weight_info, CompositeWeight):
             target_cls = weight_info.__class__
-            params = target_cls.extract_params(target_cls, weight_info, quant_algo)
+            params = target_cls.extract_params(target_cls, weight_info, quant_config)
             return target_cls(**params)
         else:
             raise ValueError(f"Invalid weight_info type: {type(weight_info)}")
@@ -88,7 +89,7 @@ class WeightModule(ABC):
         cls,
         target_cls: Type["WeightModule"],
         weight_info: "WeightModule",
-        quant_algo: Any
+        quant_config: Optional[QuantizationConfig]
     ) -> Dict[str, Any]:
         params = {}
         signature = inspect.signature(target_cls.__init__)
@@ -98,8 +99,8 @@ class WeightModule(ABC):
                 need_var_key = True
                 continue
 
-            if param.name == "quant_algo":
-                params[param.name] = quant_algo
+            if param.name == "quant_config":
+                params[param.name] = quant_config
                 continue
 
             if param.name == 'src_weight_info':
@@ -111,7 +112,7 @@ class WeightModule(ABC):
                 # 递归创建子权重
                 if param.name == "sub_weights" and isinstance(value, dict):
                     value = [
-                        cls.create(v, quant_algo)
+                        cls.create(v, quant_config)
                         for _, v in value.items()
                     ]
 
@@ -133,7 +134,7 @@ class WeightModule(ABC):
 
     @classmethod
     @abstractmethod
-    def support(cls, quant_algo: Any, src_weight_info: 'WeightModule') -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: 'WeightModule') -> bool:
         pass
 
     @torch.inference_mode()
@@ -161,7 +162,7 @@ class WeightModule(ABC):
 
     @torch.inference_mode()
     def load_lora(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig, lora_name: str):
-        try: 
+        try:
             raw_loras = self._load_raw_lora(database, layer_id, device, load_config, lora_name)
         except Exception as e:
             logging.warning(f"load layer: {layer_id} lora tensor {self.lora_a} or {self.lora_b} failed: traceback: {traceback.format_exc()}")
@@ -182,12 +183,12 @@ class WeightModule(ABC):
                     flat_res.update({k: v.contiguous().clone().to(device)})
         __extract_tensor(res)
         return flat_res
-        
+
 
     @abstractmethod
     def _load_raw_tensor(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig):
         pass
-    
+
     @abstractmethod
     def _split(self, tensor: torch.Tensor, load_config: LoadConfig):
         pass
@@ -199,7 +200,7 @@ class WeightModule(ABC):
     @abstractmethod
     def _merge_lora(self, tensor: Dict[str, torch.Tensor], database: BaseDatabase, layer_id: Optional[int], load_config: LoadConfig):
         pass
-                     
+
     @abstractmethod
     def _load_raw_lora(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig, lora_name: str):
         pass
@@ -222,7 +223,7 @@ class AtomicWeight(WeightModule):
         weights: List[CkptWeightInfo],
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
         data_type: Optional[torch.dtype] = None,
-        **kwargs 
+        **kwargs
     ) -> None:
         self.name = name
         self.weights = weights
@@ -239,7 +240,7 @@ class AtomicWeight(WeightModule):
             return True
         else:
             return False
-        
+
     def _load_raw_tensor(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig):
         before_merge_tensors = []
         convert_type = self.data_type if self.data_type is not None else load_config.compute_dtype
@@ -298,7 +299,7 @@ class AtomicWeight(WeightModule):
                         use_stack_weight=load_config.use_stack_weight,
                         bits=load_config.bit
         )
-                        
+
 
     def _load_lora_a(self, database: BaseDatabase, layer_id: Optional[int], device: str, load_config: LoadConfig, lora_name: str):
         assert self.lora_a_process_func is not None
@@ -306,7 +307,7 @@ class AtomicWeight(WeightModule):
         for ckpt_weight in self.weights:
             ckpt_name = self.lora_base_name.format(ckpt_weight.name[:-len(".weight")], self.lora_A_suffix)
             tensor_name = self.lora_tensor_name(layer_id, ckpt_name)
-            try: 
+            try:
                 before_merge_tensors.append(ckpt_weight.merge_fun([x for x in database.load_lora_tensor(lora_name, tensor_name)]))
             except:
                 logging.warning(f"load {self.name} lora A failed: {tensor_name}, {traceback.format_exc()}")
@@ -320,7 +321,7 @@ class AtomicWeight(WeightModule):
         for ckpt_weight in self.weights:
             ckpt_name = self.lora_base_name.format(ckpt_weight.name[:-len(".weight")], self.lora_B_suffix)
             tensor_name = self.lora_tensor_name(layer_id, ckpt_name)
-            try: 
+            try:
                 before_merge_tensors.append(ckpt_weight.merge_fun([x for x in database.load_lora_tensor(lora_name, tensor_name)]))
             except:
                 logging.warning(f"load {self.name} lora B failed: {tensor_name}, {traceback.format_exc()}")
@@ -336,8 +337,8 @@ class AtomicWeight(WeightModule):
         assert lora_name is not None
         if lora_name is None:
             raise Exception(f"invalid empty lora name")
-        
-        try: 
+
+        try:
             raw_loras = self._load_raw_lora(database, layer_id, device=load_config.exported_device, load_config=load_config, lora_name=lora_name)
             lora_a_tensor = raw_loras[self.lora_a_name]
             lora_b_tensor = raw_loras[self.lora_b_name]
@@ -348,7 +349,7 @@ class AtomicWeight(WeightModule):
             return tensor
 
         raw_tensor = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
-                
+
         scale = database.get_lora_config(lora_name).get_scale()
         # "addmm_impl_cpu_" not implemented for 'Half'
         if lora_b_tensor.dim() == 3 and lora_a_tensor.dim() == 2:
@@ -360,7 +361,7 @@ class AtomicWeight(WeightModule):
         else:
             merge_tensor = (lora_a_tensor.type(torch.float32) @ lora_b_tensor.type(torch.float32) * scale).type(raw_tensor.dtype).to(raw_tensor.device)
 
-        
+
         shape = raw_tensor.shape
         raw_tensor = raw_tensor.reshape(raw_tensor.nelement()) + merge_tensor.reshape(raw_tensor.nelement())
         raw_tensor = raw_tensor.reshape(shape)
@@ -368,8 +369,8 @@ class AtomicWeight(WeightModule):
         del lora_a_tensor
         del lora_b_tensor
         return {self.name : raw_tensor}
-    
-        
+
+
     def _split(self, tensor: Union[torch.Tensor, Dict[str, torch.Tensor]], load_config: LoadConfig):
         raw_tensor = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
         if load_config.tp_size <= 1 and load_config.dp_size <= 1 and load_config.ep_size <= 1 :
@@ -396,8 +397,8 @@ class AtomicWeight(WeightModule):
     def get_components(self):
         return [self]
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
-        return quant_algo is None or not quant_algo.isQuant()
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
+        return not quant_config 
 
     def get_ckpt_tensor_names(self) -> List[str]:
         if not bool(self.weights):
@@ -412,9 +413,9 @@ class AtomicWeight(WeightModule):
 
 
 class QuantWeight(WeightModule):
-    def __init__(self, name: str, quant_algo, *args, **kwargs):
+    def __init__(self, name: str, quant_config, *args, **kwargs):
         super().__init__(name)
-        self.quant_algo = quant_algo
+        self.quant_config = quant_config
 
 class MMAtomicWeight(AtomicWeight):
     def __init__(
@@ -424,7 +425,7 @@ class MMAtomicWeight(AtomicWeight):
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
         data_type: Optional[torch.dtype] = None,
         split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        **kwargs 
+        **kwargs
     ) -> None:
         super().__init__(name, weights, process_fun, data_type, **kwargs)
         self.split_func = split_func
@@ -442,14 +443,32 @@ class CustomAtomicWeight(AtomicWeight):
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
         data_type: Optional[torch.dtype] = None,
         split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = sp_id,
-        **kwargs 
+        **kwargs
     ) -> None:
         super().__init__(name, weights, process_fun, data_type, **kwargs)
         self.split_func = split_func
 
     def _get_split_func(self):
         return self.split_func
-            
+
+class CustomAtomicWeight(AtomicWeight):
+    """自定义权重组件"""
+    prefix = "__custom__."
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
+        data_type: Optional[torch.dtype] = None,
+        split_func: Optional[Callable[[torch.Tensor], torch.Tensor]] = sp_id,
+        **kwargs
+    ) -> None:
+        super().__init__(name, weights, process_fun, data_type, **kwargs)
+        self.split_func = split_func
+
+    def _get_split_func(self):
+        return self.split_func
+
 class CompositeWeight(WeightModule):
     """复合权重组件（如MoE、FFN）"""
     def __init__(self, sub_weights: Dict[str, WeightModule], *args, **kwargs):

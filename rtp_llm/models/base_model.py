@@ -121,6 +121,8 @@ class GenerateContext(NamedTuple):
     output_token_ids: Any
 
 class ModelConfig:
+    QUANTIZATION_KEY = 'QUANTIZATION'
+    SP_QUANTIZATION_KEY = 'SP_QUANTIZATION'
     def __init__(
             self,
             model_type: str = "",
@@ -136,12 +138,17 @@ class ModelConfig:
             ref_module: Optional[torch.nn.Module] = None,
             ref_dict: Dict[str, torch.Tensor] = {},
             sp_type: str = "",
+            quantization: str = ""
         ):
         self.model_type: str = model_type
         self.ckpt_path: str = ckpt_path
         self.tokenizer_path: str = tokenizer_path
         self.weight_type: WEIGHT_TYPE = weight_type
         self.act_type: WEIGHT_TYPE = act_type
+        if self.weight_type == WEIGHT_TYPE.INT8 and not quantization:
+            self.quantization = "INT8"
+        else:
+            self.quantization = quantization
         self.max_seq_len: int = max_seq_len
         self.seq_size_per_block: int = seq_size_per_block
         self.gen_num_per_circle: int = gen_num_per_circle
@@ -150,10 +157,6 @@ class ModelConfig:
         self.ref_module: Optional[torch.nn.Module] = ref_module
         self.ref_dict: Dict[str, torch.Tensor] = ref_dict
         self.sp_type: str = sp_type
-
-    @property
-    def int8_mode(self):
-        return True if self.weight_type == WEIGHT_TYPE.INT8 else False
 
     def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
         self.ref_module = ref_module
@@ -210,7 +213,7 @@ class BaseModel(object):
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
-            int8_mode=model_config.int8_mode,
+            quantization=model_config.quantization,
             data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,

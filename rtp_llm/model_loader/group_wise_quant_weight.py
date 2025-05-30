@@ -1,11 +1,12 @@
 import functools
 import logging
 import torch
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.model_weight import (W, CkptWeightInfo,
                                                  identity, transpose, pad,
                                                  merge_qkv_hf, stack_, stack_moe_w1, pad_w13)
+from rtp_llm.config.quant_config import AWQConfig, GPTQConfig, QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight, CompositeWeight, QuantWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -66,7 +67,7 @@ def get_qkv_quant_weight_info(src_weight: Union[AttnAtomicWeight, MlaAttnAtomicW
 
 
 
-def get_ffn_quant_weight_info(src_weight: Union[FfnAtomicWeight, MoeAtomicWeight], quant_algo: Any) -> List[Union[FfnAtomicWeight, MoeAtomicWeight]]:
+def get_ffn_quant_weight_info(src_weight: Union[FfnAtomicWeight, MoeAtomicWeight], quant_config: Any) -> List[Union[FfnAtomicWeight, MoeAtomicWeight]]:
     weights = src_weight.weights
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
@@ -76,10 +77,10 @@ def get_ffn_quant_weight_info(src_weight: Union[FfnAtomicWeight, MoeAtomicWeight
     if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
         assert len(weights) == 1
     w_name = weights[0].name[:-len(W_SUFFIX)]
-    group_size = quant_algo.getGroupSize()
-    pad_div = 32 // quant_algo.getWeightBits()
-    is_awq = quant_algo.isAwq()
-    is_gptq = quant_algo.isGptq()
+    group_size = quant_config.group_size()
+    pad_div = 32 // quant_config.bits()
+    is_awq = isinstance(quant_config, AWQConfig)
+    is_gptq = isinstance(quant_config, GPTQConfig)
     w: str = None
     s: str = None
     z: str = None
@@ -208,12 +209,14 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
         W.moe_w2
     ]
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
+        if not quant_config.is_quanted() or not (isinstance(quant_config, AWQConfig) or isinstance(quant_config, GPTQConfig)):
+            return False
         name = src_weight_info.name
-        return quant_algo.isGroupwise() and (quant_algo.isGptq() or quant_algo.isAwq()) and name in cls.group_wise_w
+        return quant_config.group_size() > 0 and name in cls.group_wise_w
 
-    def __init__(self, src_weight_info: AtomicWeight, quant_algo, **kwargs):
-        self.quant_algo = quant_algo
+    def __init__(self, src_weight_info: AtomicWeight, quant_config: QuantizationConfig, **kwargs):
+        self.quant_config = quant_config
         kernel: AtomicWeight
         zero: AtomicWeight
         scale: AtomicWeight
@@ -232,14 +235,14 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
                            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                            identity, config=src_weight_info.config)
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2, W.ffn_w13]:
-            (kernel, zero, scale, act_scale) = get_ffn_quant_weight_info(src_weight_info, quant_algo)
+            (kernel, zero, scale, act_scale) = get_ffn_quant_weight_info(src_weight_info, quant_config)
         else:
             raise ValueError(f"Unsupported weight name {src_weight_info.name}")
         sub_weights = {kernel.name: kernel, zero.name: zero, scale.name: scale}
         if act_scale:
             sub_weights.update({act_scale.name: act_scale})
 
-        super().__init__(sub_weights, quant_algo=quant_algo, **kwargs)
+        super().__init__(sub_weights, quant_config=quant_config, **kwargs)
         self.kernel = self.sub_weights[kernel.name]
         self.zero = self.sub_weights[zero.name]
         self.scale = self.sub_weights[scale.name]
@@ -261,9 +264,9 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
             raise ValueError(f"Unsupported weight name {self.kernel.name}")
 
         weight, zero, scale = post_func(kernel, zero, scale, device,
-                                                     self.quant_algo.isGptq(),
-                                                     self.quant_algo.isAwq(),
-                                                     self.quant_algo.getWeightBits())
+                                        isinstance(self.quant_config, GPTQConfig),
+                                        isinstance(self.quant_config, AWQConfig),
+                                        self.quant_config.bits())
         sub_tensors = {self.kernel.name: weight, self.zero.name: zero, self.scale.name: scale}
         if act_scale is not None:
             sub_tensors[self.act_scale.name] = act_scale

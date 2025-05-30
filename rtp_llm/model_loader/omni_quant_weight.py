@@ -1,6 +1,7 @@
 import functools
 import torch
 from typing import Any, Dict, List, Optional, Union
+from rtp_llm.config.quant_config import QuantizationConfig, OmniQuantConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.w8a8_weight import create_w8a8_int8_weight
@@ -56,7 +57,7 @@ def get_qkv_quant_weight_info(src_weight: Union[AttnAtomicWeight, MlaAttnAtomicW
         ]
 
 
-def get_ffn_quant_weight_info(src_weight: FfnAtomicWeight, quant_algo: Any) -> List[AtomicWeight]:
+def get_ffn_quant_weight_info(src_weight: FfnAtomicWeight, quant_config: Any) -> List[AtomicWeight]:
     weights = src_weight.weights
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
@@ -158,12 +159,14 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
     ]
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
+        if not quant_config.is_quanted():
+            return False
         name = src_weight_info.name
-        return  quant_algo.isOmniQuant() and name in cls.w8a8_weight_list
+        return  isinstance(quant_config, OmniQuantConfig) and name in cls.w8a8_weight_list
 
-    def __init__(self, src_weight_info: AtomicWeight, quant_algo: Any, *args, **kwargs):
-        self.quant_algo = quant_algo
+    def __init__(self, src_weight_info: AtomicWeight, quant_config: QuantizationConfig, *args, **kwargs):
+        self.quant_config = quant_config
         kernel: AtomicWeight = None
         scale: Optional[AtomicWeight] = None
         bias: Optional[AtomicWeight] = None  # TODO(luoli.hn) 有些有bias，有些没有bias，最好的方案是在AutoWeight再implement LinearWeight 之类的，改动比较多，先串通
@@ -181,7 +184,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
             smoother = create_w8a8_int8_weight(src_weight_info, W.attn_o_smoother, [CkptWeightInfo(w_name + SMOOTHER_SUFFIX)], identity, data_type=torch.float32, config=src_weight_info.config)
             shift = create_w8a8_int8_weight(src_weight_info, W.attn_o_shift, [CkptWeightInfo(w_name + SHIFT_SUFFIX)], identity, data_type=torch.float32, config=src_weight_info.config)
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13, W.moe_w1, W.moe_w2]:
-            (kernel, bias, scale) = get_ffn_quant_weight_info(src_weight_info, quant_algo)
+            (kernel, bias, scale) = get_ffn_quant_weight_info(src_weight_info, quant_config)
             if src_weight_info.name == W.ffn_w2:
                 smoother = create_w8a8_int8_weight(src_weight_info, W.ffn_smoother, [], functools.partial(ones, shape=src_weight_info.config.inter_padding_size), data_type=torch.float32, config=src_weight_info.config)
         elif src_weight_info.name == W.pre_ln_gamma:
@@ -207,7 +210,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
         if shift is not None:
             sub_weights[shift.name] = shift
 
-        super().__init__(sub_weights, quant_algo=quant_algo, *args, **kwargs)
+        super().__init__(sub_weights, quant_config=quant_config, *args, **kwargs)
         self.kernel = kernel
         self.bias = bias
         self.scale = scale

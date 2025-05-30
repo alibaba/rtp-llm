@@ -2,6 +2,7 @@ import logging
 import torch
 
 from typing import Any, Dict, Optional, Union
+from rtp_llm.config.quant_config import QuantizationConfig, WeightOnlyInt8PerChannelQuantConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import WeightModule, CompositeWeight, QuantWeight, AtomicWeight
 from rtp_llm.utils.database import BaseDatabase
@@ -52,17 +53,19 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
     }
 
     @classmethod
-    def support(cls, quant_algo: Any, src_weight_info: WeightModule) -> bool:
+    def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
+        if quant_config.is_quanted() or not isinstance(quant_config, WeightOnlyInt8PerChannelQuantConfig):
+            return False
         name = src_weight_info.name
-        return quant_algo.isWeightOnlyPerCol() and quant_algo.getWeightBits() == 8 and name in cls.weight_only_w
+        return name in cls.weight_only_w
 
-    def __init__(self, src_weight_info: AtomicWeight, quant_algo: Any, *args, **kwargs):
+    def __init__(self, src_weight_info: AtomicWeight, quant_config: QuantizationConfig, *args, **kwargs):
         kernel: AtomicWeight = src_weight_info
-        params = src_weight_info.extract_params(src_weight_info.__class__, src_weight_info, quant_algo)
+        params = src_weight_info.extract_params(src_weight_info.__class__, src_weight_info, quant_config)
         params['name'] = self.weight_only_w.get(src_weight_info.name)
         scale: AtomicWeight = src_weight_info.from_params(params)
         sub_weights = {kernel.name: kernel, scale.name: scale}
-        super().__init__(sub_weights, quant_algo=quant_algo, *args, **kwargs)
+        super().__init__(sub_weights, quant_config=quant_config, *args, **kwargs)
         self.kernel = kernel
         self.scale = scale
 
