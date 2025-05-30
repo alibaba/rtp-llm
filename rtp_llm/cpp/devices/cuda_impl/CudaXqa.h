@@ -1,7 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "3rdparty/xqa/mha.h"
 
 namespace rtp_llm {

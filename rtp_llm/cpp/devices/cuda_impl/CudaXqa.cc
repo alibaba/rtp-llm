@@ -1,13 +1,3 @@
-
-#include <iostream>
-#include <numeric>
-#include "rtp_llm/cpp/devices/OpData.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
 

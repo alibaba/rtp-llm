@@ -332,14 +332,22 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
                                                 rope_config,
                                                 tokensPerBlock});
 
+#ifdef USING_CUDA12
+    CudaDevice* device = dynamic_cast<CudaDevice*>(device_);
+    common_inputs.decode_trt_attn = device->prepareTrtAttn(attention_config,
+                                                           kv_cache_buffer.k_blocks,
+                                                           common_inputs.kv_cache->kv_cache_block_id,
+                                                           batch_size);
+#endif
+
     auto qkv_output = device_->allocateBuffer(
         {qkv_states_device->type(), {token_num, num_heads, head_dim}}
     );
     device_->decoderSelfAttention({0, *qkv_states_device,
-                                    *qkv_output,
-                                    common_inputs,
-                                    attention_weight,
-                                    attention_config});
+                                   *qkv_output,
+                                   common_inputs,
+                                   attention_weight,
+                                   attention_config});
 
     auto result_ref = attention->forward(query_states_host,
                                          key_states_host,
