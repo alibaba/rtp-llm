@@ -468,7 +468,7 @@ class GptInitModelParameters:
         self.ffn_tp_size = parallel_info.ffn_tp_size
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
-        self.use_all_gather = os.environ.get("USE_ALL_GATHER", "FALSE").upper() == "TRUE"
+        self.use_all_gather = self.dp_size == 1
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
