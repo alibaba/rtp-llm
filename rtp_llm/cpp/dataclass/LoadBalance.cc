@@ -38,7 +38,11 @@ void PIController::reset() {
 size_t StepRecorder::getStepPerMin() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (step_records_.size() < 2) {
-        return STEP_RECORDS_TIME_RANGE / min_step_latency_;
+        return min_step_latency_ ? (STEP_RECORDS_TIME_RANGE / min_step_latency_) : 0;
+    }
+    const auto interval = getIntervalPerStepLatency();
+    if (interval == 0) {
+        return 0;
     }
     return STEP_RECORDS_TIME_RANGE / getIntervalPerStepLatency();
 }
