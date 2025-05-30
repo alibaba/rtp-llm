@@ -418,7 +418,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         if (use_fp8_fmha_) {
             f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
         }
-        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_), kv_block_array, this, use_xqa);
+        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_));
         return;
     }
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,

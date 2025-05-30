@@ -12,7 +12,7 @@ namespace rtp_llm {
  * @param output_type bf16
  * @param kv_cache_type fp8e4m3
  * @param group_size 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
- * @param head_dim 128
+ * @param head_dim 64, 128, 256
  * @param page_size 16, 32, 64, 128
  * @return true 
  * @return false 
@@ -59,9 +59,44 @@ void runXqa(void* input,
             uint32_t* sequence_lengths,
             CudaDevice *device,
             int rope_theta = 1000000,
-            int max_position_embeddings = 40960,
+            int max_position_embeddings = 128000,
             float q_scale = 1.f,
             size_t max_decode_batch_size = 1024,
             uint32_t beam_width = beamWidth);
+
+/**
+ * @brief 
+ * 
+ * @tparam rope_dim 
+ * @param device 
+ * @param rope_theta 
+ * @param max_position_embeddings 
+ * @return BufferPtr 
+ */
+template <int rope_dim>
+BufferPtr genRopeCosSin(CudaDevice *device, int rope_theta, int max_position_embeddings) {
+    auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
+    auto freqs = torch::outer(t, inv_freq);
+    auto cos = freqs.cos().to(torch::kFloat32);
+    auto sin = freqs.sin().to(torch::kFloat32);
+    auto emb = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
+
+    BufferPtr rope_cos_sin = device->allocateBuffer({DataType::TYPE_UINT8,
+                                                    {max_position_embeddings * sizeof(Vec<float, rope_dim>)},
+                                                    AllocationType::DEVICE},
+                                                    {"rope_cos_sin"});
+    auto rope_cos_sin_ptr = reinterpret_cast<Vec<float, rope_dim>*>(rope_cos_sin->data());
+    for (size_t i = 0; i < max_position_embeddings; ++i) {
+        check_cuda_value(cudaMemcpyAsync(&(rope_cos_sin_ptr[i].data[0]),
+                                           reinterpret_cast<char*>(emb.data_ptr()) + i * sizeof(float) * rope_dim,
+                                           sizeof(float) * rope_dim,
+                                           cudaMemcpyHostToDevice,
+                                           device->getStream()));
+    }
+    check_cuda_value(cudaStreamSynchronize(device->getStream()));
+
+    return rope_cos_sin;
+}
 
 }

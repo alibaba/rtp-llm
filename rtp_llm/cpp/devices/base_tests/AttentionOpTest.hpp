@@ -438,7 +438,9 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
 
-    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    int rope_theta = 1000000;
+    int max_position_embeddings = 40960;
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * (((kv_seq_len + seq_len) + tokens_per_block - 1) / tokens_per_block + 1) + 1;
@@ -500,7 +502,9 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
            trt_attn->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(trt_attn->kv_block_array.data)),
            reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
-           device);
+           device,
+           rope_theta,
+           max_position_embeddings);
 
     device->syncAndCheck();
 
@@ -510,7 +514,9 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
                                          attention_mask_host,
                                          k_cache_host,
                                          v_cache_host,
-                                         true);
+                                         true,
+                                         rope_theta,
+                                         head_dim);
 
     auto result = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 5e-2);

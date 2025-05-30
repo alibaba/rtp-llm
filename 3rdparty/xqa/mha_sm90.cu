@@ -610,7 +610,7 @@ CUBIN_EXPORT __global__
 #else
     __launch_bounds__(128 * 3, 1)
 #endif
-        void xqa_kernel_sm90(uint32_t const nbKHeads,
+        void XQA_KERNEL_SM90(uint32_t const nbKHeads,
 #if SLIDING_WINDOW
             uint32_t const slidingWinSize,
 #endif
@@ -3119,7 +3119,7 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop, uint32_t nbKHeads,
     {
         uint32_t size;
         checkCuda(cudaMemcpyFromSymbol(&size, smemSize, sizeof(smemSize)));
-        checkCuda(cudaFuncSetAttribute(xqa_kernel_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, size));
+        checkCuda(cudaFuncSetAttribute(XQA_KERNEL_SM90, cudaFuncAttributeMaxDynamicSharedMemorySize, size));
         return size;
     }();
     // printf("smemSize = %u\n", hostSmemSize);
@@ -3172,7 +3172,7 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop, uint32_t nbKHeads,
     }();
     auto const tensorMap
         = makeTensorMapForPagedKVCache(pool, dtype, validElemsPerHead, nbKHeads, tokensPerPage, gemm0CtaTileNbTokens);
-    cudaError_t const err = cudaLaunchKernelEx(&launchCfg, &xqa_kernel_sm90, nbKHeads,
+    cudaError_t const err = cudaLaunchKernelEx(&launchCfg, &XQA_KERNEL_SM90, nbKHeads,
 #if SLIDING_WINDOW
         slidingWinSize,
 #endif
@@ -3203,7 +3203,7 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop, uint32_t nbKHeads,
     assert(gemm0CtaTileNbTokens == gemm1CtaTileNbTokens);
     auto const tensorMap = makeTensorMapForContiguousKVCache(kvCacheData, CU_TENSOR_MAP_DATA_TYPE_UINT8,
         validElemsPerHead, nbKHeads, maxSeqLen, beamWidth, batchSize, gemm0CtaTileNbTokens);
-    cudaLaunchKernelEx(&launchCfg, xqa_kernel_sm90, nbKHeads,
+    cudaLaunchKernelEx(&launchCfg, XQA_KERNEL_SM90, nbKHeads,
 #if SLIDING_WINDOW
         slidingWinSize,
 #endif

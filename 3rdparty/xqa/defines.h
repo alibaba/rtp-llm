@@ -17,6 +17,10 @@
 #define XQA_FUNC_SM90 xqa_sm90
 #endif
 
+#ifndef XQA_KERNEL_SM90
+#define XQA_KERNEL_SM90 xqa_kernel_sm90
+#endif
+
 #define STATIC_NB_K_HEADS 0
 #if STATIC_NB_K_HEADS
 #define NB_K_HEADS 2

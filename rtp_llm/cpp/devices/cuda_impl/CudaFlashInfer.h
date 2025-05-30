@@ -63,10 +63,7 @@ public:
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
              std::function<void()> moe_insertion_callback,
-             int64_t stream,
-             KVBlockArray kv_block_array,
-             CudaDevice *device,
-             bool use_xqa = false);
+             int64_t stream);
 
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(

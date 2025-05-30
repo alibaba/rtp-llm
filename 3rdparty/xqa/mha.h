@@ -108,28 +108,28 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t const nbKHeads,
 #endif
     uint32_t* semaphores, void* scratch, cudaStream_t stream);
 
-void run_xqa_sm90(uint32_t page_size, uint32_t group_size, cudaDeviceProp const& prop, uint32_t nbKHeads,
+void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW
     uint32_t slidingWinSize,
 #endif
-    float qScale, OutputHead* output,
+    float qScale, void* output,
 #if LOW_PREC_OUTPUT
     float const* rcpOutScale,
 #endif
 #if USE_INPUT_KV
-    InputHead const* qkv,
+    void const* qkv,
 #if ROPE_STYLE != 0
-    Vec<float, validElemsPerHead> const* ropeCosSin,
+    void* ropeCosSin,
 #endif
 #else
-    InputHead const* q,
+    void const* q,
 #endif
 #if USE_PAGED_KV_CACHE
-    GMemCacheHead* pool, // global pool of pages
+    void* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
 #else
-    GMemKVCacheHead* kvCacheData,
+    void* kvCacheData,
 #endif
     uint32_t maxSeqLen, uint32_t const* seqLen,
 #if BEAM_WIDTH > 1

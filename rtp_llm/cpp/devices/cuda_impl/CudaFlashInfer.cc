@@ -434,10 +434,7 @@ void FlashInferAttnParams::run(
         const AttentionModuleParams& params,
         const BufferPtr &f16_out,
         std::function<void()> moe_insertion_callback,
-        int64_t stream,
-        KVBlockArray kv_block_array,
-        CudaDevice *device,
-        bool use_xqa)
+        int64_t stream)
 {
     const int local_head_num = params.configs.head_num;
     const int local_head_num_kv = params.configs.kv_head_num;

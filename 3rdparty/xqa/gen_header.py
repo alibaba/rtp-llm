@@ -1,3 +1,5 @@
+import argparse
+import os
 
 def gen_inc():
     func_inc = f'''
@@ -6,38 +8,38 @@ def gen_inc():
 #ifndef __CUDACC__
 #include <cuda_runtime_api.h>
 #endif
-#include "defines.h"
-#include "utils.h"
+#include "3rdparty/xqa/defines.h"
+#include "3rdparty/xqa/utils.h"
 #if SPEC_DEC
-#include "specDec.h"
+#include "3rdparty/xqa/specDec.h"
 #endif
 '''
     return func_inc
 
-def gen_one_decl(func_name: str):
+def gen_one_decl(func_name: str, head_dim: int):
     func_decl = f'''
 void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW
     uint32_t slidingWinSize,
 #endif
-    float qScale, OutputHead* output,
+    float qScale, Vec<__nv_bfloat16, {head_dim}>* output,
 #if LOW_PREC_OUTPUT
     float const* rcpOutScale,
 #endif
 #if USE_INPUT_KV
-    InputHead const* qkv,
+    Vec<__nv_bfloat16, {head_dim}> const* qkv,
 #if ROPE_STYLE != 0
-    Vec<float, validElemsPerHead> const* ropeCosSin,
+    Vec<float, {head_dim}> const* ropeCosSin,
 #endif
 #else
-    InputHead const* q,
+    Vec<__nv_bfloat16, {head_dim}> const* q,
 #endif
 #if USE_PAGED_KV_CACHE
-    GMemCacheHead* pool, // global pool of pages
+    Vec<__nv_fp8_e4m3, {head_dim}>* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
 #else
-    GMemKVCacheHead* kvCacheData,
+    Vec<__nv_fp8_e4m3, {head_dim}>* kvCacheData,
 #endif
     uint32_t maxSeqLen, uint32_t const* seqLen,
 #if BEAM_WIDTH > 1
@@ -54,9 +56,15 @@ void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
     return func_decl
 
 if __name__ == "__main__":
-    with open('mha_sm90.h', 'w') as f:
+    parser = argparse.ArgumentParser("Generate xqa sm90 header")
+    parser.add_argument("--output", type=str, required=True, help="Output path")
+    args = parser.parse_args()
+
+    os.makedirs(args.output, exist_ok=True)
+    with open(args.output + '/mha_sm90.h', 'w') as f:
         f.write(gen_inc())
-        for page_size in [16, 32, 64, 128]:
-            for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
-                func_name = 'xqa_sm90' + '_ps' + str(page_size) + '_gs' + str(group_size)
-                f.write(gen_one_decl(func_name))
+        for head_dim in [64, 128, 256]:
+            for page_size in [16, 32, 64, 128]:
+                for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
+                    func_name = 'xqa_sm90' + '_hd' + str(head_dim) + '_ps' + str(page_size) + '_gs' + str(group_size)
+                    f.write(gen_one_decl(func_name, head_dim))
