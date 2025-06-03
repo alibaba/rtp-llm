@@ -281,7 +281,7 @@ void FlashInferAttnParams::genPlan(int     batch_size,
                                                    -1,                 // logits_soft_cap
                                                    size_per_head,      // head_dim_qk
                                                    size_per_head,      // head_dim_vo
-                                                   torch::empty(0, dataTypeToTorchType(dtype)),  // empty_q_data
+                                                   torch::empty(0, dataTypeToTorchType(dtype == DataType::TYPE_FP8_E4M3 ? DataType::TYPE_FP16 : dtype)),
                                                    torch::empty(0, dataTypeToTorchType(dtype)),  // empty_kv_data
                                                    stream);
 
