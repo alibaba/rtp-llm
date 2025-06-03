@@ -27,7 +27,7 @@ SpeculativeEngine::SpeculativeEngine(const EngineInitParams&                    
     metrics_reporter_(engine_init_params.metrics_reporter),
     propose_model_params_(std::move(propose_model_engine_init_params)),
     score_model_params_(std::move(engine_init_params)),
-    sp_type_(propose_model_params_->sp_type) {};
+    sp_type_(propose_model_params_->sp_type){};
 
 SpeculativeEngine::~SpeculativeEngine() {
     RTP_LLM_LOG_INFO("destory speculative engine");
@@ -78,8 +78,17 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
         BufferPtr new_tokens =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
         *new_tokens->dataWithOffset<int32_t>(0) = distribution(generator);
-        StreamUpdateInfo update_info{
-            new_tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, fake_hidden_states, false};
+        StreamUpdateInfo update_info{new_tokens,
+                                     (int)1,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     nullptr,
+                                     fake_hidden_states,
+                                     false};
         stream->update(update_info);
         stream->setIsContextStream(false);
         stream->setReuseLength(1);
@@ -536,6 +545,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
                                          nullptr,
                                          nullptr,
                                          score_output->hidden_states,
+                                         nullptr,
                                          false,
                                          true};
             stream->update(update_info);

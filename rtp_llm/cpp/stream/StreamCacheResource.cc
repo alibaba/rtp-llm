@@ -197,24 +197,95 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     batch_resource_ = kv_cache_resource;
 }
 
-void StreamCacheResource::beamSearchKvCacheUpdate(const std::vector<int>& beam_index) {
-    auto kv_cache   = kvCache();
-    int  batch_size = kv_cache.batchSize();
-    int  block_size = kv_cache.blocks(0).size();
+void StreamCacheResource::updateKvCacheBlocks(const std::vector<int>& block_src_batch) {
+    if (!resource_context_.cache_manager) {
+        return;
+    }
 
-    std::vector<int> src_block_offset(batch_size * block_size);
-    std::vector<int> target_block_offset(batch_size * block_size);
-    // check all batch has same block num
-    for (int i = 0; i < batch_size; i++) {
-        RTP_LLM_CHECK(block_size == kv_cache.blocks(i).size());
-        for (int j = 0; j < block_size; j++) {
-            src_block_offset[i * block_size + j]    = kv_cache.blocks(i)[j];
-            target_block_offset[i * block_size + j] = kv_cache.blocks(beam_index[i])[j];
+    // collect forking count for all old batches
+    auto        old_batch_size = batch_resource_.batchSize();
+    auto        new_batch_size = block_src_batch.size();
+    vector<int> batch_fork_count(old_batch_size, 0);
+    for (const auto& old_batch_idx : block_src_batch) {
+        RTP_LLM_CHECK_WITH_INFO(old_batch_idx < old_batch_size,
+                                "try to reuse an old batch %d that out of range %d",
+                                old_batch_idx,
+                                old_batch_size);
+        ++batch_fork_count[old_batch_idx];
+    }
+
+    // free all kv cache blocks of disused batches
+    // TODO(zhangjianning.zjn): might be possible to repurpose disused blocks for new batches?
+    vector<int> disused_kv_blocks;
+    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
+        if (batch_fork_count[old_batch_idx] == 0) {
+            for (const auto& disused_block : batch_resource_.batch_block_id[old_batch_idx]) {
+                disused_kv_blocks.push_back(disused_block);
+            }
+        }
+    }
+    resource_context_.cache_manager->free(disused_kv_blocks);
+
+    // TODO(zhangjianning.zjn): reuse last kv cache block if already full
+    // last_block_aligned_ = stream_->seqLength() % seqSizePerBlock() == 0 ? true : false;
+
+    // increase ref count of shared blocks
+    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
+        if (batch_fork_count[old_batch_idx] > 1) {
+            auto& batch_blocks = batch_resource_.batch_block_id[old_batch_idx];
+
+            // no shared blocks, skip
+            if (batch_blocks.size() <= 1)
+                continue;
+
+            int last_block = batch_blocks.back();
+            batch_blocks.pop_back();
+            // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
+            for (int i = 1; i < batch_fork_count[old_batch_idx]; ++i) {
+                resource_context_.cache_manager->incrRefCounter(batch_blocks);
+            }
+            batch_blocks.push_back(last_block);
         }
     }
 
-    resource_context_.cache_manager->beamSearchKvUpdate(rtp_llm::vector2Buffer(src_block_offset),
-                                                        rtp_llm::vector2Buffer(target_block_offset));
+    // malloc blocks for batches
+    uint32_t num_new_blocks = 0;
+    for (const auto& ref_count : batch_fork_count) {
+        if (ref_count > 1) {
+            num_new_blocks += ref_count - 1;
+        }
+    }
+    // TODO(zhangjianning.zjn) handle malloc failure
+    auto  new_blocks_res = resource_context_.cache_manager->malloc({stream_->streamId(), num_new_blocks});
+    auto& new_blocks     = std::get<1>(new_blocks_res);
+
+    // organize block ids
+    vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
+    batch_resource_.batch_block_id.reserve(new_batch_size);
+    for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
+        int   old_batch_idx = block_src_batch[new_batch_idx];
+        auto& fork_count    = batch_fork_count[old_batch_idx];
+        RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
+        if (fork_count == 1) {
+            // move from old blocks directly
+            batch_resource_.batch_block_id.emplace_back(std::move(old_block_ids[old_batch_idx]));
+        } else {
+            // copy from old blocks
+            batch_resource_.batch_block_id.emplace_back(old_block_ids[old_batch_idx]);
+            auto& blocks = batch_resource_.batch_block_id.back();
+            if (blocks.size() > 0) {
+                int old_block = blocks.back();
+                blocks.pop_back();
+
+                int new_block = new_blocks.block_id.back();
+                new_blocks.block_id.pop_back();
+
+                resource_context_.cache_manager->blockCopy(old_block, new_block);
+                blocks.push_back(new_block);
+            }
+        }
+        --fork_count;
+    }
 }
 
 // TODO(xinfei.sxf) move code to batch resource class

@@ -91,7 +91,8 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
                                  nullptr,
                                  nullptr,
                                  std::move(loss),
-                                 hidden_states};
+                                 hidden_states,
+                                 nullptr};
 
     stream->update(update_info);
     stream->setReuseLength(stream->seqLength() - 1);

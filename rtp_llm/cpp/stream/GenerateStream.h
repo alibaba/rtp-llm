@@ -30,6 +30,7 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr loss;
     // for mtp
     const rtp_llm::BufferPtr all_hidden_states;
+    const rtp_llm::BufferPtr beam_indices;
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
 };
@@ -103,6 +104,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         updateKvCacheBlocks(const std::vector<int>& block_src_batch);
 
     virtual size_t scoreLen() const {
         return 1;
@@ -258,7 +260,6 @@ public:
         return return_all_probs_;
     }
 
-    void beamSearchKvCacheUpdate(const rtp_llm::BufferPtr& beam_idx);
     void beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
 

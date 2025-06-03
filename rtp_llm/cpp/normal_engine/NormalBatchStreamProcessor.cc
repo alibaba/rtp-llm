@@ -505,10 +505,10 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                                          batch_cum_log_probs,
                                          all_probs,
                                          loss,
-                                         all_hidden_states};
+                                         all_hidden_states,
+                                         beam_index};
             stream->beamSearchLogitProcessorUpdate(beam_index);
             stream->update(update_info);
-            stream->beamSearchKvCacheUpdate(beam_index);
         } else {
             stream->update({new_tokens,
                             1,
@@ -518,7 +518,8 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                             batch_cum_log_probs,
                             all_probs,
                             loss,
-                            all_hidden_states});
+                            all_hidden_states,
+                            {}});
         }
         offset += batch;
         token_offset += token_size;

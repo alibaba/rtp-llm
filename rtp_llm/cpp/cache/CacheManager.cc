@@ -92,8 +92,8 @@ void CacheManager::regUserMr(size_t model_id) {
 
         kvcache_reg_mr_ = true;
 
-        auto k_block_size = getKBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
-        auto v_block_size = getVBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
+        auto k_block_size       = getKBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
+        auto v_block_size       = getVBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
         auto k_scale_block_size = (size_t)config_.kv_scale_block_stride;
         auto v_scale_block_size = (size_t)config_.kv_scale_block_stride;
         std::vector<std::shared_ptr<BlockBuffer>> buffers;
@@ -101,18 +101,30 @@ void CacheManager::regUserMr(size_t model_id) {
             for (int layer_index = 0; layer_index < config_.layer_num; ++layer_index) {
                 auto block_key = makeCacheKey(model_id, std::to_string(block_index), layer_index);
                 auto addr_info = convertIndexToAddr(block_index, layer_index);
-                auto k_buffer = std::make_shared<BlockBuffer>("k_" + block_key, std::shared_ptr<void>(addr_info.k_addr, [](void*){}), k_block_size, true, true);
+                auto k_buffer  = std::make_shared<BlockBuffer>(
+                    "k_" + block_key, std::shared_ptr<void>(addr_info.k_addr, [](void*) {}), k_block_size, true, true);
                 buffers.push_back(k_buffer);
-                auto v_buffer = std::make_shared<BlockBuffer>("v_" + block_key, std::shared_ptr<void>(addr_info.v_addr, [](void*){}), v_block_size, true, true);
+                auto v_buffer = std::make_shared<BlockBuffer>(
+                    "v_" + block_key, std::shared_ptr<void>(addr_info.v_addr, [](void*) {}), v_block_size, true, true);
                 buffers.push_back(v_buffer);
 
                 if (addr_info.k_scale_addr) {
-                    auto k_scale_buffer = std::make_shared<BlockBuffer>("k_scale_" + block_key, std::shared_ptr<void>(addr_info.k_scale_addr, [](void*){}), k_scale_block_size, true, true);
+                    auto k_scale_buffer =
+                        std::make_shared<BlockBuffer>("k_scale_" + block_key,
+                                                      std::shared_ptr<void>(addr_info.k_scale_addr, [](void*) {}),
+                                                      k_scale_block_size,
+                                                      true,
+                                                      true);
                     buffers.push_back(k_scale_buffer);
                 }
 
                 if (addr_info.v_scale_addr) {
-                    auto v_scale_buffer = std::make_shared<BlockBuffer>("v_scale_" + block_key, std::shared_ptr<void>(addr_info.v_scale_addr, [](void*){}), v_scale_block_size, true, true);
+                    auto v_scale_buffer =
+                        std::make_shared<BlockBuffer>("v_scale_" + block_key,
+                                                      std::shared_ptr<void>(addr_info.v_scale_addr, [](void*) {}),
+                                                      v_scale_block_size,
+                                                      true,
+                                                      true);
                     buffers.push_back(v_scale_buffer);
                 }
             }
@@ -743,27 +755,6 @@ void CacheManager::copyKvCacheFromSeqPosition(const SeqPosition& src_seq_positio
     //     kv_cache_.v_blocks.index({"...", src_seq_position.index, "...", src_seq_position.offset, "..."}),
     //     /*non_blocking=*/true);
 }
-
-// src_block_offset and target_block_offset has same shape.
-void CacheManager::beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_llm::BufferPtr target_block_offset) {
-    // TODO(yinzhi): not available for mla yet
-    auto k_blocks_tensor = Buffer2torchTensor(kv_cache_.k_blocks, false);
-    auto v_blocks_tensor = Buffer2torchTensor(kv_cache_.v_blocks, false);
-
-    auto org_kv_cache_offset_tensor    = Buffer2torchTensor(src_block_offset, false);
-    auto target_kv_cache_offset_tensor = Buffer2torchTensor(target_block_offset, false);
-
-    auto k_tmp = k_blocks_tensor.index_select(1, target_kv_cache_offset_tensor.to(device_->getTorchDevice()));
-    auto v_tmp = v_blocks_tensor.index_select(1, target_kv_cache_offset_tensor.to(device_->getTorchDevice()));
-
-    for (int i = 0; i < org_kv_cache_offset_tensor.size(0); i++) {
-        auto src_index = org_kv_cache_offset_tensor[i].item<int>();
-        k_blocks_tensor.index({torch::indexing::Slice(), src_index})
-            .copy_(k_tmp.index({torch::indexing::Slice(), i}).to(device_->getTorchDevice()));
-        v_blocks_tensor.index({torch::indexing::Slice(), src_index})
-            .copy_(v_tmp.index({torch::indexing::Slice(), i}).to(device_->getTorchDevice()));
-    }
-};
 
 bool CacheManager::initDistKvCache() {
     DistKvCacheInitParams init_params;

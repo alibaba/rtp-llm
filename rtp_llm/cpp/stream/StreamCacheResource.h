@@ -53,7 +53,18 @@ public:
     const BatchKVCacheResource& kvCache() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
-    void beamSearchKvCacheUpdate(const std::vector<int>& beam_index);
+    // update kv cache blocks
+    // 
+    // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i are forked from old batch block_src_batch[i]
+    // 
+    // Example: given old batch size 3, block_src_batch = [1, 2, 2, 2], the mapping of old blocks to new blocks is
+    // 
+    // old 0 --free  /--- new 0
+    // old 1 -------/ /-- new 1
+    // old 2 --------+--- new 2
+    //                \-- new 3
+    // 
+    void updateKvCacheBlocks(const std::vector<int>& block_src_batch);
 
     const ResourceContext& resourceContext() const {
         return resource_context_;

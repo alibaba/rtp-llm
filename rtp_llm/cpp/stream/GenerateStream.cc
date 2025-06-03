@@ -77,8 +77,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_->init(tileNum());
 
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
-    // TODO(xinfei.sxf): need fix context block copy
-    perf_test_ = true;
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
@@ -742,16 +740,25 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    std::vector<int> cache_block_src_batch;
+    if (tileNum() > 1 && isContextStream()) {
+        cache_block_src_batch.resize(tileNum(), 0);
+    } else if (numBeams() > 0 && update_info.beam_indices != nullptr) {
+        cache_block_src_batch = rtp_llm::buffer2vector<int>(*update_info.beam_indices);
+    }
+    if (cache_block_src_batch.size() > 0) {
+        updateKvCacheBlocks(cache_block_src_batch);
+    }
+
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 }
 
 // beam_idx: [beam_width] int, the element must less than beam_width.
-void GenerateStream::beamSearchKvCacheUpdate(const rtp_llm::BufferPtr& beam_idx) {
-    auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
-    RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
+void GenerateStream::updateKvCacheBlocks(const std::vector<int>& block_src_batch) {
+    RTP_LLM_CHECK(block_src_batch.size() == tileNum());
 
-    stream_cache_resource_->beamSearchKvCacheUpdate(beam_idx_vec);
+    stream_cache_resource_->updateKvCacheBlocks(block_src_batch);
 }
 
 void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {
