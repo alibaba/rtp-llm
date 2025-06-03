@@ -42,14 +42,14 @@ Fri May 16 14:52:19 2025
 +-----------------------------------------------------------------------------+
 ```
 接下来我们需要拉取容器环境用于配置安装RTP-LLM。我们准备的容器如下:
-registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f
+registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34
 
 镜像名: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm
-版本号: 2025_05_07_23_49_9789d20
+版本号: 2025_06_03_10_12_c02cc34
 
 ### 1.1 拉取容器
 ```shell
-docker pull registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f
+docker pull registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34
 ```
 
 ### 1.2 创建 Docker 容器，具体表现挂载盘根据自己本地机器存储来进行
@@ -76,7 +76,7 @@ docker run \
   --runtime=nvidia --gpus all \
   --name user_gpu \
   --net=host -dit \
-  registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_05_22_16_34_0c9025f \
+  registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34 \
   /bin/bash
 ```
 
