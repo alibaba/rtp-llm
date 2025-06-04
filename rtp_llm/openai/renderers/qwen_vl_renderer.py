@@ -109,3 +109,4 @@ class Qwen2VLRenderer(CustomChatRenderer):
 register_renderer('qwen_vl', QwenVLRenderer)
 register_renderer('qwen_vl_1b8', QwenVLRenderer)
 register_renderer('qwen2_vl', Qwen2VLRenderer)
+register_renderer('qwen2_5_vl', Qwen2VLRenderer)

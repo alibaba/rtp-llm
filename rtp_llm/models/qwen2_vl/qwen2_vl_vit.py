@@ -181,7 +181,6 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         image_inputs = self.image_processor(images=images, videos=None, return_tensors="pt")
         pixel_values = image_inputs["pixel_values"].to(device).to(self._data_type)
         image_grid_thw = image_inputs["image_grid_thw"].to(device)
-        # raise Exception(self.visual.get_dtype())
         embeddings = self.visual(pixel_values, grid_thw=image_grid_thw).to(device)
         pos_id = self.get_position_ids(image_grid_thw)
         return embeddings, pos_id

@@ -24,6 +24,7 @@ if platform.processor() != 'aarch64':
     from .llava import Llava
     from .qwen_vl import QWen_VL
     from .qwen2_vl.qwen2_vl import QWen2_VL
+    from .qwen2_5_vl.qwen2_5_vl import QWen2_5_VL
     from .cogvlm2 import CogVLM2
     from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
     from .internvl import InternVL
