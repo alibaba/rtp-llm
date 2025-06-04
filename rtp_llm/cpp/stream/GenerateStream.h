@@ -358,6 +358,10 @@ public:
         return 0;
     }
 
+    bool forceSpAccept() const {
+        return generate_input_->generate_config->force_sp_accept;
+    }
+
     ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
         return think_logits_processor_ptr_;
     }

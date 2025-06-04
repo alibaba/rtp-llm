@@ -27,6 +27,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->timeout_ms                     = config_proto->timeout_ms();
     generate_config->sp_edit                        = config_proto->sp_edit();
     generate_config->force_disable_sp_run           = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept                = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs           = config_proto->return_cum_log_probs();
     generate_config->return_all_probs               = config_proto->return_all_probs();
     generate_config->return_softmax_probs           = config_proto->return_softmax_probs();

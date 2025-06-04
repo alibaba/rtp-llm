@@ -57,6 +57,7 @@ public:
     int                 timeout_ms           = -1;
     bool                sp_edit              = false;
     bool                force_disable_sp_run = false;
+    bool                force_sp_accept      = false;
     bool                return_all_probs     = false;
     bool                return_softmax_probs = false;
     std::vector<std::vector<int>> stop_words_list;
@@ -119,6 +120,7 @@ public:
                      << ", top_k:" << top_k
                      << ", top_p:" << top_p
                      << ", force_disable_sp_run: " << force_disable_sp_run
+                     << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation
@@ -186,6 +188,7 @@ public:
         JSONIZE(print_stop_words);
         JSONIZE(sp_edit);
         JSONIZE(force_disable_sp_run);
+        JSONIZE(force_sp_accept);
         JSONIZE(return_all_probs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);

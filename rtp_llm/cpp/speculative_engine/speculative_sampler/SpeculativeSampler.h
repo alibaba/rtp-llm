@@ -27,11 +27,13 @@ public:
 
 private:
     absl::StatusOr<size_t> top1Sample(size_t                                    propose_step,
-                        const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                        const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
+                                      const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                                      const SpeculativeExecutorStreamOutputPtr& scorer_stream_output,
+                                      bool                                      force_accept = false) const;
     absl::StatusOr<size_t> stochasticSample(size_t                                    propose_step,
-                            const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
+                                            const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output,
+                                            bool                                      force_accept = false) const;
 
 protected:
     rtp_llm::DeviceBase* device_;

@@ -30,10 +30,10 @@ absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::l
         if (propose_step == 0) {
             accepted_len = 1;
         } else if (stream_config->top1()) {
-            CHECK_AND_ASSIGN(accepted_len, top1Sample(propose_step, propose_stream_output, scorer_stream_output));
+            CHECK_AND_ASSIGN(accepted_len, top1Sample(propose_step, propose_stream_output, scorer_stream_output, stream->forceSpAccept()));
         } else {
             // TODO(xyz): catch exception for specified stream
-            auto status = stochasticSample(propose_step, propose_stream_output, scorer_stream_output);
+            auto status = stochasticSample(propose_step, propose_stream_output, scorer_stream_output, stream->forceSpAccept());
             if (status.ok()) {
                 accepted_len = status.value();
             } else {
@@ -108,10 +108,14 @@ absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::l
 
 absl::StatusOr<size_t> SpeculativeSampler::top1Sample(size_t                                    propose_step,
                                     const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                                    const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const {
+                                    const SpeculativeExecutorStreamOutputPtr& scorer_stream_output,
+                                    bool force_accept) const {
     size_t accepted_len = 0;
     while (accepted_len < propose_step) {
-        if ((*propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len))
+        if (force_accept) {
+            int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len);
+            *scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len) = propose_token_id;
+        } else if ((*propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len))
             != (*scorer_stream_output->tokens->dataWithOffset<int32_t>(accepted_len))) {
             break;
         }
@@ -122,7 +126,8 @@ absl::StatusOr<size_t> SpeculativeSampler::top1Sample(size_t                    
 
 absl::StatusOr<size_t> SpeculativeSampler::stochasticSample(size_t                                    propose_step,
                                             const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const {
+                                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output,
+                                            bool force_accept) const {
     torch::Tensor score_all_probs   = Buffer2torchTensor(scorer_stream_output->all_probs, false);
     size_t score_vocab_size   = score_all_probs.size(1);
 
@@ -167,7 +172,7 @@ absl::StatusOr<size_t> SpeculativeSampler::stochasticSample(size_t              
 
     while (accepted_len < propose_step) {
         int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accepted_len);
-        if (randoms[accepted_len].greater(div_probs[accepted_len]).item<bool>()) {
+        if (randoms[accepted_len].greater(div_probs[accepted_len]).item<bool>() && !force_accept) {
             auto new_p = score_all_probs[accepted_len]
                                 .subtract(propose_all_probs[accepted_len])
                                 .maximum(torch::zeros_like(score_all_probs[accepted_len], torch::Device(target_device)));

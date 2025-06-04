@@ -61,6 +61,7 @@ class GenerateConfig(BaseModel):
     sp_advice_prompt_token_ids: List[int] = []
     sp_edit: bool = False
     force_disable_sp_run: bool = False
+    force_sp_accept:     bool = False
     return_cum_log_probs: bool = False
     return_all_probs: bool = False
     return_softmax_probs: bool = False

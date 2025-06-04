@@ -64,6 +64,7 @@ message GenerateConfigPB {
     repeated int32 end_think_token_ids = 34;
     bool gen_timeline = 35;
     int32 global_request_id = 36;
+    bool force_sp_accept = 37;
 }
 
 message MMPreprocessConfigPB {

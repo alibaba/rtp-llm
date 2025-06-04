@@ -49,6 +49,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.temperature = input_py.generate_config.temperature
     generate_config_pb.sp_edit = input_py.generate_config.sp_edit
     generate_config_pb.force_disable_sp_run = input_py.generate_config.force_disable_sp_run
+    generate_config_pb.force_sp_accept = input_py.generate_config.force_sp_accept
     generate_config_pb.repetition_penalty = input_py.generate_config.repetition_penalty
     trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
