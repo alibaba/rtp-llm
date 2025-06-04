@@ -16,7 +16,7 @@ def gen_inc():
 '''
     return func_inc
 
-def gen_one_decl(func_name: str, head_dim: int):
+def gen_one_decl(func_name: str, head_dim: int) -> str:
     func_decl = f'''
 void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW

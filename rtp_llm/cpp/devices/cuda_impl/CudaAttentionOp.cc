@@ -407,7 +407,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
-               this);
+               this,
+               params.configs.rope_config.base);
         return;
     }
 #endif

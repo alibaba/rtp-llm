@@ -548,12 +548,12 @@ void CudaDevice::checkUseTrtV2FMHA() {
 void CudaDevice::checkUseXQA() {
     int sm = get_sm();
     if (sm < 90) {
-        RTP_LLM_LOG_WARNING("XQA is disabled for sm %d < 90", sm);
+        RTP_LLM_LOG_WARNING("xqa is disabled for sm %d < 90", sm);
         return;
     }
     char* xqa_env = std::getenv("ENABLE_XQA");
     if (xqa_env && std::string(xqa_env) == "OFF") {
-        RTP_LLM_LOG_WARNING("XQA is disabled by env");
+        RTP_LLM_LOG_WARNING("xqa is disabled by env");
         return;
     }
     RTP_LLM_LOG_INFO("use xqa");
