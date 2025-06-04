@@ -22,3 +22,6 @@ ENV BAZELISK_BASE_URL=https://search-cicd.oss-cn-hangzhou-zmf.aliyuncs.com/third
 RUN USE_BAZEL_VERSION=6.4.0 bazelisk # prefetch bazel
 
 RUN rpm -i http://mirrors.aliyun.com/epel/7/x86_64/Packages/p/patchelf-0.12-1.el7.x86_64.rpm # for bazel rules
+
+RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+    groupadd sdev
