@@ -458,7 +458,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                            tokens_per_block);
     params->refreshFlashInferBuf(cuda_device, batch_size, input_token_num);
 
-    if (is_prefill || (group_size > 5 && skip_no_prefix)) {
+    if (is_prefill || (group_size > 2 && skip_no_prefix)) {
         params->decode_plan = false;
     } else {
         params->decode_plan = true;
