@@ -11,13 +11,12 @@ using namespace std;
 namespace rtp_llm {
 
 BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
-    at::Tensor logits_tensor  = Buffer2torchTensor(params.logits, false);
-    at::Tensor softmax_logits = torch::log_softmax(logits_tensor, -1);
-    const int  batch_size     = params.logits.shape()[0];
-    const int  beam_width_in  = params.logits.shape()[1];
-    const int  beam_width_out = params.num_beams_out == 0 ? params.num_beams_out : beam_width_in;
-    const int  vocab_size     = params.logits.shape()[2];
-    const int  max_seq_len    = params.token_ids->shape()[2];
+    const int batch_size     = params.logits.shape()[0];
+    const int beam_width_in  = params.logits.shape()[1];
+    const int beam_width_out = params.num_beams_out != 0 ? params.num_beams_out : beam_width_in;
+    const int vocab_size     = params.logits.shape()[2];
+    const int max_seq_len    = params.token_ids->shape()[2];
+    // TODO(zhangjianning.zjn): check the shape of params
     RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_in),
                             "cuda beam search op need vocab_size[%d] > beam_width_in[%d] * 2",
                             vocab_size,
@@ -40,7 +39,7 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
             } break;                                                                                                   \
             default:                                                                                                   \
                 RTP_LLM_CHECK_WITH_INFO(                                                                               \
-                    false, "cuda beam search op dose not support dtype[%d]", params.logits.type());                    \
+                    false, "cuda beam search op does not support dtype[%d]", params.logits.type());                    \
         }                                                                                                              \
     } while (0)
 
@@ -55,14 +54,53 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
         }                                                                                                              \
     } while (0)
 
+    // compute log softmax for probability calculation
+    at::Tensor logits_tsr             = Buffer2torchTensor(params.logits, false);
+    at::Tensor log_softmax_logits_tsr = logits_tsr.log_softmax(-1);
+
+    // beam search heuristic
     tensorrt_llm::BeamSearchConfig config;
     DISPATCH_TYPE(T, params.logits.type(), [&]() {
         config = tensorrt_llm::configureBeamSearch<T>(batch_size, beam_width_in, beam_width_out, vocab_size);
     });
 
-    // set trt kernel workspace
+    // set beam search kernel workspace
     BufferPtr workspace = allocateBuffer({DataType::TYPE_BYTES, {config.mWorkspaceSize}});
     cudaMemsetAsync(workspace->data(), 0, workspace->sizeBytes(), stream_);
+
+    // allocate output buffer
+    BufferPtr input_lengths_out, sequence_lengths_out, cum_log_probs_out;
+    auto      new_token_ids = allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size, beam_width_out, max_seq_len}, AllocationType::DEVICE}, {"new_token_ids"});
+    auto beam_indices =
+        allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
+    auto output_ids =
+        allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
+    if (config.mVBWS) {
+        input_lengths_out = allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE},
+                                           {"input_length_out"});
+        sequence_lengths_out = allocateBuffer(
+            {DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"sequence_lengths_out"});
+        cum_log_probs_out = allocateBuffer({DataType::TYPE_FP32, {batch_size, beam_width_out}, AllocationType::DEVICE},
+                                           {"cum_log_probs_out"});
+    } else {
+        input_lengths_out    = params.input_lengths;
+        sequence_lengths_out = params.sequence_lengths;
+        cum_log_probs_out    = params.cum_log_probs;
+    }
+
+    // if not variable beam width search, setup cum_log_probs for prefill
+    if (!config.mVBWS) {
+        // TODO(zhangjianning.zjn): would be better to use a single kernel to setup cum_log_probs
+        auto input_lengths_tsr    = Buffer2torchTensor(params.input_lengths, false);
+        auto sequence_lengths_tsr = Buffer2torchTensor(params.sequence_lengths, false);
+        auto cum_log_probs_tsr    = Buffer2torchTensor(params.cum_log_probs, false);
+        for (int i = 0; i < batch_size; i++) {
+            if (input_lengths_tsr[i].equal(sequence_lengths_tsr[i])) {
+                cum_log_probs_tsr.index_put_({i, torch::indexing::Slice(1, beam_width_in)}, -1e9);
+            }
+        }
+    }
 
     // set BeamHypotheses
     tensorrt_llm::kernels::BeamHypotheses BH;
@@ -79,49 +117,30 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     BH.nByteMaxSharedMemoryPerBlock = config.mByteMaxSharedMemoryPerBlock;
     BH.nByteSharedMemoryStage1      = config.mByteSharedMemoryStage1;
     BH.nByteSharedMemoryStage3      = config.mByteSharedMemoryStage3;
-    // essential ptr
+    // input and ouput ptr
     BH.inputLengthsIn     = params.input_lengths->data<int>();
-    BH.inputLengthsOut    = params.input_lengths->data<int>();
+    BH.inputLengthsOut    = input_lengths_out->data<int>();
     BH.sequenceLengthsIn  = params.sequence_lengths->data<int>();
-    BH.sequenceLengthsOut = params.sequence_lengths->data<int>();
-    auto input_lengths    = Buffer2torchTensor(params.input_lengths, false);
-    auto sequence_lengths = Buffer2torchTensor(params.sequence_lengths, false);
-    auto cum_log_probs_t  = Buffer2torchTensor(params.cum_log_probs, false);
-    for (int i = 0; i < batch_size; i++) {
-        if (input_lengths[i].equal(sequence_lengths[i])) {
-            for (int j = 1; j < beam_width_in; j++) {
-                cum_log_probs_t.index_put_({i, j}, -1e9);
-            }
-        }
-    }
-    BH.cumLogProbsIn   = params.cum_log_probs->data<float>();
-    BH.cumLogProbsOut  = params.cum_log_probs->data<float>();
-    BH.tokenIdsIn      = params.token_ids->data<int>();
-    auto new_token_ids = allocateBufferLike(*params.token_ids, AllocationType::DEVICE, {"new_token_ids"});
-    BH.tokenIdsOut     = new_token_ids->data<int>();
-    auto beam_indices  = allocateBuffer(
-        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
-    BH.parentIdsPtr = beam_indices->data<int>();
-    auto output_ids = allocateBuffer(
-        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
-    BH.outputIdsPtr = output_ids->data<int>();
+    BH.sequenceLengthsOut = sequence_lengths_out->data<int>();
+    BH.cumLogProbsIn      = params.cum_log_probs->data<float>();
+    BH.cumLogProbsOut     = cum_log_probs_out->data<float>();
+    BH.tokenIdsIn         = params.token_ids->data<int>();
+    BH.tokenIdsOut        = new_token_ids->data<int>();
+    BH.parentIdsPtr       = beam_indices->data<int>();
+    BH.outputIdsPtr       = output_ids->data<int>();
 
-    // invoke trt kernel
+    // invoke beam search kernel
     DISPATCH_TYPE(T, params.logits.type(), [&]() {
         DISPATCH_BOOL(IS_V2, config.mV2, [&]() {
             tensorrt_llm::kernels::invokeTopkBeamSearch<T, IS_V2>(
-                static_cast<T*>(softmax_logits.data_ptr()), nullptr, workspace->data(), BH, stream_);
+                static_cast<T*>(log_softmax_logits_tsr.data_ptr()), nullptr, workspace->data(), BH, stream_);
         });
     });
 
-    auto output_ids_tensor = Buffer2torchTensor(output_ids, false);
-    auto token_ids         = Buffer2torchTensor(params.token_ids, false);
-    auto beam_indices_in   = Buffer2torchTensor(beam_indices, false);
-
     return BeamSearchOutput({std::move(new_token_ids),
-                             std::move(params.input_lengths),
-                             std::move(params.sequence_lengths),
-                             std::move(params.cum_log_probs),
+                             std::move(input_lengths_out),
+                             std::move(sequence_lengths_out),
+                             std::move(cum_log_probs_out),
                              std::move(beam_indices)});
 }
 

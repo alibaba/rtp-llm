@@ -70,13 +70,16 @@ struct BeamSearchOpImpl: torch::nn::Module {
         // logits float[beam_width_in, vocab_size]
         auto beam_width_in  = input.logits.size(0);
         auto beam_width_out = input.beam_width_out;
-        auto max_seq_len    = input.token_ids.size(1);
+        // token_ids int[beam_width_in, max_seq_len]
+        auto max_seq_len = input.token_ids.size(1);
+
         // first topk from log softmax logits
         // log_probs: [beam_width_in, beam_width_out]
         auto [log_probs, index] = input.logits.log_softmax(-1).topk(beam_width_out, -1);
+
         // add cum_log_probs
         auto cum_log_probs = input.cum_log_probs;
-        if (input.input_lengths.equal(input.sequence_lengths)) {
+        if (beam_width_in == beam_width_out && input.input_lengths.equal(input.sequence_lengths)) {
             cum_log_probs.index_put_({torch::indexing::Slice(1)}, -1e9);
         }
         log_probs = log_probs + cum_log_probs.reshape({-1, 1});
@@ -95,6 +98,10 @@ struct BeamSearchOpImpl: torch::nn::Module {
 
         // keep track of beam indices
         auto beam_indices_in = torch::div(beam_indices, beam_width_out, "floor").squeeze();
+        // in case only one beam is selected
+        if (beam_indices_in.sizes().empty()) {
+            beam_indices_in.unsqueeze_(0);
+        }
 
         // according beam index to update input token ids
         for (int beam_idx_out = 0; beam_idx_out < beam_width_out; ++beam_idx_out) {
