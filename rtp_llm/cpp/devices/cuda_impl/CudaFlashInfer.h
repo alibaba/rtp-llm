@@ -19,6 +19,9 @@ private:
     int batch_size = 0;
     int input_token_num = 0;
     int page_num = 0;
+    int max_kv_len = 0;
+    int max_q_len = 0;
+    int accu_q_len = 0;
 
 public:
     torch::Tensor float_workspace_d;
@@ -46,7 +49,7 @@ public:
     std::vector<torch::Tensor> flash_mla_plan;
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
-    bool decode = true;
+    bool decode_plan = true;
     torch::Tensor plan;
     DataType dtype = DataType::TYPE_INVALID;
 
@@ -57,9 +60,7 @@ public:
                              const BufferPtr&                 input_lengths_host,
                              const BufferPtr&                 kv_cache_block_id_host,
                              const BufferPtr&                 kv_cache_block_id_device,
-                             DataType                         dtype,
-                             bool                             is_prefill);
-
+                             DataType                         dtype);
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
              std::function<void()> moe_insertion_callback,

@@ -87,8 +87,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           input_lengths_host,
                                           kvcache_block_id_host,
                                           kvcache_block_id_device,
-                                          DataType::TYPE_BF16,
-                                          false);
+                                          DataType::TYPE_BF16);
         auto context_flash_infer_attn =
             FlashInferAttnParams::prepare(device_,
                                           attn_configs,
@@ -97,8 +96,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor hidden,
                                           input_lengths_host,
                                           kvcache_block_id_host,
                                           kvcache_block_id_device,
-                                          DataType::TYPE_BF16,
-                                          true);
+                                          DataType::TYPE_BF16);
 
         size_t token_num     = hidden.size(0);
         auto   hidden_b      = torchTensor2Buffer(hidden);

@@ -95,6 +95,26 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
 }
 
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
+    RTP_LLM_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)fmha_type_).c_str());
+    KVBlockArray kv_block_array;
+
+    if (params.common.kv_cache) {
+        auto trt_attn = ((TRTAttn*)params.common.prefill_trt_attn.get());
+        kv_block_array = trt_attn->kv_block_array;
+        TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
+
+        if (fmha_type_ == FMHAType::FLASH_INFER) {
+            auto      flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
+            RTP_LLM_CHECK(flash_infer && flash_infer->plan.numel() > 0);
+            BufferPtr f16_out;
+            if (use_fp8_fmha_) {
+                f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
+            }
+            flash_infer->run(params, f16_out, [this]() { computeInsertedMoE(); }, reinterpret_cast<int64_t>(stream_));
+            return;
+        }
+    }
+
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.common.context_batch_size;
@@ -135,16 +155,10 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
     }
 
-    BufferPtr kv_cache_block_id = nullptr;
-    BufferPtr kv_cache_offset_host = nullptr;
 
-    KVBlockArray kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
     if (params.common.kv_cache) {
-        auto trt_attn = ((TRTAttn*)params.common.prefill_trt_attn.get());
-        kv_block_array = trt_attn->kv_block_array;
-        TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
         prefix_prompt_param.kv_block_array = kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {

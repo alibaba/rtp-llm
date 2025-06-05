@@ -177,8 +177,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferPa
                                                 torchTensor2Buffer(input_length)->slice(decode_batch_size, context_batch_size, false),
                                                 torchTensor2Buffer(block_id_map)->slice(decode_batch_size, context_batch_size, false),
                                                 torchTensor2Buffer(block_id_map.to("cuda"))->slice(decode_batch_size, context_batch_size, false),
-                                                DataType::TYPE_FP16,
-                                                true);
+                                                DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
                                                  flash_infer_attn_params->positions_d,
@@ -217,8 +216,7 @@ c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createDecodeFlashInferPar
                                                 torchTensor2Buffer(input_length)->slice(0, decode_batch_size, false),
                                                 torchTensor2Buffer(block_id_map)->slice(0, decode_batch_size, false),
                                                 torchTensor2Buffer(block_id_map.to("cuda"))->slice(0, decode_batch_size, false),
-                                                DataType::TYPE_FP16,
-                                                false);
+                                                DataType::TYPE_FP16);
     auto flash_infer_attn_params  = (FlashInferAttnParams*)params.get();
     return c10::make_intrusive<FlashInferParams>(flash_infer_attn_params->batch_indice_d,
                                                  flash_infer_attn_params->positions_d,
@@ -259,8 +257,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
                                                                           sequence_lengths_host,
                                                                           kvcache_block_id_host,
                                                                           kvcache_block_id_device,
-                                                                          DataType::TYPE_BF16,
-                                                                          false);
+                                                                          DataType::TYPE_BF16);
 #endif
 
         size_t token_num     = q.size(0);

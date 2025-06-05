@@ -19,7 +19,6 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
     auto fmha_type = fmha_type_;
     auto stream  = stream_;
     auto cufmha_runner = cufmha_runner_;
-    RTP_LLM_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)fmha_type).c_str());
     auto      datatype            = params.input.type();
     auto      token_num           = params.input.shape()[0];
     auto      batch_size          = params.common.context_batch_size;

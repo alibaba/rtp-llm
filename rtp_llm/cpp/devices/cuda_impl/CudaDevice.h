@@ -28,7 +28,8 @@ enum class FMHAType {
     TRT_V2,
     PAGED_OPEN_SOURCE,
     OPEN_SOURCE,
-    TRT_V1
+    TRT_V1,
+    FLASH_INFER
 };
 
 nvinfer1::DataType nvinfer1DtypeConvert(rtp_llm::DataType dtype);

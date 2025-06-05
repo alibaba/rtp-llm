@@ -391,7 +391,9 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         selectCuFMHARunner(params);
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
-        if (paged_kv_fmha) {
+        if (output.prefill_flash_infer_attn != nullptr && !params.configs.use_mla && !use_fp8_fmha_) {
+            fmha_type_ = FMHAType::FLASH_INFER;
+        } else if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
             } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
@@ -427,8 +429,7 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
             params.input_lengths->slice(0, params.decoder_batch_size),
             params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
             decode_kv_cache_block_id_d,
-            params.attn_dtype,
-            false);
+            params.attn_dtype);
     output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
             this,
             params.configs,
@@ -437,8 +438,7 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
             params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size),
             params.kv_cache_block_id ? params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) : nullptr,
             prefill_kv_cache_block_id_d,
-            params.attn_dtype,
-            true);
+            params.attn_dtype);
 
     output.decode_trt_attn = prepareTrtAttn(
             params.configs,
@@ -570,6 +570,7 @@ void CudaDevice::checkSupportTrtFp8FMHA() {
 bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
 #ifdef ENABLE_FP8
     if (support_trt_fp8_fmha && params.configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        RTP_LLM_LOG_DEBUG("use fp8 fmha");
         return true;
     }
 #endif

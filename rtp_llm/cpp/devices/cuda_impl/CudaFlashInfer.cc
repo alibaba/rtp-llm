@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
@@ -156,11 +157,12 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
     auto prefix_lengths = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
     auto kv_cache_block_id = kv_cache_block_id_host ? kv_cache_block_id_host->data<int>() : nullptr;
 
-    int qo_offset = 0;
     int offset = 0;
     int total_page_idx = 0;
     qo_indptr[0] = 0;
     page_indptr[0] = 0;
+    max_q_len = 1;
+    accu_q_len = 0;
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths) {
@@ -173,17 +175,19 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
                 positions[offset] = j + prefix_length;
                 offset += 1;
             }
-            qo_offset += input_length;
             seq_len = input_length + prefix_length;
+            max_q_len = max(max_q_len, input_length);
+            accu_q_len += input_length;
         } else {
             batch_indice[i] = i;
             positions[i] = sequence_lengths[i];
-            qo_offset += 1;
             seq_len = sequence_lengths[i] + 1;
+            accu_q_len += 1;
         }
 
         paged_kv_last_page_len[i] = (seq_len - 1) %  tokens_per_block + 1;
         kvlen[i] = seq_len;
+        max_kv_len = max(seq_len, max_kv_len);
 
         int page_num = (seq_len + tokens_per_block - 1) / tokens_per_block;
         RTP_LLM_CHECK_WITH_INFO(total_page_idx + page_num <= this->page_num, "page_num exceed reserved %d > %d",
@@ -195,7 +199,7 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr &prefix_lengths_host,
             }
         }
         page_indptr[i + 1] = total_page_idx;
-        qo_indptr[i + 1] = qo_offset;
+        qo_indptr[i + 1] = accu_q_len;
     }
 }
 
@@ -245,17 +249,6 @@ void FlashInferAttnParams::genPlan(int batch_size,
                                    bool use_mla,
                                    int64_t stream)
 {
-    // std::cout << "use_mla: " << use_mla << std::endl
-    //           << "mla_type: " << int(mla_ops_type) << std::endl
-    //           << "page_indptr: " << page_indptr_d
-    //           << "qo_indptr: " << qo_indptr_d
-    //           << "batch_indice: " << batch_indice_d
-    //           << "positions: " << positions_d
-    //           << "kvlen: " << kvlen_d
-    //           << "paged_kv_last_page_len: " << paged_kv_last_page_len_d
-    //           << "page_indice: " << page_indice_d.index({torch::indexing::Slice(0, 32)})
-    //           << "kv_cache_block_id: " << kv_cache_block_id_d << std::endl;
-
     if (use_mla) {
         if (mla_ops_type == MlaOpsType::FLASH_INFER) {
             plan = BatchMLAPagedAttentionPlan(
@@ -275,7 +268,7 @@ void FlashInferAttnParams::genPlan(int batch_size,
             RTP_LLM_FAIL("unexpected mla ops type: %d", int(mla_ops_type));
         }
     } else {
-        if (decode) {
+        if (decode_plan) {
             plan = BatchDecodeWithPagedKVCachePlan(
                     float_workspace_d, // float_workspace_buffer
                     int_workspace_d, // int_workspace_buffer
@@ -301,7 +294,7 @@ void FlashInferAttnParams::genPlan(int batch_size,
                     qo_indptr_h, // qo_indptr
                     page_indptr_h, // kv_indptr
                     torch::empty(0, dataTypeToTorchType(DataType::TYPE_INT32)), // kv_len_arr, not in use yet
-                    batch_size, // total_num_rows
+                    accu_q_len, // total_num_rows
                     batch_size, // batch_size
                     local_head_num, // num_qo_heads
                     local_head_num_kv, // num_kv_heads
@@ -322,8 +315,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                                         const BufferPtr&                 input_lengths_host,
                                         const BufferPtr&                 kv_cache_block_id_host,
                                         const BufferPtr&                 kv_cache_block_id_device,
-                                        DataType                         dtype,
-                                        bool                             is_prefill) {
+                                        DataType                         dtype) {
     if (rtp_llm::get_sm() < 80) {
         return nullptr;
     }
@@ -338,6 +330,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         return nullptr;
     }
 
+    bool is_prefill = prefix_lengths_host != nullptr;
     MlaOpsType mla_ops_type = device->mla_ops_type;
     int q_length = -1;
     if (mla_ops_type == MlaOpsType::FLASH_MLA) {
@@ -351,7 +344,22 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         }
     }
 
+    if (attn_configs.use_mla == false && is_prefill) {
+        size_t sp_seq_len = autil::EnvUtil::getEnv("GEN_NUM_PER_CIRCLE", 1);
+        size_t max_context_input_seq_len =
+            *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
+        size_t min_prefix_len =
+            *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
+
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d", max_context_input_seq_len, min_prefix_len);
+        
+        if (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1) {
+            return nullptr;
+        }
+    }
+
     const bool disable_flash_infer = GlobalConfig::get().fmha_config.disable_flash_infer;
+
     if ((!attn_configs.use_mla || mla_ops_type == MlaOpsType::FLASH_INFER) && disable_flash_infer) {
         return nullptr;
     }
@@ -383,7 +391,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     }
 
     int input_token_num = 0;
-    if (prefix_lengths_host) {
+    if (is_prefill) {
         input_token_num = std::accumulate(input_lengths_host->data<int>(),
                                           input_lengths_host->data<int>() + batch_size,
                                           0);
@@ -410,10 +418,10 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                            tokens_per_block);
     params->refreshFlashInferBuf(cuda_device, batch_size, input_token_num);
 
-    if (group_size > 5) {
-        params->decode = false;
+    if (group_size > 5 && !is_prefill) {
+        params->decode_plan = false;
     } else {
-        params->decode = true;
+        params->decode_plan = true;
     }
 
     params->genPlan(batch_size,
@@ -435,6 +443,17 @@ void FlashInferAttnParams::run(
         std::function<void()> moe_insertion_callback,
         int64_t stream)
 {
+
+    // std::cout << "mla_type: " << int(mla_ops_type) << std::endl
+    //           << "page_indptr: " << page_indptr_d
+    //           << "qo_indptr: " << qo_indptr_d
+    //           << "batch_indice: " << batch_indice_d
+    //           << "positions: " << positions_d
+    //           << "kvlen: " << kvlen_d
+    //           << "paged_kv_last_page_len: " << paged_kv_last_page_len_d
+    //           << "page_indice: " << page_indice_d.index({torch::indexing::Slice(0, 5)})
+    //           << "kv_cache_block_id: " << kv_cache_block_id_d << std::endl;
+
     const int local_head_num = params.configs.head_num;
     const int local_head_num_kv = params.configs.kv_head_num;
     const int size_per_head = params.configs.size_per_head;
@@ -454,17 +473,21 @@ void FlashInferAttnParams::run(
     auto append_k = torch::from_blob(params.input.dataWithOffset(local_head_num * size_per_head),
                                      {bs, local_head_num_kv, size_per_head},
                                      strides, cuda_option);
-    apply_rope_pos_ids(q,
-                       append_k,
-                       q,
-                       append_k,
-                       positions_d,
-                       params.configs.rope_config.dim,
-                       false,
-                       params.configs.rope_config.scale,
-                       params.configs.rope_config.base,
-                       stream);
-    check_cuda_error();
+
+    // std::cout << "q: \n" << q << "apped_k :" << append_k << std::endl;
+    if (params.configs.rope_config.style == RopeStyle::Base) {
+        apply_rope_pos_ids(q,
+                        append_k,
+                        q,
+                        append_k,
+                        positions_d,
+                        params.configs.rope_config.dim,
+                        false,
+                        params.configs.rope_config.scale,
+                        params.configs.rope_config.base,
+                        stream);
+        check_cuda_error();
+    }
 
     auto append_v = torch::from_blob(params.input.dataWithOffset((local_head_num + local_head_num_kv) * size_per_head),
                                      {bs, local_head_num_kv, size_per_head},
@@ -472,21 +495,25 @@ void FlashInferAttnParams::run(
 
     auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
     auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
-    if (append_k.type() != k_cache.type()) {
-        append_k = append_k.to(k_cache.type());
-        append_v = append_v.to(k_cache.type());
+
+    // std::cout << "apped_k_after_rope: \n" << append_k << "append_v_after_rope :" << append_v << std::endl;
+    if (!params.configs.skip_append_kv_cache) {
+        if (append_k.type() != k_cache.type()) {
+            append_k = append_k.to(k_cache.type());
+            append_v = append_v.to(k_cache.type());
+        }
+        append_paged_kv_cache(append_k,
+                            append_v,
+                            batch_indice_d,
+                            positions_d,
+                            k_cache,
+                            v_cache,
+                            page_indice_d,
+                            page_indptr_d,
+                            paged_kv_last_page_len_d,
+                            1,
+                            stream);
     }
-    append_paged_kv_cache(append_k,
-                          append_v,
-                          batch_indice_d,
-                          positions_d,
-                          k_cache,
-                          v_cache,
-                          page_indice_d,
-                          page_indptr_d,
-                          paged_kv_last_page_len_d,
-                          1,
-                          stream);
 
     moe_insertion_callback();
 
@@ -499,7 +526,8 @@ void FlashInferAttnParams::run(
     } else {
         out = Buffer2torchTensor(params.output, false);
     }
-    if (decode) {
+    if (decode_plan) {
+        RTP_LLM_LOG_DEBUG("decode flashinfer");
         BatchDecodeWithPagedKVCacheRun(
                 float_workspace_d, // float_workspace_buffer
                 int_workspace_d, // int_workspace_buffer
@@ -521,6 +549,7 @@ void FlashInferAttnParams::run(
                 0,
                 stream);
     } else {
+        RTP_LLM_LOG_DEBUG("prefill flashinfer");
         BatchPrefillWithPagedKVCacheRun(
                 float_workspace_d, // float_workspace_buffer
                 int_workspace_d,  // int_workspace_buffer
