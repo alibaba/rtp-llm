@@ -147,7 +147,7 @@ def setup_args():
         '--tp_size',
         env_name="TP_SIZE",
         type=int,
-        default=1,
+        default=None,
         help='指定用于张量并行度。'
     )
     parallel_group.add_argument(
@@ -161,28 +161,28 @@ def setup_args():
         '--dp_size',
         env_name="DP_SIZE",
         type=int,
-        default=1,
+        default=None,
         help='设置数据并行（Data Parallelism）的副本数量或组大小。'
     )
     parallel_group.add_argument(
         '--world_size',
         env_name="WORLD_SIZE",
         type=int,
-        default=1,
+        default=None,
         help='分布式设置中使用的GPU总数。通常情况下，`WORLD_SIZE = TP_SIZE * DP_SIZE`'
     )
     parallel_group.add_argument(
         '--world_rank',
         env_name="WORLD_RANK",
         type=int,
-        default=0,
+        default=None,
         help='当前进程/GPU在分布式系统中的全局唯一编号（从0到 `WORLD_SIZE - 1`）。'
     )
     parallel_group.add_argument(
         '--local_world_size',
         env_name="LOCAL_WORLD_SIZE",
         type=int,
-        default=1,
+        default=None,
         help='在多节点分布式设置中，当前节点（Node）上使用的GPU设备数量。'
     )
     

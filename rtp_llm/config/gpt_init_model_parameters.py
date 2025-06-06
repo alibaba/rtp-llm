@@ -378,7 +378,7 @@ class GptInitModelParameters:
         self.worker_grpc_addrs = worker_grpc_addrs
         self.worker_addrs = worker_addrs
 
-    def update_gpt_init_params_from_env(self):
+    def update_gpt_init_params_from_env(self, parallel_info: ParallelInfo=g_parallel_info):
         ## after setup_args, update gpt init params XXXConfig from env
         """
         从环境变量读取所有 Config 字段，未设置的int/float为-1，str为""，bool为False
@@ -400,13 +400,13 @@ class GptInitModelParameters:
 
         # ParallelismDistributedConfig
         self.gpt_init_params.parallelism_distributed_config = ParallelismDistributedConfig(
-            tp_size=g_parallel_info.tp_size,
-            ep_size=g_parallel_info.ep_size,
-            dp_size=g_parallel_info.dp_size,
-            world_size=g_parallel_info.world_size,
-            world_rank=g_parallel_info.world_rank,
-            local_world_size=g_parallel_info.local_world_size,
-            pp_size=g_parallel_info.pp_size,
+            tp_size=parallel_info.tp_size,
+            ep_size=parallel_info.ep_size,
+            dp_size=parallel_info.dp_size,
+            world_size=parallel_info.world_size,
+            world_rank=parallel_info.world_rank,
+            local_world_size=parallel_info.local_world_size,
+            pp_size=parallel_info.pp_size,
         )
         logging.info(f"parallelism_distributed_config.world_size: {self.gpt_init_params.parallelism_distributed_config.world_size}")
         
