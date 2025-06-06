@@ -133,6 +133,7 @@ public:
                      << ", in_think_mode: " << in_think_mode
                      << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
+                     << ", gen_timeline: " << gen_timeline
                      << "}";
         return debug_string.str();
     }
@@ -202,6 +203,7 @@ public:
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
         JSONIZE(end_think_token_ids);
+        JSONIZE(gen_timeline);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
