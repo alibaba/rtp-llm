@@ -280,6 +280,7 @@ TEST_F(AttentionOpTest, FlashinferContextAttentionOpTest) {
     setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
     setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
     setenv("DISABLE_FLASH_INFER", "0", 1);
+    GlobalConfig::update_from_env_for_test();
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     std::vector<size_t> batch = {3};

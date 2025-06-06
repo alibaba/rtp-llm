@@ -340,6 +340,7 @@ void SpeculativeExecutionConfig::update_from_env_for_test(){
     sp_min_token_match = autil::EnvUtil::getEnv("SP_MIN_TOKEN_MATCH", 2);
     sp_max_token_match = autil::EnvUtil::getEnv("SP_MAX_TOKEN_MATCH", 2);
     tree_decode_config = autil::EnvUtil::getEnv("TREE_DECODE_CONFIG", "");
+    gen_num_per_cycle = autil::EnvUtil::getEnv("GEN_NUM_PER_CYCLE", 1);
 }
 
 void register_speculative_execution_config(pybind11::module& m) {
