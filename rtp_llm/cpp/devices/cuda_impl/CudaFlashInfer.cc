@@ -345,7 +345,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     }
 
     if (attn_configs.use_mla == false && is_prefill) {
-        size_t sp_seq_len = GlobalConfig::get().fmha_config.gen_num_per_cycle;
+        size_t sp_seq_len = GlobalConfig::get().sp_config.gen_num_per_cycle;
         size_t max_context_input_seq_len =
             *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
         size_t min_prefix_len =

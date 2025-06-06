@@ -346,13 +346,14 @@ void SpeculativeExecutionConfig::update_from_env_for_test(){
 void register_speculative_execution_config(pybind11::module& m) {
     pybind11::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
         .def(pybind11::init<
-            std::string, std::string, int64_t, int64_t, std::string
+            std::string, std::string, int64_t, int64_t, std::string, int
         >(),
         pybind11::arg("sp_model_type") = "",
         pybind11::arg("sp_type") = "",
         pybind11::arg("sp_min_token_match") = 2,
         pybind11::arg("sp_max_token_match") = 2,
-        pybind11::arg("tree_decode_config") = ""
+        pybind11::arg("tree_decode_config") = "",
+        pybind11::arg("gen_num_per_cycle") = 1
         )
         .def("to_string", &SpeculativeExecutionConfig::to_string)
         .def("update_from_env_for_test", &SpeculativeExecutionConfig::update_from_env_for_test)
@@ -360,7 +361,8 @@ void register_speculative_execution_config(pybind11::module& m) {
         .def_readwrite("sp_type", &SpeculativeExecutionConfig::sp_type)
         .def_readwrite("sp_min_token_match", &SpeculativeExecutionConfig::sp_min_token_match)
         .def_readwrite("sp_max_token_match", &SpeculativeExecutionConfig::sp_max_token_match)
-        .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config);
+        .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
+        .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle);
 }
 
 // ServiceDiscoveryConfig
@@ -621,7 +623,8 @@ inline std::string SpeculativeExecutionConfig::to_string() const {
         << "sp_type: " << sp_type << "\n"
         << "sp_min_token_match: " << sp_min_token_match << "\n"
         << "sp_max_token_match: " << sp_max_token_match << "\n"
-        << "tree_decode_config: " << tree_decode_config;
+        << "tree_decode_config: " << tree_decode_config << "\n"
+        << "gen_num_per_cycle: " << gen_num_per_cycle;
     return oss.str();
 }
 

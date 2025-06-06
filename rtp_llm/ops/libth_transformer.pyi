@@ -664,7 +664,8 @@ class SpeculativeExecutionConfig:
     sp_model_type: str
     sp_type: str
     tree_decode_config: str
-    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '') -> None:
+    gen_num_per_cycle: int
+    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1) -> None:
         ...
     def to_string(self) -> str:
         ...

@@ -534,6 +534,7 @@ class GptInitModelParameters:
             sp_min_token_match=get_env_int("SP_MIN_TOKEN_MATCH", 2),
             sp_max_token_match=get_env_int("SP_MAX_TOKEN_MATCH", 2),
             tree_decode_config=get_env_str("TREE_DECODE_CONFIG", ""),
+            gen_num_per_cycle=get_env_int("GEN_NUM_PER_CYCLE", 1)
         )
 
         # MiscellaneousConfig
