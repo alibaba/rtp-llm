@@ -64,7 +64,8 @@ void TreeLogitsProcessor::updateLogitProcessorStatus(const rtp_llm::BufferPtr& n
 TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(
     rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num)
 {
-    if (PrefixToCandidateTokens::instance()->initSuccess()) {
+    if (!PrefixToCandidateTokens::instance()->initSuccess()) {
+        RTP_LLM_LOG_WARNING("PrefixToCandidateTokens is not inited");
         return nullptr;
     }
 
