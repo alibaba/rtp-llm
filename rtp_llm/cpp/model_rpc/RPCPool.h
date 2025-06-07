@@ -35,18 +35,6 @@ public:
                 std::string error_msg = "create grpc channel for " + peer + " failed";
                 return absl::InternalError(error_msg);
             }
-            auto channel_status = grpc_channel->GetState(true);
-            if (channel_status != GRPC_CHANNEL_READY) {
-                std::chrono::time_point deadline       = std::chrono::system_clock::now() + std::chrono::seconds(10);
-                bool                    isChannelReady = grpc_channel->WaitForConnected(deadline);
-                if (!(isChannelReady && grpc_channel->GetState(false) == GRPC_CHANNEL_READY)) {
-                    RTP_LLM_LOG_WARNING("wait channel ready failed channel, isChannelReady %d, current status %ld",
-                                        isChannelReady,
-                                        grpc_channel->GetState(false));
-                    std::string error_msg = "create grpc channel connection for " + peer + " failed, not ready";
-                    return absl::InternalError(error_msg);
-                }
-            }
 
             auto grpc_stub = T::NewStub(grpc_channel);
             if (!grpc_stub) {
