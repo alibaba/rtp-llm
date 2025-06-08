@@ -186,7 +186,11 @@ class ModelFactory:
             logging.info("use vanilla speculative model")
             propose_model_type = os.environ.get("SP_MODEL_TYPE", None)
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
-            propose_ckpt_path = fetch_remote_file_to_local(os.environ['SP_CHECKPOINT_PATH'])
+            origin_ckpt_path = os.environ.get('SP_CHECKPOINT_PATH', None)
+            if origin_ckpt_path is None:
+                logging.error("sp is disabled since SP_CHECKPOINT_PATH is not set")
+                return None
+            propose_ckpt_path = fetch_remote_file_to_local(origin_ckpt_path)
             logging.info(f"load propose model from ckpt_path: {propose_ckpt_path}")
 
             propose_weight_type = get_propose_weight_type_from_env(os.environ)
