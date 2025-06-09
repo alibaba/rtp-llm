@@ -525,6 +525,8 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(trt_attn->kv_block_array.data)),
            reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
            device,
+           0,
+           nullptr,
            rope_theta,
            max_position_embeddings);
 
