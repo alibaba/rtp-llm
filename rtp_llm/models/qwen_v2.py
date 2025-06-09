@@ -248,7 +248,7 @@ class QwenV2MTPWeight(QWenV2Weight):
                 WeightInfo(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.final_head.norm.weight', identity)], identity),
                 WeightInfo(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             ])
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
     def _get_weights(self):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('model.embeddings.weight', concat_1)], identity),
