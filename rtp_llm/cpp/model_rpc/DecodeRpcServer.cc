@@ -589,7 +589,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto  addr_info = sp_cache_manager->convertIndexToAddr(block_id, layer_id);
                         void* k_addr    = (void*)((int64_t)addr_info.k_addr + i * sp_k_block_size);
                         std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-                        load_layer_cache->addBlock("k_" + cache_key, k_block_addr, k_block_size, true, true);
+                        load_layer_cache->addBlock("k_" + cache_key, k_block_addr, sp_k_block_size, true, true);
                         // if (addr_info.k_scale_addr) {
                         //     void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);
                         //     std::shared_ptr<void> k_block_scale_addr(k_scale_addr, [](void* p) {});
@@ -600,7 +600,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         }
                         void* v_addr    = (void*)((int64_t)addr_info.v_addr + i * sp_v_block_size);
                         std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
-                        load_layer_cache->addBlock("v_" + cache_key, v_block_addr, v_block_size, true, true);
+                        load_layer_cache->addBlock("v_" + cache_key, v_block_addr, sp_v_block_size, true, true);
                         // if (addr_info.v_scale_addr) {
                         //     void* v_scale_addr = (void*)((int64_t)addr_info.v_scale_addr + i * scale_block_size);
                         //     std::shared_ptr<void> v_block_scale_addr(v_scale_addr, [](void* p) {});
