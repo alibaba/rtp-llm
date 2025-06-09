@@ -208,4 +208,10 @@ TEST_F(WRRLoadBalancerTest, testChangeWeight) {
     }
 }
 
+TEST_F(WRRLoadBalancerTest, testGetAllHosts) {
+    initTest();
+    ASSERT_EQ(0, load_balancer_->getAllHosts("non-biz").size());
+    ASSERT_EQ(2, load_balancer_->getAllHosts("test-biz").size());
+}
+
 }  // namespace rtp_llm

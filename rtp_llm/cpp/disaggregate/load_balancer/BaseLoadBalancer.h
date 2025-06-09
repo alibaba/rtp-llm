@@ -37,6 +37,7 @@ public:
     static bool makeCm2SubscribeConfig(SubscribeServiceConfig& config,
                                        std::string&            cluster_name,
                                        const std::string&      str_cm2_cluster_desc);
+    virtual std::vector<std::shared_ptr<const Host>> getAllHosts(const std::string& biz);
 
 protected:
     void discovery();

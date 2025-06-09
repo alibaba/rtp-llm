@@ -117,4 +117,13 @@ bool BaseLoadBalancer::makeCm2SubscribeConfig(SubscribeServiceConfig& config,
     return true;
 }
 
+std::vector<std::shared_ptr<const Host>> BaseLoadBalancer::getAllHosts(const std::string& biz) {
+    std::shared_lock<std::shared_mutex> lock(biz_hosts_mutex_);
+    auto                                iter = biz_hosts_.find(biz);
+    if (iter == biz_hosts_.end() || iter->second == nullptr) {
+        return {};
+    }
+    return iter->second->hosts;
+}
+
 }  // namespace rtp_llm
