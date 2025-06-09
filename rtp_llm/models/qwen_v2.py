@@ -233,26 +233,26 @@ class QwenV2MTPWeight(QWenV2Weight):
         super().__init__(config, tp_size, tp_rank)
     def _get_weight_info(self):
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
+            AtomicWeight(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
+            AtomicWeight(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
         ]
-        layer_weights: List[List[WeightInfo]] = []
+        layer_weights: List[List[AtomicWeight]] = []
         for layer in range(self._num_layers):
             w = self._get_hf_layer_weight_info(layer)
             layer_weights.append(w)
         for layer_id in range(self._num_layers):
             layer_weights[layer_id].extend([
-                WeightInfo(W.multi_tokens_predict_enorm, [CkptWeightInfo('model.layers.{i}.e_norm.weight', identity)], identity),
-                WeightInfo(W.multi_tokens_predict_hnorm, [CkptWeightInfo('model.layers.{i}.h_norm.weight', identity)], identity),
-                WeightInfo(W.multi_tokens_predict_eh_proj, [CkptWeightInfo('model.layers.{i}.eh_proj.weight', identity)], identity),
-                WeightInfo(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.final_head.norm.weight', identity)], identity),
-                WeightInfo(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                AtomicWeight(W.multi_tokens_predict_enorm, [CkptWeightInfo('model.layers.{i}.e_norm.weight', identity)], identity),
+                AtomicWeight(W.multi_tokens_predict_hnorm, [CkptWeightInfo('model.layers.{i}.h_norm.weight', identity)], identity),
+                AtomicWeight(W.multi_tokens_predict_eh_proj, [CkptWeightInfo('model.layers.{i}.eh_proj.weight', identity)], identity),
+                AtomicWeight(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.final_head.norm.weight', identity)], identity),
+                AtomicWeight(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             ])
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
     def _get_weights(self):
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo('model.embeddings.weight', concat_1)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity)
+            AtomicWeight(W.embedding, [CkptWeightInfo('model.embeddings.weight', concat_1)], identity),
+            AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity)
         ]
         return weights
 class QwenV2MTP(QWenV2):
