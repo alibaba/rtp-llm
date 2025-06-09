@@ -284,4 +284,11 @@ const std::shared_ptr<RequestBlockBufferStore>& NormalCacheStore::getRequestBloc
     return request_block_buffer_store_;
 }
 
+bool NormalCacheStore::fillConnectionPool(const std::string& ip, uint32_t port, uint32_t rdma_port, int count) {
+    if (!messager_client_) {
+        return false;
+    }
+    return messager_client_->fillConnectionPool(ip, port, rdma_port, count);
+}
+
 }  // namespace rtp_llm

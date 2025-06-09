@@ -58,6 +58,10 @@ public:
     void debugInfo();
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const;
+    MessagerClient* getMessagerClient() const { return messager_client_.get(); }
+    MessagerServer* getMessagerServer() const { return messager_server_.get(); }
+
+    bool fillConnectionPool(const std::string& ip, uint32_t port, uint32_t rdma_port, int count) override;
 
 private:
     bool init(const CacheStoreInitParams& params);
