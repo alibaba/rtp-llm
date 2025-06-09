@@ -59,7 +59,7 @@ private:
     std::shared_ptr<CacheManager> cache_manager_;
     std::atomic<int64_t>          last_schedule_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                        max_seq_len_              = 0;
-    size_t                        max_context_batch_size_   = 1;
+    size_t                        max_batch_tokens_size_    = 0;
     size_t                        max_generate_batch_size_  = 1;
     int                           reserve_block_num_        = 0;
     bool                          enable_partial_fallback_  = false;

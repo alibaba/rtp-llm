@@ -145,6 +145,7 @@ public:
     int64_t     local_rank_ = 0;
 
     int64_t max_seq_len_                = 0;
+    int64_t max_batch_tokens_size_      = 0;
     int64_t vocab_size_                 = 0;
     int64_t input_vocab_size_           = 0;  // 0 if not set
     int64_t type_vocab_size_            = 0;

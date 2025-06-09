@@ -15,7 +15,7 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     params_(params),
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
-    max_context_batch_size_(params.max_context_batch_size_),
+    max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store
@@ -211,14 +211,24 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     }
 
     if (!enable_fast_gen_) {
+<<<<<<< HEAD
         int max_token_size     = new_stream->contextLength();
         int packed_stream_size = 0;
+=======
+        int max_token_size = new_stream->contextLength();
+        if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
+            return true;
+        }
+>>>>>>> 78aee3666... fix - add max batch tokens size to avoid prefill batch all
         for (auto& stream : streams) {
             max_token_size = std::max(max_token_size, stream->contextLength());
-            packed_stream_size += stream->batchSize();
         }
+<<<<<<< HEAD
         return max_token_size * (packed_stream_size + new_stream->batchSize()) + running_streams_.size()
                < int(max_seq_len_ * max_context_batch_size_);
+=======
+        return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
+>>>>>>> 78aee3666... fix - add max batch tokens size to avoid prefill batch all
     } else {
         return true;
     }

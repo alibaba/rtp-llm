@@ -1009,6 +1009,14 @@ class GptInitModelParameters:
         self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
         logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")
 
+
+        self.max_batch_tokens_size = int(
+            os.environ.get(
+                "MAX_BATCH_TOKENS_SIZE", self.max_context_batch_size * self.max_seq_len
+            )
+        )
+        logging.info(f"max_batch_tokens_size: {self.max_batch_tokens_size}")
+
         role_type = os.environ.get("ROLE_TYPE", "PDFUSION").upper()
         if self.vit_separation == 1:
             role_type = "VIT"
