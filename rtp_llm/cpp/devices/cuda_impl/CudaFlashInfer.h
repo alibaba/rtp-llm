@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 
@@ -64,7 +65,10 @@ public:
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
              std::function<void()> moe_insertion_callback,
-             int64_t stream);
+             int64_t stream,
+             bool use_xqa = false,
+             KVBlockArray* kv_block_array = nullptr,
+             CudaDevice* device = nullptr);
 
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(

@@ -13,13 +13,9 @@
 #pragma once
 
 #include "defines.h"
-#if SPEC_DEC
-
 struct SpecDecParams
 {
     uint32_t qSeqLen;
     uint32_t const* qCuSeqLens; // [nbReq + 1]
     MaskType const* mask;       // [nbReq][qSeqLen][divUp(qSeqLen, 32)] or [qCuSeqLen[nbReq]][divUp(qSeqLen, 32)]
 };
-
-#endif

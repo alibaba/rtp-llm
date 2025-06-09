@@ -14,6 +14,11 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
 #include "rtp_llm/cpp/th_op/GlobalConfig.h"
+
+#ifdef USING_CUDA12
+#include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
+#endif 
+
 using namespace std;
 using namespace rtp_llm;
 
@@ -351,7 +356,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         size_t min_prefix_len =
             *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
 
-        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d", max_context_input_seq_len, min_prefix_len);
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d", max_context_input_seq_len, min_prefix_len, sp_seq_len);
         
         if (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1) {
             return nullptr;
@@ -441,19 +446,11 @@ void FlashInferAttnParams::run(
         const AttentionModuleParams& params,
         const BufferPtr &f16_out,
         std::function<void()> moe_insertion_callback,
-        int64_t stream)
+        int64_t stream,
+        bool use_xqa,
+        KVBlockArray* kv_block_array,
+        CudaDevice* device)
 {
-
-    // std::cout << "mla_type: " << int(mla_ops_type) << std::endl
-    //           << "page_indptr: " << page_indptr_d
-    //           << "qo_indptr: " << qo_indptr_d
-    //           << "batch_indice: " << batch_indice_d
-    //           << "positions: " << positions_d
-    //           << "kvlen: " << kvlen_d
-    //           << "paged_kv_last_page_len: " << paged_kv_last_page_len_d
-    //           << "page_indice: " << page_indice_d.index({torch::indexing::Slice(0, 5)})
-    //           << "kv_cache_block_id: " << kv_cache_block_id_d << std::endl;
-
     const int local_head_num = params.configs.head_num;
     const int local_head_num_kv = params.configs.kv_head_num;
     const int size_per_head = params.configs.size_per_head;
@@ -474,7 +471,6 @@ void FlashInferAttnParams::run(
                                      {bs, local_head_num_kv, size_per_head},
                                      strides, cuda_option);
 
-    // std::cout << "q: \n" << q << "apped_k :" << append_k << std::endl;
     if (params.configs.rope_config.style == RopeStyle::Base) {
         apply_rope_pos_ids(q,
                         append_k,
@@ -496,7 +492,7 @@ void FlashInferAttnParams::run(
     auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
     auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
 
-    // std::cout << "apped_k_after_rope: \n" << append_k << "append_v_after_rope :" << append_v << std::endl;
+    // Note: skip_append_kv_cache is only used for unit test
     if (!params.configs.skip_append_kv_cache) {
         if (append_k.type() != k_cache.type()) {
             append_k = append_k.to(k_cache.type());
@@ -518,6 +514,34 @@ void FlashInferAttnParams::run(
     moe_insertion_callback();
 
     check_cuda_error();
+
+#ifdef USING_CUDA12
+    if (use_xqa
+        && supportXqa(params.input.type(),
+                      params.output.type(),
+                      params.common.kv_cache->k_cache_buffer->type(),
+                      local_head_num / local_head_num_kv,
+                      size_per_head,
+                      params.configs.tokens_per_block)) {
+        auto q_c = q.contiguous();
+        RTP_LLM_LOG_DEBUG("prefill xqa");
+        runXqa(q_c.data_ptr(),
+            params.output.data(),
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            params.common.context_batch_size,
+            max_kv_len,
+            params.configs.tokens_per_block,
+            kv_block_array->mPrimaryPoolPtr,
+            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array->data)),
+            reinterpret_cast<uint32_t*>(kvlen_d.data_ptr()),
+            device,
+            max_q_len,
+            qo_indptr_d.data_ptr());
+        return;
+    }
+#endif
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

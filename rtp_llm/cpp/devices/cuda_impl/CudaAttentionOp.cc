@@ -103,14 +103,15 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         kv_block_array = trt_attn->kv_block_array;
         TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
 
-        if (fmha_type_ == FMHAType::FLASH_INFER) {
-            auto      flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
+        if (fmha_type_ == FMHAType::FLASH_INFER || fmha_type_ == FMHAType::XQA) {
+            bool use_xqa = fmha_type_ == FMHAType::XQA;
+            FlashInferAttnParams* flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
             RTP_LLM_CHECK(flash_infer && flash_infer->plan.numel() > 0);
             BufferPtr f16_out;
             if (use_fp8_fmha_) {
                 f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
             }
-            flash_infer->run(params, f16_out, [this]() { computeInsertedMoE(); }, reinterpret_cast<int64_t>(stream_));
+            flash_infer->run(params, f16_out, [this]() { computeInsertedMoE(); }, reinterpret_cast<int64_t>(stream_), use_xqa, &kv_block_array, this);
             return;
         }
     }
@@ -422,6 +423,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
                this,
+               0,
+               nullptr,
                params.configs.rope_config.base);
         return;
     }

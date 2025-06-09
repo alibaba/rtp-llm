@@ -19,38 +19,33 @@ def gen_inc():
 def gen_one_decl(func_name: str, head_dim: int) -> str:
     func_decl = f'''
 void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
-#if SLIDING_WINDOW
-    uint32_t slidingWinSize,
-#endif
     float qScale, Vec<__nv_bfloat16, {head_dim}>* output,
-#if LOW_PREC_OUTPUT
-    float const* rcpOutScale,
-#endif
-#if USE_INPUT_KV
     Vec<__nv_bfloat16, {head_dim}> const* qkv,
-#if ROPE_STYLE != 0
     Vec<float, {head_dim}> const* ropeCosSin,
-#endif
-#else
-    Vec<__nv_bfloat16, {head_dim}> const* q,
-#endif
-#if USE_PAGED_KV_CACHE
     Vec<__nv_fp8_e4m3, {head_dim}>* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
-#else
-    Vec<__nv_fp8_e4m3, {head_dim}>* kvCacheData,
-#endif
     uint32_t maxSeqLen, uint32_t const* seqLen,
-#if BEAM_WIDTH > 1
-    BeamSearchParams const& beamSearchParams,
-#endif
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
-#if SPEC_DEC
-    SpecDecParams const& specDecParams,
-#endif
+    uint32_t* semaphores, void* scratch, cudaStream_t stream);
+'''
+    return func_decl
+
+def gen_one_spec_decl(func_name: str, head_dim: int) -> str:
+    func_decl = f'''
+void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
+    float qScale, Vec<__nv_bfloat16, {head_dim}>* output,
+    Vec<__nv_bfloat16, {head_dim}> const* q,
+    Vec<__nv_fp8_e4m3, {head_dim}>* pool, // global pool of pages
+    KVCachePageIndex const*
+        kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+    uint32_t maxSeqLen, uint32_t const* seqLen,
+    uint32_t batchSize,
+    float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
+                                            // int8/fp8 KV cache.
+    void* specDecParams,
     uint32_t* semaphores, void* scratch, cudaStream_t stream);
 '''
     return func_decl
@@ -68,3 +63,5 @@ if __name__ == "__main__":
                 for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
                     func_name = 'xqa_sm90' + '_hd' + str(head_dim) + '_ps' + str(page_size) + '_gs' + str(group_size)
                     f.write(gen_one_decl(func_name, head_dim))
+                    func_name += '_spec_dec'
+                    f.write(gen_one_spec_decl(func_name, head_dim))

@@ -48,7 +48,7 @@ cc_library(
         "CudaFlashInfer.h",
     ] + select({
         "@//:using_cuda12": [
-            "CudaXqa.h",
+            "CudaXqa.h"
         ],
         "//conditions:default": [],
     }),
@@ -69,7 +69,7 @@ cc_library(
         "CudaFlashInfer.cc",
     ] + select({
         "@//:using_cuda12": [
-            "CudaXqa.cc",
+            "CudaXqa.cc"
         ],
         "//conditions:default": [],
     }),
@@ -99,7 +99,7 @@ cc_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12": [
-            "//3rdparty/xqa:xqa",
+            "//3rdparty/xqa:xqa"
         ],
         "//conditions:default": [],
     }),

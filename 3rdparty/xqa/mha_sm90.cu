@@ -2273,7 +2273,7 @@ __device__ inline RegRowWiseVec loadShmRowWiseVecWithDup(uint32_t warpRank, ShmQ
     return vec;
 }
 
-__device__ void storeShmRowWiseVec(uint32_t warpRank, ShmQWiseVec& smemVec, RegRowWiseVec const& regVec)
+__device__ inline void storeShmRowWiseVec(uint32_t warpRank, ShmQWiseVec& smemVec, RegRowWiseVec const& regVec)
 {
     uint32_t const lane = laneId();
     uint32_t const idxQuad = lane / 4;
@@ -3107,10 +3107,13 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop, uint32_t nbKHeads,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
 #if SPEC_DEC
-    SpecDecParams const& specDecParams,
+    void* specDecParamsPtr,
 #endif
     uint32_t* semaphores, void* scratch, cudaStream_t stream)
 {
+#if SPEC_DEC
+    SpecDecParams specDecParams = *(SpecDecParams*)specDecParamsPtr;
+#endif
     if (beamWidth != 1)
     {
         throw std::runtime_error("not implemented");

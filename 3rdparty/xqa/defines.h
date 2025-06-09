@@ -59,12 +59,10 @@
 #define SPEC_DEC 0
 #endif
 
-#if SPEC_DEC
 using MaskType = uint32_t;
 
 #ifndef M_TILESIZE
 #define M_TILESIZE 32
-#endif
 #endif
 
 // 0: half/bf16 based on INPUT_FP16; 1: int8_t; 2: __nv_fp8_e4m3

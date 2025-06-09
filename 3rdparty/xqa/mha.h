@@ -16,9 +16,7 @@
 #endif
 #include "defines.h"
 #include "utils.h"
-#if SPEC_DEC
 #include "specDec.h"
-#endif
 using CacheElem = ElemType<CACHE_ELEM_ENUM>;
 constexpr uint32_t validElemsPerHead = HEAD_ELEMS;
 static_assert(validElemsPerHead <= 256 && (sizeof(CacheElem) * validElemsPerHead) % 16 == 0);
@@ -116,14 +114,6 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cu
 #if LOW_PREC_OUTPUT
     float const* rcpOutScale,
 #endif
-#if USE_INPUT_KV
-    void const* qkv,
-#if ROPE_STYLE != 0
-    void* ropeCosSin,
-#endif
-#else
-    void const* q,
-#endif
 #if USE_PAGED_KV_CACHE
     void* pool, // global pool of pages
     KVCachePageIndex const*
@@ -138,10 +128,8 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cu
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
-#if SPEC_DEC
-    SpecDecParams const& specDecParams,
-#endif
-    uint32_t* semaphores, void* scratch, cudaStream_t stream);
+    uint32_t* semaphores, void* scratch, cudaStream_t stream,
+    void* ropeCosSin = nullptr, void const* input = nullptr, void* specDecParams = nullptr);
 
 #if STATIC_NB_K_HEADS
 constexpr uint32_t nbKHeads = NB_K_HEADS;

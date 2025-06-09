@@ -297,4 +297,31 @@ TEST_F(AttentionOpTest, FlashinferContextAttentionOpTest) {
         }
     }
 }
+
+TEST_F(AttentionOpTest, XqaContextAttentionOpTest) {
+    setenv("ENABLE_TRT_FMHA", "ON", 1);
+    setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
+    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
+    setenv("DISABLE_FLASH_INFER", "0", 1);
+    setenv("ENABLE_XQA", "ON", 1);
+    setenv("ENABLE_MULTI_BLOCK_MODE", "OFF", 1);
+    GlobalConfig::update_from_env_for_test();
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
+    ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
+    std::vector<size_t> batch = {3};
+    std::vector<size_t> seq   = {1};
+    std::vector<size_t> kv_seq = {2049};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            for (auto kv_seq_len: kv_seq) {
+                size_t num_heads = 64;
+                size_t num_key_value_heads = 4;
+                size_t head_dim = 128;
+                xqaPrefillOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim);
+            }
+        }
+    }
+}
 #endif
