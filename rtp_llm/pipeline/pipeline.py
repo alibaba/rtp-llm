@@ -330,7 +330,10 @@ class Pipeline(object):
                 )
                 generate_output.output_ids = ouput_tokens_list[i]
             tokens = generate_output.output_ids
-            tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
+            if not generate_config.ignore_eos:
+                tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
+            else:
+                tokens = tokens.reshape(-1)
             output_lens.append(tokens.nelement())
 
             tokens = self.process_stop_id(
@@ -347,6 +350,7 @@ class Pipeline(object):
                 tokenizer=self.tokenizer,
                 decoding_state=decoding_states[i],
                 return_incremental=generate_config.return_incremental,
+                skip_special_tokens=generate_config.skip_special_tokens,
                 **kwargs
             )
 

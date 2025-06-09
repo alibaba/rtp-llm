@@ -62,10 +62,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         if (current_beam_size == 1) {
             auto random_seeds         = MAY_GET_BUFFER_VIEW(inputs.random_seeds);
             auto repetition_penalty   = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty);
+            auto presence_penalty     = MAY_GET_BUFFER_VIEW(inputs.presence_penalty);
+            auto frequency_penalty    = MAY_GET_BUFFER_VIEW(inputs.frequency_penalty);
             auto min_lengths          = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
             auto no_repeat_ngram_size = MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size);
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx, sample_seq_num) :
                                                        Buffer::emptyBuffer());
+            auto do_sample = MAY_GET_BUFFER_VIEW(inputs.do_sample);
             auto greedy_output =
                 device_->sampleGreedy({sample_logits,
                                        input_lengths,
@@ -77,12 +80,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        *inputs.temperature,
                                        inputs.random_seeds ? (OptionalBufferRef)random_seeds : nullopt,
                                        inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
+                                       inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
+                                       inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
                                        inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                                        *eos_ids_,
                                        inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                                        inputs.cum_log_probs ? (OptionalBufferRef)*sample_cum_log_probs : nullopt,
                                        nullopt,  // output_log_probs
-                                       inputs.all_probs ? (OptionalBufferRef)all_probs : nullopt});
+                                       inputs.all_probs ? (OptionalBufferRef)all_probs : nullopt,
+                                       inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt});
             if (greedy_output.success) {
                 device_->copy({success->view(from_seq_idx, sample_seq_num), *greedy_output.success});
             } else {

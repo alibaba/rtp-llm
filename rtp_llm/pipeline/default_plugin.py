@@ -58,7 +58,7 @@ class DefaultPlugin(object):
         **kwargs: Any
     ) -> str:
         if decoding_state is None:
-            all_text = tokenizer.decode(tokens)
+            all_text = tokenizer.decode(tokens, **kwargs)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
             while (len(all_text) > 0) and ("\uFFFD" == all_text[-1]):
                 all_text = all_text[:-1]
@@ -70,7 +70,7 @@ class DefaultPlugin(object):
             )
             decoding_state.all_text += new_text
         else:
-            all_text = tokenizer.decode(tokens)
+            all_text = tokenizer.decode(tokens, **kwargs)
             new_text = all_text[len(decoding_state.all_text) :]
             decoding_state.all_text = all_text
 

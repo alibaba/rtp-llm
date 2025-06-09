@@ -312,7 +312,10 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
     sampler_inputs.random_seeds         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size});
     sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
+    sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
+    sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
     sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
+    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size});
     sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
@@ -332,9 +335,12 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     float*    temperature                  = sampler_inputs.temperature->data<float>();
     uint64_t* random_seeds                 = sampler_inputs.random_seeds->data<uint64_t>();
     float*    repetition_penalty           = sampler_inputs.repetition_penalty->data<float>();
+    float*    presence_penalty             = sampler_inputs.presence_penalty->data<float>();
+    float*    frequency_penalty            = sampler_inputs.frequency_penalty->data<float>();
     int32_t*  min_lengths                  = sampler_inputs.min_lengths->data<int32_t>();
     int32_t*  no_repeat_ngram_size         = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     int*      beam_search_sequence_lengths = sampler_inputs.beam_search_sequence_lengths->data<int32_t>();
+    bool*     do_sample                    = sampler_inputs.do_sample->data<bool>();
 
     int  batch_idx       = 0;
     bool has_random_seed = false;
@@ -361,7 +367,15 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
             top_p[batch_idx]              = stream->generateConfig()->top_p;
             temperature[batch_idx]        = stream->generateConfig()->temperature;
             repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
+            presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
+            frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
             min_lengths[batch_idx]        = stream->generateConfig()->min_new_tokens;
+            do_sample[batch_idx]          = stream->generateConfig()->do_sample;
+            if (!do_sample[batch_idx]) {
+                top_k[batch_idx]       = 1;
+                top_p[batch_idx]       = 1;
+                temperature[batch_idx] = 1;
+            }
             if (stream->generateConfig()->random_seed.has_value()) {
                 random_seeds[batch_idx] = stream->generateConfig()->random_seed.value();
                 has_random_seed         = true;

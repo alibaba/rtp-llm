@@ -48,8 +48,11 @@ public:
     rtp_llm::BufferPtr temperature;           // shape: [batch_size]
     rtp_llm::BufferPtr random_seeds;          // shape: [batch_size]
     rtp_llm::BufferPtr repetition_penalty;    // shape: [batch_size]
+    rtp_llm::BufferPtr presence_penalty;      // shape: [batch_size]
+    rtp_llm::BufferPtr frequency_penalty;     // shape: [batch_size]
     rtp_llm::BufferPtr min_lengths;           // shape: [batch_size]
     rtp_llm::BufferPtr no_repeat_ngram_size;  // shape: [batch_size]
+    rtp_llm::BufferPtr do_sample;             // shape: [batch_size]
 
     mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size * num_beams]
     mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size * num_beams, vocab_size]

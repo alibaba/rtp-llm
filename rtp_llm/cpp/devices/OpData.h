@@ -737,6 +737,8 @@ struct GreedyParams {
     const Buffer&     temperature;
     OptionalBufferRef random_seed;
     OptionalBufferRef repetition_penalty;
+    OptionalBufferRef presence_penalty;
+    OptionalBufferRef frequency_penalty;
     OptionalBufferRef min_lengths;
     OptionalBufferRef eos_ids;
     OptionalBufferRef no_repeat_ngram_size;
@@ -745,6 +747,7 @@ struct GreedyParams {
     OptionalBufferRef output_log_probs;
 
     OptionalBufferRef output_all_probs;
+    OptionalBufferRef do_sample;
 };
 
 struct GreedyOutput {

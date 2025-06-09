@@ -657,7 +657,8 @@ void GenerateStream::matchEosToken() {
 }
 
 void GenerateStream::matchEosToken(int batch_id) {
-    if (complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id_)) {
+    if ((!generate_input_->generate_config->ignore_eos)
+        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id_)) {
         sub_generate_status_[batch_id].status = StreamState::FINISHED;
     }
 }
@@ -682,6 +683,10 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
     bool match = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
+        if (generate_input_->generate_config->ignore_eos && stop_words.size() == 1
+            && stop_words[0] == special_tokens_.eos_token_id_) {
+            continue;
+        }
         if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
             match = true;
             break;

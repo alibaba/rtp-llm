@@ -48,24 +48,23 @@ void CudaDevice::processLogits(const GreedyParams& params,
                 return t != 1.0f;
             })) {
             auto sequence_lengths = clone({params.input_lengths});
-            if (decoder_batch_size) {
-                copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
-            }
-            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-            auto       repetition_penalty_buf  = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-            auto       penalty_logits          = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-            copy({*repetition_penalty_buf, repetition_penalty});
+            copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
+            auto penalty_ws = allocateBuffer({DataType::TYPE_INT32, {batch_size, vocab_size_padded}});
+            bufMemset(*penalty_ws, 0);
+            auto repetition_penalty = clone({params.repetition_penalty.value().get(), AllocationType::DEVICE});
+            auto presence_penalty   = clone({params.presence_penalty.value().get(), AllocationType::DEVICE});
+            auto frequency_penalty  = clone({params.frequency_penalty.value().get(), AllocationType::DEVICE});
             invokeBatchApplyRepetitionPenalty(logits.data<float>(),
-                                              penalty_logits->data<float>(),
-                                              repetition_penalty_buf->data<float>(),
-                                              transposed_tokens->data<int32_t>(),
+                                              penalty_ws->data<int32_t>(),
+                                              repetition_penalty->data<float>(),
+                                              presence_penalty->data<float>(),
+                                              frequency_penalty->data<float>(),
                                               batch_size,
                                               batch_size,  // local_batch_size
                                               vocab_size_padded,
                                               sequence_lengths->data<int32_t>(),
                                               step + 1,  // max_input_length
                                               step + 1,  // step
-                                              repetition_penalty_type,
                                               stream_);
             // NOTE: here step is max_len - 1
         }
@@ -219,11 +218,32 @@ GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto device_tokens     = clone({params.token_ids});
     auto transposed_tokens = transpose({*device_tokens});
 
-    processLogits(params, device_tokens, transposed_tokens);
-
+    const auto batch_size        = params.logits.shape()[0];
+    bool       has_not_do_sample = params.do_sample
+                             && std::any_of(params.do_sample.value().get().data<bool>(),
+                                            params.do_sample.value().get().data<bool>() + batch_size,
+                                            [&](auto t) { return !t; });
+    bool need_do_sample = (!params.do_sample.has_value())
+                          || std::any_of(params.do_sample.value().get().data<bool>(),
+                                         params.do_sample.value().get().data<bool>() + batch_size,
+                                         [&](auto t) { return t; });
+    if (need_do_sample) {
+        torch::Tensor selected_logits;
+        torch::Tensor mask_tensor;
+        if (has_not_do_sample) {
+            BufferPtr do_sample_mask    = clone({params.do_sample.value().get()});
+            mask_tensor                 = Buffer2torchTensor(do_sample_mask);
+            torch::Tensor logits_tensor = Buffer2torchTensor(params.logits);
+            selected_logits             = logits_tensor.masked_select(mask_tensor);
+        }
+        processLogits(params, device_tokens, transposed_tokens);
+        if (has_not_do_sample) {
+            torch::Tensor logits_tensor = Buffer2torchTensor(params.logits);
+            logits_tensor.masked_scatter(mask_tensor, selected_logits);
+        }
+    }
     // fast path for topk = 1
-    const auto batch_size = params.logits.shape()[0];
-    auto&      top_k      = params.top_k;
+    auto& top_k = params.top_k;
     if (std::all_of(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t == 1; })
         && !params.output_all_probs.has_value()) {
         BufferPtr     logits_ref      = params.logits.slice(0, params.logits.shape()[0]);

@@ -97,6 +97,9 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.force_sp_accept = input_py.generate_config.force_sp_accept
     generate_config_pb.repetition_penalty = input_py.generate_config.repetition_penalty
+    generate_config_pb.presence_penalty = input_py.generate_config.presence_penalty
+    generate_config_pb.frequency_penalty = input_py.generate_config.frequency_penalty
+    generate_config_pb.do_sample = input_py.generate_config.do_sample
     trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
@@ -142,6 +145,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
+    generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()

@@ -33,6 +33,8 @@ public:
     float                      top_p                = 1.0;
     float                      temperature          = 1.0;
     float                      repetition_penalty   = 1.0;
+    float                      presence_penalty     = 0.0;
+    float                      frequency_penalty    = 0.0;
     std::optional<int>         no_repeat_ngram_size;
     std::optional<int>         random_seed;
     std::optional<float>       top_p_decay;
@@ -66,6 +68,7 @@ public:
     std::string                   sp_advice_prompt;
     std::vector<int>              sp_advice_prompt_token_ids;
 
+    bool do_sample             = true;
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
@@ -74,6 +77,7 @@ public:
     std::vector<int> end_think_token_ids;
     bool             gen_timeline = false;
     int              profile_step = 3;
+    bool             ignore_eos   = false;
     bool             top1() {
         return top_k == 1;
     }

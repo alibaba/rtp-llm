@@ -34,6 +34,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->can_use_pd_separation          = config_proto->can_use_pd_separation();
     generate_config->gen_timeline                   = config_proto->gen_timeline();
     generate_config->profile_step                   = config_proto->profile_step();
+    generate_config->ignore_eos                     = config_proto->ignore_eos();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
@@ -54,6 +55,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->top_p              = config_proto->top_p();
     generate_config->temperature        = config_proto->temperature();
     generate_config->repetition_penalty = config_proto->repetition_penalty();
+    generate_config->presence_penalty   = config_proto->presence_penalty();
+    generate_config->frequency_penalty  = config_proto->frequency_penalty();
+    generate_config->do_sample          = config_proto->do_sample();
     TRANS_OPTIONAL(no_repeat_ngram_size);
     TRANS_OPTIONAL(random_seed);
     TRANS_OPTIONAL(top_p_decay);

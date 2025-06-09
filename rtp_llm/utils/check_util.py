@@ -21,6 +21,18 @@ def is_list_positive_float(value) -> bool:
     return isinstance(value, list) and all([is_positive_float(i) for i in value])
 
 
+def is_number(value) -> bool:
+    return isinstance(value, (float, int))
+
+
+def is_list_number(value) -> bool:
+    return isinstance(value, list) and all([is_number(i) for i in value])
+
+
+def is_union_number(value) -> bool:
+    return is_number(value) or is_list_number(value)
+
+
 def is_positive_number(value) -> bool:
     return isinstance(value, (float, int)) and value >= 0
 

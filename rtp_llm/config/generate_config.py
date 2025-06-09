@@ -41,6 +41,7 @@ class GenerateConfig(BaseModel):
     end_think_token_ids: List[int] = []
     in_think_mode: bool = False
     num_beams: int = 1
+    do_sample: bool = True
     # 0 mean not use num_return_sequences,
     # whether to enable num_return_sequences, the output format of the results is inconsistent.
     num_return_sequences: int = 0
@@ -48,6 +49,8 @@ class GenerateConfig(BaseModel):
     top_p: Union[List[float], float] = 1.0
     temperature: Union[List[float], float] = 1.0
     repetition_penalty: Union[List[float], float] = 1.0
+    presence_penalty: Union[List[float], float] = 0.0
+    frequency_penalty: Union[List[float], float] = 0.0
     min_new_tokens: Union[List[int], int] = 0
     no_repeat_ngram_size: Optional[Union[List[int], int]] = None
     random_seed: Optional[Union[List[int], int]] = None
@@ -92,13 +95,14 @@ class GenerateConfig(BaseModel):
     gen_timeline: bool = False
     profile_step: int = 3
     out_prefix: str = ""
-
     # for load balance
     role_addrs: List[RoleAddr] = []
 
     # inter request id, from master
     inter_request_id: int = -1
 
+    ignore_eos: bool = False
+    skip_special_tokens: bool = False
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
@@ -231,6 +235,14 @@ class GenerateConfig(BaseModel):
             check_with_info(
                 is_union_positive_number(self.repetition_penalty),
                 f"repetition_penalty {self.repetition_penalty} is wrong data type",
+            )
+            check_with_info(
+                is_union_number(self.presence_penalty),
+                f"presence_penalty {self.presence_penalty} is wrong data type",
+            )
+            check_with_info(
+                is_union_number(self.frequency_penalty),
+                f"frequency_penalty {self.frequency_penalty} is wrong data type",
             )
             check_with_info(
                 is_positive_integer(self.max_new_tokens),
