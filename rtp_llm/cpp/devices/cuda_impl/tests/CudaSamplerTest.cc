@@ -728,3 +728,166 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
         }
     }
 }
+
+TEST_F(CudaSamplerTest, testPenalty) {
+    size_t    batch_size = 4;
+    BufferPtr logits     = createBuffer<float>(
+        {batch_size, 10},
+        {
+            0.01, 0.88, 0.92, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.01, 0.88, 0.92, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+            0.01, 0.88, 0.92, 0.1, 0.2, 0.3, 0.4, 0.1, 0.1, 0.1, 0.01, 0.88, 0.92, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+        });
+    size_t    step         = 5;  // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    // BufferPtr finished = createBuffer<bool>({1}, {0});
+    BufferPtr output_token_ids =
+        createBuffer<int32_t>({batch_size, step + 1},
+                              {
+                                  2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0,
+                              });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths    = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr cum_log_probs    = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
+    BufferPtr rand_seed        = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+
+    auto top_k              = createBuffer<uint32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
+    auto top_p              = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
+    auto temperture         = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
+    auto repetition_penalty = createBuffer<float>({4}, {2.4, 1.0, 1.0, 1.2}, AllocationType::HOST);
+    auto presence_penalty   = createBuffer<float>({4}, {0, 0.6, 0, 0.3}, AllocationType::HOST);
+    auto frequency_penalty  = createBuffer<float>({4}, {0, 0, 0.2, 0.1}, AllocationType::HOST);
+
+    BufferPtr output_all_probs =
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {4, 10}, rtp_llm::AllocationType::DEVICE});
+    device_->bufMemset(*output_all_probs, 0);
+
+    GreedyParams params({*logits,
+                         *input_lengths,
+                         *sequence_lengths,
+                         *output_token_ids,
+                         step,
+                         *top_k,
+                         *top_p,
+                         *temperture,
+                         *rand_seed,
+                         *repetition_penalty,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         *cum_log_probs,
+                         nullopt,
+                         *output_all_probs,
+                         *presence_penalty,
+                         *frequency_penalty});
+    device_->sampleGreedy(params);
+    check_cuda_error();
+
+    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    printBuffer<float>(*cum_log_probs, "cum_log_probs");
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    auto cum_log_probs_host    = getBufferValues<float>(*cum_log_probs);
+    ASSERT_EQ(output_token_ids_host[5], 1);
+    ASSERT_EQ(output_token_ids_host[11], 7);
+    ASSERT_EQ(output_token_ids_host[17], 9);
+    ASSERT_EQ(output_token_ids_host[23], 6);
+    ASSERT_NEAR(cum_log_probs_host[0], -3.3125, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -4.16467, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -5.42469, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -5.24668, 1e-3);
+
+    printBuffer<float>(*output_all_probs, "output_all_probs");
+
+    auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
+    ASSERT_VECTOR_NEAR(
+        output_all_probs_host,
+        std::vector<float>({0.0693098, 0.0990131, 0.100677,  0.075837,  0.0838128, 0.0926275, 0.102369,  0.113135,
+                            0.125034,  0.138184,  0.0703223, 0.0921197, 0.0958792, 0.0769448, 0.0850372, 0.0939806,
+                            0.103865,  0.114788,  0.126861,  0.140203,  0.080888,  0.12942,   0.110285,  0.0885056,
+                            0.0978138, 0.108101,  0.11947,   0.0885056, 0.0885056, 0.0885056, 0.0715989, 0.0895156,
+                            0.0837425, 0.0783417, 0.0865809, 0.0956867, 0.10575,   0.116872,  0.129164,  0.142748}),
+        1e-3);
+}
+
+TEST_F(CudaSamplerTest, testDoSample) {
+    size_t    batch_size = 4;
+    BufferPtr logits     = createBuffer<float>(
+        {batch_size, 10},
+        {
+            0.01, 0.8, 0.98, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.01, 0.8, 0.98, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+            0.01, 0.8, 0.98, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.01, 0.8, 0.98, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+        });
+    size_t    step         = 5;  // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    // BufferPtr finished = createBuffer<bool>({1}, {0});
+    BufferPtr output_token_ids =
+        createBuffer<int32_t>({batch_size, step + 1},
+                              {
+                                  2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0,
+                              });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths    = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr cum_log_probs    = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
+    BufferPtr rand_seed        = createBuffer<uint64_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
+
+    auto top_k                            = createBuffer<uint32_t>({4}, {2, 2, 2, 2}, AllocationType::HOST);
+    auto top_p                            = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
+    auto temperture                       = createBuffer<float>({4}, {2.0, 2.0, 4.0, 4.0}, AllocationType::HOST);
+    auto do_sample                        = createBuffer({4}, rtp_llm::DataType::TYPE_BOOL, AllocationType::HOST);
+    *(do_sample->dataWithOffset<bool>(0)) = false;
+    *(do_sample->dataWithOffset<bool>(1)) = true;
+    *(do_sample->dataWithOffset<bool>(2)) = false;
+    *(do_sample->dataWithOffset<bool>(3)) = true;
+
+    BufferPtr output_all_probs =
+        device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {4, 10}, rtp_llm::AllocationType::DEVICE});
+    device_->bufMemset(*output_all_probs, 0);
+
+    GreedyParams params({*logits,
+                         *input_lengths,
+                         *sequence_lengths,
+                         *output_token_ids,
+                         step,
+                         *top_k,
+                         *top_p,
+                         *temperture,
+                         *rand_seed,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         *cum_log_probs,
+                         nullopt,
+                         *output_all_probs,
+                         nullopt,
+                         nullopt,
+                         *do_sample});
+    device_->sampleGreedy(params);
+    check_cuda_error();
+
+    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    printBuffer<float>(*cum_log_probs, "cum_log_probs");
+
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    auto cum_log_probs_host    = getBufferValues<float>(*cum_log_probs);
+    ASSERT_EQ(output_token_ids_host[5], 1);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 1);
+    ASSERT_EQ(output_token_ids_host[23], 2);
+    ASSERT_NEAR(cum_log_probs_host[0], -1.78719, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -2.64916, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -3.78719, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -3.6709, 1e-3);
+
+    printBuffer<float>(*output_all_probs, "output_all_probs");
+
+    auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
+    ASSERT_VECTOR_NEAR(
+        output_all_probs_host,
+        std::vector<float>({0, 0.455121, 0.544879, 0, 0, 0, 0, 0, 0, 0, 0, 0.477515, 0.522485, 0, 0, 0, 0, 0, 0, 0,
+                            0, 0.455121, 0.544879, 0, 0, 0, 0, 0, 0, 0, 0, 0.488752, 0.511248, 0, 0, 0, 0, 0, 0, 0}),
+        1e-3);
+}

@@ -80,14 +80,14 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        *inputs.temperature,
                                        inputs.random_seeds ? (OptionalBufferRef)random_seeds : nullopt,
                                        inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
-                                       inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
-                                       inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
                                        inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                                        *eos_ids_,
                                        inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                                        inputs.cum_log_probs ? (OptionalBufferRef)*sample_cum_log_probs : nullopt,
                                        nullopt,  // output_log_probs
                                        inputs.all_probs ? (OptionalBufferRef)all_probs : nullopt,
+                                       inputs.presence_penalty ? (OptionalBufferRef)presence_penalty : nullopt,
+                                       inputs.frequency_penalty ? (OptionalBufferRef)frequency_penalty : nullopt,
                                        inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt});
             if (greedy_output.success) {
                 device_->copy({success->view(from_seq_idx, sample_seq_num), *greedy_output.success});
