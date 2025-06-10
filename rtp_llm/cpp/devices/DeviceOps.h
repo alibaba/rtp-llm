@@ -12,9 +12,10 @@ public:
 
 public:
     // tensor ops
+    virtual void            copy(const CopyParams& params);
     virtual void            multiMergeCopy(const MultiMergeCopyParams& params);
     virtual void            multiCopy(const MultiCopyParams& params);
-    virtual void            copy(const CopyParams& params);
+    virtual void            batchCopy(const BatchCopyParams& params);
     virtual CloneOutput     clone(const CloneParams& params);
     virtual TransposeOutput transpose(const TransposeParams& params);
     virtual ConvertOutput   convert(const ConvertParams& params);

@@ -242,6 +242,47 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     }
 }
 
+void DeviceBase::batchCopy(const BatchCopyParams& params) {
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        auto copy_type = BatchCopyParams::CopyType(copy_type_enum);
+        auto &buffers = params.copy_buffers[copy_type];
+        size_t copy_batch_size = buffers.sizes.size();
+        if (copy_batch_size == 0) {
+            continue;
+        }
+
+        MemoryType dst_where, src_where;
+        switch (copy_type) {
+            case BatchCopyParams::D2H:
+                dst_where = MemoryType::MEMORY_CPU;
+                src_where = MemoryType::MEMORY_GPU;
+                break;
+            case BatchCopyParams::H2D:
+                dst_where = MemoryType::MEMORY_GPU;
+                src_where = MemoryType::MEMORY_CPU;
+                break;
+            case BatchCopyParams::D2D:
+                dst_where = MemoryType::MEMORY_GPU;
+                src_where = MemoryType::MEMORY_GPU;
+                break;
+            case BatchCopyParams::H2H:
+                dst_where = MemoryType::MEMORY_CPU;
+                src_where = MemoryType::MEMORY_CPU;
+                break;
+            default:
+                RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
+                break;
+        }
+
+        for (size_t i = 0; i < copy_batch_size; ++i) {
+            size_t bytes = buffers.sizes[i];
+            Buffer dst_buffer(dst_where, DataType::TYPE_BYTES, {bytes}, buffers.dst_ptr[i]);
+            Buffer src_buffer(src_where, DataType::TYPE_BYTES, {bytes}, buffers.src_ptr[i]);
+            copy({dst_buffer, src_buffer, params.overlapped, params.stream});
+        }
+    }
+}
+
 CloneOutput DeviceBase::clone(const CloneParams& params) {
     const auto& src = params.input;
     auto        dst = allocateBufferLike(src, params.alloc_type, params.hints);

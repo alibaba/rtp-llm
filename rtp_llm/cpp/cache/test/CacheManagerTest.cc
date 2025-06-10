@@ -562,6 +562,77 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
     testFunc(3, 1);
 }
 
+TEST_F(CacheManagerTest, blockBatchCopy) {
+    uint src_blocks_num = 4;
+    uint dst_blocks_num = 9;
+    uint blocks_num     = src_blocks_num + dst_blocks_num;
+    // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
+    CacheConfig  cache_config(KVCacheParam({2, 1 + blocks_num, 7, 128, 16, rtp_llm::TYPE_INT8}));
+    CacheManager cache_manager(cache_config, device_);
+    ASSERT_EQ(cache_manager.freeBlockNums(), blocks_num);
+
+    for (int i = 1; i <= src_blocks_num; ++i) {
+        vector<int8_t> k_vec(cache_config.kv_block_size, i);
+        vector<int8_t> v_vec(cache_config.kv_block_size, i);
+        auto           k_buffer = rtp_llm::vector2Buffer(k_vec);
+        auto           v_buffer = rtp_llm::vector2Buffer(v_vec);
+        cache_manager.setKVBlockValue(i, *k_buffer, *v_buffer);
+    }
+
+    auto testFunc = [&](int block_index, int block_value) {
+        auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index);
+        auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
+        auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+        ASSERT_EQ(cache_config.kv_block_size, host_kbuffer->size());
+        ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
+        for (size_t i = 0; i < host_kbuffer->size(); i++) {
+            ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
+            ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+        }
+
+        for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+            auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
+            auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
+            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+            ASSERT_EQ(cache_config.k_block_stride, host_kbuffer->size());
+            ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
+            for (size_t i = 0; i < host_kbuffer->size(); i++) {
+                ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
+                ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+            }
+        }
+    };
+
+    // check cache before copy
+    for (int i = 1; i <= src_blocks_num; ++i) {
+        SCOPED_TRACE("src before");
+        testFunc(i, i);
+    }
+    for (int i = src_blocks_num + 1; i < blocks_num; ++i) {
+        SCOPED_TRACE("dst before");
+        testFunc(i, 0);
+    }
+
+    // do copy
+    std::vector<BlockIdPair> copy_mapping;
+    for (int i = src_blocks_num + 1; i < blocks_num; ++i) {
+        int src_block = 1 + (i - src_blocks_num - 1) % src_blocks_num;
+        copy_mapping.push_back({src_block, i});
+    }
+    cache_manager.blockBatchCopy(copy_mapping);
+
+    // check cache after copy
+    for (int i = 1; i <= src_blocks_num; ++i) {
+        SCOPED_TRACE("src after");
+        testFunc(i, i);
+    }
+    for (int i = src_blocks_num + 1; i < blocks_num; ++i) {
+        SCOPED_TRACE("dst after");
+        int expected_value = 1 + (i - src_blocks_num - 1) % src_blocks_num;
+        testFunc(i, expected_value);
+    }
+}
+
 TEST_F(CacheManagerTest, testBlockCacheHoldBlockNums) {
     // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
     CacheConfig  cache_config(KVCacheParam({2, 10, 1, 1, 1, rtp_llm::TYPE_INT8}));

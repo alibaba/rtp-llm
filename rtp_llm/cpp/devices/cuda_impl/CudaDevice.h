@@ -165,9 +165,11 @@ public:
     void profileStop() override;
 
 public:
+    // TODO(zhangjianning.zjn): unify batchCopy and multiCopy
     void                          copy(const CopyParams& params);
     void                          multiMergeCopy(const MultiMergeCopyParams& params) override;
     void                          multiCopy(const MultiCopyParams& params) override;
+    void                          batchCopy(const BatchCopyParams& params) override;
     void                          noBlockCopy(const CopyParams& params) override;
     void                          bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput               transpose(const TransposeParams& params) override;

@@ -185,4 +185,77 @@ void GroupedGemmParams::check() const {
     }
 }
 
+BatchCopyParams::CopyType BatchCopyParams::get_copy_type(MemoryType dst_type, MemoryType src_type) {
+    if (src_type == MEMORY_GPU) {
+        if (dst_type == MEMORY_GPU) {
+            return CopyType::D2D;
+        } else {
+            return CopyType::D2H;
+        }
+    } else {
+        if (dst_type == MEMORY_GPU) {
+            return CopyType::H2D;
+        } else {
+            return CopyType::H2H;
+        }
+    }
+}
+
+BatchCopyParams& BatchCopyParams::reserve(CopyType copy_type, size_t size) {
+    RTP_LLM_CHECK_WITH_INFO(copy_type < TYPE_SIZE, "unexpected CopyType %d", copy_type);
+    copy_buffers[copy_type].dst_ptr.reserve(size);
+    copy_buffers[copy_type].src_ptr.reserve(size);
+    copy_buffers[copy_type].sizes.reserve(size);
+
+    return *this;
+}
+
+BatchCopyParams& BatchCopyParams::add(const Buffer& dst, const Buffer& src) {
+    bool dst_q_buffer = dst.isQBuffer();
+    bool src_q_buffer = src.isQBuffer();
+
+    RTP_LLM_CHECK_WITH_INFO(dst_q_buffer == src_q_buffer,
+                            "mismatched buffer type, dst %s q_buffer, but src %s q_buffer",
+                            dst_q_buffer ? "is" : "is not",
+                            src_q_buffer ? "is" : "is not");
+
+    if (dst_q_buffer) {
+        auto dst_ptr = reinterpret_cast<const QBuffer*>(&dst);
+        auto src_ptr = reinterpret_cast<const QBuffer*>(&src);
+
+        add(dst_ptr->kernel(), src_ptr->kernel());
+        add(dst_ptr->scales(), src_ptr->scales());
+        add(dst_ptr->zeros(), src_ptr->zeros());
+
+        return *this;
+    } else {
+        size_t dst_bytes = dst.sizeBytes();
+        size_t src_bytes = src.sizeBytes();
+        RTP_LLM_CHECK_WITH_INFO(
+            dst_bytes == src_bytes, "mismatched buffer size, dst %ld, src %ld", dst_bytes, src_bytes);
+
+        auto dst_type = dst.type();
+        auto src_type = src.type();
+        RTP_LLM_CHECK_WITH_INFO(
+            dst_type == src_type, "mismatched buffer data type, dst %d, src %d", dst_type, src_type);
+
+        auto copy_type = get_copy_type(dst.where(), src.where());
+
+        return add(dst.data(), src.data(), src_bytes, copy_type);
+    }
+}
+
+BatchCopyParams& BatchCopyParams::add(void* dst, const void* src, size_t size, CopyType copy_type) {
+    RTP_LLM_CHECK_WITH_INFO(copy_type < TYPE_SIZE, "unexpected CopyType %d", copy_type);
+
+    if (size > 0) {
+        auto& buffers = copy_buffers[copy_type];
+        buffers.dst_ptr.push_back(dst);
+        buffers.src_ptr.push_back(src);
+        buffers.sizes.push_back(size);
+    }
+
+    return *this;
+}
+
 }  // namespace rtp_llm

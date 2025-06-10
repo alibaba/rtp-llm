@@ -11,6 +11,10 @@ void DeviceOps::copy(const CopyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::batchCopy(const BatchCopyParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 CloneOutput DeviceOps::clone(const CloneParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

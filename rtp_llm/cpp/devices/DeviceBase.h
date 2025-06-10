@@ -87,7 +87,7 @@ public:
     }
 
     void         traceMemoryUsage();
-    virtual void printDebugInfo() {};
+    virtual void printDebugInfo(){};
     bool         enableDevicePerf() const {
         return enable_device_perf_;
     }
@@ -160,6 +160,7 @@ public:
 
 public:
     // device-independence op implementations
+    void         batchCopy(const BatchCopyParams& params) override;
     CloneOutput  clone(const CloneParams& params) override;
     SelectOutput select(const SelectParams& params) override;
     ConcatOutput concat(const ConcatParams& params) override;
@@ -196,10 +197,10 @@ protected:
     AllocationType getMemAllocationType(const MemoryType type);
 
 private:
-    DeviceBase(const DeviceBase&)            = delete;
+    DeviceBase(const DeviceBase&) = delete;
     DeviceBase& operator=(const DeviceBase&) = delete;
     DeviceBase(DeviceBase&&)                 = delete;
-    DeviceBase& operator=(DeviceBase&&)      = delete;
+    DeviceBase& operator=(DeviceBase&&) = delete;
 
 private:
     virtual IAllocator* getAllocator()     = 0;

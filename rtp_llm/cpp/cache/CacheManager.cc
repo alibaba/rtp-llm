@@ -678,24 +678,65 @@ std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> CacheManager::getKVBlockValue
 }
 
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    auto k_shape = config_.getKeyShape();
-    auto v_shape = config_.getValueShape();
+    auto copy_mapping = std::make_pair(src_block_index, dest_block_index);
+    blockBatchCopy(&copy_mapping, &copy_mapping + 1);
+}
 
-    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-        auto dst_k_offset = config_.getKeyOffset(dest_block_index, layer_id);
-        auto src_k_offset = config_.getKeyOffset(src_block_index, layer_id);
-        auto dst_v_offset = config_.getValueOffset(dest_block_index, layer_id);
-        auto src_v_offset = config_.getValueOffset(src_block_index, layer_id);
-        auto copyFunc     = [&](rtp_llm::BufferPtr& buffer_blocks, size_t dst_offset, size_t src_offset, size_t shape) {
-            auto dst_data   = (char*)(buffer_blocks->data()) + dst_offset;
-            auto src_data   = (char*)(buffer_blocks->data()) + src_offset;
-            auto dst_buffer = Buffer(buffer_blocks->where(), config_.dtype, {shape}, dst_data);
-            auto src_buffer = Buffer(buffer_blocks->where(), config_.dtype, {shape}, src_data);
-            device_->copy({dst_buffer, src_buffer});
-        };
-        copyFunc(kv_cache_.k_blocks, dst_k_offset, src_k_offset, k_shape);
-        copyFunc(kv_cache_.v_blocks, dst_v_offset, src_v_offset, v_shape);
+void CacheManager::blockBatchCopy(const std::vector<std::pair<int, int>>& copy_mapping) {
+    blockBatchCopy(copy_mapping.data(), copy_mapping.data() + copy_mapping.size());
+}
+
+void CacheManager::blockBatchCopy(const std::pair<int, int>* begin_ptr, const std::pair<int, int>* end_ptr) {
+    if (end_ptr == begin_ptr) {
+        return;
     }
+
+    auto& k_blocks = *kv_cache_.k_blocks;
+    auto& v_blocks = *kv_cache_.v_blocks;
+
+    BatchCopyParams copy_params;
+
+    auto k_copy_type = BatchCopyParams::get_copy_type(k_blocks.where(), k_blocks.where());
+    auto v_copy_type = BatchCopyParams::get_copy_type(v_blocks.where(), v_blocks.where());
+
+    const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
+    if (k_copy_type == v_copy_type) {
+        copy_params.reserve(k_copy_type, 2 * copy_num);
+    } else {
+        copy_params.reserve(k_copy_type, copy_num);
+        copy_params.reserve(v_copy_type, copy_num);
+    }
+
+    const auto copy_blocks =
+        [&](Buffer& buffer_blocks, size_t block_bytes, BatchCopyParams::CopyType copy_type, auto get_offset) {
+            auto blocks_data = (char*)(buffer_blocks.data());
+            for (auto it = begin_ptr; it != end_ptr; ++it) {
+                auto [src_block_index, dest_block_index] = *it;
+                for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+                    auto dst_offset = get_offset(dest_block_index, layer_id);
+                    auto dst_data   = blocks_data + dst_offset;
+
+                    auto src_offset = get_offset(src_block_index, layer_id);
+                    auto src_data   = blocks_data + src_offset;
+
+                    copy_params.add(dst_data, src_data, block_bytes, copy_type);
+                }
+            }
+        };
+
+    // copy k blocks
+    auto k_copy_bytes = config_.getKeyBlockStride();
+    copy_blocks(k_blocks, k_copy_bytes, k_copy_type, [&](int block_index, int layer_id) {
+        return config_.getKeyOffset(block_index, layer_id);
+    });
+
+    // copy v blocks
+    auto v_copy_bytes = config_.getValueBlockStride();
+    copy_blocks(v_blocks, v_copy_bytes, v_copy_type, [&](int block_index, int layer_id) {
+        return config_.getValueOffset(block_index, layer_id);
+    });
+
+    device_->batchCopy(copy_params);
 }
 
 CacheManager::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {

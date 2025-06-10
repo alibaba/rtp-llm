@@ -142,7 +142,10 @@ public:
     virtual void setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> getKVBlockValue(int block_index, int layer_id);
     std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> getKVBlockValue(int block_index);
-    void                                               blockCopy(int src_block_index, int dest_block_index);
+
+    void blockCopy(int src_block_index, int dest_block_index);
+    void blockBatchCopy(const std::vector<std::pair<int, int>>& copy_mapping);
+    void blockBatchCopy(const std::pair<int, int>* copy_mapping_begin, const std::pair<int, int>* copy_mapping_end);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 

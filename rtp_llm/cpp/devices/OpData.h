@@ -48,7 +48,9 @@ enum class ParallelMode {
     EPLB      = 5
 };
 
-enum class DeviceStream { DEFAULT = 0, };
+enum class DeviceStream {
+    DEFAULT = 0,
+};
 
 class OpStatus {
 public:
@@ -234,6 +236,43 @@ struct MultiCopyParams {
     std::vector<BufferPtr> multi_src;
 };
 
+struct BatchCopyParams {
+    enum CopyType : uint32_t {
+        D2H = 0,
+        H2D = 1,
+        D2D = 2,
+        H2H = 3,
+
+        // dummy enum indicating number of copy types
+        TYPE_SIZE
+    };
+
+    struct BatchCopyBuffers {
+        std::vector<void*>       dst_ptr;
+        std::vector<const void*> src_ptr;
+        std::vector<uint64_t>    sizes;
+    };
+
+    BatchCopyBuffers copy_buffers[TYPE_SIZE];
+
+    bool         overlapped = false;
+    DeviceStream stream     = DeviceStream::DEFAULT;
+
+    BatchCopyParams& set_overlapped(bool overlapped) {
+        this->overlapped = overlapped;
+        return *this;
+    }
+    BatchCopyParams& set_stream(const DeviceStream stream) {
+        this->stream = stream;
+        return *this;
+    }
+
+    static CopyType  get_copy_type(MemoryType dst_type, MemoryType src_type);
+    BatchCopyParams& reserve(CopyType copy_type, size_t size);
+    BatchCopyParams& add(const Buffer& dst, const Buffer& src);
+    BatchCopyParams& add(void* dst, const void* src, size_t size, CopyType copy_type);
+};
+
 using SelectOutput = BufferPtr;
 
 enum SelectType {
@@ -340,7 +379,7 @@ struct LayernormParams {
         is_inplace(is_inplace),
         qscheme(qscheme),
         attn_swap_comm_buffer(attn_swap_comm_buffer),
-        ffn_swap_comm_buffer(ffn_swap_comm_buffer){};
+        ffn_swap_comm_buffer(ffn_swap_comm_buffer) {};
 
     BufferPtr input;
     BufferPtr before_norm_output;
@@ -988,7 +1027,7 @@ struct ActivationParams {
         bias(std::nullopt),
         gate(std::nullopt),
         gate_bias(std::nullopt),
-        act_scale(std::nullopt){};
+        act_scale(std::nullopt) {};
 };
 
 // softmax op is inplace-update, thus output buffer is same as input

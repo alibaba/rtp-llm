@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
+#include "rtp_llm/cpp/kernels/batch_copy.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/utils/compiler_config.h"
@@ -87,6 +88,84 @@ void CudaDevice::multiCopy(const MultiCopyParams& params) {
         multi_copy_sizes[i] = params.multi_src[i]->sizeBytes();
     }
     InvokeMultiCopyKernel(multi_src_ptrs, multi_dst_ptrs, multi_copy_sizes, stream_);
+}
+
+void CudaDevice::batchCopy(const BatchCopyParams& params) {
+    constexpr size_t cuda_sector_size = 128;
+
+    constexpr auto align_to = [](size_t size, size_t alignment) {
+        return ((size + alignment - 1) / alignment) * alignment;
+    };
+
+    cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+
+    BatchCopyParams fallback_copies;
+    bool need_fallback;
+
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        auto copy_type = BatchCopyParams::CopyType(copy_type_enum);
+        auto &buffers = params.copy_buffers[copy_type];
+        size_t copy_batch_size = buffers.sizes.size();
+        if (copy_batch_size == 0) {
+            continue;
+        }
+
+        switch (copy_type) {
+            case BatchCopyParams::D2D: {
+                const size_t org_src_ptrs_bytes = sizeof(void *) * copy_batch_size;
+                const size_t org_dst_ptrs_bytes = sizeof(void *) * copy_batch_size;
+                const size_t org_sizes_bytes    = sizeof(uint64_t) * copy_batch_size;
+                const size_t src_ptrs_bytes     = align_to(org_src_ptrs_bytes, cuda_sector_size);
+                const size_t dst_ptrs_bytes     = align_to(org_dst_ptrs_bytes, cuda_sector_size);
+                const size_t sizes_bytes        = org_sizes_bytes;
+                const size_t workspace_bytes    = src_ptrs_bytes + dst_ptrs_bytes + sizes_bytes;
+
+                // allocate workspace buffer
+                auto workspace = allocateBuffer({TYPE_BYTES, {workspace_bytes}, AllocationType::DEVICE}, {"batch_copy_workspace"});
+
+                auto src_ptrs = reinterpret_cast<void **>(workspace->data<char>());
+                auto dst_ptrs = reinterpret_cast<void **>(workspace->data<char>() + src_ptrs_bytes);
+                auto sizes    = reinterpret_cast<uint64_t *>(workspace->data<char>() + src_ptrs_bytes + dst_ptrs_bytes);
+
+                // copy params to workspace
+                cudaMemcpyAsync(src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream);
+                cudaMemcpyAsync(dst_ptrs, buffers.dst_ptr.data(), org_dst_ptrs_bytes, cudaMemcpyHostToDevice, stream);
+                cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream);
+
+                // copy workspace to device
+                cudaEvent_t copy_params_done;
+                cudaEventCreate(&copy_params_done);
+                cudaEventRecord(copy_params_done, stream);
+
+                // do batch copy
+                auto config = kernels::getBatchCopyConfig(buffers.sizes.data(), copy_batch_size);
+                kernels::invokeBatchCopy(dst_ptrs, src_ptrs, sizes, copy_batch_size, config, stream);
+
+                cudaEventSynchronize(copy_params_done);
+                cudaEventDestroy(copy_params_done);
+                check_cuda_value(cudaGetLastError());
+
+                check_cuda_error();
+            } break;
+            case BatchCopyParams::H2H:
+            case BatchCopyParams::H2D:
+            case BatchCopyParams::D2H: {
+                // fallback to copy one by one
+                need_fallback = true;
+
+                fallback_copies.overlapped = params.overlapped;
+                fallback_copies.stream = params.stream;
+                fallback_copies.copy_buffers[copy_type] = buffers;
+            } break;
+            default:
+                RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
+                break;
+        }
+    }
+
+    if (need_fallback) {
+        DeviceBase::batchCopy(fallback_copies);
+    }
 }
 
 void CudaDevice::noBlockCopy(const CopyParams& params) {
