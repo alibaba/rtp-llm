@@ -317,6 +317,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
     sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size});
     sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
+    sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size});
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size});
     }
