@@ -32,6 +32,8 @@ public:
     int64_t waitingStreamsSize();
     int64_t runningStreamsSize();
     int64_t onflightStreams() override;
+    int64_t waitingQueryLen() override;
+    int64_t runningQueryLen() override;
 
 private:
     void evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;

@@ -195,7 +195,7 @@ void RtpLLMOp::stop() {
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waitting 1s", onflight_request);
+                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s", onflight_request);
                 sleep(1);
                 if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > STOP_TIMEOUT_MS * 1000) {
                     RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");

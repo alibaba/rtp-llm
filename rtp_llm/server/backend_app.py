@@ -165,6 +165,8 @@ class BackendApp(object):
                 "step_per_minute": load_balance_info.step_per_minute,
                 "onflight_requests": load_balance_info.onflight_requests,
                 "iterate_count": load_balance_info.iterate_count,
+                "waiting_query_len": load_balance_info.waiting_query_len,
+                "running_query_len": load_balance_info.running_query_len,
                 "version": load_balance_version,
                 "alive": True,
                 "running_task_list": [{

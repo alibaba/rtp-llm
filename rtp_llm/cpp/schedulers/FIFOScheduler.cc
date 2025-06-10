@@ -316,6 +316,24 @@ int64_t FIFOScheduler::onflightStreams() {
     return waiting_streams_.size() + running_streams_.size();
 }
 
+int64_t FIFOScheduler::waitingQueryLen() {
+    unique_lock<mutex> lock(lock_);
+    int64_t sum_len = 0;
+    for (auto& item : waiting_streams_) {
+        sum_len += item->inputLength();
+    }
+    return sum_len;
+}
+
+int64_t FIFOScheduler::runningQueryLen() {
+    unique_lock<mutex> lock(lock_);
+    int64_t sum_len = 0;
+    for (auto& item : running_streams_) {
+        sum_len += item->inputLength();
+    }
+    return sum_len;
+}
+
 void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;

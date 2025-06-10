@@ -230,7 +230,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     ASSERT_FALSE(stream2->stopped());
     ASSERT_EQ(stream1->stopReason(), "");
     ASSERT_EQ(stream2->stopReason(), "");
-    // stream2 pause，并且进入waitting queue，release了部分block
+    // stream2 pause，并且进入waiting queue，release了部分block
     ASSERT_TRUE(stream2->paused());
     ASSERT_EQ(stream2->maxBlockSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);

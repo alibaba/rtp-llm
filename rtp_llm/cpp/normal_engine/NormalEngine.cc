@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
@@ -195,14 +196,14 @@ absl::Status NormalEngine::initSystemPrompt() {
 
 LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
     auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
-    return LoadBalanceInfo{
-        (int64_t)step_recorder_.getStepLatency(),
+    return {(int64_t)step_recorder_.getStepLatency(),
         (int64_t)step_recorder_.getStepCount(),
         (int64_t)step_recorder_.getStepPerMin(),
         (int64_t)kv_cache_info.available_kv_cache,
         (int64_t)kv_cache_info.total_kv_cache,
-        (int64_t)scheduler_->onflightStreams()
-    };
+        (int64_t)scheduler_->onflightStreams(),
+        (int64_t)scheduler_->waitingQueryLen(),
+        (int64_t)scheduler_->runningQueryLen()};
 }
 
 absl::Status NormalEngine::startLoop() {

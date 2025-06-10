@@ -21,6 +21,8 @@ public:
     virtual bool                                         empty()                                  = 0;
     virtual int64_t                                      lastScheduleTime()                       = 0;
     virtual int64_t                                      onflightStreams()                        = 0;
+    virtual int64_t                                      waitingQueryLen()                       {return 0;}
+    virtual int64_t                                      runningQueryLen()                        {return 0;}
     virtual bool                                         canLoadBalance() { return true; }
     virtual void                                         updateSchedulerInfo(const std::string& scheduler_info) {}
 };

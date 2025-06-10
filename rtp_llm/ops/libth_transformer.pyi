@@ -443,6 +443,10 @@ class LoadBalanceInfo:
     step_latency_us: int
     step_per_minute: int
     total_kv_cache: int
+    onflight_requests: int
+    waiting_query_len: int
+    running_query_len: int
+
     def __init__(self) -> None:
         ...
 class MiscellaneousConfig:
