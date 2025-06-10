@@ -127,22 +127,22 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                             true,
                                             params.qscheme});
                 } else {
+                    printBufferData(*up_output, "gate_up_output buffer");
                     torch::Tensor gate_up_output_torch_tensor = Buffer2torchTensor(up_output, false);
                     std::vector<torch::Tensor> split_tensors = torch::chunk(gate_up_output_torch_tensor, 2, -1);
                     torch::Tensor first_half = split_tensors[0].clone();
                     torch::Tensor second_half = split_tensors[1].clone();
-                    up_output = torchTensor2Buffer(second_half);
                     BufferPtr gate_output = torchTensor2Buffer(first_half);
-                    auto act_output = allocateBuffer({up_output->type(), {up_output->shape()[0], up_output->shape()[1] / 2}, AllocationType::DEVICE});
+                    BufferPtr up_out = torchTensor2Buffer(second_half);
 
                     activation({params.configs.activation_type,
-                                up_output,
+                                up_out,
                                 std::nullopt,
                                 *gate_output,
                                 std::nullopt,
-                                mayGetRef(params.weights.act_scale),
-                                act_output});
-                    up_output = std::move(act_output);
+                                mayGetRef(params.weights.act_scale)});
+                    
+                    up_output = std::move(up_out);
                 }
             }
         } else {
