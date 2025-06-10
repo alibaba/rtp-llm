@@ -108,6 +108,20 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.all_probs = device_->clone(
                 {all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
         }
+        // hidden_states post process
+        if (generate_output.finished && generate_input_->generate_config->return_hidden_states && generate_output.hidden_states.has_value() && (generate_input_->generate_config->hidden_states_cut_dim > 0 || generate_input_->generate_config->normalized_hidden_states)) {
+            auto buffer = generate_output.hidden_states.value();
+            auto hidden_states_tensor = rtp_llm::Buffer2torchTensor(buffer);
+            if (generate_input_->generate_config->hidden_states_cut_dim > 0) {
+                hidden_states_tensor = hidden_states_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, generate_input_->generate_config->hidden_states_cut_dim)});
+            }
+            if (generate_input_->generate_config->normalized_hidden_states) {
+                hidden_states_tensor = torch::nn::functional::normalize(hidden_states_tensor, 
+                    torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            }
+            generate_output.hidden_states = device_->clone({*rtp_llm::torchTensor2Buffer(hidden_states_tensor),
+                                       rtp_llm::AllocationType::HOST});
+        }
 
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }

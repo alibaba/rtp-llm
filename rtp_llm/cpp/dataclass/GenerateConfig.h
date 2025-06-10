@@ -47,10 +47,12 @@ public:
     std::vector<int>         select_tokens_id;
     std::vector<std::string> select_tokens_str;
     int                 calculate_loss       = 0;
+    int                 hidden_states_cut_dim = 0;
     bool                return_logits        = false;
     bool                return_cum_log_probs = false;
     bool                return_incremental   = false;
     bool                return_hidden_states = false;
+    bool                normalized_hidden_states = false;
     bool                return_output_ids    = false;
     bool                return_input_ids    = false;
     bool                is_streaming         = false;
@@ -113,6 +115,8 @@ public:
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
+                     << ", hidden_states_cut_dim:" << hidden_states_cut_dim
+                     << ", normalized_hidden_states:" << normalized_hidden_states
                      << ", return_output_ids:" << return_output_ids
                      << ", return_input_ids:" << return_input_ids
                      << ", is_streaming:" << is_streaming
@@ -179,6 +183,8 @@ public:
         JSONIZE(return_logits);
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
+        JSONIZE(hidden_states_cut_dim);
+        JSONIZE(normalized_hidden_states);
         JSONIZE(return_output_ids);
         JSONIZE(return_input_ids);
         JSONIZE(is_streaming);

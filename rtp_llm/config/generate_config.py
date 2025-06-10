@@ -51,6 +51,8 @@ class GenerateConfig(BaseModel):
     return_logits: bool = False
     return_incremental: bool = False
     return_hidden_states: bool = False
+    hidden_states_cut_dim: int = 0
+    normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []
     select_tokens_id: List[int] = []
     return_input_ids: bool = False

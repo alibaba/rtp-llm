@@ -64,6 +64,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_logits = input_py.generate_config.return_logits
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = input_py.generate_config.return_hidden_states
+    generate_config_pb.hidden_states_cut_dim = input_py.generate_config.hidden_states_cut_dim
+    generate_config_pb.normalized_hidden_states = input_py.generate_config.normalized_hidden_states
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:

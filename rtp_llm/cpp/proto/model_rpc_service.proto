@@ -65,6 +65,8 @@ message GenerateConfigPB {
     bool gen_timeline = 35;
     int32 global_request_id = 36;
     bool force_sp_accept = 37;
+    int32 hidden_states_cut_dim = 38;
+    bool normalized_hidden_states = 39;
 }
 
 message MMPreprocessConfigPB {
