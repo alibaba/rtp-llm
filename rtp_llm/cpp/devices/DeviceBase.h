@@ -130,7 +130,7 @@ public:
 
 public:
     // device-independence op implementations
-    CloneOutput clone(const CloneParams& params) override;
+    CloneOutput clone(const CloneParams& params, bool async = true) override;
     SelectOutput select(const SelectParams& params) override;
     ConcatOutput concat(const ConcatParams& params) override;
     SplitOutput split(const SplitParams& params) override;

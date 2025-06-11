@@ -12,10 +12,10 @@ public:
 
 public:
     // tensor ops
-    virtual void copy(const CopyParams& params);
     virtual void multiMergeCopy(const MultiMergeCopyParams& params);
     virtual void multiCopy(const MultiCopyParams& params);
-    virtual CloneOutput clone(const CloneParams& params);
+    virtual void copy(const CopyParams& params, bool async = true);
+    virtual CloneOutput clone(const CloneParams& params, bool async = true);
     virtual TransposeOutput transpose(const TransposeParams& params);
     virtual ConvertOutput convert(const ConvertParams& params);
     virtual SelectOutput select(const SelectParams& params);
@@ -50,7 +50,7 @@ public:
     virtual AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
     virtual AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params);
     virtual AttentionModuleOutput mlaAbsorbAttention(const MlaAttentionModuleParams& params);
-    virtual void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
+    virtual void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode = false);
 
     // Top level model ops
     virtual AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);

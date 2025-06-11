@@ -318,7 +318,7 @@ cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
 
 // using c_type = __half;
 bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(kv_scalar_dtype, c_type, [&] {
-  std::cout<<__FILE__<<":"<<__LINE__<<" "<<kv_scalar_dtype<<std::endl;
+  //std::cout<<__FILE__<<":"<<__LINE__<<" "<<kv_scalar_dtype<<std::endl;
 
   paged_kv_mla_t<c_type, int32_t> paged_mla_kv(
     page_size, 

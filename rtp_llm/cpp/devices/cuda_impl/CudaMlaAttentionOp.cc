@@ -239,7 +239,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
     copy({*params.qkv_output, *sliced_buffer});
 }
 
-void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
+void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
     auto flash_infer_attn = (FlashInferAttnParams*)params.flash_infer.get();
     if (!flash_infer_attn) {

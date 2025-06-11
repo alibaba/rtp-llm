@@ -11,18 +11,16 @@ using namespace rtp_llm;
 
 namespace unittest {
 
-class ROCmFfnMoeFp8Op : public torch::jit::CustomClassHolder {
+class ROCmFfnMoeBf16Op : public torch::jit::CustomClassHolder {
 
 public:
-    ROCmFfnMoeFp8Op(int64_t ep_rank, int64_t ep_size);
+    ROCmFfnMoeBf16Op(int64_t ep_rank, int64_t ep_size);
 
     void forward(torch::Tensor input,
                  torch::Tensor w1,
                  torch::Tensor w2,
-                 torch::Tensor fc1_scale,
-                 torch::Tensor fc2_scale,
                  torch::Tensor gating_weight,
-                 torch::Tensor e_score_correction_bias,
+                 std::optional<torch::Tensor> e_score_correction_bias,
                  int64_t topk,
                  int64_t num_expert_group,
                  int64_t topk_group,
@@ -34,7 +32,7 @@ private:
 };
 
 
-ROCmFfnMoeFp8Op::ROCmFfnMoeFp8Op(int64_t ep_rank, int64_t ep_size) {
+ROCmFfnMoeBf16Op::ROCmFfnMoeBf16Op(int64_t ep_rank, int64_t ep_size) {
     // TODO: add ep parameters here
     params_ = GptInitParameter();
     params_.dp_size_ = ep_size;
@@ -42,20 +40,17 @@ ROCmFfnMoeFp8Op::ROCmFfnMoeFp8Op(int64_t ep_rank, int64_t ep_size) {
     params_.ep_size_ = ep_size;
     params_.ep_rank_ = ep_rank;
     params_.nccl_ip_ = "localhost";
-    params_.tp_nccl_port_ = 50049;
-    params_.dp_tp_nccl_port_ = params_.tp_nccl_port_ + 1;
+    params_.dp_tp_nccl_port_ = 50049;
     DeviceFactory::initDevices(params_);
     device_ = DeviceFactory::getDefaultDevice();
 }
 
 
-void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
+void ROCmFfnMoeBf16Op::forward(torch::Tensor input,
                               torch::Tensor w1,
                               torch::Tensor w2,
-                              torch::Tensor fc1_scale,
-                              torch::Tensor fc2_scale,
                               torch::Tensor gating_weight,
-                              torch::Tensor e_score_correction_bias,
+                              std::optional<torch::Tensor> e_score_correction_bias,
                               int64_t topk,
                               int64_t num_expert_group,
                               int64_t topk_group,
@@ -70,7 +65,7 @@ void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
         .top_k=static_cast<size_t>(topk),
         .normalize_expert_scale=false, // FIXME(liyangcheng.lyc): has_moe_norm?
         .moe_inter_padding_size=model_dim,
-        .has_moe_norm=true,
+        .has_moe_norm=false,
         .ep_rank=static_cast<size_t>(params_.ep_rank_),
         .ep_size=static_cast<size_t>(params_.ep_size_),
         .dp_rank=static_cast<size_t>(params_.dp_rank_),
@@ -87,19 +82,13 @@ void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
 
     BufferPtr input_buffer = torchTensor2Buffer(input);
 
-    BufferPtr w1_buffer = torchTensor2Buffer(w1);
-    BufferPtr w2_buffer = torchTensor2Buffer(w2);
-    BufferPtr fc1_scale_buffer = torchTensor2Buffer(fc1_scale);
-    BufferPtr fc2_scale_buffer = torchTensor2Buffer(fc2_scale);
-
-    MemoryType zeros_type = fc1_scale_buffer->where();
-    BufferPtr gate_weight_buffer = BufferPtr(new QBuffer(std::move(w1_buffer), std::move(fc1_scale_buffer), std::move(BufferPtr(new Buffer(zeros_type, DataType::TYPE_INVALID, {0}, nullptr)))));
-    BufferPtr down_weight_buffer = BufferPtr(new QBuffer(std::move(w2_buffer), std::move(fc2_scale_buffer), std::move(BufferPtr(new Buffer(zeros_type, DataType::TYPE_INVALID, {0}, nullptr)))));
+    BufferPtr gate_weight_buffer = torchTensor2Buffer(w1);
+    BufferPtr down_weight_buffer = torchTensor2Buffer(w2);
 
     torch::Tensor gating_weight_t = gating_weight.transpose(0, 1).contiguous();
     BufferPtr gating_weight_buffer = torchTensor2Buffer(gating_weight_t);
 
-    BufferPtr e_score_correction_bias_buffer = torchTensor2Buffer(e_score_correction_bias);
+    BufferPtr e_score_correction_bias_buffer = e_score_correction_bias.has_value() ? torchTensor2Buffer(e_score_correction_bias.value()) : nullptr;
 
     FfnLayerWeights weights;
     weights.moe_gate_weight = std::make_shared<DenseWeights>(DenseWeights(gate_weight_buffer));
@@ -107,7 +96,7 @@ void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
     weights.moe_gating_weight = std::make_shared<const DenseWeights>(DenseWeights(gating_weight_buffer));
     weights.e_score_correction_bias = e_score_correction_bias_buffer;
 
-    FfnLayerParams ffn_layer_params(*input_buffer, ffn_configs, weights, std::nullopt, QScheme::Qfp8PerTokenBlock, nullptr);
+    FfnLayerParams ffn_layer_params(*input_buffer, ffn_configs, weights, std::nullopt, QScheme::NoQuantize, nullptr);
 
     FfnLayerOutput ffn_output = device_->ffnLayer(ffn_layer_params);
 
@@ -118,6 +107,6 @@ void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
 } // namespace unittest
 
 
-static auto ROCmFfnMoeFp8Op = torch::jit::class_<unittest::ROCmFfnMoeFp8Op>("unittest", "ROCmFfnMoeFp8Op")
+static auto ROCmFfnMoeBf16Op = torch::jit::class_<unittest::ROCmFfnMoeBf16Op>("unittest", "ROCmFfnMoeBf16Op")
     .def(torch::jit::init<int64_t, int64_t>())
-    .def("forward", &unittest::ROCmFfnMoeFp8Op::forward);
+    .def("forward", &unittest::ROCmFfnMoeBf16Op::forward);

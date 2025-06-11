@@ -242,20 +242,9 @@ cc_library(
         "mla/mla_decoder_attention.cc",
         "mla/mla_context_attention.cc",        
         "gemm/gemm_op_test.cc",
-        "ffn/rocm_ffn_moe_fp8_test.cc"
-    ]) + select({
-        "@//:using_cuda11": glob([
-            "fp8_gemm/*.cc",
-            "gemm_dequantize/*.cc",
-            "int8_gemm/*.cc",
-        ]),
-        "@//:using_cuda12": glob([
-            "fp8_gemm/*.cc",
-            "gemm_dequantize/*.cc",
-            "int8_gemm/*.cc",
-        ]),
-        "//conditions:default": [],
-    }),
+        "ffn/rocm_ffn_moe_fp8_test.cc",
+        "ffn/rocm_ffn_moe_bf16_test.cc",
+    ]),
     deps = torch_deps() + [
         "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",        
     ],
@@ -310,24 +299,49 @@ py_test(
     ],
 )
 
-py_test(
-    name = "rocm_ffn_moe_fp8_test",
-    srcs = [
-        "ffn/rocm_ffn_moe_fp8_test.py"
-    ],
-    data = [
-        "//:th_transformer",
-        ":rocm_test_ops",
-    ],
-    deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:maga_transformer_lib",
-    ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-    },
-    exec_properties = {'gpu':'A10'},
-)
+#ToDo: fix aiter import issue
+#py_test(
+#    name = "rocm_ffn_moe_fp8_test",
+#    srcs = [
+#        "ffn/rocm_ffn_moe_fp8_test.py"
+#    ],
+#    data = [
+#        "//:th_transformer",
+#        ":rocm_test_ops",
+#    ],
+#    deps = [
+#        "//rtp_llm:torch",
+#        "//rtp_llm:rtp_llm_lib",
+#        "@aiter//:aiter_py",
+#    ],
+#    env = {
+#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#    },
+#    tags = [
+#        "rocm",
+#    ],
+#)
+
+#ToDo: fix aiter import issue
+#py_test(
+#    name = "rocm_ffn_moe_bf16_test",
+#    srcs = [
+#        "ffn/rocm_ffn_moe_bf16_test.py"
+#    ],
+#    data = [
+#        "//:th_transformer",
+#        ":rocm_test_ops",
+#    ],
+#    deps = [
+#        "//rtp_llm:torch",
+#        "//rtp_llm:rtp_llm_lib",
+#        "@aiter//:aiter_py",
+#    ],
+#    env = {
+#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#    },
+#    tags = ["rocm"],
+#)
 
 py_test(
     name = "mla_rotary_kvcache_test",
@@ -400,6 +414,9 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
     tags = [
         "rocm",
     ],

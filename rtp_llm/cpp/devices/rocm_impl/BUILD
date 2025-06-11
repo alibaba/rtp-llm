@@ -15,6 +15,7 @@ cc_library(
         "@aiter//:module_gemm_a8w8_blockscale",
         "@aiter//:module_moe_sorting",
         "@aiter//:module_moe_asm",
+        "@aiter//:module_moe",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "@local_config_rocm//rocm:rocblas",

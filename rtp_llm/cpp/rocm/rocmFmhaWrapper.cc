@@ -361,7 +361,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
     else if (mtype_ == AttentionMaskType::causalMask)
     {
         msk_str = "b";
-        // FT_LOG_INFO("Using causal_bottom_right Mask");
+        // RTP_LLM_LOG_INFO("Using causal_bottom_right Mask");
     }
     else
     {

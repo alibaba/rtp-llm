@@ -14,6 +14,7 @@ genrule(
         "aiter/jit/libmodule_gemm_a8w8_blockscale.so",
         "aiter/jit/libmodule_moe_sorting.so",
         "aiter/jit/libmodule_moe_asm.so",
+        "aiter/jit/libmodule_moe.so",
     ],
     cmd = """
         awk '{gsub(/^#cmakedefine DTYPES \"@DTYPES@\"/, "/* #undef DTYPES*/");
@@ -50,9 +51,28 @@ genrule(
         cp external/aiter/aiter/jit/module_quant.so $(location aiter/jit/libmodule_quant.so);
         cp external/aiter/aiter/jit/module_moe_sorting.so $(location aiter/jit/libmodule_moe_sorting.so);
         cp external/aiter/aiter/jit/module_moe_asm.so $(location aiter/jit/libmodule_moe_asm.so);
+        cp external/aiter/aiter/jit/module_moe.so $(location aiter/jit/libmodule_moe.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location aiter/jit/libmodule_gemm_a8w8_blockscale.so);
+        mkdir -p $(RULEDIR)/aiter && cp -r external/aiter/aiter/* $(RULEDIR)/aiter/;
     """,
     visibility = ["//visibility:public"]
+)
+
+py_library(
+    name = "aiter_py",
+    srcs = glob([
+        "aiter/**/*.py",
+    ]),
+    data = [
+        ":module_custom_all_reduce",
+        ":decode_mla",
+        ":module_quant",
+        ":module_gemm_a8w8_blockscale",
+        ":module_moe_sorting",
+        ":module_moe_asm",
+        ":module_moe",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -130,6 +150,18 @@ cc_library(
     name = "module_moe_asm",
     srcs = ["aiter/jit/libmodule_moe_asm.so"],
     hdrs = ["csrc/include/moe_op.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+ 
+cc_library(
+    name = "module_moe",
+    srcs = ["aiter/jit/libmodule_moe.so"],
+    hdrs = ["csrc/include/moe_ck.h"],
     deps = [":cpp_libraries"],
     copts = [],
     linkopts = [],

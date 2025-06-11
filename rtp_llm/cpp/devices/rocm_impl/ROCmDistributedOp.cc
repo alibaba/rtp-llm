@@ -56,14 +56,14 @@ NcclParam ROCmDevice::getNcclParam(ParallelMode mode) {
         case ParallelMode::EP:
             return dp_tp_nccl_param_;
         default:
-            FT_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
+            RTP_LLM_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }
 
 void ROCmDevice::broadcast(const BroadcastParams& params) {
-    FT_CHECK_WITH_INFO(params.mode == ParallelMode::TP, "broadcast not support mode [%d]", params.mode);
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP, "broadcast not support mode [%d]", params.mode);
     if (tp_nccl_param_.world_size_ < 2) {
         return;
     }
@@ -223,7 +223,7 @@ void computeLengthsAndOffsets(const std::vector<size_t>& split_sizes,
 }
 
 AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
-    FT_CHECK_WITH_INFO(params.mode == ParallelMode::DP_AND_TP,
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::DP_AND_TP,
         "all to all just support ParallelMode::DP_AND_TP but got [%d]",
         params.mode);
     auto&      nccl_param = dp_tp_nccl_param_;
@@ -236,13 +236,13 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
     const size_t dims       = params.buffers[0]->dim();
     const auto   batch_size = params.buffers[0]->shape()[0];
     vector<BufferPtr> byte_buffers;
-    FT_CHECK_WITH_INFO(dims == 2 || dims == 1,
+    RTP_LLM_CHECK_WITH_INFO(dims == 2 || dims == 1,
                        "alltoall just support dims 2 or 1 but got [%s] ",
                        params.buffers[0]->debugString().c_str());
     size_t         dim1_size = 0;
     vector<size_t> dim1_split_size;
     for (const auto& buffer : params.buffers) {
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             buffer->dim() == dims && buffer->shape()[0] == batch_size,
             "alltoall all input buffer dims must be consist with dims [%d] and batch_size [%d] but got [%s]",
             dims,
@@ -285,7 +285,7 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
     }
     BufferPtr output;
     if (params.input_split_sizes.size() || params.output_split_sizes.size()) {
-        FT_CHECK_WITH_INFO(
+        RTP_LLM_CHECK_WITH_INFO(
             params.input_split_sizes.empty()
                 || (params.input_split_sizes.size() == world_size
                     && std::accumulate(params.input_split_sizes.begin(), params.input_split_sizes.end(), 0)
@@ -295,7 +295,7 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
         if (params.output_split_sizes.empty()) {
             output = allocateBufferLike(*input_buffer);
         } else {
-            FT_CHECK_WITH_INFO(params.output_split_sizes.size() == world_size,
+            RTP_LLM_CHECK_WITH_INFO(params.output_split_sizes.size() == world_size,
                                "alltoall output_split_sizes is not valid");
             size_t output_batch_size =
                 std::accumulate(params.output_split_sizes.begin(), params.output_split_sizes.end(), (size_t)0);
@@ -320,7 +320,7 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
                                      nccl_param.nccl_comm_,
                                      stream);
     } else {
-        FT_CHECK_WITH_INFO(input_buffer->shape()[0] % world_size == 0,
+        RTP_LLM_CHECK_WITH_INFO(input_buffer->shape()[0] % world_size == 0,
                            "all2all_single_equal_split batch size [%d] must divide world size [%d]",
                            input_buffer->shape()[0],
                            world_size);

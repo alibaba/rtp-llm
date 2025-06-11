@@ -45,14 +45,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
             ffn_tp_nccl_param_ = tp_nccl_param_;
         }
     }
-    if (params.dp_size > 1 && params.tp_rank == 0) {
-        initNcclParam(params.dp_rank,
-                      params.dp_size,
-                      params.master_ip,
-                      params.dp_master_port,
-                      "RTP_LLM_DP_GROUP_",
-                      dp_nccl_param_);
-    }
+
     if (params.ep_size > 1) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,
@@ -66,7 +59,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
     if (tp_nccl_param_.world_size_ > 1) {
         auto& nccl_param = tp_nccl_param_;
-        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
+        RTP_LLM_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
         std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
         // custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
     }
@@ -220,7 +213,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     return std::move(output);
 }
 
-void ROCmDevice::copy(const CopyParams& params) {
+void ROCmDevice::copy(const CopyParams& params, bool async) {
     ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
                        "copy dst[%d] and src[%d] need has same type.",
                        params.src.type(), params.dst.type());
@@ -261,7 +254,11 @@ void ROCmDevice::copy(const CopyParams& params) {
     if (copyType == hipMemcpyHostToHost) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
-        ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+        if (async) {
+            ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+        } else {
+            ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+        }
     }
 
     if (copyType == hipMemcpyDeviceToHost) {
@@ -317,12 +314,13 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 
 void  ROCmDevice::checkError() {
     ROCM_CHECK_ERROR();
+}
 
 void ROCmDevice::initNcclParam(size_t             rank,
                                size_t             world_size,
                                const std::string& ip,
                                size_t             port,
-                               const string&      group_name,
+                               const std::string&      group_name,
                                NcclParam&         nccl_param) {
     nccl_param.rank_       = rank;
     nccl_param.world_size_ = world_size;
@@ -330,15 +328,15 @@ void ROCmDevice::initNcclParam(size_t             rank,
     const auto nccl_id     = &(nccl_param.nccl_uid_);
 
     if (rank == 0) {
-        FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
         NCCLCHECK(ncclGetUniqueId(nccl_id));
         setUniqueId(nccl_id, group_name, tcpStore);
     } else {
-        FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, group_name.c_str());
+        RTP_LLM_LOG_INFO("rank %d get nccl uid in group %s.", rank, group_name.c_str());
         getUniqueId(nccl_id, group_name, tcpStore);
     }
 
-    FT_LOG_INFO("Initialize NCCL communicators [%s] rank %d of %d.", group_name.c_str(), rank, world_size);
+    RTP_LLM_LOG_INFO("Initialize NCCL communicators [%s] rank %d of %d.", group_name.c_str(), rank, world_size);
     NCCLCHECK(ncclGroupStart());
     NCCLCHECK(ncclCommInitRank(&nccl_param.nccl_comm_, world_size, *nccl_id, rank));
     NCCLCHECK(ncclGroupEnd());
@@ -352,23 +350,23 @@ void ROCmDevice::syncAndCheck() {
 
 void ROCmDevice::syncCommunication(bool timeout) {
     if (tp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG(
+        RTP_LLM_LOG_DEBUG(
             "Synchronize tp NCCL communicators rank %d of %d.", tp_nccl_param_.rank_, tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(tp_nccl_param_, stream_, timeout);
     }
     if (dp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG(
+        RTP_LLM_LOG_DEBUG(
             "Synchronize dp NCCL communicators rank %d of %d.", dp_nccl_param_.rank_, dp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_nccl_param_, stream_, timeout);
     }
     if (dp_tp_nccl_param_.world_size_ > 1) {
-        FT_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
+        RTP_LLM_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
                      dp_tp_nccl_param_.rank_,
                      dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
     if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
-        FT_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
+        RTP_LLM_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
     }
 }
@@ -574,7 +572,7 @@ ROCmEvent::~ROCmEvent() {
 void ROCmEvent::synchronize() const {
     ROCM_CHECK(hipEventSynchronize(event_));
     ROCM_CHECK(hipStreamSynchronize(stream_));
-    ROCM_SYNC_AND_CHECK();
+    ROCM_CHECK_ERROR();
     hipDeviceSynchronize();
 }
 
@@ -597,22 +595,22 @@ void ROCmCommHook::hook_sync() const {
 //         return;
 //     }
 
-//     FT_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
+//     RTP_LLM_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
 //             params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden, params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale, params.enable_ffn_tp);
 
 //     size_t m = params.max_batch_seq_len * 1.1;
 //     std::vector<size_t> tp_ranks = fcNcclGatherRanks(tp_nccl_param_, stream_);
 
-//     FT_LOG_INFO("[PrepareCommBuffer] prepare attn_rs_comm_buffer_");
+//     RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_rs_comm_buffer_");
 //     std::vector<size_t> attn_rs_buffer_shape = {m, params.attn_rs_hidden};
 //     attn_rs_comm_buffer_ = initCommBuffer(attn_rs_buffer_shape, params.rs_output_type, tp_nccl_param_, tp_ranks, false, stream_);
 
-//     FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_comm_buffer_");
+//     RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_comm_buffer_");
 //     std::vector<size_t> attn_ag_buffer_shape = {m, params.attn_ag_hidden};
 //     attn_ag_comm_buffer_ = initCommBuffer(attn_ag_buffer_shape, params.ag_input_type, tp_nccl_param_, tp_ranks, true, stream_);
 
 //     if (params.enable_per_token_scale) {
-//         FT_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_scale_comm_buffer_");
+//         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_scale_comm_buffer_");
 //         std::vector<size_t> attn_ag_scale_shape = {m, 1};
 //         attn_ag_scale_comm_buffer_ = initCommBuffer(attn_ag_scale_shape, DataType::TYPE_FP32, tp_nccl_param_, tp_ranks, true, stream_);
 //     }
@@ -620,15 +618,15 @@ void ROCmCommHook::hook_sync() const {
 //     if (params.enable_ffn_tp) {
 //         std::vector<size_t> ffn_tp_ranks = fcNcclGatherRanks(ffn_tp_nccl_param_, stream_);
 
-//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_rs_comm_buffer_");
+//         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_rs_comm_buffer_");
 //         std::vector<size_t> ffn_rs_buffer_shape = {m, params.ffn_rs_hidden};
 //         ffn_rs_comm_buffer_ = initCommBuffer(ffn_rs_buffer_shape, params.rs_output_type, ffn_tp_nccl_param_, ffn_tp_ranks, false, stream_);
 
-//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
+//         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
 //         std::vector<size_t> ffn_ag_buffer_shape = {m, params.ffn_ag_hidden};
 //         ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
 
-//         FT_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
+//         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
 //         if (params.enable_per_token_scale) {
 //             std::vector<size_t> ffn_ag_scale_shape = {m, 1};
 //             ffn_ag_scale_comm_buffer_ = initCommBuffer(ffn_ag_scale_shape, DataType::TYPE_FP32, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);

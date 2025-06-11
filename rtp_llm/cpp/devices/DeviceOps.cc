@@ -7,11 +7,11 @@ DeviceOps::DeviceOps() {}
 
 DeviceOps::~DeviceOps() {}
 
-void DeviceOps::copy(const CopyParams& params) {
+void DeviceOps::copy(const CopyParams& params, bool async) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-CloneOutput DeviceOps::clone(const CloneParams& params) {
+CloneOutput DeviceOps::clone(const CloneParams& params, bool async) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -127,7 +127,7 @@ AttentionModuleOutput DeviceOps::mlaAbsorbAttention(const MlaAttentionModulePara
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
+void DeviceOps::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

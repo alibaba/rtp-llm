@@ -215,6 +215,29 @@ class MoeWeight(CompositeWeight):
     @classmethod
     def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
         return False
+    
+    def _shuff_moe_weight(self, name:str, tensor: Union[torch.Tensor, Dict[str, torch.Tensor]], load_config: LoadConfig):
+        w = tensor.get(name)
+        if isinstance(w, torch.Tensor):
+            w = load_config.exported_device.shuffle_moe_weight(w, load_config.compute_dtype, name)
+            tensor[name] = w
+        elif isinstance(w, dict):
+            self._shuff_moe_weight(name, w, load_config)
+        else:
+            raise ValueError("unsupported type")
+
+    def _postprocess(self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig):
+        moe_w1 = tensor.get(W.moe_w1)
+        moe_w2 = tensor.get(W.moe_w2)
+        for weight, keys in [(moe_w1, [W.moe_w1, W.moe_s1]),
+                           (moe_w2, [W.moe_w2, W.moe_s2])]:
+            if isinstance(weight, dict):
+                for key in keys:
+                    if key in weight:
+                        self._shuff_moe_weight(key, weight, load_config)
+            else:
+                self._shuff_moe_weight(keys[0], tensor, load_config)
+        return super()._postprocess(tensor, device, load_config)
 
 class SharedMoeConfig(FfnConfig, MoeConfig):
     pass
@@ -261,7 +284,7 @@ class MoeWithSharedWeight(CompositeWeight):
             w = load_config.exported_device.shuffle_moe_weight(w, load_config.compute_dtype, name)
             tensor[name] = w
         elif isinstance(w, dict):
-             self._shuff_moe_weight(name, w, load_config)
+            self._shuff_moe_weight(name, w, load_config)
         else:
             raise ValueError("unsupported type")
 
@@ -270,7 +293,15 @@ class MoeWithSharedWeight(CompositeWeight):
 
         return res
 
-    def _postprocess(self, tensor: torch.Tensor, device: str, load_config: LoadConfig):
-        self._shuff_moe_weight(W.moe_w1, tensor, load_config)
-        self._shuff_moe_weight(W.moe_w2, tensor, load_config)
+    def _postprocess(self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig):
+        moe_w1 = tensor.get(W.moe_w1)
+        moe_w2 = tensor.get(W.moe_w2)
+        for weight, keys in [(moe_w1, [W.moe_w1, W.moe_s1]),
+                           (moe_w2, [W.moe_w2, W.moe_s2])]:
+            if isinstance(weight, dict):
+                for key in keys:
+                    if key in weight:
+                        self._shuff_moe_weight(key, weight, load_config)
+            else:
+                self._shuff_moe_weight(keys[0], tensor, load_config)
         return super()._postprocess(tensor, device, load_config)

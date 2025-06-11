@@ -16,7 +16,7 @@ public:
     torch::Device getTorchDevice() override { return torch::Device(torch::kCPU);};
 
 public:
-    void copy(const CopyParams& params);
+    void copy(const CopyParams& params, bool async = true);
     LayernormOutput layernorm(const LayernormParams& params);
     BufferPtr gemm(const GemmParams& params);
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);

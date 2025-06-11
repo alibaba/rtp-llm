@@ -233,10 +233,10 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     }
 }
 
-CloneOutput DeviceBase::clone(const CloneParams& params) {
+CloneOutput DeviceBase::clone(const CloneParams& params, bool async) {
     const auto& src = params.input;
     auto dst = allocateBufferLike(src, params.alloc_type, params.hints);
-    copy({*dst, src, params.overlapped});
+    copy({*dst, src, params.overlapped}, async);
     return dst;
 }
 

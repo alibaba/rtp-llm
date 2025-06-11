@@ -86,7 +86,7 @@ arm_compute::DataType ArmCpuDevice::getAclDataType(DataType type) {
     }
 }
 
-void ArmCpuDevice::copy(const CopyParams& params) {
+void ArmCpuDevice::copy(const CopyParams& params, bool async) {
     auto& src  = params.src;
     auto& dst  = params.dst;
     auto  size = params.src.sizeBytes();

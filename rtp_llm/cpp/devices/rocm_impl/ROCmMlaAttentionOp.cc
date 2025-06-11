@@ -20,7 +20,7 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) {
+void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode) {
     DevicePerfWrapper wrapper(this, "mlaRotaryWriteKVCache");
     auto              flash_infer_attn = (FlashInferAttnParams*)params.flash_infer.get();
     if (!flash_infer_attn) {
@@ -74,6 +74,10 @@ void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
             *params.common.kv_cache->k_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
+        if (is_decode) {
+            k_cache = k_cache.view({-1, 1, (int64_t)params.configs.kv_lora_rank});
+            v_cache = v_cache.view({-1, 1, (int64_t)params.configs.rope_head_dim});
+        }
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
                                   f.batch_indice_t,
@@ -122,7 +126,7 @@ void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
                            params.common,
                            params.weights,
                            params.configs,
-                           params.qscheme});
+                           params.qscheme},true);
 
     QInputBatchMatmulWrapper(fused_q_input_t, params);
     printBufferData(*fused_q_input, "fused_q_input");
