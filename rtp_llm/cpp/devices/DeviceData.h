@@ -74,6 +74,8 @@ struct DeviceInitParams {
     bool use_deepep_low_latency = false;
     bool is_mtp = false;
     bool is_eagle3 =false;
+
+    FMHAConfig  fmha_config;
 };
 
 // immutable device properties. Can not change since device is initialized.

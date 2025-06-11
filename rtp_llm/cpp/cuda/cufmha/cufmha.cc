@@ -282,8 +282,10 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
                                     size_t seq_size_per_block,
                                     size_t seq_len,
                                     void* workspace,
+                                    DeviceInitParams device_params,
                                     float* linear_bias_slopes,
-                                    float softmax_extra_scale)
+                                    float softmax_extra_scale
+                                )
 {
    RTP_LLM_CHECK_WITH_INFO(head_num_ % kv_head_num_ == 0, "Number of heads in key/value must divide number of heads in query");
    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % 256 == 0, "open source fmha paged seq_size_per_block must be divided by 256");
@@ -319,7 +321,7 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
     }
     // export FMHA_SHOW_PARAMS=1
     rtp_llm::fmha::FmhaProfParam fmha_prof_params;
-    if (rtp_llm::fmha::ProfilingInterface::Instance().get_op_info()){
+    if (rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).get_op_info()){
         fmha_prof_params.set_flash_attn_params(
             true/*dir*/, flash_fwd_params.is_bf16/*data_type*/,
             flash_fwd_params.is_causal/*custom_mask*/, flash_fwd_params.b/*batch_size*/,
@@ -333,14 +335,14 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
             flash_fwd_params.alibi_slopes_ptr != nullptr/*alibi*/
         );
     }
-    rtp_llm::fmha::ProfilingInterface::Instance().instrument(true, fmha_prof_params);
+    rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).instrument(true, fmha_prof_params);
     try {
         run_mha_fwd(flash_fwd_params, stream_, block_table);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("run opensource paged flash attention failed, err: %s", e.what());
         throw;
     }
-    rtp_llm::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
+    rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).instrument(false, fmha_prof_params);
     check_cuda_error();
 }
 
@@ -352,13 +354,14 @@ void cufmha::runOpenSourceFmha(void* q,
                                size_t batch_size,
                                size_t seq_len,
                                void* workspace,
+                               DeviceInitParams device_params,
                                float* linear_bias_slopes,
                                float softmax_extra_scale)
 {
     Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_seqlens, workspace, batch_size, seq_len, seq_len, linear_bias_slopes, softmax_extra_scale);
     // export FMHA_SHOW_PARAMS=1
     rtp_llm::fmha::FmhaProfParam fmha_prof_params;
-    if (rtp_llm::fmha::ProfilingInterface::Instance().get_op_info()){
+    if (rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).get_op_info()){
         fmha_prof_params.set_flash_attn_params(
             true/*dir*/, flash_fwd_params.is_bf16/*data_type*/,
             flash_fwd_params.is_causal/*custom_mask*/, flash_fwd_params.b/*batch_size*/,
@@ -372,14 +375,14 @@ void cufmha::runOpenSourceFmha(void* q,
             flash_fwd_params.alibi_slopes_ptr != nullptr/*alibi*/
         );
     }
-    rtp_llm::fmha::ProfilingInterface::Instance().instrument(true, fmha_prof_params);
+    rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).instrument(true, fmha_prof_params);
     try {
         run_mha_fwd(flash_fwd_params, stream_, false);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("run opensource flash attention failed, err: %s", e.what());
         throw;
     }
-    rtp_llm::fmha::ProfilingInterface::Instance().instrument(false, fmha_prof_params);
+    rtp_llm::fmha::ProfilingInterface::Instance(device_params.fmha_config).instrument(false, fmha_prof_params);
     check_cuda_error();
 }
 

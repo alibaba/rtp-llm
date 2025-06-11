@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/devices/DeviceData.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 
 namespace rtp_llm {
@@ -138,6 +139,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 params.configs.tokens_per_block,
                 seq_len,
                 ws->data(),
+                init_params_,
                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr,
                 params.configs.softmax_extra_scale);
             break;
@@ -157,6 +159,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 batch_size,
                 seq_len,
                 ws->data(),
+                init_params_,
                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr,
                 params.configs.softmax_extra_scale);
             break;

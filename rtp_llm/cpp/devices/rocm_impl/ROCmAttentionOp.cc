@@ -195,7 +195,7 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
          const BufferPtr &kv_cache_block_id_host,
          rtp_llm::DataType dtype)
  {
-     const bool disable_flash_infer = GlobalConfig::get().fmha_config.disable_flash_infer;
+     const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;
      if (rtp_llm::rocm::get_sm() < 80 || disable_flash_infer) {
          return nullptr;
      }

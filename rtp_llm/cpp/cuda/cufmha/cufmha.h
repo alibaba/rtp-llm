@@ -6,6 +6,7 @@
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/devices/DeviceData.h"
 
 namespace rtp_llm{
 
@@ -89,6 +90,7 @@ public:
                            size_t batch_size,
                            size_t seq_len,
                            void   *workspace,
+                           DeviceInitParams device_params,
                            float* linear_bias_slopes = nullptr,
                            float softmax_extra_scale = 1.0f);
 
@@ -104,6 +106,7 @@ public:
                                 size_t seq_size_per_block,
                                 size_t seq_len,
                                 void   *workspace,
+                                DeviceInitParams device_params,
                                 float* linear_bias_slopes = nullptr,
                                 float softmax_extra_scale = 1.0f);
 

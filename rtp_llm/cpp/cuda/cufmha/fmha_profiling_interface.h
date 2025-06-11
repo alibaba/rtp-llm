@@ -121,8 +121,10 @@ class ProfilingInterface {
 public:
   ProfilingInterface(ProfilingInterface const&) = delete;
   void operator=(ProfilingInterface const&) = delete;
-  static ProfilingInterface& Instance() {
+  static ProfilingInterface& Instance(FMHAConfig fmha_config) {
     static ProfilingInterface instance;
+    instance.show_params_ = fmha_config.fmha_show_params;
+    instance.use_nvtx_ = fmha_config.fmha_perf_instrument;
     return instance;
   }
   bool get_op_info() {
@@ -154,8 +156,6 @@ private:
   ProfilingInterface() {
     // TODO: add print log
     domain_ = nvtxDomainCreateA("fmha");
-    show_params_ = GlobalConfig::get().fmha_config.fmha_show_params;
-    use_nvtx_ = GlobalConfig::get().fmha_config.fmha_perf_instrument;
   }
   ~ProfilingInterface() {
     nvtxDomainDestroy(domain_);

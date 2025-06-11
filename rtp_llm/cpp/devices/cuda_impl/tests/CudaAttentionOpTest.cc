@@ -60,11 +60,11 @@ TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, ContextAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
@@ -86,11 +86,11 @@ TEST_F(AttentionOpTest, ContextAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, ContextAttentionOpMultiGroupTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
@@ -112,11 +112,11 @@ TEST_F(AttentionOpTest, ContextAttentionOpMultiGroupTest) {
 }
 
 TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = true;
-    device_ = new CudaDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = true;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
@@ -139,11 +139,11 @@ TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, TrtV2ContextAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = true;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = true;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
@@ -166,11 +166,11 @@ TEST_F(AttentionOpTest, TrtV2ContextAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, TrtV1ContextAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = true;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = true;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
@@ -246,14 +246,15 @@ TEST_F(AttentionOpTest, LongSeqSelfAttentionOpTest) {
 
 #ifdef USING_CUDA12
 TEST_F(AttentionOpTest, XqaAttentionOpTest) {
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_init_params.fmha_config.disable_flash_infer = true;
+    device_init_params.fmha_config.enable_xqa = true;
     ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    config_collection.fmha_config.disable_flash_infer = true;
-    config_collection.fmha_config.enable_xqa = true;
     config_collection.hw_kernel_config.enable_multi_block_mode = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);

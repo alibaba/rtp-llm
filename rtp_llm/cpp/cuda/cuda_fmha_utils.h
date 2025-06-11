@@ -37,7 +37,7 @@ static bool UseTrtFMHA(const rtp_llm::GptInitParameter& gpt_init_parameter) {
         use_trt_fmha = false;
     }
     
-    bool fmha_env = GlobalConfig::get().fmha_config.enable_trt_fmha;
+    bool fmha_env = gpt_init_parameter.fmha_config.enable_trt_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_INFO("TRT FMHA is disabled for by env");
         use_trt_fmha = false;
@@ -96,7 +96,7 @@ static bool UsePagedTrtFMHA(const rtp_llm::GptInitParameter& gpt_init_parameter)
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for int8 kvcache");
         use_paged_trt_fmha = false;
     }
-    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_trt_fmha;
+    bool paged_fmha_env = gpt_init_parameter.fmha_config.enable_paged_trt_fmha;
     if (!paged_fmha_env) {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         use_paged_trt_fmha = false;
@@ -123,7 +123,7 @@ protected:
 template<typename T>
 static bool CheckUseFMHA(const rtp_llm::GptInitParameter& params) {
     
-    bool  fmha_enable     = GlobalConfig::get().fmha_config.enable_fmha;
+    bool  fmha_enable     =  params.fmha_config.enable_fmha;
     if (!fmha_enable){
         RTP_LLM_LOG_INFO("FMHA is not enbaled");
         return false;

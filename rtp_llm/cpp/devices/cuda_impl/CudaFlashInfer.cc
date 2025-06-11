@@ -363,7 +363,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         }
     }
 
-    const bool disable_flash_infer = GlobalConfig::get().fmha_config.disable_flash_infer;
+    const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;
 
     if ((!attn_configs.use_mla || mla_ops_type == MlaOpsType::FLASH_INFER) && disable_flash_infer) {
         return nullptr;

@@ -88,7 +88,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
-    bool fmha_env = GlobalConfig::get().fmha_config.enable_fmha;
+    bool fmha_env = params.fmha_config.enable_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_WARNING("FMHA is not enbaled");
     } else {
@@ -484,7 +484,7 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         return;
     }
 
-    bool fmha_env = GlobalConfig::get().fmha_config.enable_open_source_fmha;
+    bool fmha_env = init_params_.fmha_config.enable_open_source_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_WARNING("opensource FMHA is disabled for by env");
         return;
@@ -492,7 +492,7 @@ void CudaDevice::checkUseOpenSourceFMHA() {
 
     RTP_LLM_LOG_INFO("use opensource fmha");
     use_open_source_fmha = true;
-    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_open_source_fmha;
+    bool paged_fmha_env = init_params_.fmha_config.enable_paged_open_source_fmha;
     if (!paged_fmha_env) {
         RTP_LLM_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_OPEN_SOURCE_TRT_FMHA=OFF env");
         return;
@@ -509,7 +509,7 @@ void CudaDevice::checkUseTrtV1FMHA() {
     if (!CompileConfig::use_old_trt_fmha) {
         return;
     }
-    bool fmha_env = GlobalConfig::get().fmha_config.enable_trtv1_fmha;
+    bool fmha_env = init_params_.fmha_config.enable_trtv1_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_WARNING("TRTV1 FMHA is not enbaled");
         return;
@@ -523,7 +523,7 @@ void CudaDevice::checkUseTrtV2FMHA() {
         RTP_LLM_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
         return;
     }
-    bool fmha_env = GlobalConfig::get().fmha_config.enable_trt_fmha;
+    bool fmha_env = init_params_.fmha_config.enable_trt_fmha;
     if (!fmha_env)  {
         RTP_LLM_LOG_WARNING("TRT FMHA is disabled for by env");
         return;
@@ -538,7 +538,7 @@ void CudaDevice::checkUseTrtV2FMHA() {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for sm %d", get_sm());
         return;
     }
-    bool paged_fmha_env = GlobalConfig::get().fmha_config.enable_paged_trt_fmha;
+    bool paged_fmha_env = init_params_.fmha_config.enable_paged_trt_fmha;
     if (!paged_fmha_env) {
         RTP_LLM_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         return;
@@ -553,7 +553,7 @@ void CudaDevice::checkUseXQA() {
         RTP_LLM_LOG_WARNING("xqa is disabled for sm %d < 90", sm);
         return;
     }
-    if (!GlobalConfig::get().fmha_config.enable_xqa) {
+    if (!init_params_.fmha_config.enable_xqa) {
         RTP_LLM_LOG_WARNING("XQA is disabled by env");
         return;
     }

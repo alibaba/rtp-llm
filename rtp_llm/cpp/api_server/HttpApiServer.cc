@@ -11,9 +11,10 @@
 namespace rtp_llm {
 
 void HttpApiServer::init_controller(const rtp_llm::GptInitParameter& params) {
-    bool block = GlobalConfig::get().concurrency_config.concurrency_with_block;
+    bool block = params.concurrency_config.concurrency_with_block;
+    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from GptInitParameter.",params.concurrency_config.concurrency_with_block);
     if (params.tp_rank_ == 0) {
-        int limit = GlobalConfig::get().concurrency_config.concurrency_limit;
+        int limit = params.concurrency_config.concurrency_limit;
         RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
         controller_ = std::make_shared<ConcurrencyController>(limit, block);
     } else /* if (params.tp_size_ != 1) */ {

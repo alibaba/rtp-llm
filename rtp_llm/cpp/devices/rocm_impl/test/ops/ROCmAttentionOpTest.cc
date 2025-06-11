@@ -72,11 +72,11 @@ TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
 
 TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     printf("Runing ContextAttentionOpTest\n");
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.fmha_config.enable_trt_fmha = false;
-    config_collection.fmha_config.enable_trtv1_fmha = false;
-    config_collection.fmha_config.enable_open_source_fmha = false;
-    device_ = new ROCmDevice(DeviceInitParams());
+    auto device_init_params = DeviceInitParams();
+    device_init_params.fmha_config.enable_trt_fmha = false;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_ = new ROCmDevice(device_init_params);
     device_->init();
     // ASSERT_TRUE(!static_cast<ROCmDevice*>(device_)->use_trtv2_fmha);
     // ASSERT_TRUE(!static_cast<ROCmDevice*>(device_)->use_openSource_fmha);

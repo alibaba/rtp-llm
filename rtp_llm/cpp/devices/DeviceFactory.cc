@@ -78,7 +78,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.hidden_size       = params.hidden_size_;
     device_params.num_experts       = params.expert_num_;
     device_params.extra_experts     = params.phy_exp_num_ - params.expert_num_;
-
+    device_params.fmha_config       = params.fmha_config;
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
 
