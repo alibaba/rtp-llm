@@ -24,7 +24,9 @@
 namespace rtp_llm {
 
 bool initLogger() {
-    std::string log_conf_file = GlobalConfig::get().profiling_debug_logging_config.ft_alog_conf_path;
+    ProfilingDebugLoggingConfig& profiling_debug_logging_config = GlobalConfig::get().profiling_debug_logging_config;
+    profiling_debug_logging_config.update_from_env_for_test();
+    std::string log_conf_file = profiling_debug_logging_config.ft_alog_conf_path;
     if ("" == log_conf_file) {
         std::string alog_conf_full_path = std::filesystem::current_path().string() + "/rtp_llm/config/alog.conf";
         bool exist = std::filesystem::exists(alog_conf_full_path);

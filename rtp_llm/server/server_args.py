@@ -356,7 +356,7 @@ def setup_args():
         '--ft_alog_conf_path',
         env_name="FT_ALOG_CONF_PATH",
         type=str,
-        default='',
+        default=None,
         help="设置日志配置文件路径。"
     )
     profile_debug_logging_group.add_argument(  
