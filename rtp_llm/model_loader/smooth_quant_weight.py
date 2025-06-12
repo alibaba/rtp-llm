@@ -8,7 +8,7 @@ from rtp_llm.model_loader.w8a8_weight import W8A8Int8AtomicWeight, create_w8a8_i
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight, CompositeWeight, QuantWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
-from rtp_llm.utils.model_weight import W, CkptWeightInfo, WeightStyle, concat_0, expand_scale, identity, merge_qkv_hf, \
+from rtp_llm.utils.model_weight import W, CkptWeightInfo, WeightStyle, concat_0, merge_te_qkv, identity, merge_qkv_hf, \
         stack_, stack_moe_w1, transpose, transpose_w13, concat_w13, merge_qkv_transpose_concat0
 
 QW_SUFFIX = '.qweight'
@@ -104,7 +104,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     CkptWeightInfo(q_name+ self.qs_suffix, identity),
                     CkptWeightInfo(k_name+ self.qs_suffix, identity),
                     CkptWeightInfo(v_name+ self.qs_suffix, identity)
-                ], functools.partial(expand_scale, hidden_size=src_weight_info.config.hidden_size), data_type=torch.float32, config=src_weight_info.config),
+                ], merge_te_qkv, data_type=torch.float32, config=src_weight_info.config),
                 None
             ]
         else:
