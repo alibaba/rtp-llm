@@ -111,7 +111,7 @@ using MaskType = uint32_t;
 // 1 - naive FDL
 // 2 - aggressive FDL (implemented only in mha_sm90.cu for now)
 #ifndef ENABLE_FDL
-#define ENABLE_FDL 2
+#define ENABLE_FDL 1
 #endif
 
 #ifndef USE_INPUT_KV
