@@ -332,29 +332,28 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
 
 FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
     const MoeConfigs& moe_conf = params.configs.moe_configs.value();
-
     const Buffer& hidden = params.input;
+    
+    const size_t num_token = hidden.shape()[0];
+    const size_t model_dim = hidden.shape()[1];
+    const size_t num_expert = moe_conf.expert_num;
+    const size_t num_expert_per_rank = moe_conf.expert_num / moe_conf.ep_size;
+    const size_t topk = moe_conf.top_k;
+    const DataType dtype = hidden.type();
+
+    BufferPtr moe_out_final = allocateBuffer({dtype, {num_token, model_dim}}, {"rocm_moe_final_out"});
+
+    if (num_token == 0) {
+        return {moe_out_final};
+    };
 
     torch::Tensor topk_ids_tensor = Buffer2torchTensor(*(gate_outputs.expert_ids), false);
     torch::Tensor topk_weights_tensor = Buffer2torchTensor(*(gate_outputs.expert_scales), false);
 
-    BufferPtr moe_out_final;
-
     // FIXME(liyangcheng.lyc): Is this division correct? I refer to it from vLLM(https://github.com/vllm-project/vllm/blob/5ebf66748b8b67731972c389d879ca69c68dc2c4/vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py#L23)
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+        RTP_LLM_CHECK_WITH_INFO(dtype == DataType::TYPE_BF16, "input hidden datatype should be bf16 when using Qfp8PerTokenBlock");
         // fp8 w8a8 block scaled moe
-        const size_t num_token = hidden.shape()[0];
-        const size_t model_dim = hidden.shape()[1];
-        const size_t num_expert = moe_conf.expert_num;
-        const size_t num_expert_per_rank = moe_conf.expert_num / moe_conf.ep_size;
-        const size_t topk = moe_conf.top_k;
-
-        moe_out_final = allocateBuffer({DataType::TYPE_BF16, {num_token, model_dim}}, {"rocm_moe_final_out"});
-
-        if (num_token == 0) {
-            return {moe_out_final};
-        }
-        
         const int block_scale_n = 128;
         const int block_scale_k = 128;
         const int unit_size = 32; // used in moe_sorting, meaning?
@@ -391,7 +390,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             hidden_quant_scale_tensor = hidden_quant_scale_tensor.t().contiguous();
         }
 
-        // step 2. shuffle w1 and w2
+        // step 2. prepare w1 and w2
         const QBuffer& qmoe_gate_weight = reinterpret_cast<const QBuffer&>(*(params.weights.moe_gate_weight->kernel));
         Buffer w1 = qmoe_gate_weight.kernel();
         Buffer w1_scale = qmoe_gate_weight.scales();
@@ -467,18 +466,6 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         printBufferData(*moe_out_final, "rocm_moe_out_final");
         return {moe_out_final};
     } else if (params.qscheme == QScheme::NoQuantize) {
-        const size_t num_token = hidden.shape()[0];
-        const size_t model_dim = hidden.shape()[1];
-        const size_t num_expert = moe_conf.expert_num;
-        const size_t num_expert_per_rank = moe_conf.expert_num / moe_conf.ep_size;
-        const size_t topk = moe_conf.top_k;
-        const DataType dtype = hidden.type();
-        moe_out_final = allocateBuffer({dtype, {num_token, model_dim}}, {"rocm_moe_final_out"});
-
-        if (num_token == 0) {
-            return {moe_out_final};
-        }
-
         const int unit_size = 32;
 
         torch::Tensor hidden_tensor = Buffer2torchTensor(hidden, false);
