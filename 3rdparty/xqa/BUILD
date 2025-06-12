@@ -19,6 +19,13 @@ cc_library(
         "*.cuh",
     ]) + [":gen_header"],
     deps = xqa_libs,
-    copts = cuda_copts() + ['--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a', "--expt-relaxed-constexpr"],
+    copts = cuda_copts() + [
+        '--cuda-include-ptx=sm_90a',
+        '--cuda-gpu-arch=sm_90a',
+        '--expt-relaxed-constexpr',
+        '-nvcc_options=use_fast_math',
+        '-t 0',
+        '-res-usage',
+    ],
     visibility = ["//visibility:public"],
 )

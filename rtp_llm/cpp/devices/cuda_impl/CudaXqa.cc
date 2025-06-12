@@ -6,7 +6,7 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-BufferPtr getKVCacheScale(CudaDevice *device) {
+BufferPtr getKVCacheScale(CudaDevice* device) {
     float scale = 1.;
     BufferPtr kv_cache_scale = device->allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});
     check_cuda_value(cudaMemcpyAsync(kv_cache_scale->data(), &scale, sizeof(float), cudaMemcpyHostToDevice, device->getStream()));
@@ -15,7 +15,7 @@ BufferPtr getKVCacheScale(CudaDevice *device) {
     return kv_cache_scale;
 }
 
-BufferPtr getSemaphores(CudaDevice *device, size_t kv_head_num, size_t max_batch_size, size_t max_q_len = 0, size_t group_size = 0, bool spec_dec = false) {
+BufferPtr getSemaphores(CudaDevice* device, size_t kv_head_num, size_t max_batch_size, size_t max_q_len = 0, size_t group_size = 0, bool spec_dec = false) {
     size_t real_sem_size = 0;
     if (spec_dec) {
         size_t nb_blocks_per_grp = std::max(div_up(max_q_len * group_size, M_TILESIZE), div_up(max_q_len, M_TILESIZE / group_size));
@@ -29,7 +29,7 @@ BufferPtr getSemaphores(CudaDevice *device, size_t kv_head_num, size_t max_batch
     return semaphores;
 }
 
-void* getScratch(CudaDevice *device, size_t group_size, uint32_t beam_width) {
+void* getScratch(CudaDevice* device, size_t group_size, uint32_t beam_width) {
     size_t scratch_size = (256u << 20) * 4;
     static BufferPtr scratch = device->allocateBuffer({DataType::TYPE_BYTES, {scratch_size}, AllocationType::DEVICE}, {"scratch"});
     device->bufMemset(*scratch, 0);
@@ -39,7 +39,7 @@ void* getScratch(CudaDevice *device, size_t group_size, uint32_t beam_width) {
     return real_scratch;
 }
 
-BufferPtr getRopeCosSin(CudaDevice *device, int rope_theta, int rope_dim, int max_position_embeddings) {
+BufferPtr getRopeCosSin(CudaDevice* device, int rope_dim, int rope_theta, int max_position_embeddings) {
     if (rope_dim == 64) {
         return genRopeCosSin<64>(device, rope_theta, max_position_embeddings);
     } else if (rope_dim == 128) {
@@ -77,21 +77,22 @@ void runXqa(void*       input,
             CudaDevice* device,
             size_t      max_q_len,
             void*       q_cu_seqlens,
+            int         rope_dim,
             int         rope_theta,
             int         max_position_embeddings,
             float       q_scale,
             size_t      max_batch_size,
             uint32_t    beam_width) {
-    if (!input || !output || !head_num || !kv_head_num || (head_num / kv_head_num > 16)
-        || (head_dim != 64 && head_dim != 128 && head_dim != 256) || !batch_size || batch_size > max_batch_size
-        || !max_seq_len || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
-        || !kv_cache_page_list || !sequence_lengths || !device || rope_theta <= 0 || max_position_embeddings <= 0
-        || max_seq_len >= max_position_embeddings || (max_q_len > 0 && !q_cu_seqlens)) {
+    if (!input || !output || !head_num || !kv_head_num || (head_num / kv_head_num > 16) || (head_dim != 64 && head_dim != 128 &&
+        head_dim != 256) || !batch_size || batch_size > max_batch_size || !max_seq_len || (page_size != 16 && page_size != 32 &&
+        page_size != 64 && page_size != 128) || !kv_cache_pool || !kv_cache_page_list || !sequence_lengths || !device ||
+        rope_dim <= 0 || rope_theta <= 0 || max_position_embeddings <= 0 || max_seq_len >= max_position_embeddings ||
+        (max_q_len > 0 && !q_cu_seqlens)) {
         RTP_LLM_LOG_ERROR(
-            "xqa params error: input = %p, output = %p, head_num = %zu, kv_head_num = %zu, head_dim = %zu, "
-            "batch_size = %zu, max_seq_len = %zu, page_size = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, "
-            "sequence_lengths = %p, device = %p, rope_theta = %d, max_position_embeddings = %d, q_scale = %f, max_batch_size = %zu, "
-            "beam_width = %zu, max_q_len = %d, q_cu_seqlens = %p",
+            "xqa params error: input = %p, output = %p, head_num = %zu, kv_head_num = %zu, head_dim = %zu, batch_size = %zu, "
+            "max_seq_len = %zu, page_size = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, sequence_lengths = %p, device = %p, "
+            "rope_theta = %d, max_position_embeddings = %d, q_scale = %f, max_batch_size = %zu, beam_width = %zu, max_q_len = %d, "
+            "q_cu_seqlens = %p",
             input,
             output,
             head_num,
@@ -104,6 +105,7 @@ void runXqa(void*       input,
             kv_cache_page_list,
             sequence_lengths,
             device,
+            rope_dim,
             rope_theta,
             max_position_embeddings,
             q_scale,
@@ -126,7 +128,7 @@ void runXqa(void*       input,
 
     static void* scratch = getScratch(device, group_size, beam_width);
 
-    static BufferPtr rope_cos_sin = getRopeCosSin(device, rope_theta, head_dim, max_position_embeddings);
+    static BufferPtr rope_cos_sin = getRopeCosSin(device, rope_dim, rope_theta, max_position_embeddings);
 
     SpecDecParams specDecParams{(uint32_t)max_q_len, reinterpret_cast<uint32_t*>(q_cu_seqlens), nullptr};
 

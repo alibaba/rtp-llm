@@ -411,6 +411,11 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                               local_head_num / local_kv_head_num,
                               size_per_head,
                               local_tokens_per_block)) {
+        if (params.weights.qkv_weight->bias) {
+            auto qkv_input = Buffer2torchTensor(params.input, false);
+            qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
+        }
+
         runXqa(params.input.data(),
                params.output.data(),
                local_head_num,
@@ -425,6 +430,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                this,
                0,
                nullptr,
+               params.configs.rope_config.dim,
                params.configs.rope_config.base);
         return;
     }

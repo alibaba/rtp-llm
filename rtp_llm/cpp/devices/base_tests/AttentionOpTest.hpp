@@ -401,7 +401,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     CudaDevice* device = dynamic_cast<CudaDevice*>(device_);
 
     auto tensor_options = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
-    auto bf16_tensor_options = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
+    // auto bf16_tensor_options = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
     auto int_tensor_options = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
     auto fp8_tensor_options = torch::TensorOptions(torch::kFloat8_e4m3fn).device(torch::Device(torch::kCPU));
 
@@ -434,7 +434,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokens_per_block : padding_kv_seq_len;
     auto kvcache_pad = torch::zeros(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
-        bf16_tensor_options);
+        tensor_options);
 
     auto kvcache_pad_fp8 = torch::zeros(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
@@ -461,8 +461,9 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
 
     int rope_theta = 1000000;
-    int max_position_embeddings = 40960;
-    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, rope_theta, 1., 0., 0., max_position_embeddings});
+    int max_position_embeddings = 10240;
+    int rope_dim = static_cast<int>(head_dim);
+    auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * (((kv_seq_len + seq_len) + tokens_per_block - 1) / tokens_per_block + 1) + 1;
@@ -527,6 +528,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
            device,
            0,
            nullptr,
+           rope_dim,
            rope_theta,
            max_position_embeddings);
 

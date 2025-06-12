@@ -40,7 +40,8 @@ bool supportXqa(DataType input_type,
  * @param kv_cache_page_list [batch_size, beam_width, 2, max_pages_per_seq]
  * @param sequence_lengths kv seq len
  * @param device 
- * @param rope_theta
+ * @param rope_dim 
+ * @param rope_theta 
  * @param max_q_len max q seqlen
  * @param q_cu_seqlens accumulate q seqlen 
  * @param max_position_embeddings 
@@ -62,6 +63,7 @@ void runXqa(void* input,
             CudaDevice *device,
             size_t      max_q_len,
             void*       q_cu_seqlens,
+            int rope_dim = 128,
             int rope_theta = 1000000,
             int max_position_embeddings = 128000,
             float q_scale = 1.f,
@@ -78,7 +80,7 @@ void runXqa(void* input,
  * @return BufferPtr 
  */
 template <int rope_dim>
-BufferPtr genRopeCosSin(CudaDevice *device, int rope_theta, int max_position_embeddings) {
+BufferPtr genRopeCosSin(CudaDevice* device, int rope_theta, int max_position_embeddings) {
     auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
     auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
     auto freqs = torch::outer(t, inv_freq);
