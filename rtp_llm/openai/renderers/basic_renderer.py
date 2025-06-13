@@ -166,4 +166,4 @@ class BasicRenderer(CustomChatRenderer):
             **render_args
         )
         logging.debug(f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]")
-        return RenderedInputs(input_ids=self.tokenizer.encode(rendered))
+        return RenderedInputs(input_ids=self.tokenizer.encode(rendered), rendered_prompt=rendered)

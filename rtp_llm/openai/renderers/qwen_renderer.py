@@ -191,13 +191,15 @@ class QwenRenderer(CustomChatRenderer):
 
         query, history, system = self.parse_messages(request.messages, request.functions)
         logging.debug(f"parsed query: {query}, history: {history}, system: {system}")
+        prompt = ""
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
-            input_ids = self.text_complete_last_message(history)
+            prompt = self.text_complete_last_message(history)
+            input_ids = self.tokenizer.encode(prompt)
         else:
             assert (isinstance(query, str))
-            input_ids = make_context(self.tokenizer, query, history, system)[1]
-        return RenderedInputs(input_ids=input_ids)
+            prompt, input_ids = make_context(self.tokenizer, query, history, system)
+        return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def text_complete_last_message(self, history):
         im_start = "<|im_start|>"
@@ -210,7 +212,7 @@ class QwenRenderer(CustomChatRenderer):
             prompt += f"\n{im_start}assistant\n{response}{im_end}"
         prompt = prompt[: -len(im_end)]
 
-        return self.tokenizer.encode(prompt)
+        return prompt
 
     def parse_messages(
             self,

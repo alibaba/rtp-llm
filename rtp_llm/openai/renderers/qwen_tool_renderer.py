@@ -136,7 +136,7 @@ class QwenToolRenderer(CustomChatRenderer):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)  # type: ignore
-        return RenderedInputs(input_ids=input_ids)
+        return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(
         self,
