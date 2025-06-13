@@ -397,6 +397,13 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
     auto py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     size_t model_num = py_layers_weights_vec.size();
+    if (gpt_init_params.gen_num_per_circle_ > 1 && py_layers_weights_vec.size() == 1) {
+        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to gpt_init_params.gen_num_per_circle_: %d",
+                            gpt_init_params.gen_num_per_circle_);
+        for (size_t i = 1; i < gpt_init_params.gen_num_per_circle_; i++) {
+            py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
+        }
+    }
     if (gpt_init_params.gen_num_per_circle_ != py_layers_weights_vec.size()) {
         RTP_LLM_LOG_WARNING("gpt_init_params.gen_num_per_circle_: %d  != py_layers_weights_vec.size(): %d",
             gpt_init_params.gen_num_per_circle_, py_layers_weights_vec.size());

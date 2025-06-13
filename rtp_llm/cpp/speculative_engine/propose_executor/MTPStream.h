@@ -58,7 +58,7 @@ public:
         // get token ids
         size_t total_token_num = stream.seqLength();
         size_t input_token_num = total_token_num - mtp_token_index_ - 1;
-        RTP_LLM_LOG_DEBUG("mtp_token_index: %d, input_token_num: %d", mtp_token_index_, input_token_num);
+        RTP_LLM_LOG_DEBUG("total_token_num %d, mtp_token_index: %d, input_token_num: %d", total_token_num, mtp_token_index_, input_token_num);
         // check hidden states num is equal to token ids
         RTP_LLM_CHECK_WITH_INFO(last_hidden_states_->shape()[0] == input_token_num,
             "hidde_states_num: %d, input_token_num: %d",

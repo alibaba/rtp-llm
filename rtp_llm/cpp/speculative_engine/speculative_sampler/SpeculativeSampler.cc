@@ -64,7 +64,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
     }
 
     if (stream->needReturnHiddenStates()) {
-        if (stream->getContainProposeToken() || (stream->getProposeStream() != nullptr && stream->getProposeStream()->getMtpTokenIndex() > 0)) {
+        if (stream->getContainProposeToken() || (stream->getProposeStream() != nullptr && stream->iterCount() > 0)) {
             hidden_states = score_stream_output->hidden_states->slice(0, accept_len, false);
             hidden_states->updateParent(score_stream_output->hidden_states);
         } else {
