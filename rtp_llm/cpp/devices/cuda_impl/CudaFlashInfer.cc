@@ -95,7 +95,7 @@ FlashInferAttnParams *FlashInferAttnParams::create(CudaDevice *device, int batch
         return params;
     }
 
-    RTP_LLM_LOG_INFO("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);
+    RTP_LLM_LOG_DEBUG("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);
     auto params = make_unique<FlashInferAttnParams>();
     params->batch_size = batch_size;
     params->input_token_num = input_token_num;
