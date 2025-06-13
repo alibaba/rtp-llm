@@ -308,4 +308,79 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 7);
 }
 
+TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
+    KVCacheParam param = {1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
+    CacheConfig                   cache_config(param);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
+    ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+    ResourceContext resource_context = {cache_manager, nullptr, nullptr, true};
+    GptInitParameter config;
+    config.max_seq_len_ = 100;
+    config.max_context_batch_size_ = 1;
+    FIFOScheduler scheduler(config, cache_manager);
+
+    {
+        // test normalcase
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        shared_ptr<GenerateStream> stream1   = make_shared<NormalGenerateStream>(query, config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+        auto streams_status = scheduler.schedule();
+        ASSERT_TRUE(streams_status.ok());
+
+        stream1->setFinishedWithoutLock();
+        auto streams_status2 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+    }
+
+    {
+        // test normal case with tile num
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        query->generate_config->num_beams = 2;
+        shared_ptr<GenerateStream> stream1   = make_shared<NormalGenerateStream>(query, config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+        auto streams_status = scheduler.schedule();
+        ASSERT_TRUE(streams_status.ok());
+
+        stream1->setFinishedWithoutLock();
+        auto streams_status2 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+    }
+
+    {
+        // test abnormal case with tile num
+        std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+        query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query2->generate_config               = make_shared<GenerateConfig>();
+        query2->generate_config->num_beams = 20;
+        shared_ptr<GenerateStream> stream2    = make_shared<NormalGenerateStream>(query2, config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+
+        auto streams_status3 = scheduler.schedule();
+        ASSERT_TRUE(streams_status3.ok());
+        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+        ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_context_batch_size [1] * max_seq_len [100]");
+
+        stream2->setFinishedWithoutLock();
+        auto streams_status4 = scheduler.schedule();
+        ASSERT_TRUE(streams_status4.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        ASSERT_EQ(cache_manager->freeBlockNums(), 20);
+    }
+}
+
 }  // namespace rtp_llm

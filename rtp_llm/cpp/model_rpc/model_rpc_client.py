@@ -35,6 +35,8 @@ def trans_input(input_py: GenerateInput):
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    # check generate config is valid before enter into engine
+    input_py.generate_config.validate()
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens

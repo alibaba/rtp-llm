@@ -170,10 +170,12 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
 
     if (!enable_fast_gen_) {
         int max_token_size = new_stream->contextLength();
+        int packed_stream_size = 0;
         for (auto& stream : streams) {
             max_token_size = std::max(max_token_size, stream->contextLength());
+            packed_stream_size += stream->batchSize();
         }
-        return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_seq_len_ * max_context_batch_size_);
+        return max_token_size * (packed_stream_size + new_stream->batchSize()) + running_streams_.size() < int(max_seq_len_ * max_context_batch_size_);
     } else {
         return true;
     }
@@ -216,6 +218,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                     "input len " + std::to_string(stream->inputLength()) +
                     " is greater than kv cache max seq len " + std::to_string(cache_manager_->maxSeqLen()));
+            } else if ((size_t)stream->inputLength() * stream->batchSize() > max_context_batch_size_ * max_seq_len_) {
+                auto error_info = autil::StringUtil::formatString(
+                    "input len [%d] * batch size [%d] > max_context_batch_size [%d] * max_seq_len [%d]",
+                    stream->inputLength(), stream->batchSize(), (int)max_context_batch_size_, (int)max_seq_len_);
+                stream->stopAndRelease(ErrorCode::MALLOC_FAILED, error_info);
             } else {
                 stream->stopAndRelease(ErrorCode::MALLOC_FAILED, "LACK MEM");
             }

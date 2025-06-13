@@ -67,7 +67,6 @@ class Pipeline(object):
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer)
         config.add_stop_ids_from_str(tokenizer)
-        config.validate()
         return config
 
     def __call__(self, prompt: str, urls: Optional[List[str]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
