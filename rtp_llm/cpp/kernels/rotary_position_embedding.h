@@ -644,6 +644,27 @@ __device__ __inline__ void normal_rope(vector_t&       x,
     }
 }
 
+template<typename vector_t, typename scalar_t>
+__device__ __inline__ void normal_rope_with_cache(vector_t&     x,
+                                                  scalar_t*     smem,
+                                                  const int     tidx,
+                                                  const int     dim,
+                                                  const float2& coef,
+                                                  const int     offset = 0)
+{
+    reinterpret_cast<vector_t*>(smem)[tidx] = x;
+
+    __syncthreads();
+
+    RotaryHalfRead(x, smem, tidx, dim / 2);
+    x = rotary_embedding_transform(x, coef);
+    RotaryHalfWrite(x, smem, tidx, dim / 2);
+
+    __syncthreads();
+
+    x = reinterpret_cast<vector_t*>(smem)[tidx];
+}
+
 template<typename RopeInit, typename scalar_t, typename vector_t>
 __device__ __inline__ void glm2_rope(vector_t&   x,
                                      const int   tidx,

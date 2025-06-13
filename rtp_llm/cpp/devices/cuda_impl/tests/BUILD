@@ -219,6 +219,19 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_unfused_attention_test",
+    srcs = [
+        "CudaUnfusedAttentionTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
+    tags = ['A10'],
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
     name = "cuda_softmax_op_test",
     srcs = [
         "CudaSoftmaxOpTest.cc",

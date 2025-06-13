@@ -156,6 +156,26 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     cudaStream_t                     stream);
 
 template<typename T>
+void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
+                                          T*               k_buf,
+                                          T*               v_buf,
+                                          KVBlockArray     kv_block_array,
+                                          T*               QKV,
+                                          const int*       position_ids,
+                                          const T*         qkv_bias,
+                                          const float*     cos_sin_cache,
+                                          const int        batch_size,
+                                          const int        head_num,
+                                          const int        head_num_kv,
+                                          const int        size_per_head,
+                                          const RopeConfig rope_config,
+                                          const bool       use_logn_attn,
+                                          const bool       store_q,
+                                          const bool       store_kv,
+                                          const bool       store_cache,
+                                          cudaStream_t     stream);
+
+template<typename T>
 void invokeLoadPrefixKVCache(T*                               q_buf,
                              T*                               k_buf,
                              T*                               v_buf,
