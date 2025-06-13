@@ -452,6 +452,7 @@ absl::Status SpeculativeEngine::spStep(std::list<GenerateStreamPtr>& streams) {
     if (device_->getDeviceProperties().tp_rank == 0) {
         sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams));
+        RTP_LLM_LOG_DEBUG("speculative sample done");
 
         metrics_.propose_token_num += sampler_output.propose_token_num;
         metrics_.accept_token_num += sampler_output.accept_token_num;
@@ -604,6 +605,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
             RTP_LLM_LOG_DEBUG("sample step");
             sampler_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             CHECK_AND_RETURN_REF(sampler_output, speculative_sampler_->sample(streams));
+            RTP_LLM_LOG_DEBUG("speculative sample done");
 
             metrics_.propose_token_num += sampler_output.propose_token_num;
             metrics_.accept_token_num += sampler_output.accept_token_num;

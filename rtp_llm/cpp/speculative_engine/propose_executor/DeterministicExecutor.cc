@@ -163,6 +163,14 @@ void DeterministicExecutor::postProcess(const GenerateStreamPtr&            stre
 
     size_t propose_step         = stream_output->tokens->size();
     stream_output->propose_step = propose_step;
+    size_t vocab_size = stream->vocabSize();
+    auto all_probs = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_FP32, {propose_step, vocab_size}, rtp_llm::AllocationType::HOST}, {""});
+    device_->bufMemset(*all_probs, 0);
+    for (size_t i = 0; i < propose_step; i++) {
+        *(all_probs->view(i, 1).dataWithOffset<float>(*stream_output->tokens->dataWithOffset<int32_t>(i))) = 1.0;
+    }
+    stream_output->all_probs = device_->clone({*all_probs, rtp_llm::AllocationType::DEVICE, {"all_probs"}});
 }
 
 };  // namespace rtp_llm

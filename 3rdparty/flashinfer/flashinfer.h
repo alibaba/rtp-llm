@@ -117,6 +117,12 @@ void gelu_tanh_and_mul(at::Tensor& out, at::Tensor& input, int64_t cuda_stream);
 
 void gelu_and_mul(at::Tensor& out, at::Tensor& input, int64_t cuda_stream);
 
+void chain_speculative_sampling(at::Tensor draft_probs, at::Tensor draft_token_ids,
+    at::Tensor uniform_samples, at::Tensor target_probs,
+    at::Tensor output_token_ids, at::Tensor output_accepted_token_num,
+    at::Tensor output_emitted_token_num, bool deterministic,
+    int64_t cuda_stream);
+
 // std::vector<int64_t> BatchPrefillWithKVCacheSM90Plan(
 //     unsigned int head_dim, bool causal, at::Tensor float_workspace_buffer,
 //     at::Tensor int_workspace_buffer, at::Tensor page_locked_int_workspace_buffer,

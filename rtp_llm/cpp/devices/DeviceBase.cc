@@ -137,6 +137,10 @@ void DeviceBase::overlappedComputeBarrier() {
     syncCommunication();
 }
 
+void DeviceBase::chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 DeviceEventPtr DeviceBase::createEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

@@ -6,6 +6,12 @@
 
 namespace rtp_llm {
 
+#define printBufferDataForce(buffer, hint)                           \
+    do {                                                        \
+        printBufferData_(buffer, hint);                         \
+    } while(0)
+
+
 #define printBufferData(buffer, hint)                           \
     do {                                                        \
         if (rtp_llm::Logger::getEngineLogger().isTraceMode()) { \

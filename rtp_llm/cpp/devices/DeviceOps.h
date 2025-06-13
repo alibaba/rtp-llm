@@ -73,6 +73,7 @@ public:
     virtual FfnLayerOutput gatherCombineOutput(const MoeCombineOutput& params);
     virtual ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params);
     virtual AllGatherLoraLinearOutput allGatherloraLinear(const AllGatherLoraLinearParams& params);
+    virtual void chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 
     // for sampler
     virtual GreedyOutput sampleGreedy(const GreedyParams& params);

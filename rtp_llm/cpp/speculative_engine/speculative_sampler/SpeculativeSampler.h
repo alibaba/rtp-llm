@@ -26,6 +26,16 @@ public:
     absl::StatusOr<SpeculativeSamplerOutput> sample(const std::list<GenerateStreamPtr>& streams) const;
 
 private:
+    void batchSample(SpeculativeSamplerOutput& sample_output, const std::list<GenerateStreamPtr>& streams) const;
+    void streamSample(SpeculativeSamplerOutput& sample_output, const std::list<GenerateStreamPtr>& streams) const;
+
+    void updateSampleStream(SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                            SpeculativeExecutorStreamOutputPtr& score_stream_output,
+                            size_t                              propose_step,
+                            size_t                              accept_len,
+                            BufferPtr&                          accept_tokens,
+                            const GenerateStreamPtr&            stream) const;
+
     absl::StatusOr<size_t> top1Sample(size_t                                    propose_step,
                                       const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
                                       const SpeculativeExecutorStreamOutputPtr& scorer_stream_output,

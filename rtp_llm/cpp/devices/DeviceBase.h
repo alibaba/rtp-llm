@@ -150,6 +150,7 @@ public:
     AttentionLayerOutput mlaAttentionLayer(const AttentionLayerParams& params) override;
 
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
 protected:
     BufferStatus queryBufferStatus();
     AllocationType getMemAllocationType(const MemoryType type);

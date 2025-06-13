@@ -20,6 +20,7 @@
 #include <curand_kernel.h>
 #include <unistd.h>
 #include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "3rdparty/flashinfer/flashinfer.h"
 using namespace std;
 using namespace rtp_llm;
 using namespace tensorrt_llm;
@@ -789,5 +790,17 @@ void CudaDevice::balanceExperts(BufferPtr                  expert_ids,
         }
         check_cuda_error();
     }
+}
+
+void CudaDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    chain_speculative_sampling(params.draft_probs_d,
+        params.draft_token_ids_d,
+        params.uniform_samples_d,
+        params.target_probs_d,
+        params.output_token_ids_d,
+        params.output_accepted_token_num_d,
+        params.output_emitted_token_num_d,
+        false,
+        int64_t(stream_));
 }
 }; // namespace rtp_llm

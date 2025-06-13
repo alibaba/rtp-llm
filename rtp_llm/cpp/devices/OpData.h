@@ -965,7 +965,16 @@ struct LoraLinearReduceScatterParams {
     QScheme qscheme;
     DataType output_type;
     ParallelMode mode = ParallelMode::TP;
-    LoraLinearReduceScatterParams(const LoraLinearParams& lora_linear_params, const BufferPtr& rs_recv_buffer, QScheme qscheme, DataType output_type, ParallelMode mode = ParallelMode::TP): lora_linear_params(lora_linear_params), rs_recv_buffer(rs_recv_buffer), qscheme(qscheme), output_type(output_type), mode(mode) {}
+    LoraLinearReduceScatterParams(const LoraLinearParams& lora_linear_params,
+                                  const BufferPtr&        rs_recv_buffer,
+                                  QScheme                 qscheme,
+                                  DataType                output_type,
+                                  ParallelMode            mode = ParallelMode::TP):
+        lora_linear_params(lora_linear_params),
+        rs_recv_buffer(rs_recv_buffer),
+        qscheme(qscheme),
+        output_type(output_type),
+        mode(mode) {}
 };
 
 struct AllGatherLoraLinearParams {
@@ -975,7 +984,43 @@ struct AllGatherLoraLinearParams {
     QScheme qscheme;
     DataType output_type;
     ParallelMode mode = ParallelMode::TP;
-    AllGatherLoraLinearParams(const LoraLinearParams& lora_linear_params, const BufferPtr& ag_send_buffer, BufferPtr ag_recv_buffer, QScheme qscheme, DataType output_type, ParallelMode mode = ParallelMode::TP): lora_linear_params(lora_linear_params), ag_send_buffer(ag_send_buffer), ag_recv_buffer(ag_recv_buffer), qscheme(qscheme), output_type(output_type), mode(mode){}
+    AllGatherLoraLinearParams(const LoraLinearParams& lora_linear_params,
+                              const BufferPtr&        ag_send_buffer,
+                              BufferPtr               ag_recv_buffer,
+                              QScheme                 qscheme,
+                              DataType                output_type,
+                              ParallelMode            mode = ParallelMode::TP):
+        lora_linear_params(lora_linear_params),
+        ag_send_buffer(ag_send_buffer),
+        ag_recv_buffer(ag_recv_buffer),
+        qscheme(qscheme),
+        output_type(output_type),
+        mode(mode) {}
+};
+
+struct SpeculativeSamplingParams {
+    torch::Tensor &draft_probs_d;
+    torch::Tensor &draft_token_ids_d;
+    torch::Tensor &uniform_samples_d;
+    torch::Tensor &target_probs_d;
+    torch::Tensor &output_token_ids_d;
+    torch::Tensor &output_accepted_token_num_d;
+    torch::Tensor &output_emitted_token_num_d;
+
+    SpeculativeSamplingParams(torch::Tensor& draft_probs_d,
+                              torch::Tensor& draft_token_ids_d,
+                              torch::Tensor& uniform_samples_d,
+                              torch::Tensor& target_probs_d,
+                              torch::Tensor& output_token_ids_d,
+                              torch::Tensor& output_accepted_token_num_d,
+                              torch::Tensor& output_emitted_token_num_d):
+        draft_probs_d(draft_probs_d),
+        draft_token_ids_d(draft_token_ids_d),
+        uniform_samples_d(uniform_samples_d),
+        target_probs_d(target_probs_d),
+        output_token_ids_d(output_token_ids_d),
+        output_accepted_token_num_d(output_accepted_token_num_d),
+        output_emitted_token_num_d(output_emitted_token_num_d) {}
 };
 
 struct PrepareCommBufferParams {

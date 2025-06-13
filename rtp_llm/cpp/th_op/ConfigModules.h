@@ -121,6 +121,7 @@ struct SpeculativeExecutionConfig {
     int64_t sp_max_token_match = 2;
     std::string tree_decode_config = "";
     int64_t gen_num_per_cycle = 1;
+    bool force_stream_sample = false;
     std::string to_string() const;
     void update_from_env_for_test();
 };

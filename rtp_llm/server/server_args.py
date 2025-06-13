@@ -643,6 +643,22 @@ def setup_args():
         help="Tree decode的配置文件名，定义了从前缀词到候选Token的映射。"
     )
 
+    speculative_decoding_group.add_argument(
+        '--gen_num_per_cycle',
+        env_name="GEN_NUM_PER_CYCLE",
+        type=int,
+        default=1,
+        help="投机采样预测的步数"
+    )
+
+    speculative_decoding_group.add_argument(
+        '--force_stream_sample',
+        env_name="FORCE_STREAM_SAMPLE",
+        type=bool,
+        default=False,
+        help="投机采样强制使用流式采样"
+    )
+
     ##############################################################################################################
     # RPC 与服务发现配置
     ##############################################################################################################

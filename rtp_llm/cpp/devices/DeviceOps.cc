@@ -115,6 +115,10 @@ AttentionLayerOutput DeviceOps::mlaAttentionLayer(const AttentionLayerParams& pa
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AttentionModuleOutput DeviceOps::mlaContextAttention(const MlaAttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
