@@ -127,7 +127,7 @@ public:
     DeviceProperties getDeviceProperties() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return hostAllocator_.get(); }
-    void copy(const CopyParams& params, bool async = true);
+    void copy(const CopyParams& params);
     void noBlockCopy(const CopyParams& params) override;
     void bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput transpose(const TransposeParams& params) override;
@@ -178,7 +178,7 @@ public:
     void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
 
     void mlaAbsorbAttention(const MlaAttentionModuleParams& params);
-    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode = false);
+    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
     SliceOutput slice(const SliceParams& params) override;
 
 protected:

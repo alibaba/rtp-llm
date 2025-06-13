@@ -21,7 +21,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-void CudaDevice::copy(const CopyParams& params, bool async) {
+void CudaDevice::copy(const CopyParams& params) {
     params.check();
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
 

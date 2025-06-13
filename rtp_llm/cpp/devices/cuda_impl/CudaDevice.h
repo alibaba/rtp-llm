@@ -133,7 +133,7 @@ public:
     cudaDeviceProp getDeviceProp() const { return device_prop_; }
 
 public:
-    void copy(const CopyParams& params, bool async = true);
+    void copy(const CopyParams& params);
     void multiMergeCopy(const MultiMergeCopyParams& params) override;
     void multiCopy(const MultiCopyParams& params) override;
     void noBlockCopy(const CopyParams& params) override;
@@ -170,7 +170,7 @@ public:
     void reduceScatter(const ReduceScatterParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr mlaQKVGemm(const AttentionLayerParams& params) override;
-    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params, bool is_decode = false) override;
+    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     void sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override;

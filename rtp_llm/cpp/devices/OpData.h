@@ -112,13 +112,15 @@ struct CloneParams {
     CloneParams(const Buffer& input,
                 const AllocationType alloc_type = AllocationType::DEVICE,
                 const BufferHints& hints = BufferHints(),
-                bool overlapped = false)
-    : input(input), alloc_type(alloc_type), hints(hints), overlapped(overlapped) {}
+                bool overlapped = false,
+                bool async = true)
+    : input(input), alloc_type(alloc_type), hints(hints), overlapped(overlapped), async(async) {}
 
     const Buffer& input;
     const AllocationType alloc_type;
     const BufferHints& hints;
     bool overlapped = false;
+    bool async = true;
 };
 
 struct SliceParams {
@@ -136,6 +138,7 @@ struct CopyParams {
     const Buffer& src;
     bool overlapped = false;
     const DeviceStream stream = DeviceStream::DEFAULT;
+    bool async = true;
 
     void check() const {
         RTP_LLM_CHECK_WITH_INFO(src.type() == dst.type(),
@@ -526,6 +529,7 @@ struct MlaRotaryWriteKVCacheParams {
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
+    bool                            is_decode = false;
 };
 
 struct MlaAttentionModuleParams {

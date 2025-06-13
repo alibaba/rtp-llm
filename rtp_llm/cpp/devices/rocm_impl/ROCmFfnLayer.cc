@@ -41,7 +41,7 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
   auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);
   auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);
   token_num = hidden->shape()[0];
-  BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST}, false);
+  BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST, BufferHints(), false, false});
   BufferPtr token_nums_per_rank =
       allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
   bufMemset(*token_nums_per_rank, 0);
@@ -65,7 +65,7 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
       }
   }
   printBufferData(*token_nums_per_rank, "token_nums_per_rank");
-  auto token_nums_per_rank_gpu     = clone({*token_nums_per_rank}, false);
+  auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), false, false});
   // all_token_nums_per_rank_gpu[i]: current rank receive token num from other rank
   auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
   printBufferData(*all_token_nums_per_rank_gpu, "all_token_nums_per_rank_gpu");
@@ -84,10 +84,11 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
 
   printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
   // each rank token idx
-  BufferPtr all_token_indices = clone({*all_token_indices_cpu}, false);
+  BufferPtr all_token_indices = clone({*all_token_indices_cpu, AllocationType::DEVICE, BufferHints(), false, false});
   // sync allToAll all_token_nums_per_rank_gpu
   syncCommunication(false);
-  auto                all_token_nums_per_rank = clone({*all_token_nums_per_rank_gpu, AllocationType::HOST}, false);
+
+  auto all_token_nums_per_rank = clone({*all_token_nums_per_rank_gpu, AllocationType::HOST, BufferHints(), false, false});
   std::vector<size_t> input_split_sizes;
   std::vector<size_t> output_split_sizes;
   input_split_sizes.resize(ep_size);
@@ -420,7 +421,8 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         for (int i = 0; i < num_expert_per_rank; ++i) {
             local_expert_mask_host_ptr[moe_conf.ep_rank * num_expert_per_rank + i] = 1;
         }
-        BufferPtr local_expert_mask = clone({*local_expert_mask_host}, false);
+
+        BufferPtr local_expert_mask = clone({*local_expert_mask_host, AllocationType::DEVICE, BufferHints(), false, false});
         
         torch::Tensor sorted_ids_tensor = Buffer2torchTensor(*sorted_ids, false);
         torch::Tensor sorted_weights_tensor = Buffer2torchTensor(*sorted_weights, false);
@@ -479,7 +481,9 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         for (int i = 0; i < num_expert_per_rank; ++i) {
             local_expert_mask_host_ptr[moe_conf.ep_rank * num_expert_per_rank + i] = 1;
         }
-        BufferPtr local_expert_mask = clone({*local_expert_mask_host}, false);
+
+        BufferPtr local_expert_mask = clone({*local_expert_mask_host, AllocationType::DEVICE, BufferHints(), false, false});
+
         torch::Tensor local_expert_mask_tensor = Buffer2torchTensor(*local_expert_mask, false);
 
         // step 2. invoke ck_moe function
@@ -497,7 +501,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
           local_expert_mask_tensor);
 
         BufferPtr moe_out_tensor_buffer = torchTensor2Buffer(moe_out_tensor);
-        copy({*moe_out_final, *moe_out_tensor_buffer}, false);
+        copy({*moe_out_final, *moe_out_tensor_buffer, false, DeviceStream::DEFAULT, false});
         return FfnLayerOutput{moe_out_final};
     } else {
         RTP_LLM_FAIL("[ROCm moeFfn]: quant type %d not implemented yet", (int)params.qscheme);
@@ -507,3 +511,4 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
 }
 
 }  // namespace rtp_llm
+

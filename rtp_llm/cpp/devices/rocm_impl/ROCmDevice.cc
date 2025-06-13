@@ -213,7 +213,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     return std::move(output);
 }
 
-void ROCmDevice::copy(const CopyParams& params, bool async) {
+void ROCmDevice::copy(const CopyParams& params) {
     ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
                        "copy dst[%d] and src[%d] need has same type.",
                        params.src.type(), params.dst.type());
@@ -254,7 +254,7 @@ void ROCmDevice::copy(const CopyParams& params, bool async) {
     if (copyType == hipMemcpyHostToHost) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
-        if (async) {
+        if (params.async) {
             ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
         } else {
             ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));

@@ -33,7 +33,7 @@ DeviceProperties CpuDevice::getDeviceProperties() {
     return *prop;
 }
 
-void CpuDevice::copy(const CopyParams& params, bool async) {
+void CpuDevice::copy(const CopyParams& params) {
     auto& src  = params.src;
     auto& dst  = params.dst;
     auto  size = params.src.sizeBytes();
