@@ -194,14 +194,14 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         // |<- Stage2Ids ->|<- Stage2LogProbs ->|<- Stage1Ids ->|<- Stage1LogProbs ->|<---- Stage1TopK ---->|
         //                                                                           |<- stage2TopK ->|
         //                                      |<------------------ Stage3 ------------------>|
-        size_t const nByteStage1LogProbs = roundUp(sizeof(T) * batchSize * paddedBeamWidthIn * paddedBeamWidthOut * 2, 4);
-        size_t const nByteStage1Ids = roundUp(sizeof(int) * batchSize * paddedBeamWidthIn * paddedBeamWidthOut * 2, 4);
-        size_t const nByteStage2LogProbs = roundUp(sizeof(T) * batchSize * paddedBeamWidthOut * 2, 4);
-        size_t const nByteStage2Ids = roundUp(sizeof(int) * batchSize * paddedBeamWidthOut * 2, 4);
+        size_t const nByteStage1LogProbs = roundUp(sizeof(T) * batchSize * beamWidthIn * beamWidthOut * 2, 4);
+        size_t const nByteStage1Ids = roundUp(sizeof(int) * batchSize * beamWidthIn * beamWidthOut * 2, 4);
+        size_t const nByteStage2LogProbs = roundUp(sizeof(T) * batchSize * beamWidthOut * 2, 4);
+        size_t const nByteStage2Ids = roundUp(sizeof(int) * batchSize * beamWidthOut * 2, 4);
         size_t const nByteStage1TopK
-            = invokeComputeTopkLastDimWorkspaceSize<T>(batchSize * beamWidthIn, vocabSize, paddedBeamWidthOut * 2, true);
+            = invokeComputeTopkLastDimWorkspaceSize<T>(batchSize * beamWidthIn, vocabSize, beamWidthOut * 2, true);
         size_t const nByteStage2TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
-            batchSize, paddedBeamWidthIn * paddedBeamWidthOut * 2, beamWidthOut * 2, true);
+            batchSize, beamWidthIn * beamWidthOut * 2, beamWidthOut * 2, true);
         size_t const nByteStage3 = sizeof(T) * beamWidthIn * beamWidthOut * 2;
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
             + max(nByteStage1LogProbs + nByteStage1Ids + max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
