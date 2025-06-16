@@ -537,6 +537,7 @@ class GptInitModelParameters:
             tree_decode_config=get_env_str("TREE_DECODE_CONFIG", ""),
             gen_num_per_cycle=get_env_int("GEN_NUM_PER_CIRCLE", 1),
             force_stream_sample=get_env_bool("FORCE_STREAM_SAMPLE", False),
+            force_score_context_attention=get_env_bool("FORCE_SCORE_CONTEXT_ATTENTION", True)
         )
 
         # MiscellaneousConfig

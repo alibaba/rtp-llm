@@ -38,7 +38,7 @@ public:
             sp_output_buffer_->tokens = device_->allocateBuffer(
                     {rtp_llm::DataType::TYPE_INT32, {1, score_len_}, rtp_llm::AllocationType::HOST}, {"score_tokens"});
         }
-        if (score_len_ > 1) {
+        if (score_len_ > 1 || GlobalConfig::get().sp_config().force_score_context_attention) {
             setIsContextStream(true);
             setReuseLength(stream.reuseLength());
             setFallbackPrefixLength(stream.reuseLength());

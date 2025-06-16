@@ -344,12 +344,13 @@ void SpeculativeExecutionConfig::update_from_env_for_test(){
     tree_decode_config = autil::EnvUtil::getEnv("TREE_DECODE_CONFIG", "");
     gen_num_per_cycle = autil::EnvUtil::getEnv("GEN_NUM_PER_CIRCLE", 1);
     force_stream_sample = autil::EnvUtil::getEnv("FORCE_STREAM_SAMPLE", false);
+    force_score_context_attention = autil::EnvUtil::getEnv("FORCE_SCORE_CONTEXT_ATTENTION", true);
 }
 
 void register_speculative_execution_config(pybind11::module& m) {
     pybind11::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
         .def(pybind11::init<
-            std::string, std::string, int64_t, int64_t, std::string, int, bool
+            std::string, std::string, int64_t, int64_t, std::string, int, bool, bool
         >(),
         pybind11::arg("sp_model_type") = "",
         pybind11::arg("sp_type") = "",
@@ -357,7 +358,8 @@ void register_speculative_execution_config(pybind11::module& m) {
         pybind11::arg("sp_max_token_match") = 2,
         pybind11::arg("tree_decode_config") = "",
         pybind11::arg("gen_num_per_cycle") = 1,
-        pybind11::arg("force_stream_sample") = false
+        pybind11::arg("force_stream_sample") = false,
+        pybind11::arg("force_score_context_attention") = true
         )
         .def("to_string", &SpeculativeExecutionConfig::to_string)
         .def("update_from_env_for_test", &SpeculativeExecutionConfig::update_from_env_for_test)
@@ -367,7 +369,8 @@ void register_speculative_execution_config(pybind11::module& m) {
         .def_readwrite("sp_max_token_match", &SpeculativeExecutionConfig::sp_max_token_match)
         .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
         .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle)
-        .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample);
+        .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample)
+        .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention);
 }
 
 // ServiceDiscoveryConfig
@@ -631,7 +634,8 @@ inline std::string SpeculativeExecutionConfig::to_string() const {
         << "sp_max_token_match: " << sp_max_token_match << "\n"
         << "tree_decode_config: " << tree_decode_config << "\n"
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
-        << "force_stream_sample: " << force_stream_sample;
+        << "force_stream_sample: " << force_stream_sample << "\n"
+        << "force_score_context_attention: " << force_score_context_attention;
     return oss.str();
 }
 

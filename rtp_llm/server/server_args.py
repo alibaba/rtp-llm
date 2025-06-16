@@ -659,6 +659,14 @@ def setup_args():
         help="投机采样强制使用流式采样"
     )
 
+    speculative_decoding_group.add_argument(
+        '--force_score_context_attention',
+        env_name="FORCE_SCORE_CONTEXT_ATTENTION",
+        type=bool,
+        default=False,
+        help="投机采样强制score阶段使用context attention"
+    )
+
     ##############################################################################################################
     # RPC 与服务发现配置
     ##############################################################################################################
