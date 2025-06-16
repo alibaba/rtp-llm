@@ -28,6 +28,7 @@ cc_library(
         "*.cu",
         "mla_kernels/*.cu",
         "eplb/*.cu",
+        "moe/*.cu",
     ], exclude = [
         "layernorm_fp8_kernels.cu",
         "activation_fp8_kernels.cu",
@@ -44,7 +45,8 @@ cc_library(
         "*.cuh",
         "mla_kernels/*.h",
         "eplb/*.h",
-        "kv_cache/*.h"
+        "kv_cache/*.h",
+        "moe/*.h",
     ], exclude=[
         "AttentionFP8Weight.h",
         "moe_kernels.h",

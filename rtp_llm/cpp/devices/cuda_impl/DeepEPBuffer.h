@@ -26,6 +26,7 @@ public:
     // of local experts.
     DeepEPBuffer(DeviceBase* device,
                  int         world_rank,
+                 int         local_world_size,
                  int         world_size,
                  int64_t     num_nvl_bytes    = 0,
                  int64_t     num_rdma_bytes   = 0,
@@ -34,6 +35,7 @@ public:
         device_(device),
         world_rank_(world_rank),
         world_size_(world_size),
+        local_world_size_(local_world_size),
         num_nvl_bytes_(num_nvl_bytes),
         num_rdma_bytes_(num_rdma_bytes),
         low_latency_mode_(low_latency_mode),
@@ -196,6 +198,7 @@ private:
     DeviceBase* device_{nullptr};
     size_t      world_rank_;
     size_t      world_size_;
+    size_t      local_world_size_;
     int64_t     num_nvl_bytes_{0};
     int64_t     num_rdma_bytes_{0};
     bool        low_latency_mode_{false};

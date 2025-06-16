@@ -612,8 +612,6 @@ void sortAndScanSoftmaxOutput(int* expert_for_source_row, int* source_rows, int*
 
 void genSourceRow(int* expert_rows, int* source_rows, int token_num, int top_k, int num_experts, int start_expert, int end_expert, cudaStream_t stream);
 
-void genSourceRowRevert(int* expert_rows, int token_num, int top_k, int start_expert, cudaStream_t stream);
-
 template <class T, class OutputType, class GemmOutputType, class ScaleBiasType>
 void finalizeMoeRoutingKernelLauncher(GemmOutputType const* expanded_permuted_rows,
                                       OutputType* reduced_unpermuted_output, ScaleBiasType const* bias, float const* scales,

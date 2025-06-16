@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/DeepEPBuffer.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "deep_ep_api.h"
 
 using namespace std;
 
@@ -10,7 +11,7 @@ namespace rtp_llm {
  * @brief Initialize the communication buffer.
  */
 bool DeepEPBuffer::init() {
-    buffer_.reset(new deep_ep::Buffer(world_rank_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_));
+    buffer_.reset(deep_ep::createDeepEPBuffer(world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true));
 
     int              local_device_id = buffer_->get_local_device_id();
     std::vector<int> device_ids      = allGatherDeviceIds(local_device_id);
@@ -46,7 +47,14 @@ bool DeepEPBuffer::init() {
 
 void DeepEPBuffer::setLowLatencyEnv() {
     RTP_LLM_CHECK(num_qps_per_rank_ > 0);
-    setenv("NVSHMEM_DISABLE_P2P", "1", 1);
+    bool use_deepep_p2p_low_latency = GlobalConfig::get().moe_config.use_deepep_p2p_low_latency;
+
+    if (use_deepep_p2p_low_latency) {
+        setenv("NVSHMEM_DISABLE_P2P", "0", 1);
+    } else {
+        setenv("NVSHMEM_DISABLE_P2P", "1", 1);
+    }
+
     setenv("NVSHMEM_IB_ENABLE_IBGDA", "1", 1);
     setenv("NVSHMEM_IBGDA_NIC_HANDLER", "gpu", 1);
     std::string num_qps_per_rank_str = std::to_string(num_qps_per_rank_);

@@ -14,9 +14,11 @@ namespace rtp_llm {
 #ifdef ENABLE_DEEP_EP
 
 MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
-    const auto& moe_conf                         = params.moe_configs;
-    auto const  tp_size                          = moe_conf.tp_size;
-    auto const  expert_num                       = moe_conf.expert_num + moe_conf.extra_expert_num;
+    const auto& moe_conf   = params.moe_configs;
+    auto const  tp_size    = moe_conf.tp_size;
+    auto const  expert_num = moe_conf.expert_num + moe_conf.extra_expert_num;
+    auto const  use_fp8    = params.qscheme == QScheme::Qfp8PerTokenBlock;
+
     size_t      token_num                        = params.expert_ids.shape()[0];
     size_t      tp_token_size                    = (token_num + tp_size - 1) / tp_size;
 
@@ -36,7 +38,7 @@ MoeDispatchOutput CudaDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
                                                                 topk_idx_tensor,
                                                                 ll_num_max_token_per_rank,
                                                                 expert_num,
-                                                                true /*use_fp8*/,
+                                                                use_fp8 /*use_fp8*/,
                                                                 false /*async_finish*/,
                                                                 params.overlapped /*return_recv_hook*/
         );

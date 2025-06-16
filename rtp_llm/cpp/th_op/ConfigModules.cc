@@ -201,11 +201,11 @@ void register_hwkernel_config(pybind11::module& m) {
             int, bool, bool, bool, bool, std::string
         >(),
         pybind11::arg("deep_gemm_num_sm") = -1,
-        pybind11::arg("arm_gemm_use_kai") = false,    
-        pybind11::arg("enable_stable_scatter_add") = false,    
+        pybind11::arg("arm_gemm_use_kai") = false,
+        pybind11::arg("enable_stable_scatter_add") = false,
         pybind11::arg("enable_multi_block_mode") = true,
         pybind11::arg("ft_disable_custom_ar") = true,
-        pybind11::arg("rocm_hipblaslt_config") = "gemm_config.csv"    
+        pybind11::arg("rocm_hipblaslt_config") = "gemm_config.csv"
         )
         .def("to_string", &HWKernelConfig::to_string)
         .def("update_from_env_for_test", &HWKernelConfig::update_from_env_for_test)
@@ -225,7 +225,7 @@ void DeviceResourceConfig::update_from_env_for_test(){
     overlap_comm_type = autil::EnvUtil::getEnv("OVERLAP_COMM_TYPE", 0);
     m_split = autil::EnvUtil::getEnv("M_SPLIT", 0);
     enable_comm_overlap = bool_from_env_for_test("ENABLE_COMM_OVERLAP", true);
-    enable_layer_micro_batch = autil::EnvUtil::getEnv("ENABLE_LAYER_MICRO_BATCH", 0); 
+    enable_layer_micro_batch = autil::EnvUtil::getEnv("ENABLE_LAYER_MICRO_BATCH", 0);
     not_use_default_stream = bool_from_env_for_test("NOT_USE_DEFAULT_STREAM", false);
 }
 
@@ -291,11 +291,12 @@ void MoeConfig::update_from_env_for_test() {
 void register_moe_config(pybind11::module& m) {
     pybind11::class_<MoeConfig>(m, "MoeConfig")
         .def(pybind11::init<
-            bool, bool, bool, bool, int, bool, bool, int, int
+            bool, bool, bool, bool, bool, int, bool, bool, int, int
         >(),
         pybind11::arg("use_deepep_moe") = false,
         pybind11::arg("use_deepep_internode") = false,
         pybind11::arg("use_deepep_low_latency") = true,
+        pybind11::arg("use_deepep_p2p_low_latency") = false,
         pybind11::arg("fake_balance_expert") = false,
         pybind11::arg("eplb_control_step") = 100,
         pybind11::arg("eplb_test_mode") = false,
@@ -308,6 +309,7 @@ void register_moe_config(pybind11::module& m) {
         .def_readwrite("use_deepep_moe", &MoeConfig::use_deepep_moe)
         .def_readwrite("use_deepep_internode", &MoeConfig::use_deepep_internode)
         .def_readwrite("use_deepep_low_latency", &MoeConfig::use_deepep_low_latency)
+        .def_readwrite("use_deepep_p2p_low_latency", &MoeConfig::use_deepep_p2p_low_latency)
         .def_readwrite("fake_balance_expert", &MoeConfig::fake_balance_expert)
         .def_readwrite("eplb_control_step", &MoeConfig::eplb_control_step)
         .def_readwrite("eplb_test_mode", &MoeConfig::eplb_test_mode)
@@ -414,7 +416,7 @@ void register_cache_store_config(pybind11::module& m) {
         .def("update_from_env_for_test", &CacheStoreConfig::update_from_env_for_test)
         .def_readwrite("cache_store_rdma_mode", &CacheStoreConfig::cache_store_rdma_mode)
         .def_readwrite("wrr_available_ratio", &CacheStoreConfig::wrr_available_ratio)
-        .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor); 
+        .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor);
 }
 
 // SchedulerConfig
@@ -600,6 +602,7 @@ inline std::string MoeConfig::to_string() const {
     oss << "use_deepep_moe: " << use_deepep_moe << "\n"
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
+        << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "eplb_control_step: " << eplb_control_step << "\n"
         << "eplb_test_mode: " << eplb_test_mode << "\n"

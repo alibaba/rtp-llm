@@ -88,7 +88,7 @@ struct DeviceResourceConfig {
 
 struct SamplerConfig {
     int64_t max_batch_size = 0;
-    bool enable_flashinfer_sample_kernel = true; // 
+    bool enable_flashinfer_sample_kernel = true;
     std::string to_string() const;
     void update_from_env_for_test();
 };
@@ -97,6 +97,7 @@ struct MoeConfig {
     bool use_deepep_moe = false;
     bool use_deepep_internode = false;
     bool use_deepep_low_latency = true;
+    bool use_deepep_p2p_low_latency = false;
     bool fake_balance_expert = false;
     int eplb_control_step = 100;
     bool eplb_test_mode = false;
@@ -190,6 +191,6 @@ void register_cache_store_config(pybind11::module& m);
 void register_scheduler_config(pybind11::module& m);
 void register_batch_decode_scheduler_config(pybind11::module& m);
 void register_fifo_scheduler_config(pybind11::module& m);
-void register_misc_config(pybind11::module& m);   
+void register_misc_config(pybind11::module& m);
 
 }

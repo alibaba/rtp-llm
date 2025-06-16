@@ -10,7 +10,7 @@ class EnvArgumentGroup:
     def __init__(self, group: argparse._ArgumentGroup, parser: 'EnvArgumentParser'):
         self._group = group
         self._parser = parser
-        
+
     def add_argument(self, *args, env_name: Optional[str] = None, **kwargs) -> argparse.Action:
         if 'metavar' not in kwargs and 'type' in kwargs:
             type_ = kwargs['type']
@@ -23,7 +23,7 @@ class EnvArgumentGroup:
         action = self._group.add_argument(*args, **kwargs)
         self._parser._register_env_mapping(action, args, env_name)
         return action
-    
+
     def __getattr__(self, name):
         return getattr(self._group, name)
 
@@ -33,19 +33,19 @@ class EnvArgumentParser(argparse.ArgumentParser):
         self.env_prefix = env_prefix.upper()
         self._env_mappings: Dict[str, str] = {}
         self._groups: Dict[str, EnvArgumentGroup] = {}
-        
+
         super().__init__(*args, **kwargs)
-        
+
         self._default_group = EnvArgumentGroup(self._positionals, self)
         self._optional_group = EnvArgumentGroup(self._optionals, self)
 
     def add_argument_group(self, *args, **kwargs) -> EnvArgumentGroup:
         group = super().add_argument_group(*args, **kwargs)
         env_group = EnvArgumentGroup(group, self)
-        
+
         if hasattr(group, 'title') and group.title:
             self._groups[group.title] = env_group
-            
+
         return env_group
 
     def add_mutually_exclusive_group(self, **kwargs) -> EnvArgumentGroup:
@@ -57,7 +57,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
             action = self._positionals.add_argument(*args, **kwargs)
         else:
             action = self._optionals.add_argument(*args, **kwargs)
-            
+
         self._register_env_mapping(action, args, env_name)
         return action
 
@@ -108,7 +108,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
     def print_env_mappings(self, group_name: Optional[str] = None) -> None:
         logging.info("Argument -> Environment Variable Mappings:")
         logging.info("-" * 50)
-        
+
         if group_name:
             if group_name in self._groups:
                 group = self._groups[group_name]._group
@@ -120,7 +120,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             for dest, env_name in self._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
-                
+
         logging.info("-" * 50)
 
     def get_env_mappings(self, group_name: Optional[str] = None) -> Dict[str, str]:
@@ -133,7 +133,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
             return mappings
         else:
             return self._env_mappings.copy()
-        
+
 def setup_args():
     parser = EnvArgumentParser(
         description="RTP LLM"
@@ -185,7 +185,7 @@ def setup_args():
         default=None,
         help='在多节点分布式设置中，当前节点（Node）上使用的GPU设备数量。'
     )
-    
+
     ##############################################################################################################
     # Concurrency 控制
     ##############################################################################################################
@@ -264,14 +264,14 @@ def setup_args():
         type=bool,
         default=False,
         help="控制是否显示FMHA的参数信息。设置为 True 启用, False 禁用。"
-    ) 
+    )
     fmha_group.add_argument(
         '--disable_flash_infer',
         env_name="DISABLE_FLASH_INFER",
         type=bool,
         default=False,
         help="控制是否禁用FlashInfer Attention机制。设置为 True 启用, False 禁用。"
-    )    
+    )
     fmha_group.add_argument(
         '--enable_xqa',
         env_name="ENABLE_XQA",
@@ -310,56 +310,56 @@ def setup_args():
     # Profiling、Debugging、Logging
     ##############################################################################################################
     profile_debug_logging_group = parser.add_argument_group('Profiling、Debugging、Logging')
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--ft_nvtx',
         env_name="FT_NVTX",
         type=bool,
         default=False,
         help="控制是否启用NVTX性能分析。可选值: True (启用), False (禁用)。默认为 False"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--py_inference_log_response',
         env_name="PY_INFERENCE_LOG_RESPONSE",
         type=bool,
         default=False,
         help="控制是否在Python推理的access log中记录响应内容。可选值: `True` (记录), `False` (不记录)。默认为 `False`"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--rtp_llm_trace_memory',
         env_name="RTP_LLM_TRACE_MEMORY",
         type=bool,
         default=False,
         help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--rtp_llm_trace_malloc_stack',
         env_name="RTP_LLM_TRACE_MALLOC_STACK",
         type=bool,
         default=False,
         help="是否启用 malloc stack 追踪,与RTP_LLM_TRACE_MEMORY结合使用"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--enable_device_perf',
         env_name="ENABLE_DEVICE_PERF",
         type=bool,
         default=False,
         help="控制是否在DeviceBase中启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--ft_core_dump_on_exception',
         env_name="FT_CORE_DUMP_ON_EXCEPTION",
         type=bool,
         default=False,
         help="控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。可选值: True (启用), False (禁用)。"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--ft_alog_conf_path',
         env_name="FT_ALOG_CONF_PATH",
         type=str,
         default=None,
         help="设置日志配置文件路径。"
     )
-    profile_debug_logging_group.add_argument(  
+    profile_debug_logging_group.add_argument(
         '--log_level',
         env_name="LOG_LEVEL",
         type=str,
@@ -444,7 +444,7 @@ def setup_args():
     # 设备和资源管理
     ##############################################################################################################
     device_resource_group = parser.add_argument_group('设备和资源管理')
-	
+
     device_resource_group.add_argument(
         '--device_reserve_memory_bytes',
         env_name="DEVICE_RESERVE_MEMORY_BYTES",
@@ -535,6 +535,14 @@ def setup_args():
         type=bool,
         default=True,
         help="设置为 `True` 以启用 DeepEP 的低延迟模式。"
+    )
+
+    moe_group.add_argument(
+        '--use_deepep_p2p_low_latency',
+        env_name="USE_DEEPEP_P2P_LOW_LATENCY",
+        type=bool,
+        default=False,
+        help="设置为 `True` 以启用 DeepEP 的点对点 (P2P) 低延迟模式。"
     )
 
     moe_group.add_argument(
@@ -726,12 +734,12 @@ def setup_args():
     # FIFO 调度器配置
     ##############################################################################################################
     fifo_scheduler_group = parser.add_argument_group('FIFO Scheduler')
-    fifo_scheduler_group.add_argument(	
-        '--max_context_batch_size',	
-        env_name="MAX_CONTEXT_BATCH_SIZE",	
-        type=int,	
-        default=1,	
-        help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。"	
+    fifo_scheduler_group.add_argument(
+        '--max_context_batch_size',
+        env_name="MAX_CONTEXT_BATCH_SIZE",
+        type=int,
+        default=1,
+        help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。"
     )
     fifo_scheduler_group.add_argument(
         '--scheduler_reserve_resource_ratio',
@@ -805,7 +813,7 @@ def setup_args():
         default=1000,
         help="保留的性能记录 (step records) 的最大条数。与 `STEP_RECORDS_TIME_RANGE` 共同决定记录的保留策略。"
     )
-    
+
     parser.parse_args()
 
     parser.print_env_mappings()

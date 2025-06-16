@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/kernels/moe/moe_index_kernel.h"
 #ifdef ENABLE_FP8
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
@@ -71,12 +72,13 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 
     // these logics are from DeepEPDispatch, might could be fused.
     if (expert_for_source_row->type() != DataType::TYPE_INT32) {
-        auto expert_idx_tensor = Buffer2torchTensor(expert_for_source_row, false);
-        expert_for_source_row = torchTensor2BufferWithDstType(expert_idx_tensor, torch::kInt32);
-        tensorrt_llm::kernels::genSourceRowRevert(
+        expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"moe_expert_ids_int32"});
+
+        genSourceRowRevert(
+            gate_outputs.expert_ids->data<int64_t>(),
             expert_for_source_row->data<int>(),
-            expert_for_source_row->shape()[0],
-            expert_for_source_row->shape()[1],
+            token_num,
+            top_k,
             num_experts_per_node * moe_conf.ep_rank,
             stream_);
     }

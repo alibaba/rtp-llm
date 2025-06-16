@@ -396,7 +396,7 @@ class GptInitModelParameters:
             v = os.environ.get(name, None)
             if v is None or v == "":
                 return default
-            return v.lower() == "1" or v.lower() == "on" or v.lower() == "true" 
+            return v.lower() == "1" or v.lower() == "on" or v.lower() == "true"
 
         # ParallelismDistributedConfig
         self.gpt_init_params.parallelism_distributed_config = ParallelismDistributedConfig(
@@ -409,14 +409,14 @@ class GptInitModelParameters:
             pp_size=parallel_info.pp_size,
         )
         logging.info(f"parallelism_distributed_config.world_size: {self.gpt_init_params.parallelism_distributed_config.world_size}")
-        
+
         # CacheStoreConfig
         self.gpt_init_params.cache_store_config = CacheStoreConfig(
             cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", False),
             wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
             rank_factor=get_env_int("RANK_FACTOR", 0),
         )
-        
+
         # ConcurrencyConfig
         self.gpt_init_params.concurrency_config = ConcurrencyConfig(
             concurrency_with_block=get_env_bool("CONCURRENCY_WITH_BLOCK",False),
@@ -482,6 +482,7 @@ class GptInitModelParameters:
             use_deepep_moe=get_env_bool("USE_DEEPEP_MOE",False),
             use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE",False),
             use_deepep_low_latency=get_env_bool("USE_DEEPEP_LOW_LATENCY", True),
+            use_deepep_p2p_low_latency=get_env_bool("USE_DEEPEP_P2P_LOW_LATENCY", False),
             eplb_control_step=get_env_int("EPLB_CONTROL_STEP",100),
             eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
             eplb_test_mode=get_env_bool("EPLB_TEST_MODE",False),
@@ -642,7 +643,7 @@ class GptInitModelParameters:
                       parallel_info: ParallelInfo=g_parallel_info,
                       config_mode: ConfigMode = ConfigMode.ComplexMode,
                       gang_info: Optional[GangInfo] = None):
-        self._load_quant_config(ckpt_path, quantization) 
+        self._load_quant_config(ckpt_path, quantization)
 
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
@@ -664,7 +665,7 @@ class GptInitModelParameters:
         self.phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.expert_num
         self.enable_merge_w13 = os.getenv('ENABLE_MERGE_W13', '0').lower() == '1'
         logging.info(f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}")
-        
+
         if gang_info is not None:
             self.num_nodes = gang_info.num_nodes
         else:
@@ -672,7 +673,7 @@ class GptInitModelParameters:
                 self.num_nodes = get_gang_info().num_nodes
             except:
                 self.num_nodes = 1
-            
+
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
@@ -822,7 +823,7 @@ class GptInitModelParameters:
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
         if os.path.exists(quant_config_path):
             return QuantizationConfig.from_config({"bits": 0, "method": "smooth_quant", "group_size": 0, "is_quanted": True})
-            
+
         per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
 
         if os.path.exists(per_tensor_config_path):
@@ -861,7 +862,7 @@ class GptInitModelParameters:
         self.quant_config = self._load_quant_config_from_ckpt(ckpt_path)
         if not self.quant_config:
             if quantization:
-                try: 
+                try:
                     quant_config_dict = json.loads(quantization)
                     self.quant_config: QuantizationConfig = QuantizationConfig.from_config(quant_config_dict)
                 except Exception:
@@ -870,9 +871,9 @@ class GptInitModelParameters:
                         raise ValueError(f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}")
                 logging.info(f"need_load_quant by {self.quant_config.get_method()}")
         if self.quant_config:
-            self.quant_algo.setQuantAlgo(self.quant_config.get_algo().lower(), self.quant_config.bits(), self.quant_config.group_size()) 
+            self.quant_algo.setQuantAlgo(self.quant_config.get_algo().lower(), self.quant_config.bits(), self.quant_config.group_size())
 
-                                
+
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

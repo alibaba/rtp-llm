@@ -21,6 +21,8 @@ bool CudaDevice::initDeepEPBuffer() {
     auto   nccl_param  = getNcclParam(ParallelMode::DP_AND_TP);
     size_t world_rank  = nccl_param.rank_;
     size_t world_size  = nccl_param.world_size_;
+    size_t local_world_size = GlobalConfig::get().parallelism_distributed_config.local_world_size;
+
     int    num_experts = init_params_.num_experts + init_params_.extra_experts;
 
     // TODO: check if get right
@@ -49,6 +51,7 @@ bool CudaDevice::initDeepEPBuffer() {
         num_qps_per_rank = num_experts / init_params_.ep_size;
         deepep_buffer_.reset(new DeepEPBuffer(this,
                                               world_rank,
+                                              local_world_size,
                                               world_size,
                                               int(1e9),
                                               num_rdma_bytes,
@@ -57,6 +60,7 @@ bool CudaDevice::initDeepEPBuffer() {
 #else
         deepep_buffer_.reset(new DeepEPBuffer(this,
                                               world_rank,
+                                              local_world_size,
                                               world_size,
                                               int(1e9),
                                               num_rdma_bytes,
