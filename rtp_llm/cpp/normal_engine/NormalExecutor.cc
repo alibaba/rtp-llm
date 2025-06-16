@@ -58,6 +58,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     //     cache_config = cache_manager->cacheConfig();
     // }
 
+    // abort();
+    // TODO(wangyin.yx): maybe use PyWrappedModel here.
+
     model_.reset(new GptModel({
         device_,
         params.gpt_weights,

@@ -157,7 +157,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
     attention_conf.tokens_per_block = 16;
-    
+
     Weights weights;
     auto model = createGptModel({device_, weights, description});
     GptModelInputs inputs;

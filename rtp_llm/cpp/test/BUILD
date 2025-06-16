@@ -64,6 +64,34 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+filegroup(
+    name = "py_testdata",
+    srcs = glob([
+        "python/*",
+        "python/**/*",
+    ]),
+)
+
+cc_test(
+    name = "py_model_test",
+    srcs = [
+        "PyModelTest.cc",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        ":py_testdata",
+        "//rtp_llm:torch",
+    ],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps + [
+        ":test_utils",
+        "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
+        "//rtp_llm/cpp:utils",
+    ],
+    env = device_test_envs(),
+)
+
 cc_test(
     name = "sampler_test",
     srcs = [
