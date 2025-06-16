@@ -1,30 +1,7 @@
-load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
-load("//bazel:arch_select.bzl", "kernel_so_deps")
-load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
+load("//bazel:arch_select.bzl", "kernel_so_deps", "copy_all_so")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
-copy_so("//:th_transformer")
-copy_so("//rtp_llm/cpp/kernels:mmha1")
-copy_so("//rtp_llm/cpp/kernels:mmha2")
-copy_so("//rtp_llm/cpp/kernels:dmmha")
-copy_so("//rtp_llm/cpp/cuda:fa")
-copy_so("//rtp_llm/cpp/cutlass:fpA_intB")
-copy_so("//rtp_llm/cpp/cutlass:moe")
-copy_so("//rtp_llm/cpp/cutlass:moe_sm90")
-copy_so("//rtp_llm/cpp/cutlass:int8_gemm")
-copy_so("@flashinfer//:flashinfer_single_prefill")
-copy_so("@flashinfer//:flashinfer_single_decode")
-copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
-copy_so("@flashinfer//:flashinfer_batch_paged_decode")
-copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
-# num of so
-copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
-copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
-copy_so("@flashinfer//:flashinfer_sm90")
-copy_so("@acext//:acext_1")
-copy_so("@acext//:acext_2")
-copy_so("@acext//:acext_3")
-copy_so("@deep_ep//:deep_ep_cu")
+copy_all_so()
 
 genrule(
     name = "aiter_copy",

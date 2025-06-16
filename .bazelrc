@@ -25,6 +25,7 @@ build --action_env LIBRARY_PATH=/opt/conda310/lib
 build --define=grpc_no_ares=true
 build --define=xft_use_icx=true
 build --linkopt -ldl # exception backtrace
+build --define=NVSHMEM_DIR=/
 
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"

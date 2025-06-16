@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps")
 load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -307,7 +307,7 @@ py_library(
         ":portalocker",
         ":concurrent_log_handler",
     ],
-    data = ["//rtp_llm/cpp/deep_gemm:jit_includes"],
+    data = jit_deps(),
     imports = ["."],
 )
 
@@ -457,8 +457,7 @@ py_wheel(
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package",
-        "//rtp_llm/cpp/deep_gemm:jit_includes"
-    ],
+    ] + jit_deps(),
     requires = whl_reqs,
 )
 

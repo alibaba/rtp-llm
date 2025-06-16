@@ -4,6 +4,29 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
+load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
+
+def copy_all_so():
+    copy_so("//:th_transformer")
+    copy_so("//rtp_llm/cpp/kernels:mmha1")
+    copy_so("//rtp_llm/cpp/kernels:mmha2")
+    copy_so("//rtp_llm/cpp/kernels:dmmha")
+    copy_so("//rtp_llm/cpp/cuda:fa")
+    copy_so("//rtp_llm/cpp/cutlass:fpA_intB")
+    copy_so("//rtp_llm/cpp/cutlass:moe")
+    copy_so("//rtp_llm/cpp/cutlass:moe_sm90")
+    copy_so("//rtp_llm/cpp/cutlass:int8_gemm")
+    copy_so("@flashinfer//:flashinfer_single_prefill")
+    copy_so("@flashinfer//:flashinfer_single_decode")
+    copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
+    copy_so("@flashinfer//:flashinfer_batch_paged_decode")
+    copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
+    # num of so
+    copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
+    copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
+    copy_so("@flashinfer//:flashinfer_sm90")
+    copy_so("@deep_ep//:deep_ep_cu")
 
 def requirement(names):
     for name in names:
@@ -100,6 +123,12 @@ def flashmla_deps():
         actual = "@flashmla//:flashmla"
     )
 
+def deep_ep_deps():
+    native.alias(
+        name = "deep_ep",
+        actual = "@deep_ep//:deep_ep"
+    )
+
 def kernel_so_deps():
     return select({
         "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
@@ -137,3 +166,5 @@ def triton_deps(names):
 def internal_deps():
     return []
 
+def jit_deps():
+    return ["//rtp_llm/cpp/deep_gemm:jit_includes", ]

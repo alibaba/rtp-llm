@@ -200,6 +200,7 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
     string so_name = dir_path.string() + "/libdeepgemm" + params_str + ".so";
 
     if (!filesystem::exists(so_name)) {
+        RTP_LLM_LOG_INFO("JIT compilation %s begin", cu_filename);
         ofstream cu_file(cu_filename.c_str());
         cu_file << getKernelStr(n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab);
         cu_file.close();
@@ -216,6 +217,7 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
         if (result != 0) {
             RTP_LLM_FAIL("Failed to do interleave ffma");
         }
+        RTP_LLM_LOG_INFO("JIT compilation finished");
     }
 
     void* lib = dlopen(so_name.c_str(), RTLD_LAZY);
@@ -228,6 +230,7 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
     if (!kernel) {
         RTP_LLM_FAIL("Failed to find function: " + func_name + ", error: " + dlerror());
     }
+    RTP_LLM_LOG_INFO("JIT load %s finished", so_name);
 
     jit_kernels_[kernel_key] = kernel;
     return kernel;

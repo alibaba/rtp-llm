@@ -178,6 +178,8 @@ cc_binary(
     linkshared = 1,
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
+        "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
+        "-L$(NVSHMEM_DIR)/lib"
     ],
     visibility = ["//visibility:public"],
 )

@@ -1,10 +1,12 @@
-load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps", "flashmla_deps")
+load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "cuda_register", "trt_plugins", "flashinfer_deps", "flashmla_deps", "deep_ep_deps")
+load("@//bazel:arch_select.bzl", "torch_deps")
 
 cuda_register()
 trt_plugins()
 flashinfer_deps()
 flashmla_deps()
+deep_ep_deps()
 
 config_setting(
     name = "enable_deep_ep",
@@ -37,8 +39,10 @@ cc_library(
         ":use_accl_ep": [
             "//3rdparty/accl_ep:accl_ep",
         ],
-        "//conditions:default": ["@deep_ep//:deep_ep",],
-    }),
+        "//conditions:default": [":deep_ep",],
+    }) + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

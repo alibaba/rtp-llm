@@ -2,6 +2,7 @@ load("//bazel:defs.bzl", "rpm_library")
 load("@//:def.bzl", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
 load("@//bazel:arch_select.bzl", "torch_deps")
+exports_files(["deep_ep_api.h"])
 
 rpm_library(
     name = "accl_ep" ,
@@ -37,8 +38,10 @@ cc_library(
     hdrs = glob([
         "csrc/*.hpp",
         "csrc/kernels/*.cuh",
+        "@//3rdparty/accl_ep:deep_ep_api.h",
     ]),
     includes = ["csrc"],
+    strip_include_prefix = "3rdparty/accl_ep",
     deps = torch_deps() + [
         "@local_config_cuda//cuda:cuda_headers",
     ],

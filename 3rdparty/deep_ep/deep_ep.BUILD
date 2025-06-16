@@ -80,6 +80,10 @@ cc_library(
         'csrc/deep_ep.cpp',
         ":deep_ep_cu",
     ],
+    hdrs = [
+        "@//3rdparty/deep_ep:deep_ep_api.h",
+    ],
+    strip_include_prefix = "3rdparty/deep_ep",
     deps = [
         ":deep_ep_hdrs",
     ],
