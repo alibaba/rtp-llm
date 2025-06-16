@@ -695,11 +695,11 @@ __launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*      
                                                                         const int  hidden_units,
                                                                         const int  idx_offset)
 {
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * hidden_units;
-         index += blockDim.x * gridDim.x) {
-        const int col_index = index % hidden_units;
-        const int batch_id  = index / hidden_units;
-        from_tensor[index]  = hidden_state[(input_lengths[batch_id] + idx_offset) * hidden_units + col_index];
+    for (int64_t index = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; index < (int64_t)batch_size * hidden_units;
+         index += (int64_t)blockDim.x * gridDim.x) {
+        const int64_t col_index = index % hidden_units;
+        const int64_t batch_id  = index / hidden_units;
+        from_tensor[index]  = hidden_state[((int64_t)input_lengths[batch_id] + idx_offset) * hidden_units + col_index];
     }
 }
 

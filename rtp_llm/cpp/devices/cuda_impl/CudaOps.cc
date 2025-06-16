@@ -180,6 +180,7 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
     return {output};
 }
 
+// TODO maybe change invokeLookupHiddenStateOfLastToken for higher performence kernel
 SelectOutput CudaDevice::select(const SelectParams& params) {
     if ((params.input.where() != MemoryType::MEMORY_GPU) || (params.dim > 0)) {
         return DeviceBase::select(params);
