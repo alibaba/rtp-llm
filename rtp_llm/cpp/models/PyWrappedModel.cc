@@ -2,12 +2,11 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include <stdexcept>
 #include <mutex>
+// pybind11/stl.h might still be needed if GptModelInputs/Outputs use STL containers
 #include <pybind11/stl.h>
 #include <pybind11/iostream.h>
 
 #include <cstdlib>
-#include <libgen.h>
-#include <vector>
 #include <iostream>
 
 
@@ -30,125 +29,59 @@ void PyWrappedModel::EnsurePythonInitialized() {
                 RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
             }
 
-            py::initialize_interpreter(false);
+            // try {
+            //     py::initialize_interpreter(false);
+            // } catch (const py::error_already_set& e) {
+            //     RTP_LLM_LOG_WARNING("Failed to initialize Python interpreter: %s", e.what());
+            // }
             s_python_initialized = true;
             RTP_LLM_LOG_INFO("Python interpreter initialized via pybind11.");
         }
     }
 }
 
-// Helper function to get module name from file path
-// e.g., "/path/to/my_module.py" -> "my_module"
-std::string PyWrappedModel::GetPythonModuleNameFromFile(const std::string& file_path) {
-    std::string path_copy = file_path; // Copy since basename/dirname might modify input
-    char*       path_c_str = &path_copy[0];
-
-    char* base = basename(path_c_str);
-    std::string base_name_str(base);
-
-    size_t dot_pos = base_name_str.rfind('.');
-    if (dot_pos != std::string::npos) {
-        return base_name_str.substr(0, dot_pos);
-    }
-    return base_name_str; // Should not happen if it's a .py file
-}
-
-
-PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, const std::string& py_path, const std::string& class_name)
+PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance)
     : GptModel(params)
-    , py_path_(py_path)
-    , class_name_(class_name)
+    , py_instance_(std::move(py_instance)) // Take ownership of the passed py::object
 {
-    EnsurePythonInitialized();
+    EnsurePythonInitialized(); // Ensure interpreter is up for any base class or immediate needs
 
-    py::gil_scoped_acquire gil;
+    py::gil_scoped_acquire gil; // Acquire GIL for safety, though direct operations are minimal now
 
-    try {
-        RTP_LLM_LOG_INFO("Attempting to load Python class '%s' from file: %s",
-                         class_name_.c_str(), py_path_.c_str());
-
-        // Extract directory from py_path_ to add to sys.path
-        std::string dir_path_str;
-        // Use a mutable copy for dirname
-        std::vector<char> py_path_copy(py_path_.begin(), py_path_.end());
-        py_path_copy.push_back('\0');
-
-        char* d_name = ::dirname(py_path_copy.data());
-        if (d_name) {
-            dir_path_str = d_name;
-        }
-
-        if (!dir_path_str.empty() && dir_path_str != ".") {
-            py::module_ sys = py::module_::import("sys");
-            py::list sys_path = sys.attr("path").cast<py::list>();
-            bool path_exists = false;
-            for (const auto& path_item : sys_path) {
-                if (py::str(path_item).cast<std::string>() == dir_path_str) {
-                    path_exists = true;
-                    break;
-                }
-            }
-            if (!path_exists) {
-                sys_path.append(dir_path_str.c_str());
-                RTP_LLM_LOG_INFO("Added directory to sys.path: %s", dir_path_str.c_str());
-            } else {
-                RTP_LLM_LOG_INFO("Directory already in sys.path: %s", dir_path_str.c_str());
-            }
-        } else {
-            RTP_LLM_LOG_INFO("No directory path extracted or using CWD for py_path ('%s'), relying on existing sys.path.", py_path_.c_str());
-        }
-
-        std::string python_module_name = GetPythonModuleNameFromFile(py_path_);
-        RTP_LLM_LOG_INFO("Derived Python module name: %s", python_module_name.c_str());
-
-        py::module_ loaded_py_module = py::module_::import(python_module_name.c_str());
-        RTP_LLM_LOG_INFO("Successfully imported Python module: %s", python_module_name.c_str());
-
-        py::object py_class = loaded_py_module.attr(class_name_.c_str());
-        RTP_LLM_LOG_INFO("Successfully retrieved class '%s' from module '%s'", class_name_.c_str(), python_module_name.c_str());
-
-        py_instance_ = py_class(); // Call constructor with no arguments
-        RTP_LLM_LOG_INFO("Instantiated Python class '%s' with no parameters.", class_name_.c_str());
-
-        RTP_LLM_LOG_INFO("PyWrappedModel initialized. Python class instance '%s' created from file: %s",
-                         class_name_.c_str(), py_path_.c_str());
-
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error during module loading: %s", e.what());
-        // e.what() already contains a formatted Python traceback.
-        throw std::runtime_error("pybind11 error during Python module loading for '" + class_name_ + "': " + e.what());
-    } catch (const std::exception& e) {
-        throw std::runtime_error("C++ error during Python module loading for '" + class_name_ + "': " + e.what());
-    } catch (...) {
-        throw std::runtime_error("An unknown error occurred during Python module loading for '" + class_name_ + "' from file.");
+    if (!py_instance_ || py_instance_.is_none()) {
+        throw std::runtime_error("PyWrappedModel constructor: Python instance is null or none.");
     }
+
+    RTP_LLM_LOG_INFO("PyWrappedModel initialized with a pre-existing Python object instance.");
 }
 
 PyWrappedModel::~PyWrappedModel() {
     if (s_python_initialized && py_instance_) {
         try {
             py::gil_scoped_acquire gil;
-            py_instance_.release();
-            RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python class instance for '%s' released.", class_name_.c_str());
+            py_instance_.release(); // Release the Python object
+            RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
         } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction for class '%s': %s", class_name_.c_str(), e.what());
+            RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
         } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction for class '%s': %s", class_name_.c_str(), e.what());
+            RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
         }
     }
-    // Note: py::finalize_interpreter() is generally not called here.
-    // It should be called once when the application exits, if at all.
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     EnsurePythonInitialized();
 
     py::gil_scoped_acquire gil;
+    // py::scoped_ostream_redirect stream_redirect(
+    //     std::cout, py::module_::import("sys").attr("stdout"));
+    // py::scoped_ostream_redirect err_redirect(
+    //     std::cerr, py::module_::import("sys").attr("stderr"));
     try {
-        RTP_LLM_LOG_INFO("Calling forward method on Python class instance '%s'.", class_name_.c_str());
+        RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
 
-        if (!py_instance_) {
-            throw std::runtime_error("Python instance is not initialized for class: " + class_name_);
+        if (!py_instance_ || py_instance_.is_none()) {
+            throw std::runtime_error("Python instance is not initialized.");
         }
 
         py::object py_forward_method = py_instance_.attr("forward");
@@ -171,7 +104,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         // Call the Python forward method
         py::object py_outputs_obj = py_forward_method(py_inputs_dict); // Pass converted inputs
-        RTP_LLM_LOG_INFO("Python class '%s' forward method called successfully.", class_name_.c_str());
+        RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
 
         // Convert py_outputs_obj back to GptModelOutputs
         // This is also highly dependent on the structure of GptModelOutputs
@@ -187,16 +120,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return outputs; // Return converted outputs
 
     } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error during forward call on class '%s': %s", class_name_.c_str(), e.what());
-        throw std::runtime_error("pybind11 error during forward call on Python class '" + class_name_ + "': " + e.what());
+        RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
+        throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     }
     catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("C++ error during forward call on class '%s': %s", class_name_.c_str(), e.what());
-        throw std::runtime_error("C++ error during forward call on Python class '" + class_name_ + "': " + e.what());
+        RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
+        throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
-        RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on class '%s'.", class_name_.c_str());
-        throw std::runtime_error("An unknown error occurred during forward call on Python class '" + class_name_ + "'.");
+        RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
+        throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
 }
+
 
 }  // namespace rtp_llm

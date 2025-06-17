@@ -20,6 +20,8 @@ from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
+from rtp_llm.models_py.module_base import GptModelBase
+from rtp_llm.models_py.module_impl_example import GptModelExample
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -192,10 +194,21 @@ class BaseModel(object):
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
 
+        self.py_model: Optional[GptModelBase] = None
+
     @timer_wrapper(description="load model")
     def load(self, parallel_info: ParallelInfo=g_parallel_info):
         self.model_weights_loader = self.create_model_loader(parallel_info)
         self._load(self.device)
+
+        if True:  # TODO: add a config option to disable this
+            self._create_python_model()
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        # TODO(wangyin): in base_model this function should only return None
+        # and the actual create method should be implemented in each derived class of specific models
+        # There should also be a option to disable this python model creation
+        self.py_model = GptModelExample(self.config, self.weight)
 
     def _load(self, device: str):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(device=self.device)

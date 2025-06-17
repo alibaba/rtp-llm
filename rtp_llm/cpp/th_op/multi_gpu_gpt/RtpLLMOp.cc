@@ -42,7 +42,10 @@ void RtpLLMOp::init(py::object model,
 rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
-        rtp_llm::EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight));
+        auto py_model = model.attr("py_model");
+        // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
+
+        rtp_llm::EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model);
         model_id_++;
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
@@ -68,7 +71,7 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
         size_t gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(model_id_, 
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(model_id_,
                                                                              sp_type,
                                                                              gen_num_per_circle,
                                                                              gpt_init_params,

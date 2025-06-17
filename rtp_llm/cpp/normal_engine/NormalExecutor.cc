@@ -3,6 +3,7 @@
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 
@@ -49,25 +50,21 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
     SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
-    // CacheManager::KVCacheBuffer kv_cache_buffer;
-    // CacheConfig cache_config;
-    // if (warmup) {
-    //     kv_cache_buffer.k_blocks =
-    // } else {
-    //     kv_cache_buffer = cache_manager->kvCacheBuffer();
-    //     cache_config = cache_manager->cacheConfig();
-    // }
-
-    // abort();
-    // TODO(wangyin.yx): maybe use PyWrappedModel here.
-
-    model_.reset(new GptModel({
+    GptModelInitParams model_init_params({
         device_,
         params.gpt_weights,
         genModelDescription(params.gpt_init_parameter),
         cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
         params.model_id
-    }));
+    });
+
+    if (params.py_model) {
+        RTP_LLM_LOG_INFO("init executor with python model");
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+    } else {
+        RTP_LLM_LOG_INFO("init legacy c++ gpt model");
+        model_.reset(new GptModel(model_init_params));
+    }
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();

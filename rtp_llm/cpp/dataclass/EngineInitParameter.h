@@ -28,8 +28,13 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
    // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(size_t                           model_id,
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
-                     rtp_llm::Weights&&               gpt_weights):
-        model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
+                     rtp_llm::Weights&&               gpt_weights,
+                     py::object                       py_model = py::none())
+    : model_id(model_id)
+    , gpt_init_parameter(gpt_init_parameter)
+    , gpt_weights(std::move(gpt_weights))
+    , py_model(py_model)
+    {
         StaticConfig::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
         StaticConfig::user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
         StaticConfig::user_ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
@@ -46,11 +51,13 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         global_parallel_info.setLocalWorldSize(gpt_init_parameter.parallelism_distributed_config.local_world_size);
         Logger::log_level_ = gpt_init_parameter.profiling_debug_logging_config.log_level;
         gpt_init_parameter.showDebugInfo();
+        initialize(gpt_init_parameter);
     }
 
     size_t model_id;
     rtp_llm::GptInitParameter         gpt_init_parameter;
     rtp_llm::Weights                  gpt_weights;
+    py::object                        py_model;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 public:
