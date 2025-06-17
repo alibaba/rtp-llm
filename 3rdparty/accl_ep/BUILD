@@ -37,11 +37,12 @@ cc_library(
     name = "accl_ep_hdrs",
     hdrs = glob([
         "csrc/*.hpp",
-        "csrc/kernels/*.cuh",
-        "@//3rdparty/accl_ep:deep_ep_api.h",
-    ]),
+        "csrc/kernels/*.cuh"
+    ]) + [
+        "deep_ep_api.h",
+    ],
     includes = ["csrc"],
-    strip_include_prefix = "3rdparty/accl_ep",
+    strip_include_prefix = ".",
     deps = torch_deps() + [
         "@local_config_cuda//cuda:cuda_headers",
     ],
