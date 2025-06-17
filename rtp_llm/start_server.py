@@ -22,7 +22,7 @@ from rtp_llm.utils.concurrency_controller import ConcurrencyController, init_con
 
 def check_server_health(server_port):
     try:
-        response = requests.get(f'http://localhost:{server_port}/health', timeout=5)
+        response = requests.get(f'http://localhost:{server_port}/health', timeout=60)
         logging.info(f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}")
         if response.status_code == 200 and response.text.strip() == '"ok"':
             return True
@@ -30,7 +30,7 @@ def check_server_health(server_port):
             logging.info(f"health check is not ready")
             return False
     except BaseException as e:
-        logging.info(f"health check is not ready, {str(e)}")
+        logging.debug(f"health check is not ready, {str(e)}")
         return False
 
 def start_backend_server_impl(global_controller):
@@ -40,7 +40,7 @@ def start_backend_server_impl(global_controller):
         os._exit(-1)
     backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, ), name="backend_server")
     backend_process.start()
-    
+
     retry_interval_seconds = 5
     start_port = int(os.environ.get('START_PORT', DEFAULT_START_PORT))
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
@@ -58,16 +58,16 @@ def start_backend_server_impl(global_controller):
         except Exception as e:
             logging.info(f'backend server is not ready')
             time.sleep(retry_interval_seconds)
-    
+
     return backend_process
 
 def start_frontend_server_impl(global_controller, backend_process):
     frontend_server_count = int(os.environ.get('FRONTEND_SERVER_COUNT', 4))
     if frontend_server_count < 1:
         logging.info("frontend server's count is {frontend_server_count}, this may be a mistake")
-    
+
     frontend_processes = []
-    
+
     for i in range(frontend_server_count) :
         os.environ['FRONTEND_SERVER_ID'] = str(i)
         process = multiprocessing.Process(target=start_frontend_server,
@@ -102,23 +102,23 @@ def main():
     except RuntimeError as e:
         logging.warn(str(e))
         pass
-    
+
     global_controller = init_controller()
-    
+
     backend_process = None
     frontend_process = None
-    
+
     try:
         logging.info("start backend server")
         backend_process = start_backend_server_impl(global_controller)
         logging.info(f"backend server process = {backend_process}")
-        
+
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(global_controller, backend_process)
         logging.info(f"frontend server process = {frontend_process}")
     finally:
         monitor_and_release_process(backend_process, frontend_process)
-    
+
 def monitor_and_release_process(backend_process, frontend_process):
     all_process = []
     if backend_process:
@@ -126,7 +126,7 @@ def monitor_and_release_process(backend_process, frontend_process):
     if frontend_process:
         all_process.extend(frontend_process)
     logging.info(f"all process = {all_process}")
-    
+
     while any(proc.is_alive() for proc in all_process):
         if not all(proc.is_alive() for proc in all_process):
             logging.error(f'server monitor : some process is not alive, exit!')
@@ -135,7 +135,7 @@ def monitor_and_release_process(backend_process, frontend_process):
                     os.killpg(os.getpgid(backend_process.pid), signal.SIGTERM)
                 except Exception as e:
                     logging.error(f"catch exception when kill backend process : {str(e)}")
-        
+
             for proc in all_process:
                 try:
                     proc.terminate()

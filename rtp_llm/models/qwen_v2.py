@@ -97,16 +97,16 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora
                 ),
             AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
-                       transpose, config=attn_config, 
+                       transpose, config=attn_config,
                        lora_a_process_func=transpose, lora_b_process_func=transpose,
                        lora_a_split_func=sp_0, lora_b_split_func=sp_id),
 
             AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
                        identity, config=attn_config),
         ]
-        
+
         if self.attn_config.use_fp8_kv_cache:
-            layer_weights.append(AtomicWeight(W.attention_output_static_quant_reciprocal, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight')], create_scalar_ones, torch.float32))        
+            layer_weights.append(AtomicWeight(W.attention_output_static_quant_reciprocal, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight')], create_scalar_ones, torch.float32))
         if self.bias:
             layer_weights.append(
                 AttnAtomicWeight(W.attn_qkv_b, [
