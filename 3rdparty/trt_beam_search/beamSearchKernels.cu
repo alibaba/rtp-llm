@@ -23,10 +23,6 @@ namespace tensorrt_llm
 namespace kernels
 {
 
-size_t getBeamSearchWorkspaceSize(const BeamHypotheses &bh) {
-    // TODO
-}
-
 template <typename T, int PBM, bool IS_V2>
 void beamSearchKernelLauncher(
     T const* logProbs, T const* bias, void* workspace, BeamHypotheses& bh, cudaStream_t stream);
@@ -136,7 +132,7 @@ void invokeUpdateCacheIndirection(int* tgtCI, int const* srcCI, BeamHypotheses& 
 {
     dim3 const grid(common::roundUp(bh.nMaxSeqLen, 32), bh.nBatchSize, bh.nBeamWidthOut);
     updateCacheIndirectionKernel<<<grid, 32, 0, stream>>>(tgtCI, srcCI, bh, maxAttentionWindow, sinkTokenLength);
-    sync_check_cuda_error();
+    check_cuda_error();
 }
 
 template <typename T>
@@ -281,15 +277,15 @@ void invokePopulateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* 
     if (tokenIdsIn == tokenIdsOut) {
         int blockSize = maxBlockSize;
         int blockNum = 0;
-        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateNewTokenIds, blockSize, 0));
+        check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateNewTokenIds, blockSize, 0));
         populateNewTokenIds<<<smCount * blockNum, blockSize, 0, stream>>>(tokenIdsOut, sequenceLengthsOut, outputIdsPtr, batchSize, maxSeqLen, beamWidthOut);
-        sync_check_cuda_error();
+        check_cuda_error();
     } else {
         int blockSize = min(maxSeqLen, maxBlockSize);
         int blockNum = 0;
-        check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateTokenIds, blockSize, 0));
+        check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockNum, populateTokenIds, blockSize, 0));
         populateTokenIds<<<smCount * blockNum, blockSize, 0, stream>>>(tokenIdsOut, tokenIdsIn, sequenceLengthsOut, parentIdsPtr, outputIdsPtr, batchSize, maxSeqLen, beamWidthOut, beamWidthIn);
-        sync_check_cuda_error();
+        check_cuda_error();
     }
 }
 

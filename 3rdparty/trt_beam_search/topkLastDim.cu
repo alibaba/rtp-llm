@@ -172,7 +172,7 @@ __host__ __device__ IdxT calc_buf_len(IdxT len)
     // When writing is not skipped, read `in_buf`(T) and `in_idx_buf`(IdxT), and write
     // `out_buf`(T) and `out_idx_buf`(IdxT). The ratio between these cases determines
     // whether to skip writing and hence the buffer size.
-    constexpr RATIO_T ratio = 2 + sizeof(IdxT) * 2 / sizeof(T);
+    constexpr RATIO_T ratio = 2 + sizeof(IdxT) * static_cast<RATIO_T>(2) / sizeof(T);
     // Even such estimation is too conservative, so further decrease buf_len by 1/8
     IdxT buf_len = len / (ratio * 8);
 
@@ -1279,6 +1279,8 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
             aligned_pointers[0], 0, static_cast<char*>(aligned_pointers[2]) - static_cast<char*>(aligned_pointers[0]), stream);
     }
 
+    check_cuda_error();
+
     T const* in_buf = nullptr;
     IdxT const* in_idx_buf = nullptr;
     T* out_buf = nullptr;
@@ -1302,12 +1304,14 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 
         kernel<<<blocks, BlockSize, 0, stream>>>(in, in_idx, in_buf, in_idx_buf, out_buf, out_idx_buf, topk_out,
             topk_out_idx, counters, histograms, len, k, select_min, pass);
+        check_cuda_error();
     }
 
     if (!fused_last_filter)
     {
         air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
             in, in_idx, out_buf, out_idx_buf, topk_out, topk_out_idx, len, k, counters, select_min);
+        check_cuda_error();
     }
 
     T* idx_sort_out = sorted ? sort_in : out;
@@ -1315,17 +1319,20 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 
     cub::DeviceSegmentedSort::SortPairs(sort_temp_storage, temp_storage_bytes, topk_out_idx, idx_sort_out_idx, topk_out,
         idx_sort_out, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+    check_cuda_error();
     if (sorted)
     {
         if (select_min)
         {
             cub::DeviceSegmentedSort::StableSortPairs(sort_temp_storage, temp_storage_bytes, sort_in, out, sort_in_idx,
                 out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+            check_cuda_error();
         }
         else
         {
             cub::DeviceSegmentedSort::StableSortPairsDescending(sort_temp_storage, temp_storage_bytes, sort_in, out,
                 sort_in_idx, out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+            check_cuda_error();
         }
     }
 }
@@ -1399,24 +1406,30 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
         }
     }
 
+    check_cuda_error();
+
     air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
         <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
+    check_cuda_error();
 
     T* idx_sort_out = sorted ? sort_in : out;
     IdxT* idx_sort_out_idx = sorted ? sort_in_idx : out_idx;
     cub::DeviceSegmentedSort::SortPairs(sort_temp_storage, temp_storage_bytes, topk_out_idx, idx_sort_out_idx, topk_out,
         idx_sort_out, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+    check_cuda_error();
     if (sorted)
     {
         if (select_min)
         {
             cub::DeviceSegmentedSort::StableSortPairs(sort_temp_storage, temp_storage_bytes, sort_in, out, sort_in_idx,
                 out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+            check_cuda_error();
         }
         else
         {
             cub::DeviceSegmentedSort::StableSortPairsDescending(sort_temp_storage, temp_storage_bytes, sort_in, out,
                 sort_in_idx, out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
+            check_cuda_error();
         }
     }
 }

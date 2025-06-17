@@ -151,8 +151,6 @@ __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage
 void invokePopulateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* sequenceLengthsOut, int const* parentIdsPtr, int const* outputIdsPtr, 
     size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut, size_t const beamWidthIn, 
     cudaStream_t stream);
-    
-size_t getBeamSearchWorkspaceSize(const BeamHypotheses &bh);
 
 // void printLogProbs(float const* x, int const nBS, int const nBMIn, int const nBM, int const nV);
 

@@ -26,14 +26,14 @@
 namespace tensorrt_llm::common {
 
 template <typename T1, typename T2>
-inline size_t divUp(T1 const& a, T2 const& b)
+constexpr inline size_t divUp(T1 const& a, T2 const& b)
 {
     auto const tmp_a = static_cast<size_t>(a);
     auto const tmp_b = static_cast<size_t>(b);
     return (tmp_a + tmp_b - 1) / tmp_b;
 }
 
-inline int roundUp(int a, int b)
+constexpr inline size_t roundUp(size_t a, size_t b)
 {
     return divUp(a, b) * b;
 }
@@ -42,8 +42,8 @@ inline int getMultiProcessorCount()
 {
     int nSM{0};
     int deviceID{0};
-    check_cuda_error(cudaGetDevice(&deviceID));
-    check_cuda_error(cudaDeviceGetAttribute(&nSM, cudaDevAttrMultiProcessorCount, deviceID));
+    check_cuda_value(cudaGetDevice(&deviceID));
+    check_cuda_value(cudaDeviceGetAttribute(&nSM, cudaDevAttrMultiProcessorCount, deviceID));
     return nSM;
 }
 
@@ -51,8 +51,8 @@ inline int getMaxSharedMemoryPerSM()
 {
     int nByteMaxSharedMemoryPerSM{0};
     int deviceID{0};
-    check_cuda_error(cudaGetDevice(&deviceID));
-    check_cuda_error(
+    check_cuda_value(cudaGetDevice(&deviceID));
+    check_cuda_value(
         cudaDeviceGetAttribute(&nByteMaxSharedMemoryPerSM, cudaDevAttrMaxSharedMemoryPerMultiprocessor, deviceID));
     return nByteMaxSharedMemoryPerSM;
 }
@@ -61,8 +61,8 @@ inline int getMaxSharedMemoryPerBlockOptin()
 {
     int nByteMaxSharedMemoryPerBlockOptin{0};
     int deviceID{0};
-    check_cuda_error(cudaGetDevice(&deviceID));
-    check_cuda_error(
+    check_cuda_value(cudaGetDevice(&deviceID));
+    check_cuda_value(
         cudaDeviceGetAttribute(&nByteMaxSharedMemoryPerBlockOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, deviceID));
     return nByteMaxSharedMemoryPerBlockOptin;
 }

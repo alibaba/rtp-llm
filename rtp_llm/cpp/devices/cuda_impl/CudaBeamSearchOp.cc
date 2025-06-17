@@ -65,24 +65,29 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     });
 
     // set beam search kernel workspace
-    BufferPtr workspace = allocateBuffer({DataType::TYPE_BYTES, {config.mWorkspaceSize}});
+    BufferPtr workspace = allocateBuffer({DataType::TYPE_BYTES, {config.mWorkspaceSize}, AllocationType::DEVICE});
     cudaMemsetAsync(workspace->data(), 0, workspace->sizeBytes(), stream_);
 
     // allocate output buffer
     BufferPtr input_lengths_out, sequence_lengths_out, cum_log_probs_out;
-    auto      new_token_ids = allocateBuffer(
-        {DataType::TYPE_INT32, {batch_size, beam_width_out, max_seq_len}, AllocationType::DEVICE}, {"new_token_ids"});
-    auto beam_indices =
-        allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
-    auto output_ids =
-        allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
+    auto      new_token_ids = allocateBuffer({DataType::TYPE_INT32,
+                                         {(size_t)batch_size, (size_t)beam_width_out, (size_t)max_seq_len},
+                                         AllocationType::DEVICE},
+                                        {"new_token_ids"});
+    auto      beam_indices  = allocateBuffer(
+        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
+    auto output_ids = allocateBuffer(
+        {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
     if (config.mVBWS) {
-        input_lengths_out = allocateBuffer({DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE},
-                                           {"input_length_out"});
-        sequence_lengths_out = allocateBuffer(
-            {DataType::TYPE_INT32, {batch_size, beam_width_out}, AllocationType::DEVICE}, {"sequence_lengths_out"});
-        cum_log_probs_out = allocateBuffer({DataType::TYPE_FP32, {batch_size, beam_width_out}, AllocationType::DEVICE},
-                                           {"cum_log_probs_out"});
+        input_lengths_out =
+            allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                           {"input_length_out"});
+        sequence_lengths_out =
+            allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                           {"sequence_lengths_out"});
+        cum_log_probs_out =
+            allocateBuffer({DataType::TYPE_FP32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                           {"cum_log_probs_out"});
     } else {
         input_lengths_out    = params.input_lengths;
         sequence_lengths_out = params.sequence_lengths;
@@ -129,6 +134,8 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     BH.parentIdsPtr       = beam_indices->data<int>();
     BH.outputIdsPtr       = output_ids->data<int>();
 
+    check_cuda_error();
+
     // invoke beam search kernel
     DISPATCH_TYPE(T, params.logits.type(), [&]() {
         DISPATCH_BOOL(IS_V2, config.mV2, [&]() {
@@ -136,6 +143,8 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
                 static_cast<T*>(log_softmax_logits_tsr.data_ptr()), nullptr, workspace->data(), BH, stream_);
         });
     });
+
+    check_cuda_error();
 
     return BeamSearchOutput({std::move(new_token_ids),
                              std::move(input_lengths_out),

@@ -33,6 +33,8 @@ namespace tensorrt_llm
 namespace kernels
 {
 
+static constexpr size_t MAX_BLOCK_SIZE = 1024;
+
 #pragma nv_diag_suppress static_var_with_dynamic_init
 
 template <typename T, int PBM, int BLOCK_SIZE>
@@ -216,9 +218,6 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     int const earlyStopping{bh.earlyStoppings == nullptr ? kEarlyStopping : bh.earlyStoppings[slot]};
 
     using KVPair = cub::KeyValuePair<int, T>;
-    // __shared__ float smemCumLogProbs[PBM];
-    // __shared__ int smemSeqLen[PBM];
-    // __shared__ KVPair smemTopKV[(IS_V2) ? 1 : PBM * 2]; // Just a placeholder in V2 workflow
     __shared__ BeamStage3KernelSmem<KVPair, PBM, IS_V2> smem;
 
     if (bh.numBeamsCBA != nullptr)
@@ -304,14 +303,14 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
         }
     }
 
-    if (tid < nBMIn) // Prepare cumLogProbs, seqLen and inputLen for later use
+    for (int i = tid; i < nBMIn; i += BLOCK_SIZE) // Prepare cumLogProbs, seqLen and inputLen for later use
     {
-        int const idx = slot * nBMIn + tid;
-        smem.cumLogProbs[tid] = bh.cumLogProbsIn[idx];
-        smem.seqLen[tid] = bh.sequenceLengthsIn[idx];
+        int const idx = slot * nBMIn + i;
+        smem.cumLogProbs[i] = bh.cumLogProbsIn[idx];
+        smem.seqLen[i] = bh.sequenceLengthsIn[idx];
         if constexpr (IS_V2) {
             if (bh.inputLengthsIn != nullptr && bh.inputLengthsOut != nullptr) {
-                smem.inputLen[tid] = bh.inputLengthsIn[idx];
+                smem.inputLen[i] = bh.inputLengthsIn[idx];
             }
         }
     }
@@ -507,14 +506,11 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     }
     __syncthreads();
 
-    // TODO(zhangjianning.zjn): use for loop to support nBMOut > 1024
-
     // Update inputLengths, sequenceLengths, parentIdsPtr, outputIdsPtr, and finished
-    // TODO(zhangjianning.zjn): use for loop to support nBMOut > 1024
-    if (tid < nBMOut)
+    for (int i = tid; i < nBMOut; i += BLOCK_SIZE)
     {
-        int const beamIdxOut = slot * nBMOut + tid;
-        int const newId = bh.outputIdsPtr[slot * nBMOut + tid];
+        int const beamIdxOut = slot * nBMOut + i;
+        int const newId = bh.outputIdsPtr[slot * nBMOut + i];
         int const beamIdxIn = (newId / nV) % nBMIn; // TODO(zhangjianning.zjn): is `% nBMIn` necessary?
         int const newTokenId = newId % nV;
 
@@ -661,7 +657,7 @@ void beamSearchKernelLauncher(
     {
         // see `BeamSearchLayer<T>::configureBeamSearchLayer()` for the workspace structure
         // TODO: align the workspace structure with tensorrt_llm::configureBeamSearch, padding or not?
-        int offset = 0;
+        size_t offset = 0;
         pStage2Ids = reinterpret_cast<int*>(workspace);
         offset += roundUp(sizeof(int) * nBS * nBMOut * 2, 4);
         pStage2LogProbs = reinterpret_cast<T*>(reinterpret_cast<char*>(workspace) + offset);
@@ -675,21 +671,21 @@ void beamSearchKernelLauncher(
 
         // Stage 1
         invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
-        sync_check_cuda_error();
+        check_cuda_error();
 
-        int nThread = min(roundUp(nBMIn * nBMOut * 2, 32), 1024);
+        int nThread = std::min(roundUp(nBMIn * nBMOut * 2, 32), MAX_BLOCK_SIZE);
         addCumLogProbs<<<nBS, nThread, 0, stream>>>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
             bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut);
-        sync_check_cuda_error();
+        check_cuda_error();
 
         // Stage 2
         invokeTopkLastDim<T>(
             nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, pStage1LogProbs, pStage2LogProbs, pStage2Ids, pTopK, stream);
-        sync_check_cuda_error();
+        check_cuda_error();
 
-        nThread = min(roundUp(nBMOut * 2, 32), 1024);
+        nThread = std::min(roundUp(nBMOut * 2, 32), MAX_BLOCK_SIZE);
         gatherId<<<nBS, nThread, 0, stream>>>(pStage1Ids, pStage2Ids, nBS, nBMIn, nBMOut, nV);
-        sync_check_cuda_error();
+        check_cuda_error();
     }
     else // V1
     {
@@ -705,7 +701,7 @@ void beamSearchKernelLauncher(
         dim3 grid(nBS, nBMOut, bh.nVPart), block(nThreadStage1);
         beamStage1Kernel<T, PBM, nThreadStage1><<<grid, block, bh.nByteSharedMemoryStage1, stream>>>(
             logProbs, bias, pStage3, bh.endIds, bh.finished, nV, bh.batchSlots);
-        sync_check_cuda_error();
+        check_cuda_error();
 
 // Stage 2
 #define BEAM_STAGE2_KERNEL(N_VOCAB_PART, IS_FAST)                                                                      \
@@ -740,12 +736,12 @@ void beamSearchKernelLauncher(
             TLLM_LOG_TRACE("Use slow Beam Search stage 2 kernel due to large beam_width or vocab_size");
             BEAM_STAGE2_KERNEL(128, false)
         }
-        sync_check_cuda_error();
+        check_cuda_error();
 #undef BEAM_STAGE2_KERNEL
     }
 
     // Stage 3 in common
-    size_t constexpr nThreadStage3 = (PBM + 31) / 32 * 32;
+    size_t constexpr nThreadStage3 = std::min(roundUp(PBM, 32), MAX_BLOCK_SIZE);
     size_t const nByteStaticSharedMemory = bh.nByteSharedMemoryStage3;
     size_t const nByteDynamicSharedMemory = (IS_V2) ? 0 : sizeof(T) * nBMIn * nBMOut * 2;
     size_t const nByteRuntimeSharedMemory = nByteStaticSharedMemory + nByteDynamicSharedMemory;
@@ -770,7 +766,7 @@ void beamSearchKernelLauncher(
         beamStage3Kernel<T, PBM, nThreadStage3, false, IS_V2>
             <<<nBS, nThreadStage3, 0, stream>>>(pStage2Ids, pStage2LogProbs, pStage3, bh);
     }
-    sync_check_cuda_error();
+    check_cuda_error();
 
     invokePopulateTokenIds(bh.tokenIdsOut, bh.tokenIdsIn, bh.sequenceLengthsOut, bh.parentIdsPtr, bh.outputIdsPtr,
         bh.nBatchSize, bh.nMaxSeqLen, bh.nBeamWidthOut, bh.nBeamWidthIn, stream);

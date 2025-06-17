@@ -172,7 +172,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
     else // V2 workflow for large beam width or VBWS
     {
         config.mV2 = true;
-        switch (paddedBeamWidthOut)
+        switch (max(paddedBeamWidthIn, paddedBeamWidthOut))
         {
         case 1: GET_INFO_STAGE3(1, true);
         case 2: GET_INFO_STAGE3(2, true);
@@ -185,6 +185,8 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         case 256: GET_INFO_STAGE3(256, true);
         case 512: GET_INFO_STAGE3(512, true);
         case 1024: GET_INFO_STAGE3(1024, true);
+        case 2048: GET_INFO_STAGE3(2048, true);
+        case 4096: GET_INFO_STAGE3(4096, true);
         }
         config.mByteSharedMemoryStage3 = attr.sharedSizeBytes; // Only static shared memory
 
