@@ -87,7 +87,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             throw std::runtime_error("Python instance is not initialized.");
         }
 
-// #define BUFFER_TO_TENSOR_IF_EXISTS(buf) \
+// #define BUFFER_TO_TENSOR_IF_EXISTS(buf)
 //         (buf ? Buffer2torchTensor(*buf, false) : torch::Tensor())
 
 //         auto combo_tokens = BUFFER_TO_TENSOR_IF_EXISTS(inputs.combo_tokens);
