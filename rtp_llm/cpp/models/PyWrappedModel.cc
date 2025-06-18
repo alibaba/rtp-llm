@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/utils/utils.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include <stdexcept>
 #include <mutex>
 // pybind11/stl.h might still be needed if GptModelInputs/Outputs use STL containers
@@ -84,40 +85,48 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             throw std::runtime_error("Python instance is not initialized.");
         }
 
+#define BUFFER_TO_TENSOR_IF_EXISTS(buf) \
+        (buf ? Buffer2torchTensor(*buf, false) : torch::Tensor())
+
+        auto combo_tokens = BUFFER_TO_TENSOR_IF_EXISTS(inputs.combo_tokens);
+        auto input_lengths = BUFFER_TO_TENSOR_IF_EXISTS(inputs.input_lengths);
+        auto sequence_lengths = BUFFER_TO_TENSOR_IF_EXISTS(inputs.sequence_lengths);
+        auto attention_mask = BUFFER_TO_TENSOR_IF_EXISTS(inputs.attention_mask);
+        auto kv_cache_block_id = BUFFER_TO_TENSOR_IF_EXISTS(inputs.kv_cache_block_id);
+
+        // std::cout << "combo_tokens: " << combo_tokens << std::endl;
+        // std::cout << "input_lengths: " << input_lengths << std::endl;
+        // std::cout << "sequence_lengths: " << sequence_lengths << std::endl;
+        // std::cout << "attention_mask: " << attention_mask << std::endl;
+        // std::cout << "kv_cache_block_id: " << kv_cache_block_id << std::endl;
+
+#undef BUFFER_TO_TENSOR_IF_EXISTS
+
         py::object py_forward_method = py_instance_.attr("forward");
 
-        // Convert GptModelInputs to a Python-compatible format.
-        // This is highly dependent on GptModelInputs and what the Python 'forward' expects.
-        // Example: convert to a py::dict.
-        // You might need to include <pybind11/stl.h> for map/vector conversions
-        // and define conversions for custom types if GptModelInputs contains them.
-        py::dict py_inputs_dict;
-        // Example: Assuming GptModelInputs has a 'tokens' field (std::vector<int>)
-        // if (inputs.combo_tokens) { // Assuming combo_tokens is a pointer or optional
-        //    py_inputs_dict["combo_tokens"] = py::cast(inputs.combo_tokens->data); // Example
-        // }
-        // This part needs to be adapted to the actual structure of GptModelInputs
-        // and the Python method's signature.
-        // For now, passing an empty dict as a placeholder.
-        // py_inputs_dict["some_input_key"] = py::cast(inputs.some_field);
+        py::object py_outputs_obj = py_forward_method(
+            combo_tokens, input_lengths, sequence_lengths,
+            attention_mask, kv_cache_block_id
+        );
 
+        // TODO(wangyin.yx): tuple should not be used here,
+        // we need a concrete, well-defined output struct.
+        py::tuple result_tuple = py_outputs_obj.cast<py::tuple>();
 
-        // Call the Python forward method
-        py::object py_outputs_obj = py_forward_method(py_inputs_dict); // Pass converted inputs
-        RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
+        auto logits = result_tuple[0].cast<torch::Tensor>();
+        auto hidden_states = result_tuple[1].cast<torch::Tensor>();
 
-        // Convert py_outputs_obj back to GptModelOutputs
-        // This is also highly dependent on the structure of GptModelOutputs
-        // and what the Python 'forward' method returns.
-        GptModelOutputs outputs{};
-        // Example: if Python returns a dict
-        // if (py::isinstance<py::dict>(py_outputs_obj)) {
-        //    py::dict py_outputs_dict = py_outputs_obj.cast<py::dict>();
-        //    if (py_outputs_dict.contains("output_tokens")) {
-        //        outputs.output_ids = std::make_shared<Tensor>(py_outputs_dict["output_tokens"].cast<std::vector<int>>());
-        //    }
-        // }
-        return outputs; // Return converted outputs
+        // std::cout << "logits: " << logits << std::endl;
+        // std::cout << "hidden_states: " << hidden_states << std::endl;
+
+        auto logits_buffer = torchTensor2Buffer(logits);
+        auto hidden_states_buffer = torchTensor2Buffer(hidden_states);
+
+        GptModelOutputs outputs{
+            logits_buffer,
+            hidden_states_buffer,
+        };
+        return outputs;
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

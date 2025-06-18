@@ -165,7 +165,7 @@ void NormalEngine::initLoadBalance() {
     RTP_LLM_LOG_INFO("init load balance start");
     auto stream = enqueueMinFakeQuery(3);
     while(!stream->finished() && !stream->stopped()) {
-        RTP_LLM_LOG_INFO("wait load balance init run over for 1s");
+        RTP_LLM_LOG_DEBUG("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
     }
     RTP_LLM_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
