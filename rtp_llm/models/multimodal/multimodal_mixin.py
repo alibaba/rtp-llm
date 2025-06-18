@@ -155,7 +155,7 @@ class MultiModalMixin:
         weight_names = vit_weight.weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
-            t = self.weight.get_global_weight(fname)
+            t = self.weight.get_global_weight_or_none(fname)
             if t is None:
                 raise Exception(f"failed to get tensor from name {fname}")
             param.data = t.reshape(param.data.shape).to(ctype).to(device)

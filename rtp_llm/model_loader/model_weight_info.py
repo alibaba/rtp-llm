@@ -485,8 +485,11 @@ class ModelWeights:
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
 
-    def get_global_weight(self, name: str):
+    def get_global_weight_or_none(self, name: str):
         return self.global_weights.get(name, None)
+
+    def get_global_weight(self, name: str) -> torch.Tensor:
+        return self.global_weights[name]
 
     def steal_global_weight(self, name: str):
         if name not in self.global_weights:

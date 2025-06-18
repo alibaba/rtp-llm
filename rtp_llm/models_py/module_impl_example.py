@@ -9,8 +9,8 @@ import torch
 from typing import Optional, Tuple
 
 class GptModelExample(GptModelBase):
-    def __init__(self, params: GptInitModelParameters, weight: ModelWeights) -> None:
-        super().__init__(params, weight)
+    def __init__(self, params: GptInitModelParameters, weights: ModelWeights) -> None:
+        super().__init__(params, weights)
         print("GptModelExample initialized")
 
     def forward(self,
