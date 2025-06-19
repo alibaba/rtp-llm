@@ -369,34 +369,6 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     size_t local_head_num       = params.configs.head_num;
     size_t size_per_head        = params.configs.size_per_head;
 
-    if (use_multi_block_mode) {
-        const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
-        // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
-        max_seq_len_tile = 256 / threads_per_value;
-        partial_out = allocateBuffer({datatype,
-                                     {batch_size, max_seq_len_tile, local_head_num, size_per_head},
-                                     AllocationType::DEVICE},
-            {"partial_out"});
-        partial_sum = allocateBuffer({DataType::TYPE_FP32,
-                                     {batch_size, max_seq_len_tile, local_head_num},
-                                     AllocationType::DEVICE},
-            {"partial_sum"});
-        partial_max = allocateBuffer({DataType::TYPE_FP32,
-                                     {batch_size, max_seq_len_tile, local_head_num},
-                                     AllocationType::DEVICE},
-            {"partial_max"});
-        block_counter = allocateBuffer({DataType::TYPE_INT32,
-                                      {batch_size, local_head_num},
-                                      AllocationType::DEVICE},
-                                       {"block_counter"});
-        // TODO(lidongjin) use fill op to set zeros.
-        cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
-    }
-    void* partial_out_data = (partial_out == nullptr) ? nullptr : partial_out->data();
-    float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
-    float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
-    int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
-
     RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
     auto trt_attn = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
@@ -445,6 +417,35 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_));
         return;
     }
+
+    if (use_multi_block_mode) {
+        const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
+        // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
+        max_seq_len_tile = 256 / threads_per_value;
+        partial_out = allocateBuffer({datatype,
+                                     {batch_size, max_seq_len_tile, local_head_num, size_per_head},
+                                     AllocationType::DEVICE},
+            {"partial_out"});
+        partial_sum = allocateBuffer({DataType::TYPE_FP32,
+                                     {batch_size, max_seq_len_tile, local_head_num},
+                                     AllocationType::DEVICE},
+            {"partial_sum"});
+        partial_max = allocateBuffer({DataType::TYPE_FP32,
+                                     {batch_size, max_seq_len_tile, local_head_num},
+                                     AllocationType::DEVICE},
+            {"partial_max"});
+        block_counter = allocateBuffer({DataType::TYPE_INT32,
+                                      {batch_size, local_head_num},
+                                      AllocationType::DEVICE},
+                                       {"block_counter"});
+        // TODO(lidongjin) use fill op to set zeros.
+        cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
+    }
+    void* partial_out_data = (partial_out == nullptr) ? nullptr : partial_out->data();
+    float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
+    float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
+    int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,
