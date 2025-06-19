@@ -276,7 +276,7 @@ public:
     virtual size_t getGemmWorkspaceSize(int num_experts) const = 0;
 
     bool is_profiler = false;
-    bool use_deterministic_hopper_reduce_ = false;
+    bool use_deterministic_hopper_reduce_ = true;
 };
 
 // Assumes inputs activations are row major. Weights need to be preprocessed by th_op/weight_quantize.cc .
