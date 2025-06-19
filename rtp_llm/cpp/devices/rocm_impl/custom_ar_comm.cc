@@ -176,7 +176,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
                     local_world_size);
         return false;
     }
-    bool disable_custom_ar = .hw_kernel_config.ft_disable_custom_ar;
+    bool disable_custom_ar = hw_kernel_config.ft_disable_custom_ar;
     if (disable_custom_ar) {
         RTP_LLM_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;

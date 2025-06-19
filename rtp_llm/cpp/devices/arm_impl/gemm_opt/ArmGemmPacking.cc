@@ -33,6 +33,8 @@
 
 namespace rtp_llm {
 
+bool user_arm_gemm_use_kai = false;
+
 static const size_t kai_num_bytes_multiplier = sizeof(uint16_t);
 static const size_t kai_bl = 32;
 
@@ -122,9 +124,9 @@ static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32
     }
 }
 
-ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input, const HWKernelConfig& hw_kernel_config) {
+ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
     if (armPrepareWeightFunc == nullptr) {
-        if (!hw_kernel_config.arm_gemm_use_kai) {
+        if (!user_arm_gemm_use_kai) {
             armPrepareWeightFunc = prepareGemmOptWeight;
         } else {
             RTP_LLM_LOG_INFO("KleidiAI enabled.\n");
@@ -423,7 +425,7 @@ ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose, bool
 //    if (key == W::attn_qkv_w ||
 torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
     auto buffer = torchTensor2Buffer(weight);
-    auto retBuffer = prepareGemmWeight(key, buffer, init_params_.hw_kernel_config);
+    auto retBuffer = prepareGemmWeight(key, buffer);
 
     // Repacked buffer size may not match with shape size * element size,
     // should use buffer pointer instead of copying data.

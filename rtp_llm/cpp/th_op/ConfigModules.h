@@ -8,6 +8,8 @@
 
 namespace rtp_llm {
 
+extern int user_deep_gemm_num_sm;
+extern bool user_arm_gemm_use_kai;
 struct ParallelismDistributedConfig {
     int tp_size = 1;
     int ep_size = 1;

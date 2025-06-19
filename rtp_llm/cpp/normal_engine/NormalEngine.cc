@@ -24,7 +24,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     params_(params.gpt_init_parameter),
     metrics_reporter_(params.metrics_reporter),
     profiler_step_(0),
-    gen_timeline_sync_(autil::EnvUtil::getEnv("GEN_TIMELINE_SYNC", 0L))
+    gen_timeline_sync_(params.gpt_init_parameter.profiling_debug_logging_config.gen_timeline_sync)
 {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;

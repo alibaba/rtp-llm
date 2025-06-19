@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 // declares here for test
 //BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
-ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input, const HWKernelConfig& hw_kernel_config);
+ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input);
 
 ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false, bool unused = false);
 BufferPtr transposeWeight(ConstBufferPtr input);

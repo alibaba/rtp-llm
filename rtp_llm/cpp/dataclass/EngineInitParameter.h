@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
 
@@ -35,7 +34,8 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
                      rtp_llm::Weights&&               gpt_weights):
         model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
-        DeepGemmPlugin::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
+        user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
+        user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
         lora::user_max_lora_model_size = gpt_init_parameter.model_specific_config.max_lora_model_size;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
@@ -50,6 +50,7 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         global_parallel_info.setLocalWorldSize(gpt_init_parameter.parallelism_distributed_config.local_world_size);
         ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
         Logger::log_level_ = gpt_init_parameter.profiling_debug_logging_config.log_level;
+        gpt_init_parameter.showDebugInfo();
     }
 
     size_t model_id;
