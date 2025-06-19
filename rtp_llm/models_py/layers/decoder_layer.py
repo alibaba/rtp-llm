@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import Qwen3Attention, Qwen3RMSNorm, Qwen3MLP, AttentionKwargs
+from rtp_llm.models_py.modules import Qwen3Attention, RMSNorm, Qwen3MLP, AttentionKwargs
 from typing_extensions import Unpack
 from rtp_llm.utils.model_weight import W
 from typing import Dict
@@ -11,8 +11,8 @@ class Qwen3DecoderLayer(nn.Module):
         super().__init__()
         # self.self_attn = Qwen3Attention(config, weights)
         self.mlp = Qwen3MLP(config, weights)
-        self.input_layernorm = Qwen3RMSNorm(weights[W.pre_ln_gamma], eps=config.layernorm_eps)
-        self.post_attention_layernorm = Qwen3RMSNorm(weights[W.post_ln_gamma], eps=config.layernorm_eps)
+        self.input_layernorm = RMSNorm(weights[W.pre_ln_gamma], eps=config.layernorm_eps)
+        self.post_attention_layernorm = RMSNorm(weights[W.post_ln_gamma], eps=config.layernorm_eps)
 
     def forward(
         self,

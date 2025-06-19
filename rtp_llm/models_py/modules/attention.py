@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.norm import Qwen3RMSNorm
+from rtp_llm.models_py.modules.norm import RMSNorm
 from torch import dtype as _dtype
 from typing import Optional, Dict, TypedDict
 from typing_extensions import Unpack
@@ -145,8 +145,8 @@ class Qwen3Attention(nn.Module):
         self.k_proj = Linear(self.qkv_weights.split(self.qkv_weights.shape[1] // 3, dim=1)[1].contiguous())
         self.v_proj = Linear(self.qkv_weights.split(self.qkv_weights.shape[1] // 3, dim=1)[2].contiguous())
         self.o_proj = Linear(weights[W.attn_o_w])
-        self.q_norm = Qwen3RMSNorm(weights[W.q_ln_gamma], eps=config.layernorm_eps)  # unlike olmo, only on the head dim!
-        self.k_norm = Qwen3RMSNorm(weights[W.k_ln_gamma], eps=config.layernorm_eps)  # thus post q_norm does not need reshape
+        self.q_norm = RMSNorm(weights[W.q_ln_gamma], eps=config.layernorm_eps)  # unlike olmo, only on the head dim!
+        self.k_norm = RMSNorm(weights[W.k_ln_gamma], eps=config.layernorm_eps)  # thus post q_norm does not need reshape
         self.rotary_emb = Qwen3RotaryEmbedding(config=config)
         dtype = torch.float16        
         if config.data_type == 'bf16':

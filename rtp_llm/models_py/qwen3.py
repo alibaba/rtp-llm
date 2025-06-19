@@ -5,7 +5,7 @@ from torch import nn
 
 from typing_extensions import Unpack
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import Qwen3RMSNorm, Embedding, Linear, AttentionKwargs
+from rtp_llm.models_py.modules import Embedding, Linear, AttentionKwargs, RMSNorm
 from rtp_llm.models_py.layers.decoder_layer import Qwen3DecoderLayer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.utils.model_weight import W
@@ -20,7 +20,7 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(config, weights.weights[idx]) for idx in range(self.layer_num)]
         )
-        self.norm = Qwen3RMSNorm(weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps)
+        self.norm = RMSNorm(weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps)
         self.lm_head = Linear(weights.get_global_weight(W.lm_head))
 
         # Initialize weights and apply final processing

@@ -6,9 +6,6 @@ from torch.nn import functional as F
 
 class Embedding(nn.Module):
     def __init__(self, weight: torch.Tensor):
-        """
-        Qwen3RMSNorm is equivalent to T5LayerNorm
-        """
         super().__init__()
         self.weight = weight
 

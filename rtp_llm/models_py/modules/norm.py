@@ -4,9 +4,6 @@ from torch import nn
 
 class BaseNorm(nn.Module):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
-        """
-        Qwen3RMSNorm is equivalent to T5LayerNorm
-        """
         super().__init__()
         self.weight = weight
         self.variance_epsilon = eps
@@ -15,11 +12,8 @@ class BaseNorm(nn.Module):
         raise NotImplementedError()
 
 
-class RMSNorm(BaseNorm):
+class RMSNormTorch(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
-        """
-        Qwen3RMSNorm is equivalent to T5LayerNorm
-        """
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor):
@@ -29,7 +23,7 @@ class RMSNorm(BaseNorm):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
-class Qwen3RMSNorm(BaseNorm):
+class RMSNorm(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
