@@ -18,10 +18,6 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-namespace lora{
-    static int user_max_lora_model_size;
-}
-
 using TensorMap  = std::unordered_map<std::string, th::Tensor>;
 using TensorMaps = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
@@ -34,9 +30,8 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
                      rtp_llm::Weights&&               gpt_weights):
         model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
-        user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
-        user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
-        lora::user_max_lora_model_size = gpt_init_parameter.model_specific_config.max_lora_model_size;
+        StaticConfig::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
+        StaticConfig::user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
         StepRecorder::STEP_RECORDS_MAX_SIZE = gpt_init_parameter.misc_config.step_records_max_size;

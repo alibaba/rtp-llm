@@ -19,7 +19,7 @@ private:
     int32_t max_lora_model_size_ = -1;
 
 public:
-    LoraManager();
+    LoraManager(const int max_lora_model_size = -1);
     virtual ~LoraManager() = default;
     LoraManager(LoraManager& other) = delete;
     LoraManager(LoraManager&& other) = delete;

@@ -16,8 +16,6 @@ using namespace std;
 
 namespace rtp_llm {
 
-int user_deep_gemm_num_sm = -1;
-
 #ifdef ENABLE_FP8
 template <class T>
 static inline void hash_combine(std::size_t& seed, const T& v)
@@ -93,7 +91,7 @@ inline int DeepGemmPlugin::getNumSms() {
     num_sms = properties.multiProcessorCount;
     RTP_LLM_LOG_INFO("cuda device property has sm num %d", num_sms);
 
-    int num_sms_from_config = user_deep_gemm_num_sm;
+    int num_sms_from_config = StaticConfig::user_deep_gemm_num_sm;
     if (num_sms_from_config != -1) {
         num_sms = num_sms_from_config;
     }

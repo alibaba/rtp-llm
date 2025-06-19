@@ -5,8 +5,7 @@
 namespace rtp_llm {
 namespace lora {
 
-LoraManager::LoraManager() {
-    max_lora_model_size_ = user_max_lora_model_size;
+LoraManager::LoraManager(const int max_lora_model_size):max_lora_model_size_(max_lora_model_size) {
 }
 
 rtp_llm::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
