@@ -13,6 +13,12 @@ namespace rtp_llm {
         }                                                       \
     } while(0)
 
+#define forcePrintBufferData(buffer, hint)                                                                             \
+    do {                                                                                                               \
+        printBufferData_(buffer, hint);                                                                                \
+    }                                                                                                                  \
+    while (0)
+
 void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool show_stats_only = false);
 
 #define printTorchTensorData(buffer, hint)                      \

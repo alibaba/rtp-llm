@@ -493,6 +493,9 @@ int cufmha::getNumSplits(size_t batch_size,
                          size_t seqlen_q,
                          size_t seqlen_k) const
 {
+    if (seqlen_q > 1) {
+        return 0;
+    }
     int device_id;
     int multi_processor_count = 1;
     cudaGetDevice(&device_id);
