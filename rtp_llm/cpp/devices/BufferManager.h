@@ -1,7 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/core/Buffer.h"
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <string>
 #include <numeric>
 #include <functional>
@@ -53,7 +53,7 @@ struct AllocationRecord {
 
 class BufferManager {
 public:
-    BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
+    BufferManager(IAllocator* device_allocator, IAllocator* host_allocator,const ProfilingDebugLoggingConfig& config);
     virtual ~BufferManager();
 
 public:
@@ -88,6 +88,9 @@ private:
     // hold recycling for multi-stream scenario
     bool recycle_held_ = false;
     std::vector<std::pair<void *, IAllocator*>> held_data_;
+
+    // config
+    ProfilingDebugLoggingConfig profiling_debug_logging_config_;
 };
 
 } // namespace rtp_llm

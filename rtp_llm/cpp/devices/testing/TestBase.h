@@ -85,10 +85,10 @@ public:
     }
 
     virtual void initTestDevices() {
-        ConfigCollection& config_collection =  GlobalConfig::get();
-        config_collection.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
-        config_collection.device_resource_config.host_reserve_memory_bytes = host_reserve_memory_size_;
-        rtp_llm::DeviceFactory::initDevices(rtp_llm::GptInitParameter());
+        rtp_llm::GptInitParameter gpt_init_params;
+        gpt_init_params.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
+        gpt_init_params.device_resource_config.host_reserve_memory_bytes = host_reserve_memory_size_;
+        rtp_llm::DeviceFactory::initDevices(gpt_init_params);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 

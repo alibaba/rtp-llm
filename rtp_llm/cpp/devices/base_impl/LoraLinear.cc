@@ -59,7 +59,7 @@ ReduceScatterLoraLinearOutput DeviceBase::loraLinearReduceScatter(const LoraLine
     auto output = linear_params.gemm_params.D;
     int m_split = init_params_.m_split;
     const auto m = gemm_a.shape()[0];
-    size_t overlap_comm_type = init_params_.overlap_comm_type;
+    size_t overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
     if (overlap_comm_type == 1 && (m_split > 0) &&
         ((!linear_params.lora_input) || linear_params.lora_input->isEmpty()) &&
         init_params_.tp_size > 1)
@@ -99,7 +99,7 @@ ReduceScatterLoraLinearOutput DeviceBase::loraLinearReduceScatter(const LoraLine
                 linear_params.gemm_params.activationType,
                 linear_params.gemm_params.alpha,
                 linear_params.gemm_params.beta,
-                init_params_.overlap_math_sm_count
+                init_params_.device_resource_config.overlap_math_sm_count
             );
             loraLinear({micro_batch_gemm_params});
             reduceScatter({output_d_chunk, rs_recv_chunk, ReduceOp::Sum, params.mode, true});
@@ -120,7 +120,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
     const LoraLinearParams& linear_params = params.lora_linear_params;
     const auto &gemm_a = linear_params.gemm_params.A;
     const auto &gemm_b = linear_params.gemm_params.B;
-    
+
     BufferPtr output = nullptr;
     if (linear_params.gemm_params.D) {
         output = linear_params.gemm_params.D;
@@ -130,7 +130,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
     }
     int m_split = init_params_.m_split;
 
-    size_t overlap_comm_type = init_params_.overlap_comm_type;
+    size_t overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
 
     const size_t m = gemm_a.shape()[0];
 
@@ -176,7 +176,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
                 linear_params.gemm_params.activationType,
                 linear_params.gemm_params.alpha,
                 linear_params.gemm_params.beta,
-                init_params_.overlap_math_sm_count
+                init_params_.device_resource_config.overlap_math_sm_count
             );
             loraLinear({micro_batch_gemm_params});
             token_idx += micro_batch_tokens;
@@ -184,7 +184,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
         }
         return AllGatherLoraLinearOutput({std::move(output), std::move(params.ag_recv_buffer)});
     }
-    
+
     if (params.qscheme == NoQuantize || params.qscheme == Qfp8PerTensor) {
         allGather({{gemm_a.slice(0, gemm_a.shape()[0])}, params.mode, {params.ag_send_buffer}, false});
     } else if (params.qscheme == Qint8PerToken){

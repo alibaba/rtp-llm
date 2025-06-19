@@ -30,9 +30,9 @@ public:
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_ = GlobalConfig::get().batch_decode_scheduler_config.batch_decode_scheduler_batch_size; 
+        batch_size_ = params.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_ = SchedulerType::kBatchDecode;
-        
+
     }
     virtual ~BatchDecodeScheduler() = default;
 

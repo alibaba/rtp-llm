@@ -48,7 +48,6 @@ cc_library(
     ],
     hdrs = [
         "//rtp_llm/cpp:th_op/ConfigModules.h",
-        "//rtp_llm/cpp:th_op/GlobalConfig.h",
     ],
     deps = torch_deps() + ["@havenask//aios/autil:env_util"],
     visibility = ["//visibility:public"],

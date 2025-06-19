@@ -2,14 +2,14 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/devices/base_tests/AttentionOpTest.hpp"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace rtp_llm;
 
 TEST_F(AttentionOpTest, SelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2, 4, 8};
@@ -34,9 +34,9 @@ TEST_F(AttentionOpTest, SelfAttentionOpTest) {
 
 TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = true;
-    device_ = new CudaDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = true;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2, 4, 8};
@@ -193,9 +193,9 @@ TEST_F(AttentionOpTest, TrtV1ContextAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, LongSeqMultiBlockSelfAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = true;
-    device_ = new CudaDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = true;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {4};
@@ -219,9 +219,9 @@ TEST_F(AttentionOpTest, LongSeqMultiBlockSelfAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, LongSeqSelfAttentionOpTest) {
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = false;
-    device_ = new CudaDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {4};
@@ -252,8 +252,7 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     device_init_params.fmha_config.enable_open_source_fmha = false;
     device_init_params.fmha_config.disable_flash_infer = true;
     device_init_params.fmha_config.enable_xqa = true;
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = false;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = false;
     device_ = new CudaDevice(device_init_params);
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
@@ -277,12 +276,12 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, FlashinferContextAttentionOpTest) {
-    setenv("ENABLE_TRT_FMHA", "ON", 1);
-    setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
-    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
-    setenv("DISABLE_FLASH_INFER", "0", 1);
-    GlobalConfig::update_from_env_for_test();
-    device_ = new CudaDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.fmha_config.enable_trt_fmha = true;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_init_params.fmha_config.disable_flash_infer = false;
+    device_ = new CudaDevice(device_init_params);
     device_->init();
     std::vector<size_t> batch = {3};
     std::vector<size_t> seq   = {1};
@@ -300,13 +299,14 @@ TEST_F(AttentionOpTest, FlashinferContextAttentionOpTest) {
 }
 
 TEST_F(AttentionOpTest, XqaContextAttentionOpTest) {
-    setenv("ENABLE_TRT_FMHA", "ON", 1);
-    setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
-    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
-    setenv("DISABLE_FLASH_INFER", "0", 1);
-    setenv("ENABLE_XQA", "ON", 1);
-    setenv("ENABLE_MULTI_BLOCK_MODE", "OFF", 1);
-    GlobalConfig::update_from_env_for_test();
+    DeviceInitParams device_init_params;
+    device_init_params.fmha_config.enable_trt_fmha = true;
+    device_init_params.fmha_config.enable_trtv1_fmha = false;
+    device_init_params.fmha_config.enable_open_source_fmha = false;
+    device_init_params.fmha_config.disable_flash_infer = false;
+    device_init_params.fmha_config.enable_xqa = true;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = false;
+    device_ = new CudaDevice(device_init_params);
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);

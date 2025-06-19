@@ -2,7 +2,7 @@
 #include <nvtx3/nvToolsExt.h>
 #include <string>
 #include <iostream>
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace rtp_llm {
 namespace fmha {

@@ -458,7 +458,7 @@ void registerGptInitParameter(py::module m) {
     .def("setKvCacheDataType", &GptInitParameter::setKvCacheDataType)
     .def("showDebugInfo", &GptInitParameter::showDebugInfo)
     .def("isGatedActivation", &GptInitParameter::isGatedActivation)
-    .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)  
+    .def("isKvCacheQuant", &GptInitParameter::isKvCacheQuant)
     // 新增配置结构体成员暴露
     .def_readwrite("parallelism_distributed_config", &GptInitParameter::parallelism_distributed_config)
     .def_readwrite("concurrency_config", &GptInitParameter::concurrency_config)

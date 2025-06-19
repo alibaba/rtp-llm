@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/http_server/http_server/HttpServer.h"
 #include "autil/NetUtil.h"
 #include "autil/StringUtil.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 namespace rtp_llm {
 class WRRLoadBalancerTest: public ::testing::Test {
 public:
@@ -18,9 +18,9 @@ public:
     std::shared_ptr<WRRLoadBalancer> load_balancer_;
 
 public:
-    void initTest() {
+    void initTest(CacheStoreConfig& cache_store_config) {
         auto config    = makeConfig();
-        load_balancer_ = std::make_shared<WRRLoadBalancer>();
+        load_balancer_ = std::make_shared<WRRLoadBalancer>(cache_store_config);
         ASSERT_TRUE(load_balancer_->init(config));
     }
     LoadBalancerInitParams makeConfig();
@@ -79,7 +79,8 @@ void WRRLoadBalancerTest::initServer(const std::string& spec, int available_kv_c
 }
 
 TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
-    initTest();
+    CacheStoreConfig cache_store_config;
+    initTest(cache_store_config);
     sleep(5);
     {
         std::shared_lock<std::shared_mutex> lock(load_balancer_->host_load_balance_info_map_mutex_);
@@ -96,7 +97,8 @@ TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
 }
 
 TEST_F(WRRLoadBalancerTest, testChooseHost) {
-    initTest();
+    CacheStoreConfig cache_store_config;
+    initTest(cache_store_config);
     sleep(5);
     int count_200 = 0, count_400 = 0;
     for (int i = 0; i < 1000; i++) {
@@ -117,9 +119,9 @@ TEST_F(WRRLoadBalancerTest, testChooseHost) {
 
 TEST_F(WRRLoadBalancerTest, testChangeWeight) {
     // 10 host* 200 available kv cache, 20 host* 400 available kv cache
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.cache_store_config.wrr_available_ratio = 0;
-    initTest();
+    CacheStoreConfig cache_store_config;
+    cache_store_config.wrr_available_ratio = 0;
+    initTest(cache_store_config);
 
     sleep(5);
     int count_200 = 0, count_400 = 0;

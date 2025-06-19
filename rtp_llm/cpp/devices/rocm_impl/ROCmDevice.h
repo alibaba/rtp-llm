@@ -30,25 +30,25 @@ namespace rtp_llm {
         BufferPtr float_workspace;
         BufferPtr int_workspace;
         BufferPtr int_host_workspace;
-    
+
         BufferPtr batch_indice_host;
         BufferPtr positions_host;
         BufferPtr kvlen_host;
         BufferPtr paged_kv_last_page_len_host;
         BufferPtr paged_kv_last_page_len_1_host;
         BufferPtr page_indice_host;
-    
+
         BufferPtr batch_indice;
         BufferPtr positions;
         BufferPtr paged_kv_last_page_len; // w/o current
         BufferPtr paged_kv_last_page_len_1; // w current
-    
+
         BufferPtr qo_indptr;
         BufferPtr qo_indptr_host;
         BufferPtr page_indptr;
         BufferPtr page_indptr_host;
         BufferPtr page_indice;
-    
+
         torch::Tensor float_workspace_t;
         torch::Tensor int_workspace_t;
         torch::Tensor int_host_workspace_t;
@@ -56,7 +56,7 @@ namespace rtp_llm {
         torch::Tensor positions_t;
         torch::Tensor paged_kv_last_page_len_t;
         torch::Tensor paged_kv_last_page_len_1_t;
-    
+
         torch::Tensor qo_indptr_t;
         torch::Tensor qo_indptr_host_t;
         torch::Tensor page_indptr_t;
@@ -66,15 +66,15 @@ namespace rtp_llm {
         // for flashmla only
         BufferPtr kv_cache_block_id;
         BufferPtr kvlen;
-    
+
         torch::Tensor kv_cache_block_id_t;
         torch::Tensor kvlen_t;
-    
+
         std::vector<torch::Tensor> flash_mla_plan;
-    
+
         bool decode = true;
         torch::Tensor plan;
-    
+
         static ParamsPtr prepareDecodeFlashInferAttnParams(
             rtp_llm::DeviceBase *device,
             const rtp_llm::AttentionConfigs &attn_configs,
@@ -82,7 +82,7 @@ namespace rtp_llm {
             const BufferPtr &input_lengths_host,
             const BufferPtr &kv_cache_block_id_host,
             DataType dtype);
-    
+
         static ParamsPtr preparePrefillFlashInferAttnParams(
             rtp_llm::DeviceBase *device,
             const rtp_llm::AttentionConfigs &attn_configs,

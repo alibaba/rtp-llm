@@ -157,12 +157,13 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test(){
     ft_core_dump_on_exception = bool_from_env_for_test("FT_CORE_DUMP_ON_EXCEPTION", false);
     ft_alog_conf_path = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
     log_level = autil::EnvUtil::getEnv("LOG_LEVEL", "INFO");
+    gen_timeline_sync = bool_from_env_for_test("GEN_TIMELINE_SYNC", false);
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
     pybind11::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(pybind11::init<
-            bool, bool, bool, bool, bool, bool, std::string, std::string
+            bool, bool, bool, bool, bool, bool, std::string, std::string, bool
         >(),
         pybind11::arg("ft_nvtx") = false,
         pybind11::arg("py_inference_log_response") = false,
@@ -171,7 +172,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         pybind11::arg("enable_device_perf") = false,
         pybind11::arg("ft_core_dump_on_exception") = false,
         pybind11::arg("ft_alog_conf_path") = "",
-        pybind11::arg("log_level") = "INFO"
+        pybind11::arg("log_level") = "INFO",
+        pybind11::arg("gen_timeline_sync_") = false
         )
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env_for_test", &ProfilingDebugLoggingConfig::update_from_env_for_test)
@@ -182,7 +184,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("enable_device_perf", &ProfilingDebugLoggingConfig::enable_device_perf)
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
-        .def_readwrite("log_level", &ProfilingDebugLoggingConfig::log_level);
+        .def_readwrite("log_level", &ProfilingDebugLoggingConfig::log_level)
+        .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync);
 }
 
 // HWKernelConfig
@@ -566,7 +569,8 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "enable_device_perf: " << enable_device_perf << "\n"
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
-        << "log_level: " << log_level;
+        << "log_level: " << log_level << "\n"
+        << "gen_timeline_sync: "<< gen_timeline_sync;
     return oss.str();
 }
 

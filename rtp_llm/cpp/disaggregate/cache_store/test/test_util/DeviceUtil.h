@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 class DeviceUtil {
 public:
-    DeviceUtil();
+    DeviceUtil(const DeviceResourceConfig& device_resource_config);
     ~DeviceUtil();
 
     void* mallocCPU(size_t size);

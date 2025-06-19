@@ -116,6 +116,7 @@ void RtpLLMOp::initRPCServer(
     auto http_port = maga_init_params.gpt_init_parameter.http_port_;
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto use_cache_store = maga_init_params.gpt_init_parameter.use_cache_store_;
+    auto py_inference_log_response = maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {
         pybind11::gil_scoped_acquire acquire;
@@ -134,7 +135,8 @@ void RtpLLMOp::initRPCServer(
                                                     model_rpc_service_->getMultimodalProcessor(),
                                                     http_server_address,
                                                     maga_init_params,
-                                                    token_processor));
+                                                    token_processor,
+                                                    py_inference_log_response));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;

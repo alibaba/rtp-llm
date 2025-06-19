@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 
 namespace py = pybind11;
@@ -28,9 +28,9 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params): 
+    RemoteMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
     MultimodalProcessor(mm_process_engine, params) {
-        initLoadBalancer();    
+        initLoadBalancer();
     }
 
 private:
@@ -47,9 +47,9 @@ private:
 
     LoadBalancerInitParams makeConfig() {
         SubscribeServiceConfig subscribe_config;
-        if (GlobalConfig::get().service_discovery_config.use_local) {
+        if (gpt_init_parameter_.service_discovery_config.use_local) {
             // fake test
-            std::string remote_ip = GlobalConfig::get().service_discovery_config.remote_vit_server_ip;
+            std::string remote_ip = gpt_init_parameter_.service_discovery_config.remote_vit_server_ip;
             RTP_LLM_CHECK_WITH_INFO(!remote_ip.empty(), "multimodal server ip must be not empty");
             uint32_t remote_port = gpt_init_parameter_.remote_rpc_server_port_;
             RTP_LLM_LOG_INFO("remote rpc server addr: %s:%d", remote_ip.c_str(), remote_port);
@@ -60,7 +60,7 @@ private:
             local_config.nodes.push_back(node1);
             subscribe_config.local_configs.push_back(local_config);
         } else {
-            std::string vit_cm2_config_str = GlobalConfig::get().service_discovery_config.rtp_llm_multimodal_part_cm2_config;
+            std::string vit_cm2_config_str = gpt_init_parameter_.service_discovery_config.rtp_llm_multimodal_part_cm2_config;
             RTP_LLM_CHECK_WITH_INFO(!vit_cm2_config_str.empty(), "vit_cm2_config must be not empty");
 
             Cm2ClusterConfig vit_cm2_config;

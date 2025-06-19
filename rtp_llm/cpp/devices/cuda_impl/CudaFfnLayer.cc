@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <cstring>
 #include <numeric>
 
@@ -338,7 +338,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
                                                 stream_);
         }
     }
-    if (GlobalConfig::get().moe_config.fake_balance_expert) {
+    if (init_params_.moe_config.fake_balance_expert) {
         if (topk_t == DataType::TYPE_INT64) {
             fake_balance_expert(expert_for_source_row->data<int64_t>(),  expert_scales->data<float>(), init_params_.dp_rank, num_expert, token_num * top_k, stream_);
         } else {

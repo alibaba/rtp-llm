@@ -47,7 +47,7 @@ bool DeepEPBuffer::init() {
 
 void DeepEPBuffer::setLowLatencyEnv() {
     RTP_LLM_CHECK(num_qps_per_rank_ > 0);
-    bool use_deepep_p2p_low_latency = GlobalConfig::get().moe_config.use_deepep_p2p_low_latency;
+    bool use_deepep_p2p_low_latency = device_->initParams().moe_config.use_deepep_p2p_low_latency;
 
     if (use_deepep_p2p_low_latency) {
         setenv("NVSHMEM_DISABLE_P2P", "0", 1);

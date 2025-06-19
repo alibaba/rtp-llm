@@ -1,7 +1,7 @@
 #include <sstream>
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "autil/TimeUtility.h"
 using namespace autil::legacy::json;
 using namespace autil::legacy;
@@ -125,11 +125,11 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request,
     }
 }
 
-bool AccessLogWrapper::logResponse() {
+bool AccessLogWrapper::logResponse(bool py_inference_log_response) {
     static bool checked = false;
     static bool log_response = false;
     if (!checked) {
-        log_response = GlobalConfig::get().profiling_debug_logging_config.py_inference_log_response;
+        log_response = py_inference_log_response;
         checked = true;
     }
     return log_response;
@@ -203,7 +203,8 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
                                         int64_t                           request_id,
                                         int64_t                           start_time_us,
                                         const std::optional<std::string>& logable_response,
-                                        bool                              private_request) {
+                                        bool                              private_request,
+                                        bool                              py_inference_log_response) {
     if (private_request) {
         return;
     }
@@ -214,7 +215,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
     try {
         RequestLogInfo  request(decodeUnicode(raw_request));
         ResponseLogInfo response;
-        if (logResponse()) {
+        if (logResponse(py_inference_log_response)) {
             response.addResponse(logable_response.value());
         }
         AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_us);

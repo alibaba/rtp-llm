@@ -16,7 +16,8 @@ public:
     EmbeddingService(const std::shared_ptr<EmbeddingEndpoint>&       embedding_endpoint,
                      const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                      const std::shared_ptr<ConcurrencyController>&   controller,
-                     const kmonitor::MetricsReporterPtr&             metrics_reporter);
+                     const kmonitor::MetricsReporterPtr&             metrics_reporter,
+                     bool py_inference_log_response);
     ~EmbeddingService() = default;
 public:
     void embedding(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
@@ -34,6 +35,7 @@ private:
     std::shared_ptr<autil::AtomicCounter>    request_counter_;
     std::shared_ptr<ConcurrencyController>   controller_;
     kmonitor::MetricsReporterPtr             metrics_reporter_;
+    bool                                     py_inference_log_response_;
 };
 
 }  // namespace rtp_llm

@@ -2,7 +2,7 @@
 #include <thread>
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 using namespace std;
 
@@ -99,7 +99,7 @@ bool LoadFlags::isReady(DeviceBase* device) {
 void EplbController::init(const EplbConfig& eplb_control_data, DeviceBase* device) {
     this->eplb_control_data = eplb_control_data;
 
-    control_step = GlobalConfig::get().moe_config.eplb_control_step;
+    control_step = device->initParams().moe_config.eplb_control_step;
     RTP_LLM_LOG_INFO("EPLB control step: %d", control_step);
 
     auto eplb_control_data_list = eplb_control_data.toList();
@@ -185,9 +185,9 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     load_flags_.setReady(false, device_);
     eplb_controller_.init(eplb_control_data_, device);
 
-    test_mode_ = GlobalConfig::get().moe_config.eplb_test_mode;
+    test_mode_ = device_->initParams().moe_config.eplb_test_mode;
 
-    balance_layer_per_step_ = GlobalConfig::get().moe_config.eplb_balance_layer_per_step;
+    balance_layer_per_step_ = device_->initParams().moe_config.eplb_balance_layer_per_step;
 
     resetPlan(true);
 }

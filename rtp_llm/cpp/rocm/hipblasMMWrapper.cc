@@ -1,5 +1,5 @@
 #include "hipblasMMWrapper.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace rtp_llm {
 namespace rocm {
@@ -7,11 +7,12 @@ namespace rocm {
 hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
                                    hipblasLtHandle_t hipblaslt_handle,
                                    hipStream_t       stream,
-                                   IAllocator*       allocator):
+                                   IAllocator*       allocator,
+                                   const HWKernelConfig& hw_kernel_config):
     hipblas_handle_(hipblas_handle), hipblaslt_handle_(hipblaslt_handle), stream_(stream), allocator_(allocator) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     hipblas_workspace_ = allocator_->malloc(HIPBLAS_WORKSPACE_SIZE);
-    std::string config_path = GlobalConfig::get().hw_kernel_config.rocm_hipblaslt_config;
+    std::string config_path = hw_kernel_config.rocm_hipblaslt_config;
     if (config_path.empty()) {
         RTP_LLM_LOG_WARNING("ROCM_HIPBLASLT_CONFIG not set. Defaulting to gemm_config.csv.");
         config_path = "gemm_config.csv";
@@ -158,14 +159,14 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
         hipblasOperation_t trans_b = transb;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(int32_t)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
-        
+
         const int                        request_solutions = 1;
         hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
         int                              returnedAlgoCount = 0;
         ROCM_CHECK(hipblasLtMatmulAlgoGetHeuristic(
           hipblaslt_handle_, matmul, ADesc, BDesc, CDesc, CDesc, blasLtPrefer, request_solutions,
           heuristicResult, &returnedAlgoCount));
-        
+
         hipblasStatus_t                  blaslt_status;
         if (returnedAlgoCount > 0) {
             blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
@@ -184,7 +185,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                                             workSpace,
                                                             workspaceSize,
                                                             stream_);
-        } 
+        }
 
         if (blaslt_status != HIPBLAS_STATUS_SUCCESS || returnedAlgoCount == 0) {
             RTP_LLM_LOG_WARNING("[BLAS] blaslt failed, back to blas, which is no longer used in AITER.");
@@ -253,7 +254,7 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
     const void* alpha =
         is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<const void*>(&f_alpha);
     const void* beta = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<const void*>(&f_beta);
-    
+
     ROCM_CHECK(hipblasGemmStridedBatchedEx(hipblas_handle_,
                                                 transa,
                                                 transb,
@@ -365,7 +366,7 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
         int32_t bias_data_type = Ctype_;
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
-        
+
         const int                        request_solutions = 1;
         hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
         int                              returnedAlgoCount = 0;
@@ -378,7 +379,7 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t transa,
                                         blasLtPrefer,
                                         request_solutions,
                                         heuristicResult,
-                                        &returnedAlgoCount)); 
+                                        &returnedAlgoCount));
 
         ROCM_CHECK(hipblasLtMatmul(hipblaslt_handle_,
                         matmul,

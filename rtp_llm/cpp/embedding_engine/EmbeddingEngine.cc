@@ -21,6 +21,10 @@ EmbeddingEngine::~EmbeddingEngine() {
     (void)stop();
 }
 
+const rtp_llm::GptInitParameter& EmbeddingEngine::GetGptInitParameter(){
+    return params_;
+}
+
 absl::Status EmbeddingEngine::startLoop() {
     RTP_LLM_LOG_INFO("start embedding engine");
     running_ = true;

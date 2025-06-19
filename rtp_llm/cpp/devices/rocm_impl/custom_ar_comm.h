@@ -24,7 +24,7 @@ public:
 
     bool checkAllReduceAvailable(size_t elts_total_num, DataType data_type, size_t world_size);
 
-    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank);
+    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config);
 
     void* peerCommBufferPtr() {
         return param_.peer_comm_buffer_ptrs[rank_];
@@ -58,6 +58,6 @@ private:
 };
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream);
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream, const HWKernelConfig& hw_kernel_config);
 
 }  // namespace rtp_llm

@@ -51,10 +51,12 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/models_weight:weights_define",
+        "//rtp_llm/cpp/deep_gemm:deep_gemm_plugins_impl",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
         "@havenask//aios/autil:json",
+
     ] + select({
         "@//:using_arm": [
             "//rtp_llm/cpp/devices/arm_impl:arm_cpu_impl",
@@ -111,6 +113,7 @@ cc_library(
         ":stream",
         ":utils",
         ":cache",
+        "//rtp_llm/cpp/deep_gemm:deep_gemm_plugins_impl"
     ],
     visibility = ["//visibility:public"],
 )
@@ -171,6 +174,7 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/deep_gemm:deep_gemm_plugins_impl"
     ],
     visibility = ["//visibility:public"],
 )

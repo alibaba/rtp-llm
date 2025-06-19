@@ -2,12 +2,11 @@
 #include <chrono>
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 
-
 namespace rtp_llm {
 namespace lora {
 
 LoraManager::LoraManager() {
-    max_lora_model_size_ = GlobalConfig::get().model_specific_config.max_lora_model_size;
+    max_lora_model_size_ = user_max_lora_model_size;
 }
 
 rtp_llm::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {

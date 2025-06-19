@@ -69,7 +69,6 @@ public:
              bool use_xqa = false,
              KVBlockArray* kv_block_array = nullptr,
              CudaDevice* device = nullptr);
-
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(
             CudaDevice *device,
@@ -101,7 +100,6 @@ private:
     static bool isDecode(int input_token_num);
     static void recycle(void* p);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
-
 };
 
 }

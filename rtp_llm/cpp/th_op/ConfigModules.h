@@ -7,6 +7,7 @@
 #include <torch/extension.h>
 
 namespace rtp_llm {
+
 struct ParallelismDistributedConfig {
     int tp_size = 1;
     int ep_size = 1;
@@ -58,6 +59,7 @@ struct ProfilingDebugLoggingConfig {
     bool ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path = "";
     std::string log_level = "INFO";
+    bool gen_timeline_sync = false;
     std::string to_string() const;
     void update_from_env_for_test();
 };
@@ -173,6 +175,113 @@ struct MiscellaneousConfig {
     int64_t step_records_max_size = 1000;
     std::string to_string() const;
     void update_from_env_for_test();
+};
+
+class ParallelInfo final {
+public:
+    ParallelInfo(int tp_size = 1,
+                 int pp_size = 1,
+                 int ep_size = 1,
+                 int dp_size = 1,
+                 int world_size = 1,
+                 int world_rank = 0,
+                 int local_world_size = 1):
+        tp_size_(tp_size),
+        pp_size_(pp_size),
+        ep_size_(ep_size),
+        dp_size_(dp_size),
+        world_size_(world_size),
+        world_rank_(world_rank),
+        local_world_size_(local_world_size) {}
+
+public:
+    static ParallelInfo& globalParallelInfo() {
+        static ParallelInfo parallel_info;
+        return parallel_info;
+    }
+    void setTpSize(int tp_size) {
+        tp_size_ = tp_size;
+    }
+    int getTpSize() const {
+        return tp_size_;
+    }
+    void setPpSize(int pp_size) {
+        pp_size_ = pp_size;
+    }
+    int getPpSize() const {
+        return pp_size_;
+    }
+    void setDpSize(int dp_size) {
+        dp_size_ = dp_size;
+    }
+    int getDpSize() const {
+        return dp_size_;
+    }
+    void setEpSize(int ep_size) {
+        ep_size_ = ep_size;
+    }
+    int getEpSize() const {
+        return ep_size_;
+    }
+    int getTpRank() const {
+        return world_rank_ % tp_size_;
+    }
+    void setWorldRank(int world_rank) {
+        world_rank_ = world_rank;
+    }
+    int getWorldRank() const {
+        return world_rank_;
+    }
+    int getLocalRank() const {
+        return world_rank_ % local_world_size_;
+    }
+    void setWorldSize(int world_size) {
+        world_size_ = world_size;
+    }
+    int getWorldSize() const {
+        return world_size_;
+    }
+    void setLocalWorldSize(int local_world_size) {
+        local_world_size_ = local_world_size;
+    }
+    int getLocalWorldSize() const {
+        return local_world_size_;
+    }
+    bool isMaster() const {
+        return world_rank_ == 0;
+    }
+    bool isWorker() const {
+        return !isMaster();
+    }
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "ParallelInfo:[ "
+            << "tp_size=" << tp_size_ << " pp_size=" << pp_size_ << " world_size=" << world_size_
+            << " world_rank=" << world_rank_ << " local_world_size=" << local_world_size_ << " ]";
+        return oss.str();
+    }
+    // only for test
+    void reload() {
+        ParallelismDistributedConfig parallelism_distributed_config;
+        parallelism_distributed_config.update_from_env_for_test();
+        tp_size_          = parallelism_distributed_config.tp_size;
+        // in fact pipeline parallelism is not supported yet
+        pp_size_         =  parallelism_distributed_config.pp_size;
+        ep_size_          = parallelism_distributed_config.ep_size;
+        dp_size_          = parallelism_distributed_config.dp_size;
+        world_size_       = parallelism_distributed_config.world_size;
+        world_rank_       = parallelism_distributed_config.world_rank;
+        local_world_size_ = parallelism_distributed_config.local_world_size;
+    }
+
+private:
+    int         tp_size_;
+    int         pp_size_;
+    int         ep_size_;
+    int         dp_size_;
+    int         world_size_;
+    int         world_rank_;
+    int         local_world_size_;
 };
 
 std::string to_lower(const std::string& s);

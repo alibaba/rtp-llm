@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <algorithm>
 #include <memory>
 
@@ -587,7 +587,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         const auto& layer0 = weights_.layers[0];
         RTP_LLM_CHECK_WITH_INFO(description_.act_qscheme == QScheme::NoQuantize || description_.act_qscheme == QScheme::Qint8PerToken || description_.act_qscheme == Qfp8PerTensor,
                 "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
-        const size_t max_batch_seq_len = GlobalConfig::get().fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
+        const size_t max_batch_seq_len = device_->initParams().fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];

@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/api_server/EmbeddingService.h"
 
 #include "rtp_llm/cpp/api_server/Exception.h"
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/api_server/InferenceDataType.h"
 
@@ -10,11 +10,13 @@ namespace rtp_llm {
 EmbeddingService::EmbeddingService(const std::shared_ptr<EmbeddingEndpoint>&       embedding_endpoint,
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
-                                   const kmonitor::MetricsReporterPtr&             metrics_reporter):
+                                   const kmonitor::MetricsReporterPtr&             metrics_reporter,
+                                   bool py_inference_log_response):
     embedding_endpoint_(embedding_endpoint),
     request_counter_(request_counter),
     controller_(controller),
-    metrics_reporter_(metrics_reporter) {
+    metrics_reporter_(metrics_reporter),
+    py_inference_log_response_(py_inference_log_response) {
 }
 
 std::string EmbeddingService::getSource(const std::string& raw_request) {
@@ -50,8 +52,8 @@ std::string EmbeddingService::getUsage(const std::string& response) {
     return usage;
 }
 
-void EmbeddingService::report(const double value, 
-                              const std::string& name, 
+void EmbeddingService::report(const double value,
+                              const std::string& name,
                               const kmonitor::MetricsTags& tags,
                               const kmonitor::MetricType type) {
     kmonitor::MetricsTags metric_tags = kmonitor::MetricsTags(tags);
@@ -129,7 +131,7 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
         // metric_reporter_->reportSuccessQpsMetric(req.source);
         // metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms);
 
-        AccessLogWrapper::logSuccessAccess(body, request_id, request.getRecvTime(), logable_response, req.private_request);
+        AccessLogWrapper::logSuccessAccess(body, request_id, request.getRecvTime(), logable_response, req.private_request, py_inference_log_response_);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
         HttpApiServerException::handleException(e, request_id, metrics_reporter_, request, writer);

@@ -3,48 +3,30 @@
 #include <pybind11/pytypes.h>
 #include <tuple>
 
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
+#include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace th = torch;
 
-
 namespace rtp_llm {
+
+namespace lora{
+    static int user_max_lora_model_size;
+}
 
 using TensorMap  = std::unordered_map<std::string, th::Tensor>;
 using TensorMaps = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
-
-static void initialize(const rtp_llm::GptInitParameter& config) {
-    static std::once_flag flag;
-    std::call_once(flag, [&]() {
-        auto& global_config = GlobalConfig::get();
-        global_config.parallelism_distributed_config = config.parallelism_distributed_config;
-        global_config.scheduler_config = config.scheduler_config;
-        global_config.concurrency_config = config.concurrency_config;
-        global_config.fmha_config = config.fmha_config;
-        global_config.kv_cache_config = config.kv_cache_config;
-        global_config.profiling_debug_logging_config = config.profiling_debug_logging_config;
-        global_config.hw_kernel_config = config.hw_kernel_config;
-        global_config.device_resource_config = config.device_resource_config;
-        global_config.model_specific_config = config.model_specific_config;
-        global_config.service_discovery_config = config.service_discovery_config;
-        global_config.misc_config = config.misc_config;
-        global_config.sampler_config = config.sampler_config;
-        global_config.moe_config = config.moe_config;
-        global_config.sp_config = config.sp_config;
-        global_config.cache_store_config = config.cache_store_config;
-        global_config.batch_decode_scheduler_config = config.batch_decode_scheduler_config;
-        global_config.fifo_scheduler_config = config.fifo_scheduler_config;
-        RTP_LLM_LOG_INFO("\nGlobal GptInitParameter initialized.\n");
-    });
-}
 
 struct EngineInitParams: public th::jit::CustomClassHolder {
     EngineInitParams() {};
@@ -53,7 +35,21 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
                      rtp_llm::Weights&&               gpt_weights):
         model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
-            initialize(gpt_init_parameter);
+        DeepGemmPlugin::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
+        lora::user_max_lora_model_size = gpt_init_parameter.model_specific_config.max_lora_model_size;
+        // default 1 minute and 1000
+        StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
+        StepRecorder::STEP_RECORDS_MAX_SIZE = gpt_init_parameter.misc_config.step_records_max_size;
+        ParallelInfo& global_parallel_info = ParallelInfo::globalParallelInfo();
+        global_parallel_info.setTpSize(gpt_init_parameter.parallelism_distributed_config.tp_size);
+        global_parallel_info.setPpSize(gpt_init_parameter.parallelism_distributed_config.pp_size);
+        global_parallel_info.setEpSize(gpt_init_parameter.parallelism_distributed_config.ep_size);
+        global_parallel_info.setDpSize(gpt_init_parameter.parallelism_distributed_config.dp_size);
+        global_parallel_info.setWorldSize(gpt_init_parameter.parallelism_distributed_config.world_size);
+        global_parallel_info.setWorldRank(gpt_init_parameter.parallelism_distributed_config.world_rank);
+        global_parallel_info.setLocalWorldSize(gpt_init_parameter.parallelism_distributed_config.local_world_size);
+        ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
+        Logger::log_level_ = gpt_init_parameter.profiling_debug_logging_config.log_level;
     }
 
     size_t model_id;

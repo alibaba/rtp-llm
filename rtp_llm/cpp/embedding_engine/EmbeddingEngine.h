@@ -34,6 +34,7 @@ public:
         return resource_context_;
     }
 
+    const rtp_llm::GptInitParameter& GetGptInitParameter();
 private:
     absl::Status    trySaveStepError() const;
     void            loop();

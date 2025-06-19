@@ -1,7 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 using namespace ::testing;
 namespace rtp_llm {

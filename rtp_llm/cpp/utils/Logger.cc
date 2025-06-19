@@ -20,14 +20,14 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 namespace rtp_llm {
 
-bool initLogger() {
-    ProfilingDebugLoggingConfig& profiling_debug_logging_config = GlobalConfig::get().profiling_debug_logging_config;
-    profiling_debug_logging_config.update_from_env_for_test();
-    std::string log_conf_file = profiling_debug_logging_config.ft_alog_conf_path;
-    if ("" == log_conf_file) {
+std::string Logger::log_level_ = "INFO";
+
+bool initLogger(std::string log_file_path) {
+    std::cerr<<"initLogger log_file_path: "<<log_file_path<<std::endl;
+    if (log_file_path == "") {
         std::string alog_conf_full_path = std::filesystem::current_path().string() + "/rtp_llm/config/alog.conf";
         bool exist = std::filesystem::exists(alog_conf_full_path);
         if (!exist) {
@@ -35,21 +35,21 @@ bool initLogger() {
             AUTIL_ROOT_LOG_SETLEVEL(INFO);
             return true;
         }
-        log_conf_file = alog_conf_full_path;
+        log_file_path = alog_conf_full_path;
     }
 
-    bool exist = std::filesystem::exists(log_conf_file);
+    bool exist = std::filesystem::exists(log_file_path);
 
     if (exist) {
         try {
-            alog::Configurator::configureLogger(log_conf_file.c_str());
+            alog::Configurator::configureLogger(log_file_path.c_str());
         } catch (std::exception& e) {
-            std::cerr << "Failed to configure logger. Logger config file [" << log_conf_file << "], errorMsg ["
+            std::cerr << "Failed to configure logger. Logger config file [" << log_file_path << "], errorMsg ["
                       << e.what() << "]." << std::endl;
             return false;
         }
     } else {
-        std::cerr << "log config file [" << log_conf_file << "] doesn't exist. errorCode: [" << std::endl;
+        std::cerr << "log config file [" << log_file_path << "] doesn't exist. errorCode: [" << std::endl;
         return false;
     }
 
@@ -66,8 +66,7 @@ Logger::Logger(const std::string& submodule_name) {
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
     }
-    std::string& log_level = GlobalConfig::get().profiling_debug_logging_config.log_level;
-    if (log_level != "") {
+    if (Logger::log_level_ != "") {
         uint32_t log_level = getLevelfromstr("LOG_LEVEL");
         logger_->setLevel(log_level);
     }

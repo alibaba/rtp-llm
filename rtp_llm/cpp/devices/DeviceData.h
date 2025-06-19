@@ -59,8 +59,6 @@ struct DeviceInitParams {
     MicroBatchType enable_layer_micro_batch  = MicroBatchType::NONE;
 
     bool enable_sp = false;
-    size_t overlap_math_sm_count = 0;
-    size_t overlap_comm_type = 0;
     size_t m_split = 0;
 
     // to init deepep
@@ -74,8 +72,16 @@ struct DeviceInitParams {
     bool use_deepep_low_latency = false;
     bool is_mtp = false;
     bool is_eagle3 =false;
-
     FMHAConfig  fmha_config;
+    HWKernelConfig hw_kernel_config;
+    DeviceResourceConfig device_resource_config;
+    SamplerConfig sampler_config;
+    MoeConfig     moe_config;
+    SpeculativeExecutionConfig sp_config;
+    FIFOSchedulerConfig fifo_scheduler_config;
+    MiscellaneousConfig misc_config;
+    ParallelismDistributedConfig parallelism_distributed_config;
+    ProfilingDebugLoggingConfig profile_debug_logging_config;
 };
 
 // immutable device properties. Can not change since device is initialized.

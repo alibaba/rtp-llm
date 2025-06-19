@@ -10,11 +10,13 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+int DeepGemmPlugin::user_deep_gemm_num_sm = -1;
 
 #ifdef ENABLE_FP8
 template <class T>
@@ -64,7 +66,7 @@ size_t DeepGemmPlugin::getPaddingSize(size_t m, DeepGemmType gemm_type) {
 #ifdef ENABLE_FP8
     if (gemm_swap_ab_heuristic(m, gemm_type)) {
         // For some reason, m64n8k32 is not used in deep gemm.
-        // It might be worth it to activate the shape 
+        // It might be worth it to activate the shape
         // for some small m in swap ab variant.
         if (m < 16) {
             return 16;
@@ -91,7 +93,7 @@ inline int DeepGemmPlugin::getNumSms() {
     num_sms = properties.multiProcessorCount;
     RTP_LLM_LOG_INFO("cuda device property has sm num %d", num_sms);
 
-    int num_sms_from_config = GlobalConfig::get().hw_kernel_config.deep_gemm_num_sm;
+    int num_sms_from_config = DeepGemmPlugin::user_deep_gemm_num_sm;
     if (num_sms_from_config != -1) {
         num_sms = num_sms_from_config;
     }
@@ -154,7 +156,7 @@ inline int getSmemSize(int num_stages, int k, int bm, int bn, int bk, bool swap_
         int smem_b_per_stage = bn * bk;
         int smem_scales_b = ceil_div(bn * 4, 128) * 128;
         int smem_barrier = num_stages * 8 * 2;
-        
+
         int smem_size = 0;
         smem_size += smem_d;
         smem_size += num_stages * smem_a_per_stage;
@@ -170,7 +172,7 @@ inline int getSmemSize(int num_stages, int k, int bm, int bn, int bk, bool swap_
         int smem_b_per_stage = bn * bk;
         int smem_scales_b = ceil_div(k, bk) * 4;
         int smem_barrier = num_stages * 8 * 2;
-    
+
         int smem_size = 0;
         smem_size += smem_d;
         smem_size += num_stages * smem_a_per_stage;
@@ -316,7 +318,7 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, D
         }
 
         // For some reason, m64n8k32 is not used in deep gemm.
-        // It might be worth it to activate the shape 
+        // It might be worth it to activate the shape
         // for some small m in swap ab variant.
         static int block_ns[] = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
         for (int block_n: block_ns) {
@@ -343,9 +345,9 @@ DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, D
         RTP_LLM_CHECK_WITH_INFO(valid_best.block_n != -1, "block n size cannot be None in best config");
         if (valid_best.block_m != best.block_m || valid_best.block_n != best.block_n) {
             RTP_LLM_LOG_WARNING("best block shape for %sdeep gemm (%d, %d) is not valid, fallback to (%d, %d), "
-                           "consider changing the shape m%dn%dk%d for better performance", 
+                           "consider changing the shape m%dn%dk%d for better performance",
                            swap_ab ? "swap ab ": "",
-                           best.block_m, best.block_n, valid_best.block_m, valid_best.block_n, 
+                           best.block_m, best.block_n, valid_best.block_m, valid_best.block_n,
                            original_m, original_n, k);
         }
 

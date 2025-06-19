@@ -25,6 +25,7 @@ cc_library(
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
+        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp:utils",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types",

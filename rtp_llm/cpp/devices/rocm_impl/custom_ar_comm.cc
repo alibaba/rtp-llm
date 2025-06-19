@@ -165,7 +165,7 @@ std::vector<hipIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Nccl
     return handles;
 }
 
-bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank) {
+bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config) {
 
     size_t world_size       = tp_ranks.size();
     size_t local_world_size = rocm::getDeviceCount();
@@ -176,7 +176,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
                     local_world_size);
         return false;
     }
-    bool disable_custom_ar = GlobalConfig::get().hw_kernel_config.ft_disable_custom_ar;
+    bool disable_custom_ar = .hw_kernel_config.ft_disable_custom_ar;
     if (disable_custom_ar) {
         RTP_LLM_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
@@ -250,7 +250,7 @@ CustomAllReduceComm::select_kernel_algo(bool support_nv_link, size_t elts_total_
 }
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream) {
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream, const HWKernelConfig& hw_kernel_config) {
     size_t rank_index = 0;
     for (size_t i = 0; i < tp_ranks.size(); i++) {
         if (tp_ranks[i] == nccl_para.rank_) {
@@ -259,7 +259,7 @@ initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& t
         }
     }
 
-    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_)) {
+    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_, hw_kernel_config)) {
         return nullptr;
     }
 

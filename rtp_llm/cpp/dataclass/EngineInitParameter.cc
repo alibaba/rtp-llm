@@ -7,7 +7,6 @@
 #include <memory>
 using namespace std;
 
-
 namespace rtp_llm {
 
 rtp_llm::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& tensor) {
@@ -150,7 +149,7 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
 
         // for qwen moe
         ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
-    } 
+    }
 
     // eplb stats
     ffn_weights.logic_expert_cnt = mayFindBuffer(map, W::logic_expert_cnt);

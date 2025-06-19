@@ -19,7 +19,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <cuda.h>
 
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <mutex>
 #include <stdio.h>
 #include <stdlib.h>
@@ -400,7 +401,7 @@ bool shared_mem_sufficient(int smem_size) {
 }
 
 bool should_print() {
-    int tp_rank = GlobalConfig::get().parallelism_distributed_config.world_rank;
+    int tp_rank = ParallelInfo::globalParallelInfo().getWorldRank();
     if (tp_rank != 0) {
         return false;
     }
@@ -671,7 +672,7 @@ void print_bsd_sum_and_square(const int   layer_id,
         return;
     }
 
-    auto tp_rank = GlobalConfig::get().parallelism_distributed_config.world_rank;
+    auto tp_rank = ParallelInfo::globalParallelInfo().getWorldRank();
     if (tp_rank != 0 && tp_rank != 1) {
         return;
     }

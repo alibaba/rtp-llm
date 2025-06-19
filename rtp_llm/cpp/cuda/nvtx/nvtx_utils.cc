@@ -20,12 +20,10 @@
 #ifdef USE_NVTX
 #include "nvToolsExt.h"
 #endif
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace ft_nvtx {
 
-static bool                                            has_read_nvtx_env = false;
-static bool                                            is_enable_ft_nvtx = false;
 static std::vector<rtp_llm::KernelProfiler*> profilers;
 static std::string                                     scope;
 static int                                             domain = 0;
@@ -55,44 +53,6 @@ void resetDeviceDomain() {
 }
 int getDeviceDomain() {
     return domain;
-}
-
-bool isEnableNvtx() {
-    if (!has_read_nvtx_env) {
-        is_enable_ft_nvtx = rtp_llm::GlobalConfig::get().profiling_debug_logging_config.ft_nvtx;
-        has_read_nvtx_env = true;
-    }
-    return is_enable_ft_nvtx;
-}
-
-void ftNvtxRangePush(std::string name, cudaStream_t stream) {
-    std::string                        kernel_name = (getScope() + name).c_str();
-    if (NvtxResource::Instance().getCounter().shouldReport()) {
-        rtp_llm::KernelProfiler* profiler =
-            new rtp_llm::KernelProfiler(stream, kernel_name, NvtxResource::Instance().getMetricReporter());
-        profiler->start();
-        profilers.push_back(profiler);
-    }
-
-#ifdef USE_NVTX
-    if (isEnableNvtx()) {
-        nvtxRangePushA((getScope() + name).c_str());
-    }
-#endif
-}
-
-void ftNvtxRangePop() {
-    if (NvtxResource::Instance().getCounter().shouldReport()) {
-        rtp_llm::KernelProfiler* profiler = profilers.back();
-        profiler->stop();
-        profilers.pop_back();
-        delete profiler;
-    }
-#ifdef USE_NVTX
-    if (isEnableNvtx()) {
-        nvtxRangePop();
-    }
-#endif
 }
 
 }  // namespace ft_nvtx

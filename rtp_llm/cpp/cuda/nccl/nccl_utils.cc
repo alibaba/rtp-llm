@@ -18,7 +18,7 @@
 #include "nccl_utils_torch.h"
 #include <chrono>
 #include <string>
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace std;
 
 namespace rtp_llm {

@@ -11,7 +11,7 @@
 #include "http_server/HttpServer.h"
 #include "http_client/SimpleHttpClient.h"
 
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 using namespace autil::legacy;

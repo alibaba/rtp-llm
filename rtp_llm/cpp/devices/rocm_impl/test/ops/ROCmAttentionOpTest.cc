@@ -18,9 +18,9 @@ using namespace rtp_llm;
 TEST_F(AttentionOpTest, SelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
     printf("Runing SelfAttentionOpTest\n");
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = false;
-    device_ = new ROCmDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = false;
+    device_ = new ROCmDevice(device_init_params);
     device_->init();
     // ASSERT_FALSE(static_cast<ROCmDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2, 4, 8};
@@ -45,9 +45,9 @@ TEST_F(AttentionOpTest, SelfAttentionOpTest) {
 
 TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
-    ConfigCollection& config_collection =  GlobalConfig::get();
-    config_collection.hw_kernel_config.enable_multi_block_mode = true;
-    device_ = new ROCmDevice(DeviceInitParams());
+    DeviceInitParams device_init_params;
+    device_init_params.hw_kernel_config.enable_multi_block_mode = true;
+    device_ = new ROCmDevice(device_init_params);
     device_->init();
     // ASSERT_TRUE(static_cast<ROCmDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2, 4, 8};

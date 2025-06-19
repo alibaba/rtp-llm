@@ -8,7 +8,7 @@
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 
 using namespace autil::legacy;

@@ -21,7 +21,7 @@
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <climits>
 #include <cstdint>
 #include <sys/types.h>
@@ -36,7 +36,7 @@ CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, si
     rank_(rank),
     rank_index_(rank_index),
     world_size_(tp_ranks.size()),
-    support_nv_link_(checkAllNVLinks(tp_ranks)), 
+    support_nv_link_(checkAllNVLinks(tp_ranks)),
     comm_buf_threshold_(getCommBufThreshold(support_nv_link_, world_size_)), tp_ranks_(std::move(tp_ranks)) {
     param_.barrier_flag        = 0;
     param_.rank                = rank_;
@@ -190,7 +190,7 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     return handles;
 }
 
-bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank) {
+bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config) {
 
     size_t world_size       = tp_ranks.size();
     size_t local_world_size = getVisibleDeviceNum();
@@ -202,7 +202,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
         return false;
     }
 
-    if (GlobalConfig::get().hw_kernel_config.ft_disable_custom_ar) {
+    if (hw_kernel_config.ft_disable_custom_ar) {
         RTP_LLM_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
     }
@@ -290,7 +290,7 @@ CustomAllReduceComm::select_kernel_algo(bool support_nv_link, size_t elts_total_
 }
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, cudaStream_t stream) {
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, cudaStream_t stream, const HWKernelConfig& hw_kernel_config) {
     size_t rank_index = 0;
     for (size_t i = 0; i < tp_ranks.size(); i++) {
         if (tp_ranks[i] == nccl_para.rank_) {
@@ -299,7 +299,7 @@ initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& t
         }
     }
 
-    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_)) {
+    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_, hw_kernel_config)) {
         return nullptr;
     }
 

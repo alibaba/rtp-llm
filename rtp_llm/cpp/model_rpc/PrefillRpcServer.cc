@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -89,7 +89,7 @@ void PrefillRpcServer::initLoadBalancer() {
     if (maga_init_params_.gpt_init_parameter.load_balance_policy_name_ == "RR") {
         load_balancer_ = std::make_shared<RRLoadBalancer>();
     } else {
-        load_balancer_ = std::make_shared<WRRLoadBalancer>();
+        load_balancer_ = std::make_shared<WRRLoadBalancer>(maga_init_params_.gpt_init_parameter.cache_store_config);
     }
     RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
     RTP_LLM_LOG_INFO("load balancer init success");
@@ -97,10 +97,10 @@ void PrefillRpcServer::initLoadBalancer() {
 
 LoadBalancerInitParams PrefillRpcServer::makeConfig() {
     SubscribeServiceConfig subscribe_config;
-    if (GlobalConfig::get().service_discovery_config.use_local) {
+    if (maga_init_params_.gpt_init_parameter.service_discovery_config.use_local) {
         // fake test
 
-        vector<string> remote_addrs = split(GlobalConfig::get().service_discovery_config.remote_rpc_server_ip, ',');
+        vector<string> remote_addrs = split(maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip, ',');
         RTP_LLM_CHECK_WITH_INFO(!remote_addrs.empty(), "REMOTE_RPC_SERVER_IP contains no valid addresses");
 
         decode_cluster_name_ = "LOCAL";
@@ -136,7 +136,7 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
 
         subscribe_config.local_configs.push_back(local_config);
     } else {
-        string decode_cm2_config_str = GlobalConfig::get().service_discovery_config.rtp_llm_decode_cm2_config;
+        string decode_cm2_config_str = maga_init_params_.gpt_init_parameter.service_discovery_config.rtp_llm_decode_cm2_config;
         RTP_LLM_CHECK_WITH_INFO(!decode_cm2_config_str.empty(), "decode_cm2_config must be not empty");
 
         Cm2ClusterConfig decode_cm2_config;
@@ -314,7 +314,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
     RTP_LLM_LOG_DEBUG("remote generate stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     vector<int> all_token = stream->currentExecuteTokens();
-    int first_token = all_token[all_token.size() - 1]; 
+    int first_token = all_token[all_token.size() - 1];
     RTP_LLM_LOG_DEBUG("first token token id %d", first_token);
     GenerateRequestPB generate_request;
     generate_request.set_client_id(process_id_);

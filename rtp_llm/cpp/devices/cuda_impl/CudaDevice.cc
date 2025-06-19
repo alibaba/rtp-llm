@@ -15,12 +15,12 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace std;
 using namespace rtp_llm;
 using namespace tensorrt_llm;
@@ -34,7 +34,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_value(cudaSetDevice(device_id_));
-    if (GlobalConfig::get().device_resource_config.not_use_default_stream) {
+    if (init_params_.device_resource_config.not_use_default_stream) {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     } else {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getDefaultCUDAStream());
@@ -57,7 +57,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
 
     moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
 
-    if (GlobalConfig::get().moe_config.hack_moe_expert) {
+    if (init_params_.moe_config.hack_moe_expert) {
         hack_moe_expert_ = true;
     }
 
@@ -109,7 +109,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
     if (tp_nccl_param_.world_size_ > 1) {
         auto&               nccl_param = tp_nccl_param_;
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
-        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_, params.hw_kernel_config);
     }
 
     // cudaHostMalloc needs page table on GPU memory, retain this part first.
@@ -166,7 +166,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params)
         mla_ops_type = device_prop_.major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
     }
 
-    use_stable_scatter_add = GlobalConfig::get().hw_kernel_config.enable_stable_scatter_add;
+    use_stable_scatter_add = init_params_.hw_kernel_config.enable_stable_scatter_add;
 
     RTP_LLM_LOG_INFO("use_stable_scatter_add: %d", use_stable_scatter_add);
 }
@@ -329,8 +329,8 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->enable_comm_overlap = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
         prop->enable_sp = init_params_.enable_sp;
-        prop->overlap_math_sm_count = init_params_.overlap_math_sm_count;
-        prop->overlap_comm_type = init_params_.overlap_comm_type;
+        prop->overlap_math_sm_count = init_params_.device_resource_config.overlap_math_sm_count;
+        prop->overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
         prop->ffn_tp_size = init_params_.ffn_tp_size;
         prop->ffn_tp_rank = init_params_.ffn_tp_rank;
         prop->m_split = init_params_.m_split;
@@ -393,7 +393,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (output.prefill_flash_infer_attn != nullptr && !params.configs.use_mla) {
-            if (use_fp8_fmha_ && GlobalConfig::get().fmha_config.enable_xqa) {
+            if (use_fp8_fmha_ && init_params_.fmha_config.enable_xqa) {
                 fmha_type_ = FMHAType::XQA;
             } else {
                 fmha_type_ = FMHAType::FLASH_INFER;
@@ -583,7 +583,7 @@ bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
 }
 
 void CudaDevice::checkUseFlashinferSampleKernel() {
-    bool flashinfer_sample_env = GlobalConfig::get().sampler_config.enable_flashinfer_sample_kernel;
+    bool flashinfer_sample_env = init_params_.sampler_config.enable_flashinfer_sample_kernel;
     if (!flashinfer_sample_env) {
         RTP_LLM_LOG_WARNING("Flashinfer sample is disabled for by env");
         return;
@@ -598,8 +598,8 @@ void CudaDevice::checkUseMultiBlockMode() {
         use_multi_block_mode = false;
         return;
     }
-    
-    if (!GlobalConfig::get().hw_kernel_config.enable_multi_block_mode) {
+
+    if (!init_params_.hw_kernel_config.enable_multi_block_mode) {
         RTP_LLM_LOG_WARNING("MMHA multi_block_mode is disabled");
         use_multi_block_mode = false;
         return;

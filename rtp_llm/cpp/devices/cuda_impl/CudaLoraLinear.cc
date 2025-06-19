@@ -7,7 +7,7 @@ using namespace std;
 namespace rtp_llm {
 
 ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) {
-    size_t overlap_comm_type = init_params_.overlap_comm_type;
+    size_t overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
     if (overlap_comm_type <= 1) {
         return DeviceBase::loraLinearReduceScatter(params);
     }
@@ -19,7 +19,7 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
     size_t tp_size = params.mode == ParallelMode::FFN_TP ? init_params_.ffn_tp_size : init_params_.tp_size;
     size_t tp_rank = params.mode == ParallelMode::FFN_TP ? init_params_.ffn_tp_rank : init_params_.tp_rank;
     DataType output_data_type = params.output_type;
-    
+
     if ((overlap_comm_type == 2) &&
         ((!linear_params.lora_input) || linear_params.lora_input->isEmpty()) &&
         init_params_.tp_size > 1) {
@@ -84,13 +84,13 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
                 linear_params.gemm_params.activationType,
                 linear_params.gemm_params.alpha,
                 linear_params.gemm_params.beta,
-                init_params_.overlap_math_sm_count,
+                init_params_.device_resource_config.overlap_math_sm_count,
                 cb->_stream_compute[i % cb->_stream_compute.size()]
             );
             loraLinear({gemm_params});
             printBufferData(*input_a_chunk, "input_a_chunk");
             printBufferData(*output_chunk, "output_chunk");
-             
+
             if (i < tp_size - 1) {
                 int cur_stream_id = i % cb->_stream_compute.size();
                 int send_offset = comm_bytes * i;
@@ -130,7 +130,7 @@ ReduceScatterLoraLinearOutput CudaDevice::loraLinearReduceScatter(const LoraLine
 }
 
 AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLinearParams& params) {
-    size_t overlap_comm_type = init_params_.overlap_comm_type;
+    size_t overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
     if (overlap_comm_type <= 1) {
         return DeviceBase::allGatherloraLinear(params);
     }
@@ -243,7 +243,7 @@ AllGatherLoraLinearOutput CudaDevice::allGatherloraLinear(const AllGatherLoraLin
                 linear_params.gemm_params.activationType,
                 linear_params.gemm_params.alpha,
                 linear_params.gemm_params.beta,
-                init_params_.overlap_math_sm_count,
+                init_params_.device_resource_config.overlap_math_sm_count,
                 cb->_stream_compute[i % cb->_stream_compute.size()]
             );
             loraLinear({gemm_params});

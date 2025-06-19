@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "autil/EnvUtil.h"
 #include <cassert>
 
@@ -79,39 +79,45 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.num_experts       = params.expert_num_;
     device_params.extra_experts     = params.phy_exp_num_ - params.expert_num_;
     device_params.fmha_config       = params.fmha_config;
+    device_params.device_resource_config = params.device_resource_config;
+    device_params.sampler_config    = params.sampler_config;
+    device_params.moe_config        = params.moe_config;
+    device_params.sp_config         = params.sp_config;
+    device_params.fifo_scheduler_config = params.fifo_scheduler_config;
+    device_params.misc_config       = params.misc_config;
+    device_params.parallelism_distributed_config = params.parallelism_distributed_config;
+    device_params.profile_debug_logging_config = params.profiling_debug_logging_config;
+    device_params.device_resource_config = params.device_resource_config;
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
-
-    device_params.overlap_math_sm_count = GlobalConfig::get().device_resource_config.overlap_math_sm_count;
-    device_params.overlap_comm_type = GlobalConfig::get().device_resource_config.overlap_comm_type;
     device_params.max_seq_len       = params.max_seq_len_;
-    RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.overlap_comm_type);
-    device_params.m_split = GlobalConfig::get().device_resource_config.m_split;
+    RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);
+    device_params.m_split = params.device_resource_config.m_split;
     device_params.max_generate_batch_size = params.max_generate_batch_size_;
     device_params.max_batch_size =
-        std::max(static_cast<size_t>(GlobalConfig::get().sampler_config.max_batch_size), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
+        std::max(static_cast<size_t>(params.sampler_config.max_batch_size), std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 
-    const auto device_mem_reserve_env = GlobalConfig::get().device_resource_config.device_reserve_memory_bytes;
+    const auto device_mem_reserve_env = params.device_resource_config.device_reserve_memory_bytes;
     RTP_LLM_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);
     device_params.device_reserve_memory_bytes = device_mem_reserve_env
                                                 ? device_mem_reserve_env
                                                 : getDefaultDeviceReserveMemoryBytes(params);
     RTP_LLM_LOG_INFO("Device reserve memory bytes: %ld", device_params.device_reserve_memory_bytes);
 
-    device_params.host_reserve_memory_bytes = GlobalConfig::get().device_resource_config.host_reserve_memory_bytes; // 4GB
+    device_params.host_reserve_memory_bytes = params.device_resource_config.host_reserve_memory_bytes; // 4GB
     RTP_LLM_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
 
-    device_params.enable_comm_overlap = GlobalConfig::get().device_resource_config.enable_comm_overlap;
-    device_params.enable_layer_micro_batch = static_cast<MicroBatchType>(GlobalConfig::get().device_resource_config.enable_layer_micro_batch);
+    device_params.enable_comm_overlap = params.device_resource_config.enable_comm_overlap;
+    device_params.enable_layer_micro_batch = static_cast<MicroBatchType>(params.device_resource_config.enable_layer_micro_batch);
 
     RTP_LLM_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                 device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
 
-    device_params.use_deepep_moe = GlobalConfig::get().moe_config.use_deepep_moe;
-    device_params.use_deepep_internode = GlobalConfig::get().moe_config.use_deepep_internode;
-    device_params.use_deepep_low_latency = GlobalConfig::get().moe_config.use_deepep_low_latency;;
-    auto sp_type = GlobalConfig::get().sp_config.sp_type;
-    auto sp_model_type = GlobalConfig::get().sp_config.sp_model_type;
+    device_params.use_deepep_moe = params.moe_config.use_deepep_moe;
+    device_params.use_deepep_internode = params.moe_config.use_deepep_internode;
+    device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;;
+    auto sp_type = params.sp_config.sp_type;
+    auto sp_model_type = params.sp_config.sp_model_type;
     RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
     RTP_LLM_LOG_INFO("device_params sp_model_type is %s", sp_model_type.c_str());
     if (((sp_type == "vanilla") && (sp_model_type == "mixtbstars-mtp"))      ||
@@ -123,7 +129,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     }
 
     if (((sp_type == "vanilla") && (sp_model_type == "qwen_3_moe_eagle"))      ||
-        (sp_type == "eagle3")) 
+        (sp_type == "eagle3"))
     {
         device_params.is_eagle3 = true;
         RTP_LLM_LOG_INFO("device_params.eagle3 true");

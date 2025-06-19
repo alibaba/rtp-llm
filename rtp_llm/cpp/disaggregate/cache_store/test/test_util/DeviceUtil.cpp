@@ -6,8 +6,10 @@ using namespace std;
 
 namespace rtp_llm {
 
-DeviceUtil::DeviceUtil() {
-    rtp_llm::DeviceFactory::initDevices(GptInitParameter());
+DeviceUtil::DeviceUtil(const DeviceResourceConfig& device_resource_config) {
+    GptInitParameter gpt_init_params;
+    gpt_init_params.device_resource_config = device_resource_config;
+    rtp_llm::DeviceFactory::initDevices(gpt_init_params);
     device_ = DeviceFactory::getDefaultDevice();
 }
 

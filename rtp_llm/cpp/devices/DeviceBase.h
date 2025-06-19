@@ -111,6 +111,10 @@ public:
         return init_params_;
     }
 
+    DeviceInitParams& initParamsRef() {
+        return init_params_;
+    }
+
     // for record moe expert stats
     virtual OverallExpertStats createMoeExpertStates(const ExpertStatsParams& params);
     virtual void cleanMoeExpertStates(const OverallExpertStats& stats);

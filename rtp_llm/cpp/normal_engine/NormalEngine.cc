@@ -53,7 +53,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
 }
 
 void NormalEngine::initScheduler() {
-    if (GlobalConfig::get().scheduler_config.use_batch_decode_scheduler) {
+    if (params_.scheduler_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
@@ -294,7 +294,7 @@ absl::Status NormalEngine::step() {
         profiler_step_ = 0;
     }
     if (gen_timeline && profiler_step_ <= 0) {
-        auto stream_group = StreamGroups(streams);        
+        auto stream_group = StreamGroups(streams);
         auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size + device_->getDeviceProperties().tp_rank;
         auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
                                                                world_rank,

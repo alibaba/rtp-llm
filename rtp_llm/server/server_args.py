@@ -134,6 +134,15 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             return self._env_mappings.copy()
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1', 'on'):
+        return True
+    if v.lower() in ('no', 'false', 'f', '0', 'off'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
 def setup_args():
     parser = EnvArgumentParser(
         description="RTP LLM"
@@ -193,7 +202,7 @@ def setup_args():
     concurrent_group.add_argument(
         '--concurrency_with_block',
         env_name="CONCURRENCY_WITH_BLOCK",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制并发请求的阻塞行为。通常设置为 '1' (启用阻塞) 或 '0' (禁用阻塞)。"
     )
@@ -212,70 +221,70 @@ def setup_args():
     fmha_group.add_argument(
         '--enable_fmha',
         env_name="ENABLE_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用Fused Multi-Head Attention (FMHA) 功能。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--enable_trt_fmha',
         env_name="ENABLE_TRT_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用经TensorRT(V2版本)优化的FMHA功能。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--enable_paged_trt_fmha',
         env_name="ENABLE_PAGED_TRT_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用Paged TensorRT FMHA功能。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--enable_open_source_fmha',
         env_name="ENABLE_OPENSOURCE_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用开源版本的FMHA实现。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--enable_paged_open_source_fmha',
         env_name="ENABLE_PAGED_OPEN_SOURCE_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用Paged开源版本的FMHA实现。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--enable_trtv1_fmha',
         env_name="ENABLE_TRTV1_FMHA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用TRTv1风格的FMHA功能。可选值: True (启用), False (禁用)。"
     )
     fmha_group.add_argument(
         '--fmha_perf_instrument',
         env_name="FMHA_PERF_INSTRUMENT",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否为FMHA启用NVTX性能分析。设置为 True 启用, False 禁用。"
     )
     fmha_group.add_argument(
         '--fmha_show_params',
         env_name="FMHA_SHOW_PARAMS",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否显示FMHA的参数信息。设置为 True 启用, False 禁用。"
     )
     fmha_group.add_argument(
         '--disable_flash_infer',
         env_name="DISABLE_FLASH_INFER",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否禁用FlashInfer Attention机制。设置为 True 启用, False 禁用。"
     )
     fmha_group.add_argument(
         '--enable_xqa',
         env_name="ENABLE_XQA",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否开启 xqa 的功能，此功能需要 SM 90 (Hopper) 或更新的 GPU 架构。可选值: True (启用), False (禁用)。"
     )
@@ -287,7 +296,7 @@ def setup_args():
     kv_cache_group.add_argument(
         '--reuse_cache',
         env_name="REUSE_CACHE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否激活KV Cache的重用机制。设置为 True 启用 , False 关闭"
     )
@@ -313,42 +322,42 @@ def setup_args():
     profile_debug_logging_group.add_argument(
         '--ft_nvtx',
         env_name="FT_NVTX",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否启用NVTX性能分析。可选值: True (启用), False (禁用)。默认为 False"
     )
     profile_debug_logging_group.add_argument(
         '--py_inference_log_response',
         env_name="PY_INFERENCE_LOG_RESPONSE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否在Python推理的access log中记录响应内容。可选值: `True` (记录), `False` (不记录)。默认为 `False`"
     )
     profile_debug_logging_group.add_argument(
         '--rtp_llm_trace_memory',
         env_name="RTP_LLM_TRACE_MEMORY",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False"
     )
     profile_debug_logging_group.add_argument(
         '--rtp_llm_trace_malloc_stack',
         env_name="RTP_LLM_TRACE_MALLOC_STACK",
-        type=bool,
+        type=str2bool,
         default=False,
         help="是否启用 malloc stack 追踪,与RTP_LLM_TRACE_MEMORY结合使用"
     )
     profile_debug_logging_group.add_argument(
         '--enable_device_perf',
         env_name="ENABLE_DEVICE_PERF",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否在DeviceBase中启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。"
     )
     profile_debug_logging_group.add_argument(
         '--ft_core_dump_on_exception',
         env_name="FT_CORE_DUMP_ON_EXCEPTION",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。可选值: True (启用), False (禁用)。"
     )
@@ -365,6 +374,13 @@ def setup_args():
         type=str,
         default='INFO',
         help="设置日志记录级别。可选级别包括: ERROR, WARN, INFO, DEBUG。默认为 INFO"
+    )
+    profile_debug_logging_group.add_argument(
+        '--gen_timeline_sync',
+        env_name="GEN_TIMELINE_SYNC",
+        type=bool,
+        default=False,
+        help="是否开启收集Timeline信息用于性能分析"
     )
 
     ##############################################################################################################
@@ -383,7 +399,7 @@ def setup_args():
     hw_kernel_group.add_argument(
         '--arm_gemm_use_kai',
         env_name="ARM_GEMM_USE_KAI",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 时，为 ARM GEMM 操作启用 KleidiAI 支持。这可能影响权重处理和计算性能。"
     )
@@ -391,7 +407,7 @@ def setup_args():
     hw_kernel_group.add_argument(
         '--enable_stable_scatter_add',
         env_name="ENABLE_STABLE_SCATTER_ADD",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制是否启用稳定的 scatter add 操作。"
     )
@@ -399,7 +415,7 @@ def setup_args():
     hw_kernel_group.add_argument(
         '--enable_multi_block_mode',
         env_name="ENABLE_MULTI_BLOCK_MODE",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否为 Multi-Head Attention (MMHA) 启用 multi-block 模式。设置为 'ON' 启用，'OFF' 禁用。"
     )
@@ -415,7 +431,7 @@ def setup_args():
     hw_kernel_group.add_argument(
         '--ft_disable_custom_ar',
         env_name="FT_DISABLE_CUSTOM_AR",
-        type=bool,
+        type=str2bool,
         default=True,
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。"
     )
@@ -435,7 +451,7 @@ def setup_args():
     sampling_group.add_argument(
         '--enable_flashinfer_sample_kernel',
         env_name="ENABLE_FLASHINFER_SAMPLE_KERNEL",
-        type=bool,
+        type=str2bool,
         default=True,
         help="控制是否启用FlashInfer的采样 kernel。可选值: True (启用), False (禁用)。"
     )
@@ -488,7 +504,7 @@ def setup_args():
     device_resource_group.add_argument(
         '--enable_comm_overlap',
         env_name="ENABLE_COMM_OVERLAP",
-        type=bool,
+        type=str2bool,
         default=True,
         help="设置为 `True` 以启用计算与通信之间的重叠执行，旨在提高设备利用率和吞吐量。"
     )
@@ -504,7 +520,7 @@ def setup_args():
     device_resource_group.add_argument(
         '--not_use_default_stream',
         env_name="NOT_USE_DEFAULT_STREAM",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制 PyTorch 操作不使用标准的默认 CUDA 流。"
     )
@@ -516,7 +532,7 @@ def setup_args():
     moe_group.add_argument(
         '--use_deepep_moe',
         env_name="USE_DEEPEP_MOE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 以启用 DeepEP 来处理 MoE 模型的 expert 部分。"
     )
@@ -524,7 +540,7 @@ def setup_args():
     moe_group.add_argument(
         '--use_deepep_internode',
         env_name="USE_DEEPEP_INTERNODE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 以启用 DeepEP 来优化跨节点 (inter-node) 通信。"
     )
@@ -532,7 +548,7 @@ def setup_args():
     moe_group.add_argument(
         '--use_deepep_low_latency',
         env_name="USE_DEEPEP_LOW_LATENCY",
-        type=bool,
+        type=str2bool,
         default=True,
         help="设置为 `True` 以启用 DeepEP 的低延迟模式。"
     )
@@ -540,7 +556,7 @@ def setup_args():
     moe_group.add_argument(
         '--use_deepep_p2p_low_latency',
         env_name="USE_DEEPEP_P2P_LOW_LATENCY",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 以启用 DeepEP 的点对点 (P2P) 低延迟模式。"
     )
@@ -556,7 +572,7 @@ def setup_args():
     moe_group.add_argument(
         '--fake_balance_expert',
         env_name="FAKE_BALANCE_EXPERT",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 时，为 MoE 模型中的 expert 启用伪均衡 (fake balancing) 机制。用于测试或模拟特定均衡行为。"
     )
@@ -572,7 +588,7 @@ def setup_args():
     moe_group.add_argument(
         '--eplb_test_mode',
         env_name="EPLB_TEST_MODE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 时，为 ExpertBalancer 组件启用测试模式。用于调试或特定的测试场景。"
     )
@@ -584,7 +600,6 @@ def setup_args():
         default=1,
         help="设置 eplb 每次更新的层数。"
     )
-
 
     ##############################################################################################################
     # 模型特定配置
@@ -645,10 +660,10 @@ def setup_args():
 
     speculative_decoding_group.add_argument(
         '--gen_num_per_cycle',
-        env_name="GEN_NUM_PER_CYCLE",
+        env_name="GEN_NUM_PER_CIRCLE",
         type=int,
         default=1,
-        help="投机采样预测的步数"
+        help="每一轮 speculative execution（推测式生成）中，最多生成多少个 token。"
     )
 
     speculative_decoding_group.add_argument(
@@ -675,7 +690,7 @@ def setup_args():
     rpc_discovery_group.add_argument(
         '--use_local',
         env_name="USE_LOCAL",
-        type=bool,
+        type=str2bool,
         default=False,
         help="设置为 `True` 时，系统将使用本地配置进行 decode 和 ViT 服务发现，而不是依赖外部服务注册与发现机制 (如 CM2)。适用于本地测试或特定部署。"
     )
@@ -719,7 +734,7 @@ def setup_args():
     cache_store_group.add_argument(
         '--cache_store_rdma_mode',
         env_name="CACHE_STORE_RDMA_MODE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="控制 cache store 是否使用 RDMA 模式。"
     )
@@ -749,7 +764,7 @@ def setup_args():
     scheduler_group.add_argument(
         '--use_batch_decode_scheduler',
         env_name="USE_BATCH_DECODE_SCHEDULER",
-        type=bool,
+        type=str2bool,
         default=False,
         help='若为 True，则启用一个专门为decode阶段优化的特化调度器。此调度器在 decode 期间以固定大小的 batch 处理请求。若为 False，系统将使用一个 FIFO-based的默认调度器，默认调度器采用continuous batching。'
     )
@@ -776,7 +791,7 @@ def setup_args():
     fifo_scheduler_group.add_argument(
         '--enable_fast_gen',
         env_name="ENABLE_FAST_GEN",
-        type=bool,
+        type=str2bool,
         default=False,
         help='若为 True，长请求会被拆分为chunks并分步处理。这主要用于提高长序列或流式输入的处理效率，并能改善并发场景下其他请求的交互性。注意：仅在使用默认调度器时有效。'
     )
@@ -790,7 +805,7 @@ def setup_args():
     fifo_scheduler_group.add_argument(
         '--enable_partial_fallback',
         env_name="ENABLE_PARTIAL_FALLBACK",
-        type=bool,
+        type=str2bool,
         default=False,
         help="若为 True，则允许默认调度器在系统内存不足以满足活动请求时，从某些请求中回收一部分 KV cache blocks。这可以在高负载下提高系统利用率，但可能会影响那些资源被回收的请求的公平性。注意：在使用默认调度器时有效。"
     )
@@ -817,7 +832,7 @@ def setup_args():
     misc_group.add_argument(
         '--load_balance',
         env_name="LOAD_BALANCE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="当设置为true时，启用基于吞吐量和延迟的动态并发控制；否则使用固定并发数。"
     )

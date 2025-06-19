@@ -143,7 +143,7 @@ cc_library(
                            "@local_config_cuda//cuda:cudart",],
         "@//:using_rocm": ["//rtp_llm/cpp/rocm:rocm_utils"],
         "//conditions:default": [],
-    }) 
+    })
     + ["//:gpt_init_params"]
     ,
     copts = copts(),

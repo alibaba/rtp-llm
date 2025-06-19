@@ -21,7 +21,7 @@ def check_exeutor_type(model: BaseModel):
 
 
 def create_engine(model: BaseModel, propose_model: Optional[ProposeModel] = None) -> BaseEngine:
-    torch.ops.rtp_llm.init_engine()
+    torch.ops.rtp_llm.init_engine(model.config.gpt_init_params.profiling_debug_logging_config.ft_alog_conf_path)
     executor_type = check_exeutor_type(model)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:

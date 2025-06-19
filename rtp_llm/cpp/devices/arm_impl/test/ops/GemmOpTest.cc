@@ -237,7 +237,7 @@ void ArmGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
 }
 
 TEST_F(ArmGemmOpTest, BasicGemmOpTest) {
-    if (GlobalConfig::get().hw_kernel_config.arm_gemm_use_kai) {
+    if (std::getenv("ARM_GEMM_USE_KAI") != nullptr) {
         return;
     }
     BasicGemmOP(2, 1024, 2048);
@@ -249,7 +249,7 @@ TEST_F(ArmGemmOpTest, BasicGemmOpTest) {
 }
 
 TEST_F(ArmGemmOpTest, BasicGemmOPKaiTest) {
-    if (!GlobalConfig::get().hw_kernel_config.arm_gemm_use_kai) {
+    if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
         return;
     }
     BasicGemmOP_fp32fp16fp32(4, 6, 1024);

@@ -6,18 +6,19 @@
 #include <numeric>
 #include <mutex>
 #include <unistd.h>
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace std;
 using ReadLock = shared_lock<shared_mutex>;
 using WriteLock = unique_lock<shared_mutex>;
 
 namespace rtp_llm {
 
-BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allocator)
+BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allocator, const ProfilingDebugLoggingConfig& config)
     : device_allocator_(device_allocator)
     , host_allocator_(host_allocator)
-    , trace_memory_(GlobalConfig::get().profiling_debug_logging_config.rtp_llm_trace_memory)
-    , trace_malloc_stack_(GlobalConfig::get().profiling_debug_logging_config.rtp_llm_trace_malloc_stack)
+    , trace_memory_(config.rtp_llm_trace_memory)
+    , trace_malloc_stack_(config.rtp_llm_trace_malloc_stack)
+    , profiling_debug_logging_config_(config)
 {
     if (trace_memory_) {
         autil::EnvUtil::setEnv("STACK_TRACER_LOG", "true");

@@ -35,7 +35,7 @@ public:
                  const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights);
 
     void removeLora(const std::string& adapter_name);
-    
+
     std::shared_ptr<EngineBase> getEngine() const { return engine_; }
     std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const { return mm_processor_; }
 

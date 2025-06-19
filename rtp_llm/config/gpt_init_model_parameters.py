@@ -454,6 +454,7 @@ class GptInitModelParameters:
             ft_core_dump_on_exception=get_env_bool("FT_CORE_DUMP_ON_EXCEPTION", False),
             ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
             log_level=get_env_str("LOG_LEVEL", "INFO"),
+            gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False)
         )
 
         # HWKernelConfig

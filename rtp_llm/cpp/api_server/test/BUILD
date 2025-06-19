@@ -1,11 +1,11 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
- 
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
- 
+
 test_linkopts = [
     "-lpython3.10",
     "-ltorch",
@@ -13,14 +13,14 @@ test_linkopts = [
     "-ltorch_cpu",
     "-ltorch_python",
 ] + device_linkopts()
- 
+
 cc_library(
     name = "test_headers",
     hdrs = glob([
         "utils/*.h",
     ]),
 )
- 
+
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp:models",
@@ -29,7 +29,7 @@ test_deps = [
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + torch_deps() + device_impl_target()
- 
+
 # 通过 python 执行 cpp 单测
 py_test(
     name = "api_server_unittest",  # 需要有一个同名 py 文件

@@ -1,18 +1,18 @@
 #include "rtp_llm/cpp/utils/SignalUtils.h"
 #include "rtp_llm/cpp/th_op/common/InitEngineOps.h"
 #include <cstdio>
+#include <string>
 
 namespace torch_ext {
 
-void initEngine() {
-    bool init_log_success = rtp_llm::initLogger();
+void initEngine(std::string py_ft_alog_file_path) {
+    bool init_log_success = rtp_llm::initLogger(py_ft_alog_file_path);
     fflush(stdout);
     fflush(stderr);
 
     if (!init_log_success) {
         std::runtime_error("init logger failed");
     }
-
 
     RTP_LLM_LOG_INFO("install sighandler begin");
     if (!rtp_llm::installSighandler()) {

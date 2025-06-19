@@ -4,14 +4,14 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace rtp_llm {
 
-WRRLoadBalancer::WRRLoadBalancer() {
-    available_ratio_ = GlobalConfig::get().cache_store_config.wrr_available_ratio;
+WRRLoadBalancer::WRRLoadBalancer(CacheStoreConfig& cache_store_config) {
+    available_ratio_ = cache_store_config.wrr_available_ratio;
     // rank factor: 0: KV_CACHE, 1: ONFLIGHT_REQUESTS
-    rank_factor_ = GlobalConfig::get().cache_store_config.rank_factor;
+    rank_factor_ = cache_store_config.rank_factor;
     RTP_LLM_CHECK_WITH_INFO(rank_factor_ == 0 || rank_factor_ == 1, "rank factor should be 0 or 1");
     RTP_LLM_LOG_INFO("wrr load balance avaiable ratio %lu, rank factor = %ld", available_ratio_, rank_factor_);
 }
@@ -79,7 +79,7 @@ WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) 
 
     double                              threshold  = calculateThreshold(hosts);
     double                              weight_acc = 0;
-    
+
     for (auto& host : hosts) {
         // calculate weight sum
         const std::string spec = "tcp:" + host->ip + ":" + std::to_string(host->http_port);

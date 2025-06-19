@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 using namespace std;
 
@@ -21,7 +21,7 @@ bool CudaDevice::initDeepEPBuffer() {
     auto   nccl_param  = getNcclParam(ParallelMode::DP_AND_TP);
     size_t world_rank  = nccl_param.rank_;
     size_t world_size  = nccl_param.world_size_;
-    size_t local_world_size = GlobalConfig::get().parallelism_distributed_config.local_world_size;
+    size_t local_world_size = init_params_.parallelism_distributed_config.local_world_size;
 
     int    num_experts = init_params_.num_experts + init_params_.extra_experts;
 
@@ -72,7 +72,7 @@ bool CudaDevice::initDeepEPBuffer() {
             RTP_LLM_LOG_ERROR("Failed to initialize DeepEPBuffer");
             return false;
         }
-        auto deep_ep_num_sm = GlobalConfig::get().moe_config.deep_ep_num_sm;
+        auto deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm;
         if (deep_ep_num_sm) {
             RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", deep_ep_num_sm);
             deepep_buffer_->setNumSMs(deep_ep_num_sm);

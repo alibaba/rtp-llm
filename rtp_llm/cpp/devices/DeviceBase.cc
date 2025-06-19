@@ -10,7 +10,7 @@
 #include "torch/extension.h"
 #include "torch/types.h"
 #include <numeric>
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 using namespace std;
 using namespace rtp_llm;
 
@@ -25,8 +25,8 @@ DeviceBase::DeviceBase(const DeviceInitParams& params)
     }
 
 void DeviceBase::init() {
-    buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));
-    enable_device_perf_ = GlobalConfig::get().profiling_debug_logging_config.enable_device_perf;
+    buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator(), init_params_.profile_debug_logging_config));
+    enable_device_perf_ = init_params_.profile_debug_logging_config.enable_device_perf;
 }
 
 void DeviceBase::setTraceMemory(bool trace_memory) {

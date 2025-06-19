@@ -1,10 +1,9 @@
 #pragma once
-#include <torch/custom_class.h>
-#include <torch/script.h>
+#include <torch/extension.h>
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace torch_ext {
 
-void initEngine();
+void initEngine(std::string py_ft_alog_file_path);
 
 }  // namespace torch_ext

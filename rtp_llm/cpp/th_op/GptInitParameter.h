@@ -249,6 +249,7 @@ public:
     std::vector<std::string> worker_addrs_;
     std::vector<std::string> worker_grpc_addrs_;
     // GlobalConfig replication
+
     ParallelismDistributedConfig parallelism_distributed_config;
     ConcurrencyConfig concurrency_config;
     FMHAConfig  fmha_config;
@@ -272,7 +273,7 @@ public:
     GptInitParameter(
         int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len,
         int64_t vocab_size, int64_t hidden_size);
-    
+
     void showDebugInfo() const;
     void insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     void setLayerNormType();

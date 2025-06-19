@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -19,9 +19,9 @@ public:
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
                                  (size_t)score_model_engine_init_params.gpt_init_parameter.max_seq_len_);
 
-        min_token_match_len_ = GlobalConfig::get().sp_config.sp_min_token_match;
-        max_token_match_len_ = GlobalConfig::get().sp_config.sp_max_token_match;
-        
+        min_token_match_len_ = device->initParams().sp_config.sp_min_token_match;
+        max_token_match_len_ = device->initParams().sp_config.sp_max_token_match;
+
         RTP_LLM_LOG_INFO("DeterministicExecutor propose step is %ld", propose_step_);
         RTP_LLM_LOG_INFO("DeterministicExecutor min token match size is %ld", min_token_match_len_);
         RTP_LLM_LOG_INFO("DeterministicExecutor max token match size is %ld", max_token_match_len_);

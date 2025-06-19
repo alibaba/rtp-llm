@@ -51,6 +51,9 @@ public:
 
     bool empty();
 
+    // all time is us
+    static size_t STEP_RECORDS_MAX_SIZE;
+    static size_t STEP_RECORDS_TIME_RANGE;
 private:
     double getIntervalAvgGenNum() {
         return queue_total_gen_num_ * 1.0 / step_records_.size();
@@ -64,18 +67,13 @@ private:
         return getIntervalDuration() * 1.0 / (getIntervalAvgGenNum() * (step_records_.size() - 1));
     }
 
-
-    // all time is us
-    const static size_t STEP_RECORDS_MAX_SIZE;
-    const static size_t STEP_RECORDS_TIME_RANGE;
-
     PIController avg_latency_controller_;
     PIController step_count_controller_;
 
     std::queue<StepInfo> step_records_;
     size_t              min_step_latency_ = 10 * 1000 * 1000;  // 10s
     size_t              queue_total_gen_num_ = 0;
-    
+
     std::mutex          mutex_;
 };
 

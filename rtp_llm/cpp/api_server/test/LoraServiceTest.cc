@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/api_server/GangServer.h"
 #include "rtp_llm/cpp/api_server/LoraService.h"
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockApiServerMetricReporter.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockGangServer.h"

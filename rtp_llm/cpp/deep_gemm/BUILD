@@ -31,8 +31,8 @@ gen_cu_and_lib("deepgemm_dpsk", NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASE
 gen_cu_and_lib("deepgemm_qwen", QWEN_NORMAL_CASES + QWEN_CONTIGUOUS_CASES + QWEN_MASKED_CASES, 1, template_header, template, template_tail, 1)
 
 gen_dispatch_code(
-    "deepgemm_dispatch", 
-    NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES + 
+    "deepgemm_dispatch",
+    NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES +
     QWEN_NORMAL_CASES + QWEN_CONTIGUOUS_CASES + QWEN_MASKED_CASES,
     dispatch_template_header,
     dispatch_template,

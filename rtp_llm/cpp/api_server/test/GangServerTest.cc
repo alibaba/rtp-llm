@@ -6,7 +6,7 @@
 #include "autil/legacy/jsonizable.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/api_server/GangServer.h"
-#include "rtp_llm/cpp/api_server/ParallelInfo.h"
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/cpp/http_server/http_server/HttpServer.h"
 
 using namespace ::testing;
