@@ -1,3 +1,4 @@
+import json
 import time
 import requests
 import copy
@@ -15,7 +16,7 @@ from datetime import timedelta
 import torch.distributed as dist
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info, g_parallel_info, g_master_info, update_master_info, DEFAULT_START_PORT
-from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
+from rtp_llm.distribute.gang_info import get_gang_info, GangInfo, JSON_GANG_PARTS_ENV
 
 # for ut
 from rtp_llm.distribute.gang_test_util import create_store, store_based_barrier
@@ -59,6 +60,7 @@ class GangServer:
     def __init__(self):
         self._initialized: bool = False
         self._gang_status: Dict[str, str] = {}
+        self._gang_parts: Dict[str, str] = {}
         self._gang_info: GangInfo = None
         self._request_threadpool = ThreadPoolExecutor(g_parallel_info.world_size)
         self._failure_events: Dict[int, FailedRankInfo] = {}
@@ -75,7 +77,18 @@ class GangServer:
             if not self._initialized:
                 logging.debug(f'server member recv: {name} {ip}')
                 self._gang_status[name] = ip
+                last_underscore_index = name.rfind('_')
+                if last_underscore_index != -1:
+                    part_name = name[:last_underscore_index]
+                else:
+                    part_name = name
+                self._gang_parts[part_name] = ip
             return {'initializing':not self._initialized}
+
+        @app.post("/broadcast_parts")
+        def broadcast_parts(req: Dict[str, Any]):
+            logging.debug(f'broadcast parts recv: {json.dumps(req)}')
+            os.environ[JSON_GANG_PARTS_ENV] = json.dumps(req)
 
         @app.post('/report_failure')
         def handle_failure_report(req: Dict[str, Any]):
@@ -140,6 +153,7 @@ class GangServer:
                 if response['initializing'] == True:
                     logging.debug(f'client member recv: {member.name} {member.ip}')
                     self._gang_status[member.name] = member.ip
+            self._broadcast_parts(gang_info)
 
     def _check_ready(self):
         miss: List[str] = []
@@ -162,8 +176,12 @@ class GangServer:
         while True:
             try:
                 self._gang_info = get_gang_info()
-                self._check_gang_info(self._gang_info)
-                self._exchange_gang_info(self._gang_info)
+                if self._gang_info.only_leader:
+                    self._exchange_gang_info(self._gang_info)
+                    self._check_gang_info(self._gang_info)
+                else:
+                    self._check_gang_info(self._gang_info)
+                    self._exchange_gang_info(self._gang_info)
                 self._check_ready()
                 return
             except Exception as e:
@@ -196,6 +214,28 @@ class GangServer:
             future_list.append(future_)
         if is_wait:
             wait(future_list)
+
+    def _broadcast_parts(self, gang_info: GangInfo):
+        if gang_info.only_leader and gang_info.master.ip == gang_info.self.ip and gang_info.master.local_rank == gang_info.self.local_rank:
+            for member in gang_info.members:
+                master_part_name = gang_info.master.name
+                last_underscore_index = master_part_name.rfind('_')
+                if last_underscore_index != -1:
+                    master_part_name = master_part_name[:last_underscore_index]
+                self._gang_parts[master_part_name] = gang_info.master.ip
+                if len(self._gang_parts) * g_parallel_info.local_world_size == g_parallel_info.world_size:
+                    broadcast_url = f'http://{member.ip}:{member.gang_hb_port}/broadcast_parts'
+                    parts: Dict[str, Any] = {}
+                    for name, address in self._gang_parts.items():
+                        part_info = {}
+                        part_info['name'] = name
+                        part_info['ip'] = address
+                        parts[name] = part_info
+                    os.environ[JSON_GANG_PARTS_ENV] = json.dumps(parts)
+                    try:
+                        result = requests.post(broadcast_url, json=parts, timeout=1)
+                    except:
+                        logging.debug(f'request {broadcast_url} failed')
 
     def _health_check_impl(self):
         failed_member = None
@@ -290,10 +330,10 @@ class GangServer:
             self._gang_info.master.ip,
             self._gang_info.master.server_port)
         master_url = f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
-        logging.info(f'gang worker {g_parallel_info} exchange done')
-
+        logging.info(f'gang worker {g_parallel_info} memory_barrier {master_url}')
         init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 45))
         self.memory_barrier(master_url, timeout=init_process_timeout)
 
+        logging.info(f'gang worker {g_parallel_info} start_health_check')
         self.start_health_check()
         logging.info(f'gang init done')

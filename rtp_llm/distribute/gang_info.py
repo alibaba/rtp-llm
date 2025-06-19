@@ -2,11 +2,13 @@ import json
 import logging
 import os
 import socket
+import ipaddress
 from typing import NamedTuple, List, Any, Dict, Optional
 
 from rtp_llm.distribute.worker_info import g_worker_info, g_parallel_info, WorkerInfo
 
 CONFIG_FILE_ENV = 'DISTRIBUTE_CONFIG_FILE'
+JSON_GANG_PARTS_ENV = 'JSON_GANG_PARTS'
 
 def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
     members: List[WorkerInfo] = []
@@ -90,22 +92,81 @@ def get_c2_members():
     logging.info(f"gang info json: {gang_info_json}")
     return members_from_json(gang_info_json)
 
+def get_leader_ip(leader_address: str) -> str:
+    try:
+        ipaddress.ip_address(leader_address)
+        return leader_address
+    except:
+        return socket.gethostbyname(leader_address)
+
+def get_leader_members(env_str: str) -> List[WorkerInfo]:
+    ip_str = get_leader_ip(env_str)
+    members: List[WorkerInfo] = []
+    zone_name = os.environ.get("ZONE_NAME", "")
+    member_info = {}
+    member_info['name'] = 'part0'
+    if zone_name:
+        member_info['name'] = zone_name + '_part0'
+    member_info['ip'] = ip_str
+    members.append(WorkerInfo(
+        server_port=-1,
+        gang_hb_port=-1,
+        http_port=-1,
+        rpc_server_port=-1,
+        backend_server_port=-1,
+        remote_rpc_server_port=-1,
+        cache_store_listen_port=-1,
+        cache_store_connect_port=-1,
+        cache_store_rdma_connect_port=-1,
+        cache_store_rdma_listen_port=-1,
+        local_rank=0,
+        world_rank=0,
+        name=member_info['name'], ip=member_info['ip'], info=member_info))
+
+    if os.environ.get("WORLD_INDEX") and ip_str != g_worker_info.ip:
+        self_member_info = {}
+        self_member_info['name'] = 'part' + os.environ.get("WORLD_INDEX")
+        if zone_name:
+            self_member_info['name'] = zone_name + '_part' + os.environ.get("WORLD_INDEX")
+        self_member_info['ip'] = g_worker_info.ip
+        members.append(WorkerInfo(
+            server_port=-1,
+            gang_hb_port=-1,
+            http_port=-1,
+            rpc_server_port=-1,
+            backend_server_port=-1,
+            remote_rpc_server_port=-1,
+            cache_store_listen_port=-1,
+            cache_store_connect_port=-1,
+            cache_store_rdma_connect_port=-1,
+            cache_store_rdma_listen_port=-1,
+            local_rank=0,
+            world_rank=0,
+            name=self_member_info['name'], ip=self_member_info['ip'], info=self_member_info))
+
+    return members
+
 def get_members_from_file():
     file = os.environ[CONFIG_FILE_ENV]
     with open(file, 'r') as reader:
         config_json = json.loads(reader.read())
     return members_from_json(config_json)
 
+def get_members_from_json_env(env_str: str) -> List[WorkerInfo]:
+    return members_from_json(json.loads(env_str))
+
 class GangInfo(NamedTuple):
     members: List[WorkerInfo]
     master: WorkerInfo
     self: WorkerInfo
     num_nodes: int
+    only_leader: bool
 
     def workers(self) -> List[WorkerInfo]:
         return [member for member in self.members if not member.equals(self.master)]
 
 def get_gang_info() -> GangInfo:
+    only_leader = False
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
         if os.environ.get(CONFIG_FILE_ENV):
@@ -114,12 +175,22 @@ def get_gang_info() -> GangInfo:
         elif os.environ.get("GANG_CONFIG_STRING"):
             logging.info(f"use GANG_CONFIG_STRING: {os.environ['GANG_CONFIG_STRING']}")
             members = members_from_test_env(os.environ['GANG_CONFIG_STRING'])
+        # from env json
+        elif os.environ.get(JSON_GANG_PARTS_ENV):
+            logging.info(f"use JSON_GANG_PARTS_ENV: {os.environ[JSON_GANG_PARTS_ENV]}")
+            members = get_members_from_json_env(os.environ[JSON_GANG_PARTS_ENV])
+        # for lws
+        elif os.environ.get("LEADER_ADDRESS"):
+            logging.info(f"use LEADER_ADDRESS: {os.environ['LEADER_ADDRESS']}")
+            members = get_leader_members(os.environ['LEADER_ADDRESS'])
         # from c2 annotation
         else:
             members = get_c2_members()
     else:
         members = [WorkerInfo(socket.gethostbyname(socket.gethostname()),
                               -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 'local', None)]
+    if os.environ.get("LEADER_ADDRESS"):
+        only_leader = True
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
@@ -154,4 +225,4 @@ def get_gang_info() -> GangInfo:
             if part_rank == 0 and local_rank == 0:
                 master = new_member
     # not check master and self empty here for ut
-    return GangInfo(all_members, master, self, len(members))
+    return GangInfo(all_members, master, self, len(members), only_leader)
