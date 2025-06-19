@@ -13,8 +13,12 @@ public:
         GenerateStream(stream) {
         // WARNING: VanillaStream currently only support batch_size = 1
         RTP_LLM_CHECK(tileNum() == 1);
-        if (!generateConfig()->top1()) {
+        std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
+        if (!generate_config->top1()) {
             setReturnAllProbs(true);
+        }
+        if (generate_config->top_k == 0 && generate_config->top_p > 0.0) {
+            generate_config->top_k = 20;
         }
         sp_output_buffer_ = std::make_shared<SpeculativeExecutorStreamOutput>();
         sp_output_buffer_->propose_step = propose_step;

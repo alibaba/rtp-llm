@@ -130,6 +130,7 @@ bool CudaDevice::checkUseFlashinferSampleGreedy(const GreedyParams& params) {
     if ((!use_flashinfer_sample_kernel) ||
         params.random_seed.has_value() ||
         params.cum_log_probs.has_value() ||
+        params.output_all_probs.has_value() ||
         params.output_log_probs.has_value()) {
         return false;
     }

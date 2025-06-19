@@ -174,7 +174,7 @@ std::tuple<CacheConfig, CacheConfig> CacheConfigCreator::createSpConfig(
     } else {
         const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
         if (is_mtp) {
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * propose_param.num_layers_);
+            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * propose_param.gen_num_per_circle_);
         } else {
             block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
         }

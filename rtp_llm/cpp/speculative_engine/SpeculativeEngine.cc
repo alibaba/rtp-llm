@@ -172,7 +172,7 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
         auto proposer_cache_config      = std::get<1>(config);
         resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_);
         if (isMTPEagle()) {
-            auto layer_num = propose_model_params_->getGptInitParameter().num_layers_;
+            auto layer_num = propose_model_params_->getGptInitParameter().gen_num_per_circle_;
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
@@ -374,7 +374,7 @@ absl::Status SpeculativeEngine::step() {
     if (gen_timeline && profiler_step_ <= 0) {
         profiler_ = std::make_shared<CudaProfiler_E>("sp_cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
         profiler_->start();
-        profiler_step_ = 3;
+        profiler_step_ = 5;
     }
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 

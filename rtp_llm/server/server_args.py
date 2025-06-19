@@ -663,7 +663,7 @@ def setup_args():
         '--force_score_context_attention',
         env_name="FORCE_SCORE_CONTEXT_ATTENTION",
         type=bool,
-        default=False,
+        default=True,
         help="投机采样强制score阶段使用context attention"
     )
 

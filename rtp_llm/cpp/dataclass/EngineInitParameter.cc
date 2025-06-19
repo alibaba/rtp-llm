@@ -403,6 +403,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
         for (size_t i = 1; i < gpt_init_params.gen_num_per_circle_; i++) {
             py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
         }
+        model_num = gpt_init_params.gen_num_per_circle_;
     }
     if (gpt_init_params.gen_num_per_circle_ != py_layers_weights_vec.size()) {
         RTP_LLM_LOG_WARNING("gpt_init_params.gen_num_per_circle_: %d  != py_layers_weights_vec.size(): %d",
