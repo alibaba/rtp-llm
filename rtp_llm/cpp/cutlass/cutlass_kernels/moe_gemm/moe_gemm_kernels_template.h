@@ -148,7 +148,11 @@ void genericMoeGemmKernelLauncher(T const* A, WeightType const* B, GemmOutputTyp
 
         if (kernel_occupancy != nullptr)
         {
-            *kernel_occupancy = tensorrt_llm::cutlass_extensions::compute_occupancy_for_kernel<GemmKernel>();
+            thread_local int cached_kernel_occupancy = -1;
+            if (cached_kernel_occupancy == -1) {
+                cached_kernel_occupancy = tensorrt_llm::cutlass_extensions::compute_occupancy_for_kernel<GemmKernel>();
+            }
+            *kernel_occupancy = cached_kernel_occupancy;
             return;
         }
         int occupancy = std::min(2, GemmGrouped::maximum_active_blocks());

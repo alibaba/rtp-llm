@@ -121,7 +121,11 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
 
     if (occupancy != nullptr)
     {
-        *occupancy = tensorrt_llm::cutlass_extensions::compute_occupancy_for_kernel<GemmKernel>();
+        thread_local int cached_kernel_occupancy = -1;
+        if (cached_kernel_occupancy == -1) {
+            cached_kernel_occupancy = tensorrt_llm::cutlass_extensions::compute_occupancy_for_kernel<GemmKernel>();
+        }
+        *occupancy = cached_kernel_occupancy;
         return;
     }
 
