@@ -41,7 +41,7 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     so_path = find_th_transformer(bazel_bin_dir)
 logging.info(f"so path: {so_path}")
 sys.path.append(so_path)
-
+torch.ops.load_library(os.path.join(so_path, 'libth_transformer.so'))
 # load intel xft lib
 xft_loaded = False
 # for path in sys.path:
