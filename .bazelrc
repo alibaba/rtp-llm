@@ -1,6 +1,4 @@
 common --experimental_downloader_config=bazel/bazel_downloader.cfg
-common --incompatible_java_common_parameters=false
-
 fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
 
