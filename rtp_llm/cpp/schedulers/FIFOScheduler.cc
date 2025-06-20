@@ -85,6 +85,15 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     return absl::OkStatus();
 }
 
+absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
+    {
+        lock_guard<mutex> lock(lock_);
+        waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
+    }
+    cond_.notify_all();
+    return absl::OkStatus();
+}
+
 int FIFOScheduler::runningNextBlockNum(size_t reserve_step) const {
     int total_need_block_nums = 0;
     for (auto& stream : running_streams_) {

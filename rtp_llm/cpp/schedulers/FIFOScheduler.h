@@ -2,6 +2,7 @@
 
 #include <queue>
 #include <tuple>
+#include <vector>
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/dataclass/Query.h"
 #include "rtp_llm/cpp/schedulers/SchedulerBase.h"
@@ -19,6 +20,7 @@ public:
     ~FIFOScheduler() override;
 
     absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
+    absl::Status                                 batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;
     absl::Status                                 stop() override;
     bool                                         empty() override;

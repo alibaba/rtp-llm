@@ -20,6 +20,16 @@ void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
     stream_ = engine->enqueue(input);
 }
 
+void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {
+    auto input = stream->generateInput();
+    input_ids_ = input->input_ids;
+    generate_config_ = input->generate_config;
+    // align life cycle with stream
+    lora_guard_ = std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(),
+                                input->generate_config->adapter_name);
+    stream_ = stream;
+}
+
 std::pair<MultiSeqsResponse, bool>
 GenerateStreamWrapper::generateResponse() {
     if (stream_->finished() && stream_->hasOutput() == false) {

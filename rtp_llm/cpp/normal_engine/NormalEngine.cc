@@ -256,6 +256,18 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
     return stream;
 }
 
+std::vector<std::shared_ptr<GenerateStream>> NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<std::shared_ptr<GenerateStream>> streams;
+    streams.reserve(inputs.size());
+    for (auto &inp : inputs) {
+        auto stream = std::make_shared<NormalGenerateStream>(
+            inp, params_, resource_context_, metrics_reporter_);
+        streams.push_back(stream);
+    }
+    (void)scheduler_->batchEnqueue(streams);
+    return streams;
+}
+
 absl::Status NormalEngine::step() {
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {

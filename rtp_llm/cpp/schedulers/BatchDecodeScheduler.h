@@ -48,6 +48,10 @@ public:
         return absl::OkStatus();
     }
 
+    absl::Status batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
+        return absl::InternalError("Not implement yet");
+    }
+
     void evictAllDoneStreams() {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->checkTimeout();

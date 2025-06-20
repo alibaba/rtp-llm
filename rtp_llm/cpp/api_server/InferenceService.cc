@@ -178,12 +178,21 @@ void InferenceService::inferResponse(int64_t                                    
         throw HttpApiServerException(HttpApiServerException::CANCELLED_ERROR, "client disconnects");
     }
 
-    std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    inputs.reserve(req.input_texts.size());
     for (int i = 0; i < req.input_texts.size(); i++) {
         auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
-        streams.emplace_back(std::make_shared<GenerateStreamWrapper>(metric_reporter_, token_processor_));
-        streams[i]->init(input, engine_);
+        inputs.push_back(input);
     }
+    auto ori_streams = engine_->batchEnqueue(inputs);
+    std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
+    streams.reserve(ori_streams.size());
+    for (size_t idx = 0; idx < ori_streams.size(); ++idx) {
+        auto stream_wrapper = std::make_shared<GenerateStreamWrapper>(metric_reporter_, token_processor_);
+        stream_wrapper->init(ori_streams[idx], engine_); 
+        streams.push_back(stream_wrapper);
+    }
+
     auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
     iterate_stage_timer.end_stage();

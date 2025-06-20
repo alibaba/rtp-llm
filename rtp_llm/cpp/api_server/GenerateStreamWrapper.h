@@ -23,6 +23,9 @@ public:
     void init(const std::shared_ptr<GenerateInput>& input,
               const std::shared_ptr<EngineBase>& engine);
 
+    void init(GenerateStreamPtr input,
+              const std::shared_ptr<EngineBase>& engine);
+
     virtual std::pair<MultiSeqsResponse, bool>
     generateResponse();
 

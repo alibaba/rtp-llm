@@ -383,4 +383,41 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     }
 }
 
+TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
+    KVCacheParam param = {1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16};
+    CacheConfig                   cache_config(param);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
+    ASSERT_EQ(cache_manager->freeBlockNums(), 3);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    config.max_generate_batch_size_ = 100;
+    FIFOScheduler scheduler(config, cache_manager);
+    vector<GenerateStreamPtr> streams;
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        shared_ptr<GenerateStream> stream    = make_shared<NormalGenerateStream>(query, config, resource_context, nullptr);
+        streams.push_back(stream);
+    }
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+        query->generate_config               = make_shared<GenerateConfig>();
+        shared_ptr<GenerateStream> stream    = make_shared<NormalGenerateStream>(query, config, resource_context, nullptr);
+        streams.push_back(stream);
+    }
+    ASSERT_TRUE(scheduler.batchEnqueue(streams).ok());
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(streams_status.value().size(), 2);
+    ASSERT_EQ(cache_manager->freeBlockNums(), 1);
+
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
+}
+
 }  // namespace rtp_llm
