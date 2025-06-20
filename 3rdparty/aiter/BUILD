@@ -18,6 +18,7 @@ genrule(
         "aiter/jit/libmodule_pa.so",
         "aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so",
         "aiter/jit/libmodule_moe.so",
+        "aiter/jit/libmodule_activation.so",
     ],
     cmd = """
         awk '{gsub(/^#cmakedefine DTYPES \"@DTYPES@\"/, "/* #undef DTYPES*/");
@@ -58,6 +59,7 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location aiter/jit/libmodule_gemm_a8w8_blockscale.so);
         cp external/aiter/aiter/jit/module_pa.so $(location aiter/jit/libmodule_pa.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so);
+        cp external/aiter/aiter/jit/module_activation.so $(location aiter/jit/libmodule_activation.so);
     """,
     visibility = ["//visibility:public"]
 )
@@ -185,6 +187,18 @@ cc_library(
     name = "module_pa",
     srcs = ["aiter/jit/libmodule_pa.so"],
     hdrs = ["csrc/include/attention.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_activation",
+    srcs = ["aiter/jit/libmodule_activation.so"],
+    hdrs = ["csrc/include/activation.h"],
     deps = [":cpp_libraries"],
     copts = [],
     linkopts = [],

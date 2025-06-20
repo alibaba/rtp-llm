@@ -18,6 +18,7 @@ cc_library(
         "@aiter//:module_moe_asm",
         "@aiter//:module_pa",
         "@aiter//:module_moe",
+        "@aiter//:module_activation",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "@local_config_rocm//rocm:rocblas",

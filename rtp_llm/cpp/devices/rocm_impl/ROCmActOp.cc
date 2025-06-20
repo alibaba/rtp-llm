@@ -5,6 +5,9 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
+// aiter kernels
+#include "activation.h"
+
 using namespace std;
 
 namespace rtp_llm {
@@ -86,14 +89,27 @@ BufferPtr ROCmDevice::activation(const ActivationParams& params) {
     auto gate_bias = params.gate_bias ? params.gate_bias.value().get().data() : nullptr;
     auto act_scale = params.act_scale ? params.act_scale.value().get().data() : nullptr;
 
-    DTYPE_DISPATCH(
-        states->type(), params.atype,
-        states->data(), bias,
-        gate, gate_bias, m, n,
-        act_scale,
-        stream_
-    );
-    return states;
+    if (params.fuse_gate_up) {
+        torch::Tensor gate_up_tensor = Buffer2torchTensor(*params.states, false);
+        torch::Tensor output_tensor = Buffer2torchTensor(*params.output_buffer, false);
+        if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
+            aiter::silu_and_mul(output_tensor, gate_up_tensor);
+        } else if (params.atype == ActivationType::Gelu) {
+            aiter::gelu_and_mul(output_tensor, gate_up_tensor);
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        }
+        return params.output_buffer;
+    } else {
+        DTYPE_DISPATCH(
+            states->type(), params.atype,
+            states->data(), bias,
+            gate, gate_bias, m, n,
+            act_scale,
+            stream_
+        );
+        return states;
+    }
 }
 
 

@@ -17,7 +17,8 @@ genrule(
         "libmodule_quant.so",
         "libmodule_pa.so",
         "libtile_rmsnorm2d_fwd.so",
-        "libtile_example_fmha_fwd.so"
+        "libtile_example_fmha_fwd.so",
+        "libmodule_activation.so",
     ],
     cmd = """
         cp ./bazel-out/k8-opt/bin/external/aiter/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -31,6 +32,7 @@ genrule(
         cp ./bazel-out/k8-opt/bin/external/aiter/aiter/jit/libmodule_pa.so $(location libmodule_pa.so);
         cp ./bazel-out/k8-opt/bin/external/composable_kernel_archive/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
         cp ./bazel-out/k8-opt/bin/external/composable_kernel_archive/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter/aiter/jit/libmodule_activation.so $(location libmodule_activation.so);
     """,
 )
 
