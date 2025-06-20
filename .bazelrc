@@ -1,3 +1,9 @@
+common --experimental_downloader_config=bazel/bazel_downloader.cfg
+common --incompatible_java_common_parameters=false
+
+fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
+
+
 build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
 
 build --spawn_strategy=local # avoid nvcc conflicts
