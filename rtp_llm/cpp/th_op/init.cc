@@ -41,8 +41,10 @@ PYBIND11_MODULE(libth_transformer, m) {
 }
 
 TORCH_LIBRARY(libth_transformer, m) {
-  m.def("rmsnorm(Tensor! output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
+  m.def("rmsnorm(Tensor output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
   m.impl("rmsnorm", torch::kCUDA, &rmsnorm);
+  m.def("silu_and_mul(Tensor output, Tensor input, int cuda_stream) -> ()");
+  m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 }
 
 }  // namespace torch_ext

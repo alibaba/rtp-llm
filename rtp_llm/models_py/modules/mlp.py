@@ -16,3 +16,25 @@ class Qwen3MLP(nn.Module):
     def forward(self, x: torch.Tensor):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
+
+class Qwen3MLP_TrochFused(nn.Module):
+    def __init__(self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]):
+        super().__init__()
+        gate_proj_bias = weights.get(W.ffn_b1, None)
+        up_proj_bias = weights.get(W.ffn_b3, None)
+        gate_up_proj_bias = None
+        if gate_proj_bias is not None and up_proj_bias is not None:
+            gate_up_proj_bias = torch.cat([gate_proj_bias, up_proj_bias], dim=-1)
+        gate_up_proj_weight = torch.cat([weights[W.ffn_w1], weights[W.ffn_w3]], dim=-1)
+        self.gate_up_proj = Linear(gate_up_proj_weight, gate_up_proj_bias)
+        self.down_proj = Linear(weights[W.ffn_w2], weights.get(W.ffn_b2, None))
+
+    def forward(self, x: torch.Tensor):
+        gate_up = self.gate_up_proj(x)
+
+        d = gate_up.shape[-1] // 2
+        output_shape = gate_up.shape[:-1] + (d,)
+        output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
+        torch.ops.libth_transformer.silu_and_mul(output, gate_up, 0)
+        down_proj = self.down_proj(output)
+        return down_proj
