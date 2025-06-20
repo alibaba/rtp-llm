@@ -62,17 +62,17 @@ class DeviceResourceConfig:
 class DeviceType:
     """
     Members:
-    
+
       Cpu
-    
+
       Cuda
-    
+
       Yitian
-    
+
       ArmCpu
-    
+
       ROCm
-    
+
       Ppu
     """
     ArmCpu: typing.ClassVar[DeviceType]  # value = <DeviceType.ArmCpu: 3>
@@ -142,13 +142,13 @@ class EplbConfig:
 class EplbMode:
     """
     Members:
-    
+
       NONE
-    
+
       STATS
-    
+
       EPLB
-    
+
       ALL
     """
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
@@ -448,13 +448,13 @@ class MiscellaneousConfig:
 class MlaOpsType:
     """
     Members:
-    
+
       AUTO
-    
+
       MHA
-    
+
       FLASH_INFER
-    
+
       FLASH_MLA
     """
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
@@ -506,7 +506,8 @@ class MoeConfig:
     use_deepep_internode: bool
     use_deepep_low_latency: bool
     use_deepep_moe: bool
-    def __init__(self, use_deepep_moe: bool = False, use_deepep_internode: bool = False, use_deepep_low_latency: bool = True, fake_balance_expert: bool = False, eplb_control_step: int = 100, eplb_test_mode: bool = False, hack_moe_expert: bool = False, eplb_balance_layer_per_step: int = 1, deep_ep_num_sm: int = 0) -> None:
+    use_deepep_p2p_low_latency: bool
+    def __init__(self, use_deepep_moe: bool = False, use_deepep_internode: bool = False, use_deepep_low_latency: bool = True, use_deepep_p2p_low_latency: bool = False, fake_balance_expert: bool = False, eplb_control_step: int = 100, eplb_test_mode: bool = False, hack_moe_expert: bool = False, eplb_balance_layer_per_step: int = 1, deep_ep_num_sm: int = 0) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -537,11 +538,12 @@ class ProfilingDebugLoggingConfig:
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     ft_nvtx: bool
+    gen_timeline_sync: bool
     log_level: str
     py_inference_log_response: bool
     rtp_llm_trace_malloc_stack: bool
     rtp_llm_trace_memory: bool
-    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO') -> None:
+    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -659,6 +661,7 @@ class SpecialTokens:
     def __init__(self) -> None:
         ...
 class SpeculativeExecutionConfig:
+    gen_num_per_cycle: int
     sp_max_token_match: int
     sp_min_token_match: int
     sp_model_type: str

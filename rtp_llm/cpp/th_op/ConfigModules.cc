@@ -176,7 +176,7 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         pybind11::arg("ft_core_dump_on_exception") = false,
         pybind11::arg("ft_alog_conf_path") = "",
         pybind11::arg("log_level") = "INFO",
-        pybind11::arg("gen_timeline_sync_") = false
+        pybind11::arg("gen_timeline_sync") = false
         )
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env_for_test", &ProfilingDebugLoggingConfig::update_from_env_for_test)
