@@ -178,7 +178,8 @@ class QWenV2(QWen):
         config.special_tokens.assistant.eos_token_ids = [151645, 198] # '<|im_end|>\n'
 
         cls._from_hf(config, ckpt_path)
-        assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
+        assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, \
+            f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.layer_num={config.layer_num} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
