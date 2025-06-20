@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import hashlib
 import base64
 
+from rtp_llm.utils.ssrf_check import check_ssrf
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -70,11 +71,13 @@ def get_vit_compute_dtype(dtype: str):
         return torch.half
 
 def get_bytes_io_from_url(url: str):
+    if not check_ssrf(url):
+        raise Exception(f"urrl ssrf chekc failed {url}")
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         try:
             if url.startswith("http") or url.startswith("https"):
-                response = requests.get(url, stream=True, headers=HTTP_HEADS, timeout=10)
+                response = requests.get(url, stream=True, headers=HTTP_HEADS, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     res = BytesIO(response.content)
                 else:
