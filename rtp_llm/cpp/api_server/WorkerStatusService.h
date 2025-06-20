@@ -38,7 +38,9 @@ public:
 class WorkerStatusService {
 public:
     WorkerStatusService(const std::shared_ptr<EngineBase>&            engine,
-                        const std::shared_ptr<ConcurrencyController>& controller);
+                        const std::shared_ptr<ConcurrencyController>& controller,
+                        const int load_balance = 0
+                    );
     ~WorkerStatusService() = default;
     int getLoadBalanceEnv() { return load_balance_env_; }
 public:
