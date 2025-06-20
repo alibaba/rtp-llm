@@ -1,4 +1,15 @@
 {
+    // Disable C_CPP intelli mode if use with clangd together
+    "C_Cpp.intelliSenseEngine": "Disabled",
+    "clangd.path": "/usr/bin/clangd",
+    "clangd.arguments": [
+      "--header-insertion=never",
+      "--query-driver=**",
+      "--background-index",
+      "-j=32",
+      "--log=info",
+      "--compile-commands-dir=${workspaceFolder}"
+    ],
     "files.associations": {
         "*.cuh": "cpp",
         "stdexcept": "cpp",

@@ -203,3 +203,13 @@ py_runtime(
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python"
 )
+
+
+load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
+
+refresh_compile_commands(
+    name = "refresh_compdb",
+    targets = {
+        "//rtp_llm/cpp:model_rpc_server": "--config=cuda12_6 --config=debug --sandbox_base=/mnt/ram/",
+    },
+)
