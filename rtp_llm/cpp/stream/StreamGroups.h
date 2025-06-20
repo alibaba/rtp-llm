@@ -139,6 +139,10 @@ public:
     bool genTimeline() {
         return gen_timeline_;
     }
+
+    int profileStep() {
+        return profile_step_;
+    }
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -176,6 +180,7 @@ private:
     size_t                       total_score_batch_size_   = 0;
     bool                         has_multimodal_input_     = false;
     bool                         gen_timeline_             = false;
+    int                          profile_step_             = 0;
     std::list<std::string>       adapter_names;
 };
 

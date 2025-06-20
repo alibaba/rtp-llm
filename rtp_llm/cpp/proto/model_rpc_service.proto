@@ -67,6 +67,7 @@ message GenerateConfigPB {
     bool force_sp_accept = 37;
     int32 hidden_states_cut_dim = 38;
     bool normalized_hidden_states = 39;
+    bool profile_step = 40;
 }
 
 message MMPreprocessConfigPB {

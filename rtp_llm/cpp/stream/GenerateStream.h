@@ -129,6 +129,8 @@ public:
     bool returnLogits() const;
     bool returnCumLogProbs() const;
     bool genTimeline() const;
+    int  profileStep() const;
+    void setProfileStep(int profile_step);
     void setGenTimeline(bool gen_timeline);
     bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
@@ -469,6 +471,7 @@ protected:
     bool                                use_cache_store_        = false;
 
     bool                                gen_timeline_           = false;
+    int                                 profile_step_           = 3;
 
     // The number of times this stream has been interfered by prefills
     int32_t                             batch_with_prefill_times_ = 0;

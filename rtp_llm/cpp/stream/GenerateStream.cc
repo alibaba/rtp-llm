@@ -30,6 +30,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , enable_fast_gen_(params.enable_fast_gen_)
     , use_cache_store_(params.use_cache_store_)
     , gen_timeline_(input->generate_config->gen_timeline)
+    , profile_step_(input->generate_config->profile_step)
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
@@ -241,6 +242,14 @@ bool GenerateStream::genTimeline() const {
 
 void GenerateStream::setGenTimeline(bool gen_timeline) {
     gen_timeline_ = gen_timeline;
+}
+
+int GenerateStream::profileStep() const {
+    return profile_step_;
+}
+
+void GenerateStream::setProfileStep(int profile_step) {
+    profile_step_ = profile_step;
 }
 
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {

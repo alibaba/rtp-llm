@@ -372,9 +372,17 @@ absl::Status SpeculativeEngine::step() {
         profiler_step_ = 0;
     }
     if (gen_timeline && profiler_step_ <= 0) {
-        profiler_ = std::make_shared<CudaProfiler_E>("sp_cuda_profiler_dp" + std::to_string(device_->getDeviceProperties().dp_rank) + "_");
+        auto stream_group = StreamGroups(streams);
+        auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
+                          + device_->getDeviceProperties().tp_rank;
+        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
+                                                               world_rank,
+                                                               stream_group.totalModelBatchSize(),
+                                                               stream_group.maxSeqLen(),
+                                                               int(stream_group.totalContextBatchSize() > 0));
+        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
         profiler_->start();
-        profiler_step_ = 5;
+        profiler_step_ = streams.begin()->profileStep();
     }
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 
