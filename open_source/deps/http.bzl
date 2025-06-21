@@ -96,3 +96,11 @@ def http_deps():
         urls = ["https://github.com/ARM-software/ComputeLibrary/archive/refs/tags/v24.04.tar.gz"],
         strip_prefix = "ComputeLibrary-24.04",
     )
+
+    http_archive(
+        # Hedron's Compile Commands Extractor for Bazel
+        name = "hedron_compile_commands",
+        urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz" ],
+        strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
+        sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
+    )
