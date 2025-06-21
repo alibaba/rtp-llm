@@ -1,6 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
+#include "aios/autil/autil/EnvUtil.h"
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 using namespace ::testing;
@@ -37,7 +37,6 @@ TEST(ParallelInfoTest, GlobalParallelInfo) {
         autil::EnvGuard world_size_env("WORLD_SIZE", "2");
         autil::EnvGuard world_rank_env("WORLD_RANK", "2");
         autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "2");
-        GlobalConfig::update_from_env_for_test();
         parallel_info.reload();
 
         EXPECT_EQ(parallel_info.tp_size_, 2);

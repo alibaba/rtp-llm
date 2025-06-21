@@ -307,7 +307,6 @@ TEST_F(AttentionOpTest, XqaContextAttentionOpTest) {
     device_init_params.fmha_config.enable_xqa = true;
     device_init_params.hw_kernel_config.enable_multi_block_mode = false;
     device_ = new CudaDevice(device_init_params);
-    device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);

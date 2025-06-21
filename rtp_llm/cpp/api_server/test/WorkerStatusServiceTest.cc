@@ -23,7 +23,6 @@ protected:
         mock_writer_           = std::make_unique<http_server::MockHttpResponseWriter>();
         mock_engine_base_      = std::make_shared<MockEngineBase>();
         controller_            = std::make_shared<ConcurrencyController>();
-        GlobalConfig::update_from_env_for_test();
         worker_status_service_ = std::make_shared<WorkerStatusService>(mock_engine_base_, controller_);
     }
     void TearDown() override {}
@@ -36,9 +35,7 @@ protected:
 };
 
 TEST_F(WorkerStatusServiceTest, Constructor) {
-    autil::EnvGuard     load_balance_env("LOAD_BALANCE", "1");
-    GlobalConfig::update_from_env_for_test();
-    WorkerStatusService worker_status_service(nullptr, nullptr);
+    WorkerStatusService worker_status_service(nullptr, nullptr, 1);
     EXPECT_EQ(worker_status_service.engine_, nullptr);
     EXPECT_EQ(worker_status_service.controller_, nullptr);
     EXPECT_EQ(worker_status_service.load_balance_env_, 1);
@@ -68,10 +65,9 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_AlreadyStopped) {
 }
 
 TEST_F(WorkerStatusServiceTest, WorkerStatus_HasLoadBalanceEnv) {
-    autil::EnvGuard load_balance_env("LOAD_BALANCE", "1");
-    GlobalConfig::update_from_env_for_test();
+    mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 1;
     auto            worker_status_service = std::make_shared<WorkerStatusService>(mock_engine_base_, controller_);
-
+    mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 0;
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
     ASSERT_TRUE(writer != nullptr);
     std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
@@ -121,7 +117,7 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_NoLoadBalanceEnv) {
     ASSERT_TRUE(writer != nullptr);
     std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
     http_server::HttpRequest                         request;
-    
+
     LoadBalanceInfo load_balance_info;
     load_balance_info.step_latency_us    = 1;
     load_balance_info.iterate_count      = 2;

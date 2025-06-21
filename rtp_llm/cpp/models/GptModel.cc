@@ -934,7 +934,6 @@ GptLayerOutputs GptModel::forwardMicroBatchedLayers(const GptLayerInputs&   laye
             layer_inputs.dtype
         });
     }
-
     if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_PREFILL) {
         micro_batch_layer_inputs = forwardPrefillMicroBatchedLayers(micro_batch_layer_inputs, eagle3_selected_hidden);
     } else if (device_props_.enable_layer_micro_batch == MicroBatchType::DS_DECODE) {
@@ -1390,7 +1389,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     GptLayerOutputs layer_outputs;
     std::vector<BufferPtr> eagle3_selected_hidden;
-
     if (int(device_props_.enable_layer_micro_batch) && layer_inputs.micro_batch_inputs.size() > 0) {
         layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs, eagle3_selected_hidden);
     } else {

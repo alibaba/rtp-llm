@@ -48,8 +48,7 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
 
     auto gpt_params = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
-    // Todo(tanboyu.tby): Need to remove GptInitParameter, only use GlobalConfig
-    GlobalConfig::update_from_env_for_test();
+    gpt_params.update_from_env_for_test();
     rtp_llm::DeviceFactory::initDevices(gpt_params);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();;
     attn_configs = AttentionConfigs({

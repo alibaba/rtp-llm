@@ -274,6 +274,27 @@ public:
         int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len,
         int64_t vocab_size, int64_t hidden_size);
 
+
+    void update_from_env_for_test(){
+        parallelism_distributed_config.update_from_env_for_test();
+        concurrency_config.update_from_env_for_test();
+        fmha_config.update_from_env_for_test();
+        kv_cache_config.update_from_env_for_test();
+        profiling_debug_logging_config.update_from_env_for_test();
+        hw_kernel_config.update_from_env_for_test();
+        device_resource_config.update_from_env_for_test();
+        sampler_config.update_from_env_for_test();
+        moe_config.update_from_env_for_test();
+        model_specific_config.update_from_env_for_test();
+        sp_config.update_from_env_for_test();
+        service_discovery_config.update_from_env_for_test();
+        cache_store_config.update_from_env_for_test();
+        scheduler_config.update_from_env_for_test();
+        batch_decode_scheduler_config.update_from_env_for_test();
+        fifo_scheduler_config.update_from_env_for_test();
+        misc_config.update_from_env_for_test();
+    }
+
     void showDebugInfo() const;
     void insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     void setLayerNormType();

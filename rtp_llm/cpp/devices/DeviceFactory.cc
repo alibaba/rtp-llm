@@ -109,7 +109,6 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
 
     device_params.enable_comm_overlap = params.device_resource_config.enable_comm_overlap;
     device_params.enable_layer_micro_batch = static_cast<MicroBatchType>(params.device_resource_config.enable_layer_micro_batch);
-
     RTP_LLM_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                 device_params.enable_comm_overlap, device_params.enable_layer_micro_batch);
 

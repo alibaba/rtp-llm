@@ -22,7 +22,6 @@ private:
 
 GemmOp::GemmOp() {
     rtp_llm::initLogger();
-    GlobalConfig::update_from_env_for_test();
     DeviceFactory::initDevices(GptInitParameter());
     device = DeviceFactory::getDefaultDevice();
 }
@@ -38,13 +37,13 @@ void GemmOp::forward(torch::Tensor input,
     auto dtype = kernel->type();
     auto output_buffer = torchTensor2Buffer(output);
 
-    auto weight_buffer = 
+    auto weight_buffer =
       new QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
 		  std::move(scales_buffer),
 		  std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr))));
 
     auto gemm_result = device->gemm({
-        *hidden, 
+        *hidden,
         *weight_buffer
       });
     device->copy({*output_buffer, *gemm_result});

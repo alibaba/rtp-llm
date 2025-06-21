@@ -20,7 +20,6 @@
 #include <cuda.h>
 
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <mutex>
 #include <stdio.h>
 #include <stdlib.h>

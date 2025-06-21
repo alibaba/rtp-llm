@@ -12,6 +12,7 @@ namespace rtp_llm {
 struct StaticConfig{
     static int user_deep_gemm_num_sm;
     static bool user_arm_gemm_use_kai;
+    static bool user_ft_core_dump_on_exception;
 };
 
 struct ParallelismDistributedConfig {

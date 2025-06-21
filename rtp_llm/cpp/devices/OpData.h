@@ -82,7 +82,7 @@ public:
         RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
         ss << stack;
         detail_str_ = ss.str();
-        if (ft_core_dump_on_exception) {
+        if (StaticConfig::user_ft_core_dump_on_exception) {
             fflush(stdout);
             fflush(stderr);
             abort();

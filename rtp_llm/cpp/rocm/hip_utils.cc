@@ -56,7 +56,7 @@ void throwRocmError(const char* const file, int const line, std::string const& i
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
-    if (rtp_llm::ft_core_dump_on_exception) {
+    if (rtp_llm::StaticConfig::user_ft_core_dump_on_exception) {
         abort();
     }
     throw FT_EXCEPTION(error_msg);

@@ -32,6 +32,7 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         model_id(model_id), gpt_init_parameter(gpt_init_parameter), gpt_weights(std::move(gpt_weights)) {
         StaticConfig::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
         StaticConfig::user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
+        StaticConfig::user_ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
         StepRecorder::STEP_RECORDS_MAX_SIZE = gpt_init_parameter.misc_config.step_records_max_size;
@@ -43,7 +44,6 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         global_parallel_info.setWorldSize(gpt_init_parameter.parallelism_distributed_config.world_size);
         global_parallel_info.setWorldRank(gpt_init_parameter.parallelism_distributed_config.world_rank);
         global_parallel_info.setLocalWorldSize(gpt_init_parameter.parallelism_distributed_config.local_world_size);
-        ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
         Logger::log_level_ = gpt_init_parameter.profiling_debug_logging_config.log_level;
         gpt_init_parameter.showDebugInfo();
     }
