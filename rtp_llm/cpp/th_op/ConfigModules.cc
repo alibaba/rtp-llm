@@ -550,7 +550,8 @@ inline std::string FMHAConfig::to_string() const {
         << "enable_trtv1_fmha: " << enable_trtv1_fmha << "\n"
         << "fmha_perf_instrument: " << fmha_perf_instrument << "\n"
         << "fmha_show_params: " << fmha_show_params << "\n"
-        << "disable_flash_infer: " << disable_flash_infer << "\n";
+        << "disable_flash_infer: " << disable_flash_infer << "\n"
+        << "enable_xqa: "<<enable_xqa <<"\n";
     return oss.str();
 }
 

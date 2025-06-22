@@ -87,7 +87,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.misc_config       = params.misc_config;
     device_params.parallelism_distributed_config = params.parallelism_distributed_config;
     device_params.profile_debug_logging_config = params.profiling_debug_logging_config;
-    device_params.device_resource_config = params.device_resource_config;
+    device_params.hw_kernel_config = params.hw_kernel_config;
     size_t max_batch_size           = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
     device_params.max_seq_len       = params.max_seq_len_;
