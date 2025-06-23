@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -130,8 +131,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // };
         // return outputs;
         // Call the Python forward method
+        const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
+
+        auto attention_common_inputs = prepareAttentionInputs(inputs, DataType::TYPE_FP16, combo_position_ids);
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
-        py::object py_outputs_obj = py_forward_method(token_ids); // Pass converted inputs
+        torch::Tensor k_cache = Buffer2torchTensor(k_cache_buffer_, false);
+        torch::Tensor v_cache = Buffer2torchTensor(v_cache_buffer_, false);
+        // py::dict kwargs = py::dict("attn_params"=attention_common_inputs);
+        py::kwargs kwargs;
+        kwargs["k_cache"] = k_cache;
+        kwargs["v_cache"] = k_cache;
+        kwargs["attn_params"] = attention_common_inputs;
+        // py::object py_outputs_obj = py_forward_method(token_ids, k_cache, v_cache, attention_common_inputs); //
+        py::object py_outputs_obj = py_forward_method(token_ids, **kwargs);
         auto hidden_states_tensor = convertPyObjectToTensor(py_outputs_obj);
         auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
 

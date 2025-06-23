@@ -7,9 +7,9 @@ from rtp_llm.utils.model_weight import W
 from typing import Dict
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]):
+    def __init__(self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor], layer_idx: int):
         super().__init__()
-        # self.self_attn = Qwen3Attention(config, weights)
+        self.self_attn = Qwen3Attention(config, weights, layer_idx)
         self.mlp = Qwen3MLP(config, weights)
         self.input_layernorm = RMSNorm(weights[W.pre_ln_gamma], eps=config.layernorm_eps)
         self.post_attention_layernorm = RMSNorm(weights[W.post_ln_gamma], eps=config.layernorm_eps)
@@ -23,11 +23,10 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        # hidden_states = self.self_attn(
-        #     hidden_states=hidden_states,
-        #     past_key_value=past_key_value,
-        #     **kwargs,
-        # )
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            **kwargs
+        )
         hidden_states = residual + hidden_states
 
         # Fully Connected

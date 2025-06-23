@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
+#include "rtp_llm/cpp/th_op/multi_gpu_gpt/FlashInferOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include <torch/library.h>
 #include "3rdparty/flashinfer/flashinfer.h"
@@ -31,16 +32,18 @@ PYBIND11_MODULE(libth_transformer, m) {
     register_scheduler_config(m);
     register_batch_decode_scheduler_config(m);
     register_fifo_scheduler_config(m);
-    register_misc_config(m);   
+    register_misc_config(m);
+    register_attn_params(m),
     registerGptInitParameter(m);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
     registerDeviceOps(m);
     register_arpc_config(m);
+    registerFlashInferOp(m);
 }
 
-TORCH_LIBRARY(libth_transformer, m) {
+TORCH_LIBRARY_FRAGMENT(libth_transformer, m) {
   m.def("rmsnorm(Tensor output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
   m.impl("rmsnorm", torch::kCUDA, &rmsnorm);
   m.def("silu_and_mul(Tensor output, Tensor input, int cuda_stream) -> ()");

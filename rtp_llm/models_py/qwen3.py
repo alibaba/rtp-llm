@@ -18,7 +18,7 @@ class Qwen3Model(nn.Module):
 
         self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config, weights.weights[idx]) for idx in range(self.layer_num)]
+            [Qwen3DecoderLayer(config, weights.weights[idx], idx) for idx in range(self.layer_num)]
         )
         self.norm = RMSNorm(weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps)
         self.lm_head = Linear(weights.get_global_weight(W.lm_head))
