@@ -267,6 +267,7 @@ public:
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig fifo_scheduler_config;
     MiscellaneousConfig misc_config;
+    ArpcConfig arpc_config;
 
     GptInitParameter();
 

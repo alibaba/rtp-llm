@@ -34,6 +34,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
     registerDeviceOps(m);
+    register_arpc_config(m);
 }
 
 }  // namespace torch_ext

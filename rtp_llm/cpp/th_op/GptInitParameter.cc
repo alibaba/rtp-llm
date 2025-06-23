@@ -153,7 +153,9 @@ void GptInitParameter::showDebugInfo() const{
             << "========== FIFOSchedulerConfig ==========\n"
             << fifo_scheduler_config.to_string() << "\n"
             << "========== MiscellaneousConfig ==========\n"
-            << misc_config.to_string() << "\n";
+            << misc_config.to_string() << "\n"
+            << "========== ArpcConfig ==========\n"
+            << arpc_config.to_string() << "\n";
         RTP_LLM_LOG_INFO(oss.str());
 }
 
@@ -477,6 +479,7 @@ void registerGptInitParameter(py::module m) {
     .def_readwrite("batch_decode_scheduler_config", &GptInitParameter::batch_decode_scheduler_config)
     .def_readwrite("fifo_scheduler_config", &GptInitParameter::fifo_scheduler_config)
     .def_readwrite("misc_config", &GptInitParameter::misc_config)
+    .def_readwrite("arpc_config", &GptInitParameter::arpc_config)
     REGISTER_PROPERTYS;
 }
 

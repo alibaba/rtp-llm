@@ -70,6 +70,7 @@ cc_library(
     ]),
     deps = [
         "@havenask//aios/network/arpc:arpc",
+        "@havenask//aios/network/arpc/arpc/metric:kmonitor_anet_metric",
         ":embedding_engine"
     ],
     visibility = ["//visibility:public"]

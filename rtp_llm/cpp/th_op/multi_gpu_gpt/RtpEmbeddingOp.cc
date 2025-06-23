@@ -27,7 +27,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
             (void)rtp_llm::initKmonitorFactory();
-            auto kmon_tags = rtp_llm::getHippoTags();
+            auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(gpt_init_params.dp_rank_));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
@@ -80,6 +80,9 @@ void RtpEmbeddingOp::startRpcServer(const rtp_llm::GptInitParameter& gpt_init_pa
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service),
+                                                                    gpt_init_params.arpc_config.threadNum,
+                                                                    gpt_init_params.arpc_config.queueNum,
+                                                                    gpt_init_params.arpc_config.ioThreadNum,
                                                                     gpt_init_params.model_rpc_port_));
         embedding_rpc_service_->start();
     } else {

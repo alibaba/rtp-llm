@@ -355,6 +355,7 @@ class GptInitParameter:
     size_per_head: int
     softmax_extra_scale: float
     sp_config: SpeculativeExecutionConfig
+    arpc_config: ArpcConfig
     special_tokens: SpecialTokens
     sync_status_interval_ms: int
     tokenizer_path: str
@@ -444,6 +445,14 @@ class MiscellaneousConfig:
     def to_string(self) -> str:
         ...
     def update_from_env_for_test(self) -> None:
+        ...
+class ArpcConfig:
+    threadNum: int
+    queueNum: int
+    ioThreadNum: int
+    def __init__(self, threadNum: int = 10, queueNum: int = 50, ioThreadNum: int = 2) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class MlaOpsType:
     """

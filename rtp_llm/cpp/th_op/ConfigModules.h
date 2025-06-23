@@ -291,6 +291,13 @@ private:
     int         local_world_size_;
 };
 
+struct ArpcConfig {
+    int threadNum = 10;
+    int queueNum  = 50;
+    int ioThreadNum = 2;
+    std::string to_string() const;
+};
+
 std::string to_lower(const std::string& s);
 bool bool_from_env_for_test(std::string env_name, bool default_value);
 void register_parallelism_distributed_config(pybind11::module& m);
@@ -310,5 +317,5 @@ void register_scheduler_config(pybind11::module& m);
 void register_batch_decode_scheduler_config(pybind11::module& m);
 void register_fifo_scheduler_config(pybind11::module& m);
 void register_misc_config(pybind11::module& m);
-
+void register_arpc_config(pybind11::module& m);
 }

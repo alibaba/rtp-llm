@@ -63,6 +63,22 @@ void register_parallelism_distributed_config(pybind11::module& m) {
         .def_readwrite("local_world_size", &ParallelismDistributedConfig::local_world_size);
 }
 
+void register_arpc_config(pybind11::module& m) {
+    pybind11::class_<ArpcConfig>(m, "ArpcConfig")
+        .def(pybind11::init<
+            int, int, int
+        >(),
+        pybind11::arg("threadNum") = 10,
+        pybind11::arg("queueNum") = 50,
+        pybind11::arg("ioThreadNum") = 2
+        )
+        .def("to_string", &ArpcConfig::to_string)
+        .def_readwrite("threadNum", &ArpcConfig::threadNum)
+        .def_readwrite("queueNum", &ArpcConfig::queueNum)
+        .def_readwrite("ioThreadNum", &ArpcConfig::ioThreadNum);
+}
+
+
 // ConcurrencyConfig
 void ConcurrencyConfig::update_from_env_for_test() {
     concurrency_with_block = bool_from_env_for_test("CONCURRENCY_WITH_BLOCK", false);
@@ -699,6 +715,15 @@ inline std::string MiscellaneousConfig::to_string() const {
     oss << "load_balance: " << load_balance << "\n"
         << "step_records_time_range: " << step_records_time_range << "\n"
         << "step_records_max_size: " << step_records_max_size << "\n";
+    return oss.str();
+}
+
+// ArpcConfig
+inline std::string ArpcConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "threadNum: " << threadNum << "\n"
+        << "queueNum: " << queueNum << "\n"
+        << "ioThreadNum: " << ioThreadNum;
     return oss.str();
 }
 

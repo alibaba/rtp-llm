@@ -91,10 +91,15 @@ absl::Status EmbeddingEngine::step() {
             }
         }
     } catch (const exception& e) {
-        RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), e.what());
-        for (auto& stream: streams) {
-            stream->setError(e.what());
+        std::string error_msg = e.what();
+        RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
+        for (auto& stream: streams) {            
+            stream->setError(error_msg);
             RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
+        }
+        if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos) {
+            RTP_LLM_LOG_ERROR("detect CUDA error, do abort");
+            abort();
         }
     }
     return absl::OkStatus();

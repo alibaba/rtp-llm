@@ -13,7 +13,7 @@ from rtp_llm.config.task_type import TaskType, check_task_type
 from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
 from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
 from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode
-from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig
+from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, preset_quant_config
 
@@ -269,6 +269,7 @@ class GptInitModelParameters:
     hw_kernel_config: HWKernelConfig
     kv_cache_config: KVCacheConfig
     misc_config: MiscellaneousConfig
+    arpc_config: ArpcConfig
     model_specific_config: ModelSpecificConfig
     moe_config: MoeConfig
     parallelism_distributed_config: ParallelismDistributedConfig
@@ -549,6 +550,13 @@ class GptInitModelParameters:
             load_balance=get_env_int("LOAD_BALANCE",0),
             step_records_time_range=get_env_int("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
+        )
+        
+        # ArpcConfig
+        self.gpt_init_params.arpc_config = ArpcConfig(
+            threadNum=get_env_int("ARPC_THREAD_NUM", 10),
+            queueNum=get_env_int("ARPC_QUEUE_NUM", 50),
+            ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
         )
 
     def update_config_with_sparse_config(self, ckpt_path: str):

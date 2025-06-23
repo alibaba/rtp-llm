@@ -396,6 +396,7 @@ bool initKmonitorFactory() {
     for (auto &pair : param.kmonitorTags) {
         metricsConfig.AddGlobalTag(pair.first, pair.second);
     }
+    setHippoTags(metricsConfig);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
         return false;
@@ -414,17 +415,15 @@ void stopKmonitorFactory() {
     kmonitor::KMonitorFactory::Shutdown();
 }
 
-kmonitor::MetricsTags getHippoTags() {
-    auto hippo_tags = kmonitor::MetricsTags();
+void setHippoTags(kmonitor::MetricsConfig& config) {
     if (std::getenv("HIPPO_ROLE")) {
         auto host_ip = autil::EnvUtil::getEnv("HIPPO_SLAVE_IP", "");
-        hippo_tags.AddTag("host_ip", host_ip);
-        hippo_tags.AddTag("container_ip", autil::EnvUtil::getEnv("RequestedIP", host_ip));
-        hippo_tags.AddTag("hippo_role", autil::EnvUtil::getEnv("HIPPO_ROLE", ""));
-        hippo_tags.AddTag("hippo_app", autil::EnvUtil::getEnv("HIPPO_APP", ""));
-        hippo_tags.AddTag("hippo_group", autil::EnvUtil::getEnv("HIPPO_SERVICE_NAME", ""));
+        config.AddGlobalTag("host_ip", host_ip);
+        config.AddGlobalTag("container_ip", autil::EnvUtil::getEnv("RequestedIP", host_ip));
+        config.AddGlobalTag("hippo_role", autil::EnvUtil::getEnv("HIPPO_ROLE", ""));
+        config.AddGlobalTag("hippo_app", autil::EnvUtil::getEnv("HIPPO_APP", ""));
+        config.AddGlobalTag("hippo_group", autil::EnvUtil::getEnv("HIPPO_SERVICE_NAME", ""));
     }
-    return hippo_tags;
 }
 
 }  // namespace rtp_llm

@@ -473,6 +473,6 @@ private:
 bool initKmonitorFactory();
 void stopKmonitorFactory();
 
-kmonitor::MetricsTags getHippoTags();
+void setHippoTags(kmonitor::MetricsConfig& config);
 
 }  // namespace rtp_llm
