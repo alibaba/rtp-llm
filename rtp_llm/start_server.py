@@ -9,7 +9,7 @@ import requests
 import signal
 import multiprocessing
 from typing import Generator, Union, Any, Dict, List
-
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
@@ -33,12 +33,12 @@ def check_server_health(server_port):
         logging.debug(f"health check is not ready, {str(e)}")
         return False
 
-def start_backend_server_impl(global_controller):
+def start_backend_server_impl(global_controller, py_env_configs: PyEnvConfigs):
     # only for debug
     if os.environ.get('DEBUG_LOAD_SERVER', None) == '1':
         start_backend_server(global_controller)
         os._exit(-1)
-    backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, ), name="backend_server")
+    backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, py_env_configs), name="backend_server")
     backend_process.start()
 
     retry_interval_seconds = 5
@@ -108,9 +108,12 @@ def main():
     backend_process = None
     frontend_process = None
 
+    ## collect all args and envs.
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
     try:
         logging.info("start backend server")
-        backend_process = start_backend_server_impl(global_controller)
+        backend_process = start_backend_server_impl(global_controller, py_env_configs)
         logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")

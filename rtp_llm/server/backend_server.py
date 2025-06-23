@@ -10,6 +10,7 @@ from typing import Union, Any, Dict, Callable
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, ORJSONResponse
 from fastapi import Request
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import torch
 import asyncio
 import functools
@@ -42,7 +43,7 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 USAGE_HEADER = "USAGE"
 
 class BackendServer(object):
-    def __init__(self):
+    def __init__(self, py_env_configs: PyEnvConfigs):
         if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
             os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
         if torch.cuda.is_available():
@@ -62,6 +63,7 @@ class BackendServer(object):
         self.model = None
         self._openai_endpoint = None
         self._embedding_endpoint = None
+        self.py_env_configs = py_env_configs
 
     def start(self):
         self._gang_server.start()

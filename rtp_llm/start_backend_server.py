@@ -11,6 +11,7 @@ import multiprocessing
 from multiprocessing import Process
 from typing import Generator, Union, Any, Dict, List
 from setproctitle import setproctitle
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import torch
 import signal
 import glob
@@ -25,7 +26,7 @@ from rtp_llm.utils.util import copy_gemm_config
 from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.utils.concurrency_controller import ConcurrencyController, init_controller, set_global_controller
 
-def local_rank_start(global_controller: ConcurrencyController):
+def local_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
     copy_gemm_config()
     app = None
     try:
@@ -46,7 +47,7 @@ def local_rank_start(global_controller: ConcurrencyController):
     if not torch.cuda.is_available():
         logging.info("GPU not found: using CPU")
 
-def multi_rank_start(global_controller: ConcurrencyController):
+def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
     try:
         multiprocessing.set_start_method('spawn')
     except RuntimeError as e:
@@ -71,7 +72,7 @@ def multi_rank_start(global_controller: ConcurrencyController):
                                             g_parallel_info.world_rank + local_world_size)):
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(cuda_device_list)
         os.environ['WORLD_RANK'] = str(world_rank)
-        proc = Process(target=local_rank_start, args=(global_controller, ), name=f"rank-{world_rank}")
+        proc = Process(target=local_rank_start, args=(global_controller, py_env_configs), name=f"rank-{world_rank}")
         proc.start()
         procs.append(proc)
 
@@ -146,7 +147,7 @@ def clear_jit_filelock():
         for file in files:
             os.remove(file)
 
-def start_backend_server(global_controller: ConcurrencyController):
+def start_backend_server(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
     setproctitle("maga_ft_backend_server")
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
@@ -165,9 +166,9 @@ def start_backend_server(global_controller: ConcurrencyController):
             not support WORLD_SIZE {g_parallel_info.world_size} for {torch.cuda.device_count()} local gpu')
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(global_controller)
+        return multi_rank_start(global_controller, py_env_configs)
     else:
-        return local_rank_start(global_controller)
+        return local_rank_start(global_controller, py_env_configs)
 
 def main():
     return start_backend_server(None)
