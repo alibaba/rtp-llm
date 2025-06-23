@@ -114,7 +114,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
 
     device_params.use_deepep_moe = params.moe_config.use_deepep_moe;
     device_params.use_deepep_internode = params.moe_config.use_deepep_internode;
-    device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;;
+    device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;
     auto sp_type = params.sp_config.sp_type;
     auto sp_model_type = params.sp_config.sp_model_type;
     RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
