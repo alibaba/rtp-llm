@@ -28,21 +28,21 @@ class FakeModelLoader(object):
                 config_json = json.loads(content)
         else:
             raise Exception("not existed config_path ", config_path)
-
+        os.environ["WARM_UP"] = "0"
         model_cls = ModelFactory.get_model_cls(self.model_type)
         model_config = ModelConfig(ckpt_path=self.ckpt_path,
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
             weight_type=self.weight_type,
             max_seq_len=64,
-            seq_size_per_block=8,
+            seq_size_per_block=64,
             gen_num_per_circle=1,
             quantization=self.quantization
             )
 
         raw_config: GptInitModelParameters = model_cls.create_config(model_config)
         raw_config.head_num = config_json.get("num_attention_heads", raw_config.head_num)
-        raw_config.head_num_kv = config_json.get("num_attention_heads", raw_config.head_num_kv)
+        raw_config.head_num_kv = config_json.get("num_key_value_heads", raw_config.head_num_kv)
         if config_json.get('multi_query_attention', False):
             raw_config.head_num_kv = config_json['multi_query_group_num']
         raw_config.size_per_head = config_json.get("kv_channels", raw_config.size_per_head)
@@ -59,7 +59,7 @@ class FakeModelLoader(object):
             quantization= model_config.quantization,
             data_type=model_config.act_type,
             max_seq_len=self.max_seq_len,
-            seq_size_per_block=8,
+            seq_size_per_block=64,
             gen_num_per_circle=1,
             ptuning_path=None
         )

@@ -13,7 +13,6 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     assert(!attn_params.is_none());
     // const FlashInferAttnParams& params = attn_params.cast<FlashInferAttnParams>();
     const AttentionCommonInputs& attn_param = attn_params.cast<AttentionCommonInputs>();
-    std::cout<<"bb:"<<std::endl;
     FlashInferAttnParams* params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
     if (attn_param.prefill_flash_infer_attn) {
         params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();        
@@ -22,15 +21,9 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     }
     assert(params);
     
-    // const FlashInferAttnParams& params = attn_params.cast<FlashInferAttnParams>();
-    
     const int local_head_num = configs.head_num_;
     const int local_head_num_kv = configs.head_num_kv_;
     const int size_per_head = configs.size_per_head_;
-    // if (weights.qkv_weight->bias) {
-    //     at::Tensor qkv_input = input;
-    //     qkv_input.add_(Buffer2torchTensor(weights.qkv_weight->bias, false));
-    // }
 
     const int bs = input.size(0);
     const std::vector<int64_t> strides = {(local_head_num + 2 * local_head_num_kv) * size_per_head, size_per_head, 1};
@@ -40,13 +33,6 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     auto append_k = qkv[1].reshape({bs, local_head_num_kv, size_per_head});
     auto append_v = qkv[2].reshape({bs, local_head_num_kv, size_per_head});
     cudaStream_t stream = 0;
-    // auto q = torch::from_blob(input.data(),
-    //                           {bs, local_head_num, size_per_head},
-    //                           strides, cuda_option);
-    // auto append_k = torch::from_blob(input.dataWithOffset(local_head_num * size_per_head),
-    //                                  {bs, local_head_num_kv, size_per_head},
-    //                                  strides, cuda_option);
-    std::cout<<"cc:"<<std::endl;
 
     if (rope_config.style == RopeStyle::Base) {
         apply_rope_pos_ids(q,
@@ -61,15 +47,7 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
                            (int64_t)stream);
         check_cuda_error();
     }
-    std::cout<<"dd:"<<std::endl;
     
-    // auto append_v = torch::from_blob(params->input.dataWithOffset((local_head_num + local_head_num_kv) * size_per_head),
-    //                                  {bs, local_head_num_kv, size_per_head},
-    //                                  strides, cuda_option);
-
-    // auto k_cache = Buffer2torchTensor(params->common.kv_cache->k_cache_buffer, false);
-    // auto v_cache = Buffer2torchTensor(params->common.kv_cache->v_cache_buffer, false);
-
     // Note: skip_append_kv_cache is only used for unit test
     bool skip_append_kv_cache = false;
     if (!skip_append_kv_cache) {
@@ -95,12 +73,7 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     check_cuda_error();
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * configs.softmax_extra_scale_;
-    // at::Tensor out;
-    // if (output.dtype() == DataType::TYPE_FP8_E4M3) {
-    //     out = Buffer2torchTensor(f16_out, false);
-    // } else {
-    //     out = Buffer2torchTensor(params->output, false);
-    // }
+
     if (params->decode_plan) {
         RTP_LLM_LOG_DEBUG("decode flashinfer");
         BatchDecodeWithPagedKVCacheRun(

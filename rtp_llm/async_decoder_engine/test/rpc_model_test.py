@@ -24,7 +24,9 @@ class RpcModelTest(TestCase):
 
         self.tokenizer_path = os.path.join(os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source")
         self.ckpt_path = os.path.join(os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source")
-
+        self.tokenizer_path = "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct"
+        self.ckpt_path = "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct"
+        
     def create_pipeline(self, max_seq_len: int = 100):
         set_global_controller(init_controller())
         ports, _ = PortManager().get_consecutive_ports(1)
@@ -32,7 +34,7 @@ class RpcModelTest(TestCase):
         os.environ['START_PORT'] = str(free_port)
         update_master_info("", free_port)
         g_worker_info.reload()
-        self.fake_model_loader = FakeModelLoader(model_type='llama',
+        self.fake_model_loader = FakeModelLoader(model_type='qwen_2',
                                                  tokenizer_path=self.tokenizer_path,
                                                  ckpt_path=self.ckpt_path,
                                                  weight_type=WEIGHT_TYPE.FP16,

@@ -357,10 +357,10 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
             *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
 
         RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d", max_context_input_seq_len, min_prefix_len, sp_seq_len);
-
-        if (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1) {
-            return nullptr;
-        }
+        // TODO(wangyin): pass python mode arg to this prepare function and check whether should return null.
+        // if (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1) {
+        //     return nullptr;
+        // }
     }
 
     const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;
@@ -463,7 +463,6 @@ void FlashInferAttnParams::run(
     const int bs = params.input.shape()[0];
     const vector<int64_t> strides = {(local_head_num + 2 * local_head_num_kv) * size_per_head, size_per_head, 1};
     const auto cuda_option = torch::dtype(dataTypeToTorchType(params.input.type())).device(torch::DeviceType::CUDA).requires_grad(false);
-
     auto q = torch::from_blob(params.input.data(),
                               {bs, local_head_num, size_per_head},
                               strides, cuda_option);
