@@ -365,7 +365,6 @@ absl::Status SpeculativeEngine::step() {
 
     bool all_streams_disable_sp_run = !streams.empty() && std::all_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->disableSpRun(); });
     bool gen_timeline = !streams.empty() && std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->genTimeline(); });
-    // std::shared_ptr<CudaProfiler_E> profiler;
     profiler_step_--;
     if (profiler_step_ <= 0) {
         profiler_.reset();
@@ -380,9 +379,9 @@ absl::Status SpeculativeEngine::step() {
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
-        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
+        profiler_            = std::make_shared<CudaProfiler_E>(profiler_prefix);
         profiler_->start();
-        profiler_step_ = streams.begin()->profileStep();
+        profiler_step_ = (*streams.begin())->profileStep();
     }
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 

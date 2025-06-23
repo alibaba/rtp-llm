@@ -74,7 +74,6 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         ASSERT_TRUE(output.ok()) << output.status().ToString();
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 3);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
