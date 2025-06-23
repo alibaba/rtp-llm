@@ -6,12 +6,7 @@ import torch
 import logging
 from typing import Any, Dict
 from dataclasses import dataclass
-
-
-DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 7
-WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+from rtp_llm.config.py_config_modules import DEFAULT_START_PORT, MASTER_INFO_PORT_NUM, MIN_WORKER_INFO_PORT_NUM, WORKER_INFO_PORT_NUM
 
 def get_worker_port_num():
     global WORKER_INFO_PORT_NUM

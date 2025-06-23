@@ -55,7 +55,7 @@ void register_parallelism_distributed_config(pybind11::module& m) {
         pybind11::arg("local_world_size") = 1
         )
         .def("to_string", &ParallelismDistributedConfig::to_string)
-        .def("update_from_env_for_test", &ParallelismDistributedConfig::update_from_env_for_test)
+        .def("update_from_env", &ParallelismDistributedConfig::update_from_env_for_test)
         .def_readwrite("tp_size", &ParallelismDistributedConfig::tp_size)
         .def_readwrite("ep_size", &ParallelismDistributedConfig::ep_size)
         .def_readwrite("dp_size", &ParallelismDistributedConfig::dp_size)
@@ -96,7 +96,7 @@ void register_concurrency_config(pybind11::module& m) {
         pybind11::arg("concurrency_limit") = 32
         )
         .def("to_string", &ConcurrencyConfig::to_string)
-        .def("update_from_env_for_test", &ConcurrencyConfig::update_from_env_for_test)
+        .def("update_from_env", &ConcurrencyConfig::update_from_env_for_test)
         .def_readwrite("concurrency_with_block", &ConcurrencyConfig::concurrency_with_block)
         .def_readwrite("concurrency_limit", &ConcurrencyConfig::concurrency_limit);
 }
@@ -133,7 +133,7 @@ void register_fmha_config(pybind11::module& m) {
         pybind11::arg("enable_xqa") = true
         )
         .def("to_string", &FMHAConfig::to_string)
-        .def("update_from_env_for_test", &FMHAConfig::update_from_env_for_test)
+        .def("update_from_env", &FMHAConfig::update_from_env_for_test)
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
         .def_readwrite("enable_trt_fmha", &FMHAConfig::enable_trt_fmha)
         .def_readwrite("enable_paged_trt_fmha", &FMHAConfig::enable_paged_trt_fmha)
@@ -163,7 +163,7 @@ void register_kvcache_config(pybind11::module& m) {
         pybind11::arg("multi_task_prompt_str") = ""
         )
         .def("to_string", &KVCacheConfig::to_string)
-        .def("update_from_env_for_test", &KVCacheConfig::update_from_env_for_test)
+        .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str);
@@ -181,12 +181,19 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test(){
     log_level = autil::EnvUtil::getEnv("LOG_LEVEL", "INFO");
     gen_timeline_sync = bool_from_env_for_test("GEN_TIMELINE_SYNC", false);
     torch_cuda_profiler_dir = autil::EnvUtil::getEnv("TORCH_CUDA_PROFILER_DIR","");
+    log_path = autil::EnvUtil::getEnv("LOG_PATH", "logs");
+    log_file_backup_count = autil::EnvUtil::getEnv("LOG_FILE_BACKUP_COUNT", 16);
+    nccl_debug_file = autil::EnvUtil::getEnv("NCCL_DEBUG_FILE", "");
+    debug_load_server = autil::EnvUtil::getEnv("DEBUG_LOAD_SERVER", false);
+    hack_layer_num = autil::EnvUtil::getEnv("HACK_LAYER_NUM", 0);
+    test_layer_num = autil::EnvUtil::getEnv("TEST_LAYER_NUM", 0);
+    debug_start_fake_process = autil::EnvUtil::getEnv("DEBUG_START_FAKE_PROCESS", false);
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
     pybind11::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(pybind11::init<
-            bool, bool, bool, bool, bool, bool, std::string, std::string, bool, std::string
+            bool, bool, bool, bool, bool, bool, std::string, std::string, std::string, bool, std::string, int, std::string, bool, int, int, bool
         >(),
         pybind11::arg("ft_nvtx") = false,
         pybind11::arg("py_inference_log_response") = false,
@@ -196,11 +203,18 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         pybind11::arg("ft_core_dump_on_exception") = false,
         pybind11::arg("ft_alog_conf_path") = "",
         pybind11::arg("log_level") = "INFO",
+        pybind11::arg("torch_cuda_profiler_dir") = "",
         pybind11::arg("gen_timeline_sync") = false,
-        pybind11::arg("torch_cuda_profiler_dir") = ""
+        pybind11::arg("log_path") = "logs",
+        pybind11::arg("log_file_backup_count") = 16,
+        pybind11::arg("nccl_debug_file") = "",
+        pybind11::arg("debug_load_server") = false,
+        pybind11::arg("hack_layer_num") = 0,
+        pybind11::arg("test_layer_num") = 0,
+        pybind11::arg("debug_start_fake_process") = false
         )
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
-        .def("update_from_env_for_test", &ProfilingDebugLoggingConfig::update_from_env_for_test)
+        .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("ft_nvtx", &ProfilingDebugLoggingConfig::ft_nvtx)
         .def_readwrite("py_inference_log_response", &ProfilingDebugLoggingConfig::py_inference_log_response)
         .def_readwrite("rtp_llm_trace_memory", &ProfilingDebugLoggingConfig::rtp_llm_trace_memory)
@@ -210,7 +224,14 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("log_level", &ProfilingDebugLoggingConfig::log_level)
         .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
-        .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir);
+        .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir)
+        .def_readwrite("log_path", &ProfilingDebugLoggingConfig::log_path)
+        .def_readwrite("log_file_backup_count", &ProfilingDebugLoggingConfig::log_file_backup_count)
+        .def_readwrite("nccl_debug_file", &ProfilingDebugLoggingConfig::nccl_debug_file)
+        .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
+        .def_readwrite("hack_layer_num", &ProfilingDebugLoggingConfig::hack_layer_num)
+        .def_readwrite("test_layer_num", &ProfilingDebugLoggingConfig::test_layer_num)
+        .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process);
 }
 
 // HWKernelConfig
@@ -236,7 +257,7 @@ void register_hwkernel_config(pybind11::module& m) {
         pybind11::arg("rocm_hipblaslt_config") = "gemm_config.csv"
         )
         .def("to_string", &HWKernelConfig::to_string)
-        .def("update_from_env_for_test", &HWKernelConfig::update_from_env_for_test)
+        .def("update_from_env", &HWKernelConfig::update_from_env_for_test)
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
         .def_readwrite("arm_gemm_use_kai", &HWKernelConfig::arm_gemm_use_kai)
         .def_readwrite("enable_stable_scatter_add", &HWKernelConfig::enable_stable_scatter_add)
@@ -272,7 +293,7 @@ void register_device_resource_config(pybind11::module& m) {
         pybind11::arg("not_use_default_stream") = false
         )
         .def("to_string", &DeviceResourceConfig::to_string)
-        .def("update_from_env_for_test", &DeviceResourceConfig::update_from_env_for_test)
+        .def("update_from_env", &DeviceResourceConfig::update_from_env_for_test)
         .def_readwrite("device_reserve_memory_bytes", &DeviceResourceConfig::device_reserve_memory_bytes)
         .def_readwrite("host_reserve_memory_bytes", &DeviceResourceConfig::host_reserve_memory_bytes)
         .def_readwrite("overlap_math_sm_count", &DeviceResourceConfig::overlap_math_sm_count)
@@ -298,7 +319,7 @@ void register_sampler_config(pybind11::module& m) {
         pybind11::arg("enable_flashinfer_sample_kernel") = true
         )
         .def("to_string", &SamplerConfig::to_string)
-        .def("update_from_env_for_test", &SamplerConfig::update_from_env_for_test)
+        .def("update_from_env", &SamplerConfig::update_from_env_for_test)
         .def_readwrite("max_batch_size", &SamplerConfig::max_batch_size)
         .def_readwrite("enable_flashinfer_sample_kernel", &SamplerConfig::enable_flashinfer_sample_kernel);
 }
@@ -333,7 +354,7 @@ void register_moe_config(pybind11::module& m) {
         pybind11::arg("deep_ep_num_sm") = 0
         )
         .def("to_string", &MoeConfig::to_string)
-        .def("update_from_env_for_test", &MoeConfig::update_from_env_for_test)
+        .def("update_from_env", &MoeConfig::update_from_env_for_test)
         .def_readwrite("use_deepep_moe", &MoeConfig::use_deepep_moe)
         .def_readwrite("use_deepep_internode", &MoeConfig::use_deepep_internode)
         .def_readwrite("use_deepep_low_latency", &MoeConfig::use_deepep_low_latency)
@@ -359,7 +380,7 @@ void register_model_specific_config(pybind11::module& m) {
             pybind11::arg("load_python_model") = false
         )
         .def("to_string", &ModelSpecificConfig::to_string)
-        .def("update_from_env_for_test", &ModelSpecificConfig::update_from_env_for_test)
+        .def("update_from_env", &ModelSpecificConfig::update_from_env_for_test)
         .def_readwrite("max_lora_model_size", &ModelSpecificConfig::max_lora_model_size)
         .def_readwrite("load_python_model", &ModelSpecificConfig::load_python_model)
         ;
@@ -392,7 +413,7 @@ void register_speculative_execution_config(pybind11::module& m) {
         pybind11::arg("force_score_context_attention") = true
         )
         .def("to_string", &SpeculativeExecutionConfig::to_string)
-        .def("update_from_env_for_test", &SpeculativeExecutionConfig::update_from_env_for_test)
+        .def("update_from_env", &SpeculativeExecutionConfig::update_from_env_for_test)
         .def_readwrite("sp_model_type", &SpeculativeExecutionConfig::sp_model_type)
         .def_readwrite("sp_type", &SpeculativeExecutionConfig::sp_type)
         .def_readwrite("sp_min_token_match", &SpeculativeExecutionConfig::sp_min_token_match)
@@ -424,7 +445,7 @@ void register_service_discovery_config(pybind11::module& m) {
         pybind11::arg("rtp_llm_multimodal_part_cm2_config") = ""
         )
         .def("to_string", &ServiceDiscoveryConfig::to_string)
-        .def("update_from_env_for_test", &ServiceDiscoveryConfig::update_from_env_for_test)
+        .def("update_from_env", &ServiceDiscoveryConfig::update_from_env_for_test)
         .def_readwrite("use_local", &ServiceDiscoveryConfig::use_local)
         .def_readwrite("remote_rpc_server_ip", &ServiceDiscoveryConfig::remote_rpc_server_ip)
         .def_readwrite("rtp_llm_decode_cm2_config", &ServiceDiscoveryConfig::rtp_llm_decode_cm2_config)
@@ -449,7 +470,7 @@ void register_cache_store_config(pybind11::module& m) {
         pybind11::arg("rank_factor") = 0
         )
         .def("to_string", &CacheStoreConfig::to_string)
-        .def("update_from_env_for_test", &CacheStoreConfig::update_from_env_for_test)
+        .def("update_from_env", &CacheStoreConfig::update_from_env_for_test)
         .def_readwrite("cache_store_rdma_mode", &CacheStoreConfig::cache_store_rdma_mode)
         .def_readwrite("wrr_available_ratio", &CacheStoreConfig::wrr_available_ratio)
         .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor);
@@ -468,7 +489,7 @@ void register_scheduler_config(pybind11::module& m) {
         pybind11::arg("use_batch_decode_scheduler") = false
         )
         .def("to_string", &SchedulerConfig::to_string)
-        .def("update_from_env_for_test", &SchedulerConfig::update_from_env_for_test)
+        .def("update_from_env", &SchedulerConfig::update_from_env_for_test)
         .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler);
 }
 
@@ -485,7 +506,7 @@ void register_batch_decode_scheduler_config(pybind11::module& m) {
         pybind11::arg("batch_decode_scheduler_batch_size") = 1
         )
         .def("to_string", &BatchDecodeSchedulerConfig::to_string)
-        .def("update_from_env_for_test", &BatchDecodeSchedulerConfig::update_from_env_for_test)
+        .def("update_from_env", &BatchDecodeSchedulerConfig::update_from_env_for_test)
         .def_readwrite("batch_decode_scheduler_batch_size", &BatchDecodeSchedulerConfig::batch_decode_scheduler_batch_size);
 }
 
@@ -510,7 +531,7 @@ void register_fifo_scheduler_config(pybind11::module& m) {
         pybind11::arg("fast_gen_context_budget") = -1
         )
         .def("to_string", &FIFOSchedulerConfig::to_string)
-        .def("update_from_env_for_test", &FIFOSchedulerConfig::update_from_env_for_test)
+        .def("update_from_env", &FIFOSchedulerConfig::update_from_env_for_test)
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
         .def_readwrite("enable_fast_gen", &FIFOSchedulerConfig::enable_fast_gen)
@@ -537,7 +558,7 @@ void register_misc_config(pybind11::module& m) {
         pybind11::arg("disable_pdl") = false
         )
         .def("to_string", &MiscellaneousConfig::to_string)
-        .def("update_from_env_for_test", &MiscellaneousConfig::update_from_env_for_test)
+        .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("load_balance", &MiscellaneousConfig::load_balance)
         .def_readwrite("step_records_time_range", &MiscellaneousConfig::step_records_time_range)
         .def_readwrite("step_records_max_size", &MiscellaneousConfig::step_records_max_size)
@@ -602,7 +623,14 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "log_level: " << log_level << "\n"
         << "gen_timeline_sync: "<< gen_timeline_sync << "\n"
-        << "torch_cuda_profiler_dir" << torch_cuda_profiler_dir << "\n";
+        << "torch_cuda_profiler_dir" << torch_cuda_profiler_dir << "\n"
+        << "log_path: " << log_path << "\n"
+        << "log_file_backup_count: " << log_file_backup_count << "\n"
+        << "nccl_debug_file: " << nccl_debug_file << "\n"
+        << "debug_load_server: " << debug_load_server << "\n"
+        << "hack_layer_num: " << hack_layer_num << "\n"
+        << "test_layer_num: " << test_layer_num << "\n"
+        << "debug_start_fake_process: " << debug_start_fake_process;
     return oss.str();
 }
 

@@ -16,7 +16,7 @@ from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, 
 from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, Fp8PerChannelCompressedQuantConfig, preset_quant_config
-
+from rtp_llm.config.py_config_modules import get_env_bool, get_env_int, get_env_str
 updated_params: Set[str] = set()
 
 def get_pad_size(size: int , align_size: int):
@@ -381,24 +381,6 @@ class GptInitModelParameters:
         self.worker_addrs = worker_addrs
 
     def update_gpt_init_params_from_env(self, parallel_info: ParallelInfo=g_parallel_info):
-        ## after setup_args, update gpt init params XXXConfig from env
-        """
-        从环境变量读取所有 Config 字段，未设置的int/float为-1，str为""，bool为False
-        """
-        def get_env_int(name:str, default:int=-1):
-            v = os.environ.get(name, None)
-            return int(v) if v is not None and v != "" else default
-
-        def get_env_str(name:str, default:str=""):
-            v = os.environ.get(name, None)
-            return v if v is not None else default
-
-        def get_env_bool(name:str, default:bool=False):
-            ## in fact, we can always get value from env, if that's not specified, we return default value
-            v = os.environ.get(name, None)
-            if v is None or v == "":
-                return default
-            return v.lower() == "1" or v.lower() == "on" or v.lower() == "true"
 
         # ParallelismDistributedConfig
         self.gpt_init_params.parallelism_distributed_config = ParallelismDistributedConfig(
@@ -457,9 +439,15 @@ class GptInitModelParameters:
             ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
             log_level=get_env_str("LOG_LEVEL", "INFO"),
             gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False),
-            torch_cuda_profiler_dir=get_env_str("TORCH_CUDA_PROFILER_DIR","")
+            torch_cuda_profiler_dir=get_env_str("TORCH_CUDA_PROFILER_DIR",""),
+            log_path=get_env_str("log_path", "logs"),
+            log_file_backup_count=get_env_int("LOG_FILE_BACKUP_COUNT",16),
+            nccl_debug_file=get_env_str("NCCL_DEBUG_FILE",""),
+            debug_load_server=get_env_bool("DEBUG_LOAD_SERVER",False),
+            hack_layer_num=get_env_int("HACK_LAYER_NUM",0),
+            test_layer_num=get_env_int("TEST_LAYER_NUM",0),
+            debug_start_fake_process=get_env_int("DEBUG_START_FAKE_PROCESS",False)
         )
-
         # HWKernelConfig
         self.gpt_init_params.hw_kernel_config = HWKernelConfig(
             deep_gemm_num_sm=get_env_int("DEEP_GEMM_NUM_SM"),

@@ -16,7 +16,7 @@ class BatchDecodeSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
@@ -26,7 +26,7 @@ class CacheStoreConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class ConcurrencyConfig:
     concurrency_limit: int
@@ -35,7 +35,7 @@ class ConcurrencyConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class DeviceExporter:
     def get_device_id(self) -> int:
@@ -65,7 +65,7 @@ class DeviceResourceConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class DeviceType:
     """
@@ -200,7 +200,7 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class FMHAConfig:
     disable_flash_infer: bool
@@ -217,7 +217,7 @@ class FMHAConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class GptInitParameter:
     activation_type: str
@@ -424,7 +424,7 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class KVCacheConfig:
     multi_task_prompt: str
@@ -434,7 +434,7 @@ class KVCacheConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class LoadBalanceInfo:
     available_kv_cache: int
@@ -458,7 +458,7 @@ class MiscellaneousConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class MlaOpsType:
     """
@@ -510,7 +510,7 @@ class ModelSpecificConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class MoeConfig:
     deep_ep_num_sm: int
@@ -527,7 +527,7 @@ class MoeConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class MultimodalInput:
     mm_type: int
@@ -547,15 +547,21 @@ class ParallelismDistributedConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class ProfilingDebugLoggingConfig:
+    debug_load_server: bool
+    debug_start_fake_process: int
     enable_device_perf: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     ft_nvtx: bool
     gen_timeline_sync: bool
+    hack_layer_num: int
+    log_file_backup_count: int
     log_level: str
+    log_path: str
+    nccl_debug_file: str
     py_inference_log_response: bool
     rtp_llm_trace_malloc_stack: bool
     rtp_llm_trace_memory: bool
@@ -564,7 +570,7 @@ class ProfilingDebugLoggingConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class QuantAlgo:
     def __getstate__(self) -> tuple:
@@ -643,7 +649,7 @@ class SamplerConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class SchedulerConfig:
     use_batch_decode_scheduler: bool
@@ -651,7 +657,7 @@ class SchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class ServiceDiscoveryConfig:
     remote_rpc_server_ip: str
@@ -663,7 +669,7 @@ class ServiceDiscoveryConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 class SpecialTokens:
     assistant: RoleSpecialTokens
@@ -686,11 +692,21 @@ class SpeculativeExecutionConfig:
     sp_model_type: str
     sp_type: str
     tree_decode_config: str
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+    gen_num_per_cycle: int
+    force_stream_sample: bool
+    force_score_context_attention: bool
+>>>>>>> finish py_env_configs
     def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
+=======
+    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1) -> None:
+>>>>>>> finish py_env_configs
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env_for_test(self) -> None:
+    def update_from_env(self) -> None:
         ...
 def create_linear_softmax_handler(gpt_init_params: GptInitParameter) -> EmbeddingHandlerOp:
     ...

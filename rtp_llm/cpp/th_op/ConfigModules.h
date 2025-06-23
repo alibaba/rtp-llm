@@ -70,6 +70,13 @@ struct ProfilingDebugLoggingConfig {
     std::string log_level = "INFO";
     bool gen_timeline_sync = false;
     std::string torch_cuda_profiler_dir = "";
+    std::string log_path = "logs";
+    int log_file_backup_count = 16;
+    std::string nccl_debug_file = "";
+    bool debug_load_server = false;
+    int hack_layer_num = 0;
+    int test_layer_num = 0;
+    int debug_start_fake_process = false;
     std::string to_string() const;
     void update_from_env_for_test();
 };
