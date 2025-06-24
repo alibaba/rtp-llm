@@ -365,9 +365,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     BufferPtr partial_max = nullptr;
     BufferPtr block_counter = nullptr;
 
-    size_t batch_size           = params.common.decoder_batch_size;
-    size_t local_head_num       = params.configs.head_num;
-    size_t size_per_head        = params.configs.size_per_head;
+    size_t batch_size     = params.common.decoder_batch_size;
+    size_t local_head_num = params.configs.head_num;
+    size_t size_per_head  = params.configs.size_per_head;
 
     RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
     auto trt_attn = ((TRTAttn*)params.common.decode_trt_attn.get());
@@ -383,27 +383,51 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                               local_head_num / local_kv_head_num,
                               size_per_head,
                               local_tokens_per_block)) {
-        if (params.weights.qkv_weight->bias) {
-            auto qkv_input = Buffer2torchTensor(params.input, false);
-            qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
-        }
 
-        runXqa(params.input.data(),
+        auto q_output = allocateBuffer({params.input.type(),
+                                       {batch_size, local_head_num, size_per_head},
+                                       AllocationType::DEVICE},
+                                       {"q_output"});
+
+        static BufferPtr cos_sin_cache = getRopeCosSin(this,
+                                                       params.configs.rope_config.style,
+                                                       params.configs.rope_config.dim,
+                                                       params.configs.rope_config.base);
+
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
+                                         invokeDecodeAddFusedQKVBiasTranspose,
+                                         q_output->data(),
+                                         nullptr, // k_buf
+                                         nullptr, // v_buf
+                                         kv_block_array,
+                                         params.input.data(),
+                                         params.common.sequence_lengths->data<int>(),
+                                         params.weights.qkv_weight->bias->data(),
+                                         cos_sin_cache->data<float>(),
+                                         batch_size,
+                                         local_head_num,
+                                         local_kv_head_num,
+                                         size_per_head,
+                                         params.configs.rope_config,
+                                         params.configs.use_logn_attn,
+                                         true, // store_q,
+                                         false, // store_kv,
+                                         true, // store_cache,
+                                         stream_);
+
+        runXqa(q_output->data(),
                params.output.data(),
                local_head_num,
                local_kv_head_num,
                size_per_head,
                params.common.decoder_batch_size,
-               params.common.decoder_max_seq_len,
+               params.common.decoder_max_seq_len + 1,
                local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
-               this,
-               0,
-               nullptr,
-               params.configs.rope_config.dim,
-               params.configs.rope_config.base);
+               this);
+
         return;
     }
 #endif

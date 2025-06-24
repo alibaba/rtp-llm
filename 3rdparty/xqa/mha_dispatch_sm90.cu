@@ -22,13 +22,12 @@
                                             scratch,                                                                   \
                                             stream) 
 
-#define XQA_SM90(func, a0, a1, b0, b1, c0, c1)                     \
+#define XQA_SM90(func, a0, a1, b0, b1, c0, c1)                                                                         \
         func##a0##a1##b0##b1##c0##c1(prop,                                                                             \
                                      nbKHeads,                                                                         \
                                      qScale,                                                                           \
                                      reinterpret_cast<Vec<__nv_bfloat16, c_head_dim>*>(output),                        \
                                      reinterpret_cast<Vec<__nv_bfloat16, c_head_dim> const*>(input),                   \
-                                     reinterpret_cast<Vec<float, c_head_dim>*>(ropeCosSin),                            \
                                      reinterpret_cast<Vec<__nv_fp8_e4m3, c_head_dim>*>(pool),                          \
                                      kvCachePageList,                                                                  \
                                      maxSeqLen,                                                                        \
@@ -112,7 +111,7 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cu
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
     uint32_t* semaphores, void* scratch, cudaStream_t stream,
-    void* ropeCosSin, void const* input, void* specDecParams) {
+    void const* input, void* specDecParams) {
     XQA_DISPATCH_HEAD_DIM_SM90(64)
     XQA_DISPATCH_HEAD_DIM_SM90(128)
     XQA_DISPATCH_HEAD_DIM_SM90(256)

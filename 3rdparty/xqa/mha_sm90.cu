@@ -659,10 +659,10 @@ CUBIN_EXPORT __global__
     uint32_t const idxHeadGrp = blockIdx.z % nbKHeads; // inside one request
     assert(gridDim.z == nbKHeads * batchSize);
     uint32_t const cacheSeqLen_past = getCacheSeqLen<usePagedKVCache>(cacheList, idxReq);
-#if USE_INPUT_KV
-    uint32_t const cacheSeqLen = cacheSeqLen_past + 1;
-#else
+#if SPEC_DEC
     uint32_t const cacheSeqLen = cacheSeqLen_past;
+#else
+    uint32_t const cacheSeqLen = cacheSeqLen_past + 1;
 #endif
     static_assert(gemm0CtaTileNbTokens == gemm1CtaTileNbTokens);
     constexpr uint32_t tileSize = gemm0CtaTileNbTokens;

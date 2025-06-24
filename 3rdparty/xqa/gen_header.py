@@ -20,8 +20,7 @@ def gen_one_decl(func_name: str, head_dim: int) -> str:
     func_decl = f'''
 void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
     float qScale, Vec<__nv_bfloat16, {head_dim}>* output,
-    Vec<__nv_bfloat16, {head_dim}> const* qkv,
-    Vec<float, {head_dim}> const* ropeCosSin,
+    Vec<__nv_bfloat16, {head_dim}> const* q,
     Vec<__nv_fp8_e4m3, {head_dim}>* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].

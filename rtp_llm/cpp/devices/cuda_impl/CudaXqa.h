@@ -40,11 +40,8 @@ bool supportXqa(DataType input_type,
  * @param kv_cache_page_list [batch_size, beam_width, 2, max_pages_per_seq]
  * @param sequence_lengths kv seq len
  * @param device 
- * @param rope_dim 
- * @param rope_theta 
  * @param max_q_len max q seqlen
  * @param q_cu_seqlens accumulate q seqlen 
- * @param max_position_embeddings 
  * @param q_scale 
  * @param max_batch_size for semaphores
  * @param beam_width 
@@ -61,48 +58,26 @@ void runXqa(void* input,
             int32_t* kv_cache_page_list,
             uint32_t* sequence_lengths,
             CudaDevice *device,
-            size_t      max_q_len,
-            void*       q_cu_seqlens,
-            int rope_dim = 128,
-            int rope_theta = 1000000,
-            int max_position_embeddings = 128000,
+            size_t max_q_len = 0,
+            void* q_cu_seqlens = nullptr,
             float q_scale = 1.f,
             size_t max_batch_size = 1024,
             uint32_t beam_width = beamWidth);
 
 /**
- * @brief 
+ * @brief Get the Rope Cos Sin object, TODO: move to python
  * 
- * @tparam rope_dim 
  * @param device 
+ * @param rope_style 
+ * @param rope_dim 
  * @param rope_theta 
  * @param max_position_embeddings 
  * @return BufferPtr 
  */
-template <int rope_dim>
-BufferPtr genRopeCosSin(CudaDevice* device, int rope_theta, int max_position_embeddings) {
-    auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
-    auto freqs = torch::outer(t, inv_freq);
-    auto cos = freqs.cos().to(torch::kFloat32);
-    auto sin = freqs.sin().to(torch::kFloat32);
-    auto emb = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-
-    BufferPtr rope_cos_sin = device->allocateBuffer({DataType::TYPE_UINT8,
-                                                    {max_position_embeddings * sizeof(Vec<float, rope_dim>)},
-                                                    AllocationType::DEVICE},
-                                                    {"rope_cos_sin"});
-    auto rope_cos_sin_ptr = reinterpret_cast<Vec<float, rope_dim>*>(rope_cos_sin->data());
-    for (size_t i = 0; i < max_position_embeddings; ++i) {
-        check_cuda_value(cudaMemcpyAsync(&(rope_cos_sin_ptr[i].data[0]),
-                                           reinterpret_cast<char*>(emb.data_ptr()) + i * sizeof(float) * rope_dim,
-                                           sizeof(float) * rope_dim,
-                                           cudaMemcpyHostToDevice,
-                                           device->getStream()));
-    }
-    check_cuda_value(cudaStreamSynchronize(device->getStream()));
-
-    return rope_cos_sin;
-}
+BufferPtr getRopeCosSin(CudaDevice* device,
+                        RopeStyle rope_style = RopeStyle::Base,
+                        int rope_dim = 128,
+                        int rope_theta = 1000000,
+                        int max_position_embeddings = 128000);
 
 }

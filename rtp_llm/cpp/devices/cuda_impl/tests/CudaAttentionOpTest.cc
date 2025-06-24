@@ -257,19 +257,17 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
-    std::vector<size_t> batch_size = {2};
-    size_t head_dim = 128;
+    size_t batch_size = 3;
+    std::vector<size_t> head_dim = {64, 128, 256};
     size_t seq_q = 1;
+    size_t seq_kv = 129;
     size_t head_q = 64;
     std::vector<size_t> head_kv = {4, 8, 16, 32, 64};
     std::vector<size_t> page_size = {16, 32, 64, 128};
-    for (auto bs : batch_size) {
+    for (auto hd: head_dim) {
         for (auto hkv: head_kv) {
             for (auto ps : page_size) {
-                std::vector<size_t> seq_kv = {1, ps - 1, ps, ps + 1};
-                for (auto skv: seq_kv) {
-                    xqaAttentionOpTest(bs, seq_q, skv, head_q, hkv, head_dim, ps);
-                }
+                xqaAttentionOpTest(batch_size, seq_q, seq_kv, head_q, hkv, hd, ps);
             }
         }
     }

@@ -129,7 +129,7 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cu
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
     uint32_t* semaphores, void* scratch, cudaStream_t stream,
-    void* ropeCosSin = nullptr, void const* input = nullptr, void* specDecParams = nullptr);
+    void const* input = nullptr, void* specDecParams = nullptr);
 
 #if STATIC_NB_K_HEADS
 constexpr uint32_t nbKHeads = NB_K_HEADS;

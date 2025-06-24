@@ -2,11 +2,6 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/devices/base_tests/UnfusedAttentionTest.hpp"
-#include "rtp_llm/cpp/th_op/GlobalConfig.h"
-
-#ifdef USING_CUDA12
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#endif
 
 using namespace rtp_llm;
 

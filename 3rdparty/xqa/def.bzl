@@ -9,6 +9,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, spec_d
         '-nvcc_options=use_fast_math',
         '-t 0',
         '-res-usage',
+        '-DUSE_INPUT_KV=0',
         '-DXQA_FUNC_SM90=' + xqa_name,
         '-DXQA_KERNEL_SM90=' + xqa_kernel_name,
         '-DHEAD_ELEMS=' + str(head_dim),
@@ -17,8 +18,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, spec_d
     ]
     if spec_dec:
         addition_cuda_copts += [
-            '-DSPEC_DEC=1',
-            '-DUSE_INPUT_KV=0' 
+            '-DSPEC_DEC=1'
         ]
     native.cc_library(
         name = xqa_name,
