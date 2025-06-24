@@ -464,6 +464,7 @@ class GptInitModelParameters:
             enable_stable_scatter_add=get_env_bool("ENABLE_STABLE_SCATTER_ADD", False),
             enable_multi_block_mode=get_env_bool("ENABLE_MULTI_BLOCK_MODE", True),
             rocm_hipblaslt_config=get_env_str("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"),
+            ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR",True)
         )
 
         # DeviceResourceConfig
@@ -484,10 +485,12 @@ class GptInitModelParameters:
             use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE",False),
             use_deepep_low_latency=get_env_bool("USE_DEEPEP_LOW_LATENCY", True),
             use_deepep_p2p_low_latency=get_env_bool("USE_DEEPEP_P2P_LOW_LATENCY", False),
-            eplb_control_step=get_env_int("EPLB_CONTROL_STEP",100),
-            eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
-            eplb_test_mode=get_env_bool("EPLB_TEST_MODE",False),
             fake_balance_expert=get_env_bool("FAKE_BALANCE_EXPERT",False),
+            eplb_control_step=get_env_int("EPLB_CONTROL_STEP",100),
+            eplb_test_mode=get_env_bool("EPLB_TEST_MODE",False),
+            hack_moe_expert=get_env_bool("HACK_MOE_EXPERT",False),
+            eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
+            deep_ep_num_sm=get_env_int("DEEP_EP_NUM_SM",0)
         )
 
         # ModelSpecificConfig
