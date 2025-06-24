@@ -33,7 +33,7 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     if (params.weights.q_norm_weight) {
         RTP_LLM_CHECK_WITH_INFO(params.weights.k_norm_weight != nullptr, "q_norm_weight and k_norm_weight should both be provided");
         RTP_LLM_CHECK_WITH_INFO(params.ln_params.norm_type == NormType::rmsnorm, "qkRmsNorm only support rmsnorm");
-        auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv,
+        auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv, 
                                                             *params.weights.q_norm_weight,
                                                             *params.weights.k_norm_weight,
                                                             params.ln_params.eps,

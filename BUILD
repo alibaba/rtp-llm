@@ -82,6 +82,8 @@ filegroup(
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/FlashInferOp.h",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FusedQKRmsNorm.h",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/Torch_ext.h",
     ],
 )
 
@@ -103,6 +105,7 @@ filegroup(
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/FlashInferOp.cc",
+        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FusedQKRmsNorm.cc",
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp:th_op/common/NcclOp.cc",

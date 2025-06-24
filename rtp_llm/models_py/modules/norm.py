@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from typing import Optional, Dict, TypedDict, Tuple, Any
 # from rtp_llm.ops import rmsnorm
 
 class BaseNorm(nn.Module):
@@ -32,3 +33,59 @@ class RMSNorm(BaseNorm):
         torch.ops.libth_transformer.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
         return output
 
+class QKRMSNorm(nn.Module):
+    def __init__(self, q_weight: torch.Tensor, 
+                       k_weight: torch.Tensor, 
+                       head_num: int,
+                       kv_head_num: int,
+                       size_per_head: float = 128,
+                       eps: float = 1e-6):
+        super().__init__()
+        self.q_norm = RMSNorm(q_weight, eps)
+        self.k_norm = RMSNorm(k_weight, eps)
+        self.head_num = head_num
+        self.kv_head_num = kv_head_num
+        self.size_per_head = size_per_head
+        self.q_size = self.head_num * self.size_per_head
+        self.kv_size = self.kv_head_num * self.size_per_head
+        self.variance_epsilon = eps
+
+    def _apply_qk_norm(
+        self, q: torch.Tensor, k: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q_by_head = q.reshape(-1, self.size_per_head)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+        k_by_head = k.reshape(-1, self.size_per_head)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+        return q, k
+
+    def forward(self, hidden_states):
+        q, k, v = hidden_states.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self._apply_qk_norm(q, k)
+        output = torch.cat([q, k, v], dim=-1)
+        return output
+
+
+class FusedQKRMSNorm(nn.Module):
+    def __init__(self, q_weight: torch.Tensor, 
+                       k_weight: torch.Tensor, 
+                       head_num: int,
+                       kv_head_num: int,
+                       size_per_head: float = 128,
+                       eps: float = 1e-6):
+        super().__init__()
+        self.q_weight = q_weight
+        self.k_weight = k_weight
+        self.eps = eps
+        self.head_num = head_num
+        self.kv_head_num = kv_head_num
+        self.size_per_head = size_per_head
+        self.q_size = self.head_num * self.size_per_head
+        self.kv_size = self.kv_head_num * self.size_per_head
+
+    def forward(self, hidden_states):
+        m, n = hidden_states.shape
+        torch.ops.libth_transformer.fused_qk_rmsnorm(hidden_states, self.q_weight, self.k_weight, self.eps, self.head_num, self.kv_head_num, m, n, self.size_per_head, 0)
+        return hidden_states

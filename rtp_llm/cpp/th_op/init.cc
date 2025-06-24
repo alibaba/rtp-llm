@@ -1,3 +1,4 @@
+#include <torch/library.h>
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
@@ -7,8 +8,8 @@
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/FlashInferOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include <torch/library.h>
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "rtp_llm/cpp/th_op/multi_gpu_gpt/FusedQKRmsNorm.h"
 
 using namespace rtp_llm;
 
@@ -48,6 +49,8 @@ TORCH_LIBRARY_FRAGMENT(libth_transformer, m) {
   m.impl("rmsnorm", torch::kCUDA, &rmsnorm);
   m.def("silu_and_mul(Tensor output, Tensor input, int cuda_stream) -> ()");
   m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
+  m.def("fused_qk_rmsnorm(Tensor IO, Tensor q_gamma, Tensor k_gamma, float layernorm_eps, int q_group_num, int k_group_num, int m, int n, int norm_size, int cuda_stream) -> ()");
+  m.impl("fused_qk_rmsnorm", torch::kCUDA, &FusedQKRMSNorm);
 }
 
 }  // namespace torch_ext
