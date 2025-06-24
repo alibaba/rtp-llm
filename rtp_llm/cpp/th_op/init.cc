@@ -56,6 +56,8 @@ TORCH_LIBRARY_FRAGMENT(libth_transformer, m) {
   m.impl("fused_qk_rmsnorm", torch::kCUDA, &FusedQKRMSNorm);
   m.def("layernorm(Tensor! output, Tensor input, Tensor weight, Tensor beta, float eps, int cuda_stream) -> ()");
   m.impl("layernorm", torch::kCUDA, &layernorm);
+  m.def("fused_add_layernorm(Tensor! input, Tensor! residual, Tensor bias, Tensor weight, Tensor beta, float eps, int cuda_stream) -> ()");
+  m.impl("fused_add_layernorm", torch::kCUDA, &fused_add_layernorm);
 }
 
 }  // namespace torch_ext

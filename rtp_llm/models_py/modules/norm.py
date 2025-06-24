@@ -144,3 +144,32 @@ class LayerNorm(BaseLayerNorm):
         output = torch.empty_like(hidden_states)
         torch.ops.libth_transformer.layernorm(output, hidden_states, self.weight.data, self.beta, self.variance_epsilon, 0)
         return output
+
+class BaseAddBiasResLayerNorm(torch.nn.Module):
+    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.weight = weight
+        self.beta = beta
+        self.variance_epsilon = eps
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError()
+        
+class AddBiasResLayerNormTorch(BaseAddBiasResLayerNorm):
+    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, beta, eps)
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor):
+        hidden_states = hidden_states + bias + residual
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        mean = hidden_states.mean(dim=-1, keepdim=True)
+        squared_sum = (hidden_states ** 2).mean(dim=-1, keepdim=True)
+        
+        x_normalized = (hidden_states - mean) / torch.sqrt((squared_sum - (mean ** 2)) + self.variance_epsilon)
+        return (self.weight * x_normalized + self.beta).to(input_dtype)
+
+class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
+    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, beta, eps)
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor):
+        torch.ops.libth_transformer.fused_add_layernorm(hidden_states, residual, bias, self.weight.data, self.beta, self.variance_epsilon, 0)
+        return hidden_states
