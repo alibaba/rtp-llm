@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpNorm.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/FlashInferOp.h"
@@ -45,12 +46,14 @@ PYBIND11_MODULE(libth_transformer, m) {
 }
 
 TORCH_LIBRARY_FRAGMENT(libth_transformer, m) {
-  m.def("rmsnorm(Tensor output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
+  m.def("rmsnorm(Tensor! output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
   m.impl("rmsnorm", torch::kCUDA, &rmsnorm);
-  m.def("silu_and_mul(Tensor output, Tensor input, int cuda_stream) -> ()");
+  m.def("silu_and_mul(Tensor! output, Tensor input, int cuda_stream) -> ()");
   m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
-  m.def("fused_qk_rmsnorm(Tensor IO, Tensor q_gamma, Tensor k_gamma, float layernorm_eps, int q_group_num, int k_group_num, int m, int n, int norm_size, int cuda_stream) -> ()");
+  m.def("fused_qk_rmsnorm(Tensor! IO, Tensor q_gamma, Tensor k_gamma, float layernorm_eps, int q_group_num, int k_group_num, int m, int n, int norm_size, int cuda_stream) -> ()");
   m.impl("fused_qk_rmsnorm", torch::kCUDA, &FusedQKRMSNorm);
+  m.def("layernorm(Tensor! output, Tensor input, Tensor weight, Tensor beta, float eps, int cuda_stream) -> ()");
+  m.impl("layernorm", torch::kCUDA, &layernorm);
 }
 
 }  // namespace torch_ext
