@@ -182,8 +182,8 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
         prop->enable_comm_overlap = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
         prop->enable_sp = init_params_.enable_sp;
-        prop->overlap_math_sm_count = init_params_.overlap_math_sm_count;
-        prop->overlap_comm_type = init_params_.overlap_comm_type;
+        prop->overlap_math_sm_count = init_params_.device_resource_config.overlap_math_sm_count;
+        prop->overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
         prop->ffn_tp_size = init_params_.ffn_tp_size;
         prop->ffn_tp_rank = init_params_.ffn_tp_rank;
         prop->m_split = init_params_.m_split;
