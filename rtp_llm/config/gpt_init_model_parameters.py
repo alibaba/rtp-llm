@@ -730,7 +730,7 @@ class GptInitModelParameters:
         logging.info(f'max_generate_batch_size: {self.max_generate_batch_size}')
         self.max_context_batch_size = int(os.environ.get('MAX_CONTEXT_BATCH_SIZE', 1))
         logging.info(f'max_context_batch_size: {self.max_context_batch_size}')
-        self.reserve_runtime_mem_mb = int(os.environ.get('RESERVER_RUNTIME_MEM_MB', 128))
+        self.reserve_runtime_mem_mb = int(os.environ.get('RESERVER_RUNTIME_MEM_MB', 1024))
         logging.info(f'reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}')
         self.kv_cache_mem_mb = int(os.environ.get('KV_CACHE_MEM_MB', -1))
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
