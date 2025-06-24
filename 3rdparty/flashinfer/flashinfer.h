@@ -126,6 +126,9 @@ void chain_speculative_sampling(at::Tensor draft_probs, at::Tensor draft_token_i
 void rmsnorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, double eps,
              int64_t cuda_stream);
 
+void fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps,
+                       int64_t cuda_stream);
+
 // std::vector<int64_t> BatchPrefillWithKVCacheSM90Plan(
 //     unsigned int head_dim, bool causal, at::Tensor float_workspace_buffer,
 //     at::Tensor int_workspace_buffer, at::Tensor page_locked_int_workspace_buffer,

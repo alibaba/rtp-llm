@@ -12,7 +12,6 @@ class BaseNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError()
 
-
 class RMSNormTorch(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
@@ -32,6 +31,33 @@ class RMSNorm(BaseNorm):
         output = torch.empty_like(hidden_states)
         torch.ops.libth_transformer.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
         return output
+
+class BaseResNorm(nn.Module):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError()
+
+class RMSResNormTorch(BaseResNorm):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, eps)
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        hidden_states = hidden_states + residual
+        output = torch.empty_like(hidden_states)
+        torch.ops.libth_transformer.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
+        return output
+
+class RMSResNorm(BaseResNorm):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, eps)
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        torch.ops.libth_transformer.fused_add_rmsnorm(hidden_states, residual, self.weight.data, self.variance_epsilon, 0)
+        return hidden_states
 
 class QKRMSNorm(nn.Module):
     def __init__(self, q_weight: torch.Tensor, 

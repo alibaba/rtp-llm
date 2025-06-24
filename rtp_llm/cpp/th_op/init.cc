@@ -48,6 +48,8 @@ PYBIND11_MODULE(libth_transformer, m) {
 TORCH_LIBRARY_FRAGMENT(libth_transformer, m) {
   m.def("rmsnorm(Tensor! output, Tensor input, Tensor weight, float eps, int cuda_stream) -> ()");
   m.impl("rmsnorm", torch::kCUDA, &rmsnorm);
+  m.def("fused_add_rmsnorm(Tensor! input, Tensor! residual, Tensor weight, float eps, int cuda_stream) -> ()");
+  m.impl("fused_add_rmsnorm", torch::kCUDA, &fused_add_rmsnorm);
   m.def("silu_and_mul(Tensor! output, Tensor input, int cuda_stream) -> ()");
   m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
   m.def("fused_qk_rmsnorm(Tensor! IO, Tensor q_gamma, Tensor k_gamma, float layernorm_eps, int q_group_num, int k_group_num, int m, int n, int norm_size, int cuda_stream) -> ()");
