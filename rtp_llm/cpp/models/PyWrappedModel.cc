@@ -16,39 +16,15 @@
 
 namespace rtp_llm {
 
-bool PyWrappedModel::s_python_initialized = false;
-std::mutex PyWrappedModel::s_python_init_mutex;
-
-void PyWrappedModel::EnsurePythonInitialized() {
-    if (!s_python_initialized) {
-        std::lock_guard<std::mutex> lock(s_python_init_mutex);
-        if (!s_python_initialized) {
-
-            // Set PYTHONUNBUFFERED=TRUE before initializing the interpreter
-            // This helps ensure that Python's output is not overly buffered,
-            // which is useful when redirecting stdout/stderr.
-            if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
-                RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
-            } else {
-                RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
-            }
-
-            // try {
-            //     py::initialize_interpreter(false);
-            // } catch (const py::error_already_set& e) {
-            //     RTP_LLM_LOG_WARNING("Failed to initialize Python interpreter: %s", e.what());
-            // }
-            s_python_initialized = true;
-            RTP_LLM_LOG_INFO("Python interpreter initialized via pybind11.");
-        }
-    }
-}
-
 PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance)
     : GptModel(params)
     , py_instance_(std::move(py_instance)) // Take ownership of the passed py::object
 {
-    EnsurePythonInitialized(); // Ensure interpreter is up for any base class or immediate needs
+    if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
+        RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
+    } else {
+        RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
+    }
 
     py::gil_scoped_acquire gil; // Acquire GIL for safety, though direct operations are minimal now
 
@@ -60,21 +36,18 @@ PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_i
 }
 
 PyWrappedModel::~PyWrappedModel() {
-    if (s_python_initialized && py_instance_) {
-        try {
-            py::gil_scoped_acquire gil;
-            py_instance_.release(); // Release the Python object
-            RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
-        }
+    try {
+        py::gil_scoped_acquire gil;
+        py_instance_.release(); // Release the Python object
+        RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
     }
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-    EnsurePythonInitialized();
 
     py::gil_scoped_acquire gil;
     // py::scoped_ostream_redirect stream_redirect(
@@ -140,7 +113,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // py::dict kwargs = py::dict("attn_params"=attention_common_inputs);
         py::kwargs kwargs;
         kwargs["k_cache"] = k_cache;
-        kwargs["v_cache"] = k_cache;
+        kwargs["v_cache"] = v_cache;
         kwargs["attn_params"] = attention_common_inputs;
         // py::object py_outputs_obj = py_forward_method(token_ids, k_cache, v_cache, attention_common_inputs); //
         py::object py_outputs_obj = py_forward_method(token_ids, **kwargs);

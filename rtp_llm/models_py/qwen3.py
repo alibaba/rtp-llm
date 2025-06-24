@@ -10,6 +10,8 @@ from rtp_llm.models_py.layers.decoder_layer import Qwen3DecoderLayer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.utils.model_weight import W
 
+from rtp_llm.models_py.module_base import set_trace_on_tty
+
 class Qwen3Model(nn.Module):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__()
@@ -35,17 +37,11 @@ class Qwen3Model(nn.Module):
 
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-
         for decoder_layer in self.layers[: self.layer_num]:
             hidden_states = decoder_layer(
                 hidden_states,
                 **flash_attn_kwargs,
             )
-
-        # hidden_states = self.norm(hidden_states)
-        # logits = self.lm_head(hidden_states)
-        # add hidden states from the last decoder layer
 
         return hidden_states
 

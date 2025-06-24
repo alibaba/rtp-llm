@@ -22,9 +22,6 @@ public:
 private:
     py::object        py_instance_; // Stores the instance of the Python class
 
-    static void EnsurePythonInitialized();
-    static bool s_python_initialized;
-    static std::mutex s_python_init_mutex;
 };
 
 }  // namespace rtp_llm

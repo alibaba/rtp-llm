@@ -15,12 +15,12 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     const AttentionCommonInputs& attn_param = attn_params.cast<AttentionCommonInputs>();
     FlashInferAttnParams* params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
     if (attn_param.prefill_flash_infer_attn) {
-        params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();        
+        params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
     } else {
-        params = (FlashInferAttnParams*)attn_param.decode_flash_infer_attn.get();        
+        params = (FlashInferAttnParams*)attn_param.decode_flash_infer_attn.get();
     }
     assert(params);
-    
+
     const int local_head_num = configs.head_num_;
     const int local_head_num_kv = configs.head_num_kv_;
     const int size_per_head = configs.size_per_head_;
@@ -47,7 +47,7 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
                            (int64_t)stream);
         check_cuda_error();
     }
-    
+
     // Note: skip_append_kv_cache is only used for unit test
     bool skip_append_kv_cache = false;
     if (!skip_append_kv_cache) {
