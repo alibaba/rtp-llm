@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::list<GenerateStreamPtr>& streams) const {
     bool contain_topp = false;
-    bool force_stream_sample = GlobalConfig::get().sp_config.force_stream_sample;
+    bool force_stream_sample = device_->initParams().sp_config.force_stream_sample;
     torch::Device target_device = device_->getTorchDevice();
     SpeculativeSamplerOutput     sample_output;
 
@@ -19,7 +19,7 @@ absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::l
     if (!contain_topp || force_stream_sample || target_device != torch::Device(torch::kCUDA)) {
         streamSample(sample_output, streams);
     } else {
-        batchSample(sample_output, streams);        
+        batchSample(sample_output, streams);
     }
     return sample_output;
 }
@@ -32,7 +32,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
                                             const GenerateStreamPtr&            stream) const {
 
     std::shared_ptr<GenerateConfig>&          stream_config         = stream->generateConfig();
-                            
+
     RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
                       stream->streamId(),
                       stream_config->top_k,
@@ -132,9 +132,9 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
         sample_output.propose_token_num += propose_step;
         sample_output.accept_token_num += accept_len;
 
-        rtp_llm::BufferPtr accept_tokens = 
+        rtp_llm::BufferPtr accept_tokens =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
-        
+
         memcpy(accept_tokens->data(), score_stream_output->tokens->data(), sizeof(int32_t) * accept_len);
 
         updateSampleStream(propose_stream_output, score_stream_output, propose_step, accept_len, accept_tokens, stream);
