@@ -30,10 +30,10 @@ class ServerConfig:
         self.fronted_server_id = 0
 
     def update_from_env(self):
-        self.fronted_server_count = int(os.environ.get("SERVER_FRONTED_SERVER_COUNT", self.fronted_server_count))
-        self.start_port = int(os.environ.get("SERVER_START_PORT", self.start_port))
-        self.timeout_keep_alive = int(os.environ.get("SERVER_TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive))
-        self.fronted_server_id = int(os.environ.get("SERVER_FRONTED_SERVER_ID", self.fronted_server_id))
+        self.fronted_server_count = int(os.environ.get("FRONTED_SERVER_COUNT", self.fronted_server_count))
+        self.start_port = int(os.environ.get("START_PORT", self.start_port))
+        self.timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive))
+        self.fronted_server_id = int(os.environ.get("FRONTED_SERVER_ID", self.fronted_server_id))
 
     def to_string(self):
         return (
@@ -62,23 +62,23 @@ class ModelConfig:
         self.ptuning_path: Optional[str] = None
 
     def update_from_env(self):
-        self.extra_data_path = os.environ.get("MODEL_EXTRA_DATA_PATH", self.extra_data_path)
-        self.local_extra_data_path = os.environ.get("MODEL_LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path)
-        self.tokenizer_path = os.environ.get("MODEL_TOKENIZER_PATH", self.tokenizer_path)
-        self.act_type = os.environ.get("MODEL_ACT_TYPE", self.act_type)
-        use_float32 = os.environ.get("MODEL_USE_FLOAT32")
+        self.extra_data_path = os.environ.get("EXTRA_DATA_PATH", self.extra_data_path)
+        self.local_extra_data_path = os.environ.get("LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path)
+        self.tokenizer_path = os.environ.get("TOKENIZER_PATH", self.tokenizer_path)
+        self.act_type = os.environ.get("ACT_TYPE", self.act_type)
+        use_float32 = os.environ.get("USE_FLOAT32")
         if use_float32 is not None:
             self.use_float32 = get_env_bool(use_float32)
-        self.original_checkpoint_path = os.environ.get("MODEL_ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path)
-        self.mla_ops_type = os.environ.get("MODEL_MLA_OPS_TYPE", self.mla_ops_type)
-        self.parallel_batch = int(os.environ.get("MODEL_PARALLEL_BATCH", self.parallel_batch))
-        self.ft_plugin_path = os.environ.get("MODEL_FT_PLUGIN_PATH", self.ft_plugin_path)
-        self.weight_type = os.environ.get("MODEL_WEIGHT_TYPE", self.weight_type)
-        self.task_type = os.environ.get("MODEL_TASK_TYPE", self.task_type)
-        self.model_type = os.environ.get("MODEL_MODEL_TYPE", self.model_type)
-        self.checkpoint_path = os.environ.get("MODEL_CHECKPOINT_PATH", self.checkpoint_path)
-        self.oss_endpoint = os.environ.get("MODEL_OSS_ENDPOINT", self.oss_endpoint)
-        self.ptuning_path = os.environ.get("MODEL_PTUNING_PATH", self.ptuning_path)
+        self.original_checkpoint_path = os.environ.get("ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path)
+        self.mla_ops_type = os.environ.get("MLA_OPS_TYPE", self.mla_ops_type)
+        self.parallel_batch = int(os.environ.get("PARALLEL_BATCH", self.parallel_batch))
+        self.ft_plugin_path = os.environ.get("FT_PLUGIN_PATH", self.ft_plugin_path)
+        self.weight_type = os.environ.get("WEIGHT_TYPE", self.weight_type)
+        self.task_type = os.environ.get("TASK_TYPE", self.task_type)
+        self.model_type = os.environ.get("MODEL_TYPE", self.model_type)
+        self.checkpoint_path = os.environ.get("CHECKPOINT_PATH", self.checkpoint_path)
+        self.oss_endpoint = os.environ.get("OSS_ENDPOINT", self.oss_endpoint)
+        self.ptuning_path = os.environ.get("PTUNING_PATH", self.ptuning_path)
 
     def to_string(self):
             return (
@@ -107,9 +107,9 @@ class PySpeculativeExecutionConfig:
         self.sp_checkpoint_path: Optional[str] = None
 
     def update_from_env(self):
-        self.gen_num_per_circle = int(os.environ.get("SPECULATIVE_GEN_NUM_PER_CIRCLE", self.gen_num_per_circle))
-        self.sp_quantization = os.environ.get("SPECULATIVE_SP_QUANTIZATION", self.sp_quantization)
-        self.sp_checkpoint_path = os.environ.get("SPECULATIVE_SP_CHECKPOINT_PATH", self.sp_checkpoint_path)
+        self.gen_num_per_circle = int(os.environ.get("GEN_NUM_PER_CIRCLE", self.gen_num_per_circle))
+        self.sp_quantization = os.environ.get("SP_QUANTIZATION", self.sp_quantization)
+        self.sp_checkpoint_path = os.environ.get("SP_CHECKPOINT_PATH", self.sp_checkpoint_path)
 
     def to_string(self):
         return (
@@ -125,7 +125,7 @@ class LoraConfig:
 
     def update_from_env(self):
         self.lora_info = os.environ.get("LORA_INFO", self.lora_info)
-        merge_lora = os.environ.get("LORA_MERGE_LORA")
+        merge_lora = os.environ.get("MERGE_LORA")
         if merge_lora is not None:
             self.merge_lora = merge_lora.lower() == "true"
 
@@ -143,12 +143,12 @@ class LoadConfig:
         self.load_ckpt_num_process: int = 0
 
     def update_from_env(self):
-        self.phy2log_path = os.environ.get("LOAD_PHY2LOG_PATH", self.phy2log_path)
-        self.converter_num_per_gpu = int(os.environ.get("LOAD_CONVERTER_NUM_PER_GPU", self.converter_num_per_gpu))
-        tokenizers_parallelism = os.environ.get("LOAD_TOKENIZERS_PARALLELISM")
+        self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
+        self.converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", self.converter_num_per_gpu))
+        tokenizers_parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
         if tokenizers_parallelism is not None:
             self.tokenizers_parallelism = tokenizers_parallelism.lower() == "true"
-        self.load_ckpt_num_process = int(os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process))
+        self.load_ckpt_num_process = int(os.environ.get("CKPT_NUM_PROCESS", self.load_ckpt_num_process))
 
     def to_string(self):
         return (
@@ -166,10 +166,10 @@ class RenderConfig:
         self.llava_chat_template: str = ''
 
     def update_from_env(self):
-        self.model_template_type = os.environ.get("RENDER_MODEL_TEMPLATE_TYPE", self.model_template_type)
-        self.default_chat_template_key = os.environ.get("RENDER_DEFAULT_CHAT_TEMPLATE_KEY", self.default_chat_template_key)
-        self.default_tool_use_template_key = os.environ.get("RENDER_DEFAULT_TOOL_USE_TEMPLATE_KEY", self.default_tool_use_template_key)
-        self.llava_chat_template = os.environ.get("RENDER_LLAVA_CHAT_TEMPLATE", self.llava_chat_template)
+        self.model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", self.model_template_type)
+        self.default_chat_template_key = os.environ.get("DEFAULT_CHAT_TEMPLATE_KEY", self.default_chat_template_key)
+        self.default_tool_use_template_key = os.environ.get("DEFAULT_TOOL_USE_TEMPLATE_KEY", self.default_tool_use_template_key)
+        self.llava_chat_template = os.environ.get("LLAVA_CHAT_TEMPLATE", self.llava_chat_template)
 
     def to_string(self):
         return (
@@ -191,16 +191,16 @@ class GangConfig:
         self.gang_timeout_min: int = 30
 
     def update_from_env(self):
-        fake_gang_env = os.environ.get("GANG_FAKE_GANG_ENV")
+        fake_gang_env = os.environ.get("FAKE_GANG_ENV")
         if fake_gang_env is not None:
             self.fake_gang_env = fake_gang_env.lower() == "true"
-        self.gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", self.gang_annocation_path)
-        self.gang_config_string = os.environ.get("GANG_CONFIG_STRING", self.gang_config_string)
-        self.zone_name = os.environ.get("GANG_ZONE_NAME", self.zone_name)
-        self.distribute_config_file = os.environ.get("GANG_DISTRIBUTE_CONFIG_FILE", self.distribute_config_file)
-        self.dist_barrier_timeout = int(os.environ.get("GANG_DIST_BARRIER_TIMEOUT", self.dist_barrier_timeout))
-        self.gang_sleep_time = int(os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time))
-        self.gang_timeout_min = int(os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min))
+        self.gang_annocation_path = os.environ.get("ANNOCATION_PATH", self.gang_annocation_path)
+        self.gang_config_string = os.environ.get("CONFIG_STRING", self.gang_config_string)
+        self.zone_name = os.environ.get("ZONE_NAME", self.zone_name)
+        self.distribute_config_file = os.environ.get("DISTRIBUTE_CONFIG_FILE", self.distribute_config_file)
+        self.dist_barrier_timeout = int(os.environ.get("DIST_BARRIER_TIMEOUT", self.dist_barrier_timeout))
+        self.gang_sleep_time = int(os.environ.get("SLEEP_TIME", self.gang_sleep_time))
+        self.gang_timeout_min = int(os.environ.get("TIMEOUT_MIN", self.gang_timeout_min))
 
     def to_string(self):
         return (
@@ -226,10 +226,10 @@ class VitConfig:
     def update_from_env(self):
         self.vit_separation = int(os.environ.get("VIT_SEPARATION", self.vit_separation))
         self.vit_trt = int(os.environ.get("VIT_TRT", self.vit_trt))
-        self.trt_cache_enabled = int(os.environ.get("VIT_TRT_CACHE_ENABLED", self.trt_cache_enabled))
-        self.trt_cache_path = os.environ.get("VIT_TRT_CACHE_PATH", self.trt_cache_path)
-        self.download_headers = os.environ.get("VIT_DOWNLOAD_HEADERS", self.download_headers)
-        self.mm_cache_item_num = int(os.environ.get("VIT_MM_CACHE_ITEM_NUM", self.mm_cache_item_num))
+        self.trt_cache_enabled = int(os.environ.get("TRT_CACHE_ENABLED", self.trt_cache_enabled))
+        self.trt_cache_path = os.environ.get("TRT_CACHE_PATH", self.trt_cache_path)
+        self.download_headers = os.environ.get("DOWNLOAD_HEADERS", self.download_headers)
+        self.mm_cache_item_num = int(os.environ.get("MM_CACHE_ITEM_NUM", self.mm_cache_item_num))
 
     def to_string(self):
         return (
@@ -253,16 +253,16 @@ class GenerateConfig:
         self.generation_config_path: Optional[str] = None
 
     def update_from_env(self):
-        self.think_end_tag = os.environ.get("GENERATE_THINK_END_TAG", self.think_end_tag)
-        self.think_end_token_id = int(os.environ.get("GENERATE_THINK_END_TOKEN_ID", self.think_end_token_id))
-        self.think_mode = int(os.environ.get("GENERATE_THINK_MODE", self.think_mode))
-        force_stop_words = os.environ.get("GENERATE_FORCE_STOP_WORDS")
+        self.think_end_tag = os.environ.get("THINK_END_TAG", self.think_end_tag)
+        self.think_end_token_id = int(os.environ.get("THINK_END_TOKEN_ID", self.think_end_token_id))
+        self.think_mode = int(os.environ.get("THINK_MODE", self.think_mode))
+        force_stop_words = os.environ.get("FORCE_STOP_WORDS")
         if force_stop_words is not None:
             self.force_stop_words = force_stop_words.lower() == "true"
-        self.stop_words_list = os.environ.get("GENERATE_STOP_WORDS_LIST", self.stop_words_list)
-        self.stop_words_str = os.environ.get("GENERATE_STOP_WORDS_STR", self.stop_words_str)
-        self.think_start_tag = os.environ.get("GENERATE_THINK_START_TAG", self.think_start_tag)
-        self.generation_config_path = os.environ.get("GENERATE_GENERATION_CONFIG_PATH", self.generation_config_path)
+        self.stop_words_list = os.environ.get("STOP_WORDS_LIST", self.stop_words_list)
+        self.stop_words_str = os.environ.get("STOP_WORDS_STR", self.stop_words_str)
+        self.think_start_tag = os.environ.get("THINK_START_TAG", self.think_start_tag)
+        self.generation_config_path = os.environ.get("GENERATION_CONFIG_PATH", self.generation_config_path)
 
     def to_string(self):
         return (
@@ -281,7 +281,7 @@ class QuantizationConfig:
         self.int8_mode: int = 0
 
     def update_from_env(self):
-        self.int8_mode = int(os.environ.get("QUANTIZATION_INT8_MODE", self.int8_mode))
+        self.int8_mode = int(os.environ.get("INT8_MODE", self.int8_mode))
 
     def to_string(self):
         return f"int8_mode: {self.int8_mode}"
@@ -299,9 +299,9 @@ class PyEplbConfig:
     def update_from_env(self):
         self.eplb_mode = os.environ.get("EPLB_MODE", self.eplb_mode)
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", self.eplb_update_time))
-        self.redundant_expert = int(os.environ.get("EPLB_REDUNDANT_EXPERT", self.redundant_expert))
-        self.hack_ep_single_entry = int(os.environ.get("EPLB_HACK_EP_SINGLE_ENTRY", self.hack_ep_single_entry))
-        self.balance_method = os.environ.get("EPLB_BALANCE_METHOD", self.balance_method)
+        self.redundant_expert = int(os.environ.get("REDUNDANT_EXPERT", self.redundant_expert))
+        self.hack_ep_single_entry = int(os.environ.get("HACK_EP_SINGLE_ENTRY", self.hack_ep_single_entry))
+        self.balance_method = os.environ.get("BALANCE_METHOD", self.balance_method)
         self.eplb_force_repack = int(os.environ.get("EPLB_FORCE_REPACK", self.eplb_force_repack))
         self.eplb_stats_window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", self.eplb_stats_window_size))
 
@@ -325,11 +325,11 @@ class PyKvCacheConfig:
         self.use_block_cache: Optional[int] = None
 
     def update_from_env(self):
-        self.int8_kv_cache = int(os.environ.get("KV_CACHE_INT8_KV_CACHE", self.int8_kv_cache))
+        self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
         self.kv_cache_mem_mb = int(os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb))
-        self.seq_size_per_block = os.environ.get("KV_CACHE_SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
-        self.test_block_num = int(os.environ.get("KV_CACHE_TEST_BLOCK_NUM", self.test_block_num))
-        use_block_cache = os.environ.get("KV_CACHE_USE_BLOCK_CACHE")
+        self.seq_size_per_block = os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
+        self.test_block_num = int(os.environ.get("TEST_BLOCK_NUM", self.test_block_num))
+        use_block_cache = os.environ.get("USE_BLOCK_CACHE")
         if use_block_cache is not None:
             self.use_block_cache = int(use_block_cache)
 
@@ -349,9 +349,9 @@ class PyDeviceResourceConfig:
         self.acext_gemm_config_dir: Optional[str] = None
 
     def update_from_env(self):
-        self.reserver_runtime_mem_mb = int(os.environ.get("DEVICE_RESOURCE_RESERVER_RUNTIME_MEM_MB", self.reserver_runtime_mem_mb))
-        self.specify_gpu_arch = os.environ.get("DEVICE_RESOURCE_SPECIFY_GPU_ARCH", self.specify_gpu_arch)
-        self.acext_gemm_config_dir = os.environ.get("DEVICE_RESOURCE_ACEXT_GEMM_CONFIG_DIR", self.acext_gemm_config_dir)
+        self.reserver_runtime_mem_mb = int(os.environ.get("RESERVER_RUNTIME_MEM_MB", self.reserver_runtime_mem_mb))
+        self.specify_gpu_arch = os.environ.get("SPECIFY_GPU_ARCH", self.specify_gpu_arch)
+        self.acext_gemm_config_dir = os.environ.get("ACEXT_GEMM_CONFIG_DIR", self.acext_gemm_config_dir)
 
     def to_string(self):
         return (
@@ -377,9 +377,9 @@ class EngineConfig:
         self.max_seq_len: int = 0
 
     def update_from_env(self):
-        self.warm_up = int(os.environ.get("ENGINE_WARM_UP", self.warm_up))
-        self.warm_up_with_loss = int(os.environ.get("ENGINE_WARM_UP_WITH_LOSS", self.warm_up_with_loss))
-        self.max_seq_len = int(os.environ.get("ENGINE_MAX_SEQ_LEN", self.max_seq_len))
+        self.warm_up = int(os.environ.get("WARM_UP", self.warm_up))
+        self.warm_up_with_loss = int(os.environ.get("WARM_UP_WITH_LOSS", self.warm_up_with_loss))
+        self.max_seq_len = int(os.environ.get("MAX_SEQ_LEN", self.max_seq_len))
 
     def to_string(self):
         return (
