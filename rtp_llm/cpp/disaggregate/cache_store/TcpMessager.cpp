@@ -21,8 +21,12 @@ bool TcpMessager::init(MessagerInitParams params) {
         return false;
     }
 
-    service_ = std::make_shared<TcpCacheStoreServiceImpl>(
-        memory_util_, request_block_buffer_store_, metrics_reporter_, timer_manager_);
+    service_ = std::make_shared<TcpCacheStoreServiceImpl>(memory_util_,
+                                                          request_block_buffer_store_,
+                                                          metrics_reporter_,
+                                                          timer_manager_,
+                                                          locked_block_buffer_manager_,
+                                                          tcp_client_);
     if (!tcp_server_->registerService(service_.get())) {
         RTP_LLM_LOG_WARNING("messager init failed, tcp server register service failed");
         return false;
@@ -71,6 +75,16 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.load(controller, load_request, load_response, closure);
+}
+
+bool TcpMessager::generateBlockInfo(BlockBufferInfo*                    block_info,
+                                    const std::shared_ptr<BlockBuffer>& block,
+                                    uint32_t                            partition_count,
+                                    uint32_t                            partition_id) {
+    block_info->set_key(block->key);
+    block_info->set_len(block->len / partition_count);  // real len
+    block_info->set_addr((int64_t)(block->addr.get()) + block_info->len() * partition_id);
+    return true;
 }
 
 }  // namespace rtp_llm

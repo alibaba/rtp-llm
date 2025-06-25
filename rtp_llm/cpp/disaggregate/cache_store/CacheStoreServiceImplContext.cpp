@@ -63,7 +63,7 @@ void CacheStoreServiceImplContext::runSuccess(bool direct_write) {
         std::lock_guard<std::mutex> lock(response_mutex_);
         if (response_ != nullptr) {
             response_->set_error_code(KvCacheStoreServiceErrorCode::EC_SUCCESS);
-            response_->set_response_send_start_time_us(autil::TimeUtility::currentTimeInMicroSeconds());
+            response_->set_response_send_start_time_us(currentTimeUs());
             response_->set_direct_write_response(direct_write);
             response_ = nullptr;
         }

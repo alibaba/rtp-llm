@@ -35,6 +35,8 @@ interface_includes = [
     "MemoryUtil.h",
     "RequestBlockBuffer.h",
     "LoadContext.h",
+    "RemoteStoreTask.h",
+    "MessagerRequest.h",
 ]
 
 interface_sources = [

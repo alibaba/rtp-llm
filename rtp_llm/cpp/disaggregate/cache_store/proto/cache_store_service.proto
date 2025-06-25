@@ -32,6 +32,7 @@ message BlockBufferInfo {
     optional uint32 len = 2;
     optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
     optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
+    optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
 }
 
 message CacheLoadRequest {
@@ -52,10 +53,54 @@ message CacheLoadResponse {
     repeated BlockBufferInfo blocks = 4;
 };
 
+message CacheTransferInfo {
+    optional uint32 partition_count = 1; 
+    optional uint32 partition_id = 2;
+
+    repeated string local_keys = 5;
+    repeated string remote_keys = 6;
+}
+
+message CacheTransferRequest {
+    optional CacheTransferInfo transfer_info = 1;
+    repeated BlockBufferInfo blocks = 2;
+
+    optional string request_id = 3;
+    optional string client_ip = 4;
+    optional uint32 client_port = 5; // tcp or rdma server port
+    optional uint32 rdma_client_port = 6;
+    optional uint32 timeout_ms = 7;
+    optional int64 request_send_start_time_us = 8;
+}
+
+message CacheTransferResponse {
+    optional KvCacheStoreServiceErrorCode error_code = 1; 
+    optional string error_msg = 2;
+    optional int64 response_send_start_time_us = 3;
+}
+
+message BlockReadRequest {
+    repeated BlockBufferInfo blocks = 1;
+}
+
+message BlockReadResponse {
+    optional KvCacheStoreServiceErrorCode error_code = 1;
+    repeated BlockBufferInfo blocks = 2;
+}
+
 service KvCacheStoreService {
     option (arpc.global_service_id) = 10000;
 
     rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
         option (arpc.local_method_id) = 10002;
+    }
+
+    rpc transfer(CacheTransferRequest) returns (CacheTransferResponse) {
+        option (arpc.local_method_id) = 10004;
+    }
+
+    // only for tcp read
+    rpc blockRead(BlockReadRequest) returns (BlockReadResponse) {
+        option (arpc.local_method_id) = 10006;
     }
 }

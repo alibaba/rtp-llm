@@ -33,6 +33,9 @@ public:
     std::string debugInfoOnRequest(const std::string& requestid) const;
     void        debugInfo();
 
+    bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers);
+    std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key);
+
 private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
     std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
@@ -46,6 +49,10 @@ private:
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;
+    std::vector<std::pair<std::string, int64_t>>                         expired_request_caches_;
+
+    std::shared_mutex                                             buffer_map_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffer_map_;
 };
 
 }  // namespace rtp_llm

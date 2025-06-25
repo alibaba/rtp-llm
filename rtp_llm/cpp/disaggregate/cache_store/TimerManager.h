@@ -4,7 +4,7 @@
 #include "autil/Lock.h"
 #include "autil/LoopThread.h"
 
-namespace arpc {
+namespace rtp_llm {
 
 class TimerManager {
 public:
@@ -25,4 +25,4 @@ private:
     autil::LoopThreadPtr _timerThread;
 };
 
-}  // namespace arpc
+}  // namespace rtp_llm

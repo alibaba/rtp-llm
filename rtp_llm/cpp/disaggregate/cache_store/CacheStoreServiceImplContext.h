@@ -18,8 +18,8 @@ public:
     virtual ~CacheStoreServiceImplContext() = default;
 
 public:
-    void setTimer(const std::shared_ptr<arpc::Timer>& timer) {
-        timer_ = std::weak_ptr<arpc::Timer>(timer);
+    void setTimer(const std::shared_ptr<Timer>& timer) {
+        timer_ = std::weak_ptr<Timer>(timer);
     }
     void runFailed(KvCacheStoreServiceErrorCode error_code);
 
@@ -47,7 +47,7 @@ protected:
 
     std::weak_ptr<RequestBlockBufferStore> request_block_buffer_store_;
 
-    std::weak_ptr<arpc::Timer> timer_;
+    std::weak_ptr<Timer> timer_;
 
     std::atomic_int write_cnt_{0};
 

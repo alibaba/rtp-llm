@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
-namespace arpc {
+namespace rtp_llm {
 
 TimerManager::TimerManager(const std::string& threadName, int64_t timeoutIntevalUs) {
     _timerThread =
@@ -10,7 +11,7 @@ TimerManager::TimerManager(const std::string& threadName, int64_t timeoutInteval
 TimerManager::~TimerManager() {}
 
 std::shared_ptr<Timer> TimerManager::addTimer(int64_t timeoutMs, Timer::Callback&& callback) {
-    auto expiredTimeUs = timeoutMs * 1000 + autil::TimeUtility::currentTimeInMicroSeconds();
+    auto expiredTimeUs = timeoutMs * 1000 + currentTimeUs();
     auto timer         = std::make_shared<Timer>(expiredTimeUs, std::move(callback));
 
     {
@@ -26,13 +27,13 @@ size_t TimerManager::getActiveTimerCount() const {
 }
 
 void TimerManager::timeoutProc() {
-    auto currentTimeUs = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto current_time_us = currentTimeUs();
 
     std::map<int64_t, std::shared_ptr<Timer>> timeoutTimers;
     {
         // extract all timeout timer
         autil::ScopedWriteLock lock(_rwlock);
-        auto                   upperIter = _timeoutCheckTimers.upper_bound(currentTimeUs);
+        auto                   upperIter = _timeoutCheckTimers.upper_bound(current_time_us);
         timeoutTimers.insert(_timeoutCheckTimers.begin(), upperIter);
         _timeoutCheckTimers.erase(_timeoutCheckTimers.begin(), upperIter);
     }
@@ -43,4 +44,4 @@ void TimerManager::timeoutProc() {
     }
 }
 
-}  // namespace arpc
+}  // namespace rtp_llm

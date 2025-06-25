@@ -3,8 +3,7 @@
 #include "aios/network/arpc/arpc/CommonMacros.h"
 #include "autil/Lock.h"
 
-ARPC_BEGIN_NAMESPACE(arpc);
-
+namespace rtp_llm {
 class TimerManager;
 
 class Timer {
@@ -31,5 +30,4 @@ private:
     // after stop called, callback should be clear
     Callback _callback;
 };
-
-ARPC_END_NAMESPACE(arpc);
+}  // namespace rtp_llm

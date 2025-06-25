@@ -218,8 +218,57 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
     return load_context;
 }
 
+std::shared_ptr<RemoteStoreTask>
+NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                        RemoteStoreTask::CheckCancelFunc           check_cancel_func) {
+    auto                                task = std::make_shared<RemoteStoreTaskImpl>(request, check_cancel_func);
+    std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+    auto&                               tasks = remote_store_tasks_[request->request_id];
+    tasks.push_back(task);
+
+    RTP_LLM_LOG_INFO("normal cache store submit remote store task, request id is %s, request is %s",
+                     request->request_id.c_str(),
+                     request->toString().c_str());
+
+    auto                          request_id = request->request_id;
+    RequestBlockBuffer::WatchFunc watchFunc =
+        [this, request_id, task](bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+            if (!ok) {
+                RTP_LLM_LOG_WARNING("normal cache store run store task watch func failed, request id is %s",
+                                    request_id.c_str());
+                return;
+            }
+
+            auto transfer_request = task->makeAvailableRequest(blocks);
+
+            if (transfer_request == nullptr) {
+                RTP_LLM_LOG_WARNING("normal cache store make available request failed, request id is %s",
+                                    request_id.c_str());
+                return;
+            }
+            this->messager_->transfer(transfer_request);
+        };
+
+    this->request_block_buffer_store_->setRequestBlockBufferWatchFunc(request_id, std::move(watchFunc));
+    return std::dynamic_pointer_cast<RemoteStoreTask>(task);
+}
+
+void NormalCacheStore::releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) {
+    std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+    auto&                               tasks = remote_store_tasks_[task->getRequestId()];
+    tasks.erase(std::remove(tasks.begin(), tasks.end(), task), tasks.end());
+}
+
 void NormalCacheStore::markRequestEnd(const std::string& requestid) {
     request_block_buffer_store_->delRequestBlockBuffer(requestid);
+}
+
+bool NormalCacheStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
+    return request_block_buffer_store_->regUserBuffers(buffers);
+}
+
+std::shared_ptr<BlockBuffer> NormalCacheStore::findUserBuffer(const std::string& buffer_key) {
+    return request_block_buffer_store_->findUserBuffer(buffer_key);
 }
 
 const std::shared_ptr<MemoryUtil>& NormalCacheStore::getMemoryUtil() const {

@@ -2,6 +2,7 @@
 
 #include "aios/network/anet/transport.h"
 #include "aios/network/arpc/arpc/ANetRPCChannelManager.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/TcpTransferConnection.h"
 
 namespace rtp_llm {
 
@@ -13,6 +14,7 @@ public:
 public:
     bool                                  init(int io_thread_count);
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
+    std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port);
 
 private:
     void                                  stop();

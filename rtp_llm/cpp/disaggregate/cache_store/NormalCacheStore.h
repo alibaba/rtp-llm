@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "autil/ThreadPool.h"
 
 #include <memory>
@@ -45,6 +46,13 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
+    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
+    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+
+    bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
+    std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
+
     void markRequestEnd(const std::string& requestid);
 
     void debugInfo();
@@ -70,12 +78,14 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    CacheStoreInitParams                     params_;
-    std::shared_ptr<MemoryUtil>              memory_util_;
-    std::shared_ptr<RequestBlockBufferStore> request_block_buffer_store_;
-    std::shared_ptr<Messager>                messager_;
-    autil::ThreadPoolBasePtr                 thread_pool_;  // task executor
-    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    CacheStoreInitParams                                                             params_;
+    std::shared_ptr<MemoryUtil>                                                      memory_util_;
+    std::shared_ptr<RequestBlockBufferStore>                                         request_block_buffer_store_;
+    std::shared_ptr<Messager>                                                        messager_;
+    autil::ThreadPoolBasePtr                                                         thread_pool_;  // task executor
+    kmonitor::MetricsReporterPtr                                                     metrics_reporter_;
+    std::shared_mutex                                                                remote_store_tasks_mutex_;
+    std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
 };
 
 }  // namespace rtp_llm

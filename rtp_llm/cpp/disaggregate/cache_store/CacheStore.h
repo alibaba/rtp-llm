@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTask.h"
 
 #include <memory>
 
@@ -38,6 +39,14 @@ public:
 
     virtual std::shared_ptr<StoreContext>
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers, int64_t timeout_ms) = 0;
+
+    virtual std::shared_ptr<RemoteStoreTask>
+                 submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                       RemoteStoreTask::CheckCancelFunc           check_cancel_func) = 0;
+    virtual void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task)      = 0;
+
+    virtual bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) = 0;
+    virtual std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key)                            = 0;
 
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 

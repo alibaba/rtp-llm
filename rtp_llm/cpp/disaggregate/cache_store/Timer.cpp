@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/Timer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
 
-ARPC_BEGIN_NAMESPACE(arpc);
+namespace rtp_llm {
 
 Timer::Timer(int64_t expiredTimeUs, Callback&& callback):
     _stoped(false), _expiredTimeUs(expiredTimeUs), _callback(callback) {}
@@ -28,5 +28,4 @@ void Timer::callback() {
         }
     }
 }
-
-ARPC_END_NAMESPACE(arpc);
+}  // namespace rtp_llm

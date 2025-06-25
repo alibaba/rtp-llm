@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/TcpClient.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpServer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
 
@@ -20,10 +19,15 @@ public:
     void load(const std::shared_ptr<LoadRequest>&                          request,
               const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) override;
 
+protected:
+    bool generateBlockInfo(::BlockBufferInfo*                  block_info,
+                           const std::shared_ptr<BlockBuffer>& block_buffer,
+                           uint32_t                            local_partition_count,
+                           uint32_t                            local_partition_id) override;
+
 private:
     MessagerInitParams init_params_;
 
-    std::shared_ptr<TcpClient>                tcp_client_;
     std::shared_ptr<TcpServer>                tcp_server_;
     std::shared_ptr<TcpCacheStoreServiceImpl> service_;
 };

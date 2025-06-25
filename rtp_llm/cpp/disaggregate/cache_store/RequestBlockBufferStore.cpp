@@ -189,7 +189,35 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
             request_block_buffer = iter->second;
         }
         request_cache_map_[requestid] = nullptr;
+        for (int i = expired_request_caches_.size() - 1; i >= 0; i--) {
+            if (currentTimeUs() - expired_request_caches_[i].second > 1000 * 60 * 60) {
+                request_cache_map_.erase(expired_request_caches_[i].first);
+                expired_request_caches_.pop_back();
+            } else {
+                break;
+            }
+        }
+        expired_request_caches_.push_back({requestid, currentTimeUs()});
     }
+}
+
+bool RequestBlockBufferStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
+    std::unique_lock<std::shared_mutex> lock(buffer_map_mutex_);
+    for (auto& buffer : buffers) {
+        buffer_map_[buffer->key] = buffer;
+    }
+    RTP_LLM_LOG_INFO("reg user buffer count %d", buffers.size());
+    return true;
+}
+
+std::shared_ptr<BlockBuffer> RequestBlockBufferStore::findUserBuffer(const std::string& key) {
+    std::shared_lock<std::shared_mutex> lock(buffer_map_mutex_);
+    auto                                it = buffer_map_.find(key);
+    if (it == buffer_map_.end()) {
+        RTP_LLM_LOG_INFO("find user buffer failed, key %s, current count %d", key.c_str(), buffer_map_.size());
+        return nullptr;
+    }
+    return it->second;
 }
 
 }  // namespace rtp_llm

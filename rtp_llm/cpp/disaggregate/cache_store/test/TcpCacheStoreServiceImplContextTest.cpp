@@ -47,12 +47,13 @@ protected:
     }
 
 protected:
-    std::shared_ptr<NormalCacheStore>   cache_store1_;
-    std::shared_ptr<NormalCacheStore>   cache_store2_;
-    CacheLoadRequest*                   request_;
-    CacheLoadResponse*                  response_;
-    MockCacheLoadServiceClosure*        done_{nullptr};
-    std::shared_ptr<arpc::TimerManager> timer_manager_;
+    std::shared_ptr<NormalCacheStore>                     cache_store1_;
+    std::shared_ptr<NormalCacheStore>                     cache_store2_;
+    CacheLoadRequest*                                     request_;
+    CacheLoadResponse*                                    response_;
+    std::shared_ptr<CacheStoreServerLoadMetricsCollector> collector_;
+    MockCacheLoadServiceClosure*                          done_{nullptr};
+    std::shared_ptr<TimerManager>                   timer_manager_;
 
     std::shared_ptr<TcpCacheStoreServiceImplContext> context_;
 
