@@ -4,7 +4,7 @@ from torch import dtype as _dtype
 from typing import Optional
 from torch.nn import functional as F
 
-class Embedding(nn.Module):
+class EmbeddingTorch(nn.Module):
     def __init__(self, weight: torch.Tensor):
         super().__init__()
         self.weight = weight
@@ -14,7 +14,7 @@ class Embedding(nn.Module):
             input,
             self.weight)
 
-class EmbeddingRTP(nn.Module):
+class Embedding(nn.Module):
     def __init__(self, weight: torch.Tensor):
         super().__init__()
         self.weight = weight

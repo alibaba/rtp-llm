@@ -92,6 +92,20 @@ void invokeEmebeddingLookup(T*           from_tensor,
                             cudaStream_t stream);
 
 template<typename T>
+void invokeEmebeddingLookupVec(T*           from_tensor,
+                               const T*     embedding_table,
+                               double       input_embedding_scalar,
+                               const T*     pos_table,
+                               const T*     type_table,
+                               const int*   input_ids,
+                               const int*   input_pos,
+                               const int*   input_type,
+                               const int*   input_mask,
+                               const int    token_num,
+                               const int    hidden_units,
+                               cudaStream_t stream);
+
+template<typename T>
 void invokeInputIdsEmbeddingLookupPosEncodingSoftPrompt(inputIdsEmbeddingLookupPosEncodingSoftPromptParam<T> param);
 
 template<typename T>
@@ -99,11 +113,11 @@ void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const
 
 // from [b, s, h, d] to [b, h, s, d]
 template<typename T>
-void invokeTransposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+void invokeTransposeAxis12(
+    T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
 
 template<typename T>
-void invokeTransposeAxis01(
-    T* out, T* in, const int dim0, const int dim1, cudaStream_t stream);
+void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, cudaStream_t stream);
 
 template<typename T>
 void invokeBuildDecoderAttentionMask(T*           attention_mask,
@@ -130,11 +144,11 @@ void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
 
 template<typename T>
 void invokeLookupHiddenStateOfFirstToken(T*           from_tensor,
-                                        const T*     hidden_state,
-                                        const int*   input_lengths,
-                                        const int    batch_size,
-                                        const int    hidden_units,
-                                        cudaStream_t stream);
+                                         const T*     hidden_state,
+                                         const int*   input_lengths,
+                                         const int    batch_size,
+                                         const int    hidden_units,
+                                         cudaStream_t stream);
 
 void invokeTileGptPromptInputs(int*         tiled_input_ids,
                                int*         tiled_input_lengths,
@@ -260,31 +274,31 @@ void invokeSumLengthDimension(float*       out_buf,
 void invokeMaxLength(
     size_t* h_pinned_max_length, const int* lengths, size_t* max_length, const size_t size, cudaStream_t stream = 0);
 
-void invokeConvertOffsetToAddr(uint64_t*       block_addr, // [l, b, 2, m]
-                               const uint64_t* k_cache_base_addr, // [l]
+void invokeConvertOffsetToAddr(uint64_t*       block_addr,         // [l, b, 2, m]
+                               const uint64_t* k_cache_base_addr,  // [l]
                                const uint64_t* v_cache_base_addr,
-                               const int*      offset, // [b, m]
+                               const int*      offset,  // [b, m]
                                int             layer_num,
                                int             batch_size,
                                int             max_block_num,
                                int             block_size,
                                cudaStream_t    stream);
 
-void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
+void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr,  // [b, 2, m]
                                        const uint64_t k_cache_base_addr,
                                        const uint64_t v_cache_base_addr,
-                                       const int*     offset, // [b, m]
+                                       const int*     offset,  // [b, m]
                                        int            batch_size,
                                        int            max_block_num,
                                        int            block_size,
                                        cudaStream_t   stream);
 
-void invokeConvertOffsetToBlockArrayData(int32_t*       offset_addr, // [b, 2, m]
-                                         const int*     offset, // [b, m]
-                                         int            batch_size,
-                                         int            max_block_num,
-                                         int            kv_block_offset,
-                                         cudaStream_t   stream);
+void invokeConvertOffsetToBlockArrayData(int32_t*     offset_addr,  // [b, 2, m]
+                                         const int*   offset,       // [b, m]
+                                         int          batch_size,
+                                         int          max_block_num,
+                                         int          kv_block_offset,
+                                         cudaStream_t stream);
 
 void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
                                         int*         cu_seqlens,
@@ -293,16 +307,13 @@ void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
                                         const int    max_seq_len,
                                         cudaStream_t stream);
 
-void invokeGetCuSeqLens(int* cu_seqlens,
-                        const int* sequence_length,
-                        const int* prefix_length,
-                        const int batch_size,
-                        cudaStream_t stream);
+void invokeGetCuSeqLens(
+    int* cu_seqlens, const int* sequence_length, const int* prefix_length, const int batch_size, cudaStream_t stream);
 
 // just support two dim
 template<typename T>
-void invokeScatterAdd(T const* src, int N, int K, int32_t const* index, T* out, bool use_stable_scatter_add, cudaStream_t stream);
-
+void invokeScatterAdd(
+    T const* src, int N, int K, int32_t const* index, T* out, bool use_stable_scatter_add, cudaStream_t stream);
 
 template<typename T>
 void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int dim1_size, T* out, cudaStream_t stream);
@@ -310,6 +321,7 @@ void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int d
 // template <typename T>
 void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
 
-void fake_balance_expert(int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
+void fake_balance_expert(
+    int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream);
 
 }  // namespace rtp_llm
