@@ -98,7 +98,8 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
             nullptr,  // lora_model_input
             attention_mask,
             kv_cache_block_id,
-            {},  // multimodal_features
+            nullptr,  // kv_cache_update_mapping
+            {},       // multimodal_features
             text_tokens_mask,
             mm_features_locs,
             std::nullopt,  // input_embeddings

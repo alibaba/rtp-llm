@@ -29,6 +29,7 @@ public:
                         const std::string&     adapter_name          = ""):
         stream_(stream),
         resource_context_(resource_context),
+        block_update_mapping_(),
         need_release_resource_(need_release_resource),
         adapter_name_(adapter_name) {}
     ~StreamCacheResource() {
@@ -53,18 +54,29 @@ public:
     const BatchKVCacheResource& kvCache() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
-    // update kv cache blocks
-    // 
-    // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i are forked from old batch block_src_batch[i]
-    // 
-    // Example: given old batch size 3, block_src_batch = [1, 2, 2, 2], the mapping of old blocks to new blocks is
-    // 
-    // old 0 --free  /--- new 0
-    // old 1 -------/ /-- new 1
-    // old 2 --------+--- new 2
-    //                \-- new 3
-    // 
-    void updateKvCacheBlocks(const std::vector<int>& block_src_batch);
+    // generate block copy mapping for kv cache update
+    //
+    // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i should be
+    //                           forked from old batch block_src_batch[i],
+    //
+    // Note: This method may allocate and free KV cache blocks, but the caller must
+    // execute the block copy maunually (e.g., via `getKVBlockUpdateMapping` and
+    // `CacheManager::blockBatchCopy`) before using the cache
+    //
+    // Example: given old batch size 3, block_src_batch = [1, 2, 2, 2], the copy mapping of
+    // old blocks to new blocks is
+    //
+    // old batch 0 --free  /--- new batch 0
+    // old batch 1 -------/ /-- new batch 1
+    // old batch 2 --------+--- new batch 2
+    //                      \-- new batch 3
+    //
+    void generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch);
+
+    // get block copy mapping of last kv cache update
+    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() {
+        return block_update_mapping_;
+    }
 
     const ResourceContext& resourceContext() const {
         return resource_context_;
@@ -103,13 +115,14 @@ public:
     }
 
 private:
-    GenerateStream*      stream_;
-    BatchKVCacheResource batch_resource_;
-    ResourceContext      resource_context_;
-    bool                 last_block_aligned_    = false;
-    bool                 need_release_resource_ = true;
-    int                  malloc_failed_times_   = 0;
-    const std::string    adapter_name_;
+    GenerateStream*          stream_;
+    BatchKVCacheResource     batch_resource_;
+    ResourceContext          resource_context_;
+    std::vector<BlockIdPair> block_update_mapping_;
+    bool                     last_block_aligned_    = false;
+    bool                     need_release_resource_ = true;
+    int                      malloc_failed_times_   = 0;
+    const std::string        adapter_name_;
 };
 
 }  // namespace rtp_llm

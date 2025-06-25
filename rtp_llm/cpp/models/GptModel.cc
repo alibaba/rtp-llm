@@ -138,10 +138,9 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                             prefix_lengths->size(),
                             context_batch_size);
     attention_inputs.max_prefix_length =
-        context_batch_size && prefix_lengths ?
-            *std::max_element(prefix_lengths->data<int32_t>(),
-                              prefix_lengths->data<int32_t>() + prefix_lengths->size()) :
-            0;
+        context_batch_size && prefix_lengths ? *std::max_element(
+            prefix_lengths->data<int32_t>(), prefix_lengths->data<int32_t>() + prefix_lengths->size()) :
+                                               0;
     const auto max_decoder_seq_len = decoder_batch_size ?
                                          *std::max_element(sequence_lengths->data<int32_t>(),
                                                            sequence_lengths->data<int32_t>() + decoder_batch_size) :
@@ -1626,6 +1625,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
         inputs.kv_cache_block_id.get() ? inputs.kv_cache_block_id->shape()[1] : 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
+        inputs.kv_cache_update_mapping.get() ? inputs.kv_cache_update_mapping->shape()[0] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputLengthes] =
@@ -1668,8 +1669,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape     = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                        {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]},
-                                                        rtp_llm::AllocationType::HOST});
+                                                    {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]},
+                                                    rtp_llm::AllocationType::HOST});
         mm_features_shape_ptr = mm_features_shape->data<int32_t>();
         for (auto i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
@@ -1690,8 +1691,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         inputs.combo_tokens  = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                       {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
-                                                       rtp_llm::AllocationType::HOST});
+                                                      {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
+                                                      rtp_llm::AllocationType::HOST});
         inputs.input_lengths = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                                        {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
                                                        rtp_llm::AllocationType::HOST});
@@ -1710,6 +1711,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                 inputs.cache_keys = device->allocateBuffer(
                     {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
             }
+            inputs.kv_cache_update_mapping =
+                device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                        {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2},
+                                        rtp_llm::AllocationType::HOST});
         }
         inputs.request_id = device->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});
@@ -1778,6 +1783,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         if (inputs.pd_separation) {
             buffers.emplace_back(inputs.cache_keys);
         }
+        buffers.emplace_back(inputs.kv_cache_update_mapping);
     }
     buffers.emplace_back(inputs.request_id);
     buffers.emplace_back(inputs.request_pd_separation);

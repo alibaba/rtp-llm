@@ -21,6 +21,11 @@ namespace rtp_llm {
 
 class DistKvCache;
 
+struct BlockIdPair {
+    int src;
+    int dst;
+};
+
 class CacheManager {
 public:
     struct SeqPosition {
@@ -144,12 +149,11 @@ public:
     std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> getKVBlockValue(int block_index);
 
     void blockCopy(int src_block_index, int dest_block_index);
-    void blockBatchCopy(const std::vector<std::pair<int, int>>& copy_mapping);
-    void blockBatchCopy(const std::pair<int, int>* copy_mapping_begin, const std::pair<int, int>* copy_mapping_end);
+    void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
+    void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
+    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
-
-    void beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_llm::BufferPtr target_block_offset);
 
     void regUserMr(size_t model_id);
 

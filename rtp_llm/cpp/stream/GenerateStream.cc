@@ -788,20 +788,20 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     resizeSubGenerateStatus(update_info.new_tokens->shape()[0]);
 
-    if (update_info.src_batch_indices) {
-        auto src_batch_indices_vec = rtp_llm::buffer2vector<int>(*update_info.src_batch_indices);
-        updateKvCacheBlocks(src_batch_indices_vec);
-    }
-
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 }
 
-// beam_idx: [beam_width_out] int, the element must less than beam_width_in.
-void GenerateStream::updateKvCacheBlocks(const std::vector<int>& block_src_batch) {
-    RTP_LLM_CHECK(block_src_batch.size() == tileNumOut());
+// src_batch_indices: [tile_num_out] int, the element must less than tile_num_in.
+void GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices) {
+    RTP_LLM_CHECK(src_batch_indices == nullptr || src_batch_indices->shape()[0] == tileNumOut());
 
-    stream_cache_resource_->updateKvCacheBlocks(block_src_batch);
+    std::vector<int> block_src_batch;
+    if (!finished() && src_batch_indices) {
+        block_src_batch = rtp_llm::buffer2vector<int>(*src_batch_indices);
+    }
+
+    stream_cache_resource_->generateKVBlockUpdateMapping(block_src_batch);
 }
 
 void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {

@@ -47,6 +47,7 @@ enum GptModelInputIndex : size_t {
     sequenceLengths,
     prefixLengths,
     maxBlocksPerBatch,
+    kvCacheUpdateCopyNum,
     lmOutputIndexes,
     lmOutputLengthes,
     comboPositionIds,
@@ -150,7 +151,7 @@ struct TokenSliceInfo {
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
-    virtual ~GptModel() {};
+    virtual ~GptModel(){};
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 

@@ -678,15 +678,22 @@ std::tuple<rtp_llm::BufferPtr, rtp_llm::BufferPtr> CacheManager::getKVBlockValue
 }
 
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    auto copy_mapping = std::make_pair(src_block_index, dest_block_index);
+    BlockIdPair copy_mapping{src_block_index, dest_block_index};
     blockBatchCopy(&copy_mapping, &copy_mapping + 1);
 }
 
-void CacheManager::blockBatchCopy(const std::vector<std::pair<int, int>>& copy_mapping) {
+void CacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping) {
     blockBatchCopy(copy_mapping.data(), copy_mapping.data() + copy_mapping.size());
 }
 
-void CacheManager::blockBatchCopy(const std::pair<int, int>* begin_ptr, const std::pair<int, int>* end_ptr) {
+void CacheManager::blockBatchCopy(const Buffer& copy_mapping) {
+    RTP_LLM_CHECK(copy_mapping.dim() == 2 && copy_mapping.shape()[1] == 2);
+    const auto* begin_ptr = (const BlockIdPair*)copy_mapping.data();
+    size_t      copy_num  = copy_mapping.shape()[0];
+    blockBatchCopy(begin_ptr, begin_ptr + copy_num);
+}
+
+void CacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
     if (end_ptr == begin_ptr) {
         return;
     }

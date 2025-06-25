@@ -139,7 +139,8 @@ struct GptModelInputs {
 
     rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 
-    rtp_llm::BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block block id
+    rtp_llm::BufferPtr kv_cache_block_id;        // [batch_size, block_nums], kv cache block block id
+    rtp_llm::BufferPtr kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features;  // all features in gathered stream stored here
     rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

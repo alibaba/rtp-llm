@@ -32,6 +32,7 @@ public:
                     has_multimodal_input_ = true;
                 }
             }
+            total_block_update_copy_num_ += stream->streamCacheResource().getKVBlockUpdateMapping().size();
             model_execute_token_size_ += stream->currentExecuteTokenSize();
             total_sampler_batch_size_in_ += stream->tileNumIn();
             total_sampler_batch_size_out_ += stream->tileNumOut();
@@ -57,6 +58,9 @@ public:
     }
     size_t totalSamplerBatchSizeOut() const {
         return total_sampler_batch_size_out_;
+    }
+    size_t totalBlockUpdateCopyNum() const {
+        return total_block_update_copy_num_;
     }
     size_t maxBlockSize() const {
         return max_block_size_;
@@ -157,6 +161,7 @@ public:
                      << ", total_model_batch_size: " << totalModelBatchSize()
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
+                     << ", total_block_update_copy_num: " << total_block_update_copy_num_
                      << ", max_block_size: " << max_block_size_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
                      << "}";
@@ -170,6 +175,7 @@ private:
     size_t                       total_sampler_batch_size_out_ = 0;
     size_t                       total_decode_batch_size_      = 0;
     size_t                       total_context_batch_size_     = 0;
+    size_t                       total_block_update_copy_num_  = 0;
     size_t                       max_block_size_               = 0;
     size_t                       model_execute_token_size_     = 0;
     size_t                       max_seq_len_                  = 0;

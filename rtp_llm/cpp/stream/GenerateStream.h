@@ -30,8 +30,6 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr loss;
     // for mtp
     const rtp_llm::BufferPtr all_hidden_states;
-    // for dynamic batch size in beam search or multiple return sequences
-    const rtp_llm::BufferPtr src_batch_indices;
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
 };
@@ -105,7 +103,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
-    void         updateKvCacheBlocks(const std::vector<int>& block_src_batch);
+    void         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return 1;

@@ -27,20 +27,22 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     RTP_LLM_LOG_DEBUG(
         "context_streams size = %d, decode_streams size = %d", context_streams.size(), decode_streams.size());
     GptModelInputs model_input;
-    size_t         current_tokens_size      = stream_groups.modelExecuteTokenSize();
-    size_t         total_batch_size         = stream_groups.totalModelBatchSize();
-    size_t         total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
-    size_t         total_context_batch_size = stream_groups.totalContextBatchSize();
-    size_t         max_block_size           = stream_groups.maxBlockSize();
-    size_t         multimodal_features_len  = stream_groups.mmFeaturesLen();
+    const size_t   current_tokens_size      = stream_groups.modelExecuteTokenSize();
+    const size_t   total_batch_size         = stream_groups.totalModelBatchSize();
+    const size_t   total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
+    const size_t   total_context_batch_size = stream_groups.totalContextBatchSize();
+    const size_t   total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
+    const size_t   max_block_size           = stream_groups.maxBlockSize();
+    const size_t   multimodal_features_len  = stream_groups.mmFeaturesLen();
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_block_size) {
-        model_input.kv_cache_block_id = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_block_size});
-        model_input.cache_keys        = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_block_size});
+        model_input.kv_cache_block_id       = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_block_size});
+        model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
+        model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_block_size});
     }
     model_input.request_id            = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size});
     model_input.request_pd_separation = CACHED_HOST_BUF(TYPE_BOOL, {total_context_batch_size});
@@ -80,6 +82,14 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int  batch_idx          = 0;
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
 
+    auto* kv_cache_update_mapping =
+        model_input.kv_cache_update_mapping ? (BlockIdPair*)model_input.kv_cache_update_mapping->data() : nullptr;
+    const auto add_cache_update_copy = [&](const auto& update_mapping) {
+        size_t update_copy_num = update_mapping.size();
+        std::memcpy(kv_cache_update_mapping, update_mapping.data(), update_copy_num * sizeof(BlockIdPair));
+        kv_cache_update_mapping += update_copy_num;
+    };
+
     if (merged_text_mask) {
         std::fill(merged_text_mask, merged_text_mask + current_tokens_size, 1);
     }
@@ -116,6 +126,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                             kv_cache.batch_block_id[i].size() * sizeof(int));
             }
             batch_idx += 1;
+        }
+
+        if (max_block_size) {
+            add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
     }
 
@@ -201,6 +215,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 stream->queryPdSep();
             batch_idx += 1;
             token_idx += input_tokens.size();
+        }
+
+        if (max_block_size) {
+            add_cache_update_copy(stream->streamCacheResource().getKVBlockUpdateMapping());
         }
     }
 
@@ -510,8 +528,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                             batch_cum_log_probs,
                             all_probs,
                             loss,
-                            all_hidden_states,
-                            src_batch_indices});
+                            all_hidden_states});
         } else {
             stream->update({new_tokens,
                             1,
@@ -521,9 +538,10 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                             batch_cum_log_probs,
                             all_probs,
                             loss,
-                            all_hidden_states,
-                            src_batch_indices});
+                            all_hidden_states});
         }
+
+        stream->updateKvCacheBlocks(src_batch_indices);
 
         batch_idx_in += cur_batch_size_in;
         batch_idx_out += cur_batch_size_out;

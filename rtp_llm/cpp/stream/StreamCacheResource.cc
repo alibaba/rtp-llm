@@ -197,8 +197,10 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     batch_resource_ = kv_cache_resource;
 }
 
-void StreamCacheResource::updateKvCacheBlocks(const std::vector<int>& block_src_batch) {
-    if (!resource_context_.cache_manager) {
+void StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch) {
+    block_update_mapping_.clear();
+
+    if (!resource_context_.cache_manager || block_src_batch.size() == 0) {
         return;
     }
 
@@ -259,10 +261,10 @@ void StreamCacheResource::updateKvCacheBlocks(const std::vector<int>& block_src_
     // TODO(zhangjianning.zjn): handle malloc failure properly
     RTP_LLM_CHECK_WITH_INFO(malloc_status, "failed to malloc %d new blocks during kv cache update", num_new_blocks);
 
-    // organize block ids
+    // generate update mapping for block ids
     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
     batch_resource_.batch_block_id.reserve(new_batch_size);
-    vector<pair<int32_t, int32_t>> copy_mapping;
+    block_update_mapping_.reserve(num_new_blocks);
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         int   old_batch_idx = block_src_batch[new_batch_idx];
         auto& fork_count    = batch_fork_count[old_batch_idx];
@@ -282,12 +284,11 @@ void StreamCacheResource::updateKvCacheBlocks(const std::vector<int>& block_src_
                 new_blocks.block_id.pop_back();
                 blocks.push_back(new_block);
 
-                copy_mapping.emplace_back(old_block, new_block);
+                block_update_mapping_.push_back(BlockIdPair{old_block, new_block});
             }
         }
         --fork_count;
     }
-    resource_context_.cache_manager->blockBatchCopy(copy_mapping);
 }
 
 // TODO(xinfei.sxf) move code to batch resource class

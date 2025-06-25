@@ -106,6 +106,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    {
+        // update kv cache
+        if (model_input.kv_cache_update_mapping) {
+            cache_manager_->blockBatchCopy(*model_input.kv_cache_update_mapping);
+        }
+    }
     // get lora input
     if (lora_manager_) {
         model_input.lora_model_input =
