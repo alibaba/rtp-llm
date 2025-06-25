@@ -22,6 +22,8 @@ public:
 private:
     py::object        py_instance_; // Stores the instance of the Python class
 
+    torch::Tensor k_cache_base_tensor_;
+    torch::Tensor v_cache_base_tensor_;
 };
 
 }  // namespace rtp_llm
