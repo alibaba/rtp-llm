@@ -886,8 +886,10 @@ class GptInitModelParameters:
                         raise ValueError(f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}")
                 logging.info(f"need_load_quant by {self.quant_config.get_method()}")
         if self.quant_config:
+            logging.info(f"quant config info: {self.quant_config.get_algo()}, {self.quant_config.bits()}, {self.quant_config.group_size()}")
             self.quant_algo.setQuantAlgo(self.quant_config.get_algo().lower(), self.quant_config.bits(), self.quant_config.group_size())
-
+        else:
+            logging.info("no quant config")
 
 
     def get_params_dict(self):
