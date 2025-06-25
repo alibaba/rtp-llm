@@ -194,13 +194,13 @@ class GangConfig:
         fake_gang_env = os.environ.get("FAKE_GANG_ENV")
         if fake_gang_env is not None:
             self.fake_gang_env = fake_gang_env.lower() == "true"
-        self.gang_annocation_path = os.environ.get("ANNOCATION_PATH", self.gang_annocation_path)
-        self.gang_config_string = os.environ.get("CONFIG_STRING", self.gang_config_string)
+        self.gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", self.gang_annocation_path)
+        self.gang_config_string = os.environ.get("GANG_CONFIG_STRING", self.gang_config_string)
         self.zone_name = os.environ.get("ZONE_NAME", self.zone_name)
         self.distribute_config_file = os.environ.get("DISTRIBUTE_CONFIG_FILE", self.distribute_config_file)
         self.dist_barrier_timeout = int(os.environ.get("DIST_BARRIER_TIMEOUT", self.dist_barrier_timeout))
-        self.gang_sleep_time = int(os.environ.get("SLEEP_TIME", self.gang_sleep_time))
-        self.gang_timeout_min = int(os.environ.get("TIMEOUT_MIN", self.gang_timeout_min))
+        self.gang_sleep_time = int(os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time))
+        self.gang_timeout_min = int(os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min))
 
     def to_string(self):
         return (
