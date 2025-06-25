@@ -26,8 +26,8 @@ PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_i
         RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
     }
 
-    k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_);
-    v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_);
+    k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_, false);
+    v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_, false);
 
     py::gil_scoped_acquire gil; // Acquire GIL for safety, though direct operations are minimal now
 
