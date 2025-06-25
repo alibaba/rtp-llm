@@ -116,6 +116,9 @@ def main():
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(global_controller, backend_process)
         logging.info(f"frontend server process = {frontend_process}")
+
+        logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
+
     finally:
         monitor_and_release_process(backend_process, frontend_process)
 

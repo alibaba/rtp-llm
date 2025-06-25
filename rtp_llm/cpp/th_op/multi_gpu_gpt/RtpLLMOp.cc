@@ -120,6 +120,7 @@ void RtpLLMOp::initRPCServer(
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto use_cache_store = maga_init_params.gpt_init_parameter.use_cache_store_;
     auto py_inference_log_response = maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
+    // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {
         pybind11::gil_scoped_acquire acquire;
@@ -133,6 +134,7 @@ void RtpLLMOp::initRPCServer(
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
 
+        // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_service_->getEngine(),
                                                     model_rpc_service_->getMultimodalProcessor(),
