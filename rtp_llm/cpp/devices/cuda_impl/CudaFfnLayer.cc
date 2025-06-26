@@ -131,7 +131,10 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     vector<BufferPtr> selected_buffers;
     BufferPtr select_hidden = select({*hidden, *all_token_indices});
     BufferPtr hidden_fp8;
-    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+    // TODO: remove or fix it
+    // bool use_fp8_all2all = params.qscheme == QScheme::Qfp8PerTokenBlock
+    bool use_fp8_all2all = false;
+    if (use_fp8_all2all) {
         hidden_fp8 =
             quantize({*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
         selected_buffers.emplace_back(std::dynamic_pointer_cast<QBuffer>(hidden_fp8)->kernelPtr());
@@ -144,8 +147,8 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
 
     auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
     const auto& global_buffers = all2all_output.outputs;
-    if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        BufferPtr hidden_fp8(new QBuffer(std::move(global_buffers[0]),
+    if (use_fp8_all2all) {
+        BufferPtr hidden_fp8_out(new QBuffer(std::move(global_buffers[0]),
                                          std::move(global_buffers[1]),
                                          std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
                                                                         DataType::TYPE_INVALID,
@@ -154,7 +157,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
 
         updateExpertGpuLoads(moe_conf, params.expert_stats, global_buffers[2]);
 
-        return {hidden_fp8,
+        return {hidden_fp8_out,
                 global_buffers[2],
                 global_buffers[3],
                 all_token_indices,
