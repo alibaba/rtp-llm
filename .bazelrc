@@ -71,6 +71,7 @@ build:cuda12 --copt="-DUSING_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
 build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
 build:cuda12 --copt="-DENABLE_FP8=1"
+build:cuda12 --jobs=64
 
 build:cuda12_2 --config=cuda12
 build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
@@ -160,10 +161,10 @@ test --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/nvi
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
+test --test_env NCCL_DEBUG="INFO"
 # for dp scatter add stable result
 test --test_env ENABLE_STABLE_SCATTER_ADD="ON"
 test --test_env TZ=Asia/Shanghai
-test --test_env HOME=/home/admin
 
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
