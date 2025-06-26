@@ -4,8 +4,7 @@
 py_library(
     name = "models",
     srcs = glob([
-        "*.py",
-        "layers/*.py",
+        "model_desc/*.py",
         "modules/*.py",
     ]),
     deps = [

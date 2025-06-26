@@ -20,8 +20,8 @@ from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.models_py.module_base import GptModelBase
-from rtp_llm.models_py.qwen3 import Qwen3Model
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
