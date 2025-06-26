@@ -13,7 +13,7 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     assert(!attn_params.is_none());
     // const FlashInferAttnParams& params = attn_params.cast<FlashInferAttnParams>();
     const AttentionCommonInputs& attn_param = attn_params.cast<AttentionCommonInputs>();
-    FlashInferAttnParams* params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
+    FlashInferAttnParams* params;
     if (attn_param.prefill_flash_infer_attn) {
         params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
     } else {

@@ -31,8 +31,8 @@ class Qwen3Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.is_causal = True
 
-        self.qkv_proj = Linear(weights[W.attn_qkv_w])
-        self.o_proj = Linear(weights[W.attn_o_w])
+        self.qkv_proj = Linear(weights[W.attn_qkv_w], weights.get(W.attn_qkv_b, None))
+        self.o_proj = Linear(weights[W.attn_o_w], weights.get(W.attn_o_b, None))
         if W.q_ln_gamma in weights:
             self.q_norm = RMSNorm(weights[W.q_ln_gamma], eps=config.layernorm_eps)  # unlike olmo, only on the head dim!
             self.k_norm = RMSNorm(weights[W.k_ln_gamma], eps=config.layernorm_eps)  # thus post q_norm does not need reshape

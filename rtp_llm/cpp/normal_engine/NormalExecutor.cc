@@ -58,7 +58,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
         params.model_id
     });
 
-    if (params.py_model) {
+    if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
     } else {
