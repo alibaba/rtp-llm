@@ -2,6 +2,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <future>
 #include <vector>
 #include <openssl/sha.h>
 #include <filesystem>
@@ -13,7 +14,7 @@ namespace rtp_llm {
 
 #ifdef ENABLE_FP8
 
-unordered_map<vector<uint32_t>, runDeepGemmFunc, VectorHasher> JIT::jit_kernels_ = {};
+JITRuntimeMap JIT::jit_kernels_;
 
 string getDeepGemmTypeStr(DeepGemmType type) {
     switch (type)
@@ -83,10 +84,10 @@ string getFilesHash(filesystem::path path) {
     SHA256_Init(&sha256);
 
     for (const auto& file : files) {
-        std::string filename = file.string();
+        string filename = file.string();
         SHA256_Update(&sha256, filename.c_str(), filename.size());
 
-        ifstream ifs(file, std::ios::binary);
+        ifstream ifs(file, ios::binary);
         char buffer[4096];
         while (ifs.read(buffer, sizeof(buffer)) || ifs.gcount() > 0) {
             SHA256_Update(&sha256, buffer, ifs.gcount());
@@ -98,7 +99,7 @@ string getFilesHash(filesystem::path path) {
 
     ostringstream oss;
     for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+        oss << hex << setw(2) << setfill('0') << static_cast<int>(hash[i]);
     }
 
     return oss.str();
@@ -181,31 +182,26 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
                                           uint32_t num_stages, 
                                           uint32_t num_tma_multicast,
                                           DeepGemmType gemm_type,
-                                          bool     swap_ab) {
-    auto kernel_key = vector<uint32_t>{n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
-
-    const string params_str = "_" + to_string(n) + "_" + to_string(k) + "_" + to_string(bm) + "_" + to_string(bn) + "_" + to_string(bk) + "_" + to_string(num_groups) + "_" + to_string(num_stages) + "_" + to_string(num_tma_multicast) + "_" + to_string(uint32_t(gemm_type)) + "_" + to_string(uint32_t(swap_ab));
-    if (jit_kernels_.find(kernel_key) != jit_kernels_.end()) {
-        return jit_kernels_[kernel_key];
-    }
-    
+                                          bool     swap_ab){
     static const string hdrs_path = getPath();
     static const string file_hash = getFilesHash(hdrs_path);
-    filesystem::path dir_path = string("./deep_gemm_runtime/" + file_hash);
+    const string short_params_str = to_string(n) + "_" + to_string(k) + "_" + to_string(num_groups) + "_" + to_string(uint32_t(gemm_type));
+    filesystem::path dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str);
     filesystem::create_directories(dir_path);
+    const string params_str = "_" + to_string(n) + "_" + to_string(k) + "_" + to_string(bm) + "_" + to_string(bn) + "_" + to_string(bk) + "_" + to_string(num_groups) + "_" + to_string(num_stages) + "_" + to_string(num_tma_multicast) + "_" + to_string(uint32_t(gemm_type)) + "_" + to_string(uint32_t(swap_ab));
 
-    JITFilelock lock(string(dir_path) + "/deepgemm" + params_str + "_lock", 30);
+    JITFilelock lock(string(dir_path) + "/deepgemm" + params_str + "_lock", 120);
 
     string cu_filename = dir_path.string() + "/deepgemm" + params_str + ".cu";
     string so_name = dir_path.string() + "/libdeepgemm" + params_str + ".so";
 
     if (!filesystem::exists(so_name)) {
-        RTP_LLM_LOG_INFO("JIT compilation %s begin", cu_filename);
+        RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " begin");
         ofstream cu_file(cu_filename.c_str());
         cu_file << getKernelStr(n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab);
         cu_file.close();
 
-        string command = "/usr/local/cuda/bin/nvcc " + cu_filename + " -o " + so_name + " -std=c++17 -shared -O3 --expt-relaxed-constexpr --expt-extended-lambda -gencode=arch=compute_90a,code=sm_90a --compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi -DENABLE_FP8 -I" + hdrs_path + "/../ -I" + hdrs_path + "/cpp/deep_gemm/cutlass_hdr/cutlass/include";
+        string command = "/usr/local/cuda/bin/nvcc " + cu_filename + " -o " + so_name + " -std=c++17 -shared -O3 --expt-relaxed-constexpr --expt-extended-lambda -gencode=arch=compute_90a,code=sm_90a --compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi -diag-suppress 177 -DENABLE_FP8 -I" + hdrs_path + "/../ -I" + hdrs_path + "/cpp/deep_gemm/cutlass_hdr/cutlass/include";
 
         int result = system(command.c_str());
         if (result != 0) {
@@ -230,10 +226,73 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
     if (!kernel) {
         RTP_LLM_FAIL("Failed to find function: " + func_name + ", error: " + dlerror());
     }
-    RTP_LLM_LOG_INFO("JIT load %s finished", so_name);
+    RTP_LLM_LOG_INFO("JIT load " + so_name + " finished");
 
-    jit_kernels_[kernel_key] = kernel;
+    auto kernel_key = vector<uint32_t>{n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
+    jit_kernels_.insert(kernel_key, kernel);
     return kernel;
+}
+
+runDeepGemmFunc JIT::searchKernel(uint32_t n, 
+                                  uint32_t k, 
+                                  uint32_t bm, 
+                                  uint32_t bn, 
+                                  uint32_t bk, 
+                                  uint32_t num_groups, 
+                                  uint32_t num_stages, 
+                                  uint32_t num_tma_multicast,
+                                  DeepGemmType gemm_type,
+                                  bool     swap_ab) {
+    auto kernel_key = vector<uint32_t>{n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
+
+    auto kernel_value = jit_kernels_.find(kernel_key);
+    if (kernel_value) {
+        return kernel_value;
+    }
+
+    vector<thread> threads;
+
+    static const vector<uint32_t> bm_list = {64, 128};
+    static const vector<uint32_t> bn_list = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
+    static const vector<uint32_t> bk_list = {128};
+    static const vector<uint32_t> num_stages_list = {4, 5, 6, 7, 8};
+    static const vector<uint32_t> num_tma_multicast_list = {1, 2};
+    RTP_LLM_LOG_INFO("Start compile and load deepgemm kernel for %u %u %u %u", n, k, num_groups, uint32_t(gemm_type));
+    for (auto& bm_: bm_list) {
+        for (auto& bn_: bn_list) {
+            for (auto& bk_: bk_list) {
+                for (auto& num_stages_: num_stages_list) {
+                    if (128 % bn_ && num_stages_ > 6) {
+                        continue;
+                    }
+                    for (auto& num_tma_multicast_: num_tma_multicast_list) {
+                        if (gemm_type == DeepGemmType::Normal || gemm_type == DeepGemmType::GroupedMasked) {
+                            threads.emplace_back([&](){
+                                compileAndLoadKernel(n, k, bm_, bn_, bk_, num_groups, num_stages_, num_tma_multicast_, gemm_type, true);
+                            });
+                        }
+                        threads.emplace_back([&](){
+                            compileAndLoadKernel(n, k, bm_, bn_, bk_, num_groups, num_stages_, num_tma_multicast_, gemm_type, false);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto& thread: threads) {
+        thread.join();
+    }
+
+    RTP_LLM_LOG_INFO("Finish compile and load deepgemm kernel for %u %u %u %u", n, k, num_groups, uint32_t(gemm_type));
+
+    kernel_value = jit_kernels_.find(kernel_key);
+    if (kernel_value) {
+        return kernel_value;
+    } else {
+        string params_str = to_string(n) + ", " + to_string(k) + ", " + to_string(bm) + ", " + to_string(bn) + ", " + to_string(bk) + ", " + to_string(num_groups) + ", " + to_string(num_stages) + ", " + to_string(num_tma_multicast) + ", " + to_string(uint32_t(gemm_type)) + ", " + to_string(uint32_t(swap_ab));
+        RTP_LLM_FAIL("Not find matched kernel for params " + params_str);
+    }
 }
 
 void JIT::runKernel(__nv_bfloat16*         output,
@@ -256,7 +315,7 @@ void JIT::runKernel(__nv_bfloat16*         output,
                     uint32_t               num_sms,
                     uint32_t               smem_size,
                     bool                   swap_ab) {
-    auto kernel = compileAndLoadKernel(n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab);
+    auto kernel = searchKernel(n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab);
     kernel(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, stream, num_sms, smem_size);
 }
 #endif

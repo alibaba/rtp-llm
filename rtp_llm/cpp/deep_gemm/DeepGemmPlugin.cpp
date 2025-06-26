@@ -262,7 +262,7 @@ public:
 };
 
 DeepGemmConfig getBestConfig(int m, int n, int k, int num_groups, int num_sms, DeepGemmType gemm_type, int expected_m = -1) {
-        static unordered_map<DeepGemmConfigKey, DeepGemmConfig, DeepGemmConfigKeyHasher> best_configs;
+    static unordered_map<DeepGemmConfigKey, DeepGemmConfig, DeepGemmConfigKeyHasher> best_configs;
 
     DeepGemmConfigKey key{ m, n, k, num_groups, num_sms, gemm_type, expected_m };
     auto it = best_configs.find(key);

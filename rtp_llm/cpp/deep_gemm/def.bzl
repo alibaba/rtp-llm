@@ -34,22 +34,6 @@ copy_filegroup = rule(
     },
 )
 
-def sub_lib(name, srcs):
-    native.cc_library(
-        name = name + "_cu",
-        srcs = [srcs],
-        deps = preloaded_deps,
-        copts = sm90_cuda_copts,
-        visibility = ["//visibility:public"],
-    )
-    
-    cc_shared_library(
-        name = name,
-        roots = [":" + name + "_cu"],
-        preloaded_deps = preloaded_deps,
-        visibility = ["//visibility:public"],
-    )
-
 def sub_lib_and_interleave(name, srcs):
     native.cc_library(
         name = name + "_cu",

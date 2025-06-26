@@ -2,6 +2,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <mutex>
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
@@ -78,17 +79,35 @@ struct VectorHasher {
     }
 };
 
+class JITRuntimeMap {
+private:
+    std::unordered_map<std::vector<uint32_t>, runDeepGemmFunc, VectorHasher> map_;
+    mutable std::shared_mutex jit_kernel_map_mutex_;
+public:
+    void insert(const std::vector<uint32_t>& key, const runDeepGemmFunc value) {
+        std::unique_lock lock(jit_kernel_map_mutex_);
+        map_[key] = value;
+    }
+
+    runDeepGemmFunc find(const std::vector<uint32_t> key) {
+        std::shared_lock lock(jit_kernel_map_mutex_);
+        if (map_.find(key) != map_.end()) {
+            return map_[key];
+        }
+        return nullptr;
+    }
+};
+
 class JIT
 {
 private:
-    static std::unordered_map<std::vector<uint32_t>, runDeepGemmFunc, VectorHasher> jit_kernels_;
+    static JITRuntimeMap jit_kernels_;
     static uint64_t generateInputKey(uint64_t n, uint64_t k, uint64_t group_num, DeepGemmType gemm_type);
     static void systemCall(std::string command);
-public:
-    static std::string getKernelStr(uint32_t n, uint32_t k, uint32_t bm, uint32_t bn, uint32_t bk, uint32_t num_groups, uint32_t num_stages, uint32_t num_tma_multicast, DeepGemmType gemm_type, bool swap_ab);
-
     static runDeepGemmFunc compileAndLoadKernel(uint32_t n, uint32_t k, uint32_t bm, uint32_t bn, uint32_t bk, uint32_t num_groups, uint32_t num_stages, uint32_t num_tma_multicast, DeepGemmType gemm_type, bool swap_ab);
-
+    static runDeepGemmFunc searchKernel(uint32_t n, uint32_t k, uint32_t bm, uint32_t bn, uint32_t bk, uint32_t num_groups, uint32_t num_stages, uint32_t num_tma_multicast, DeepGemmType gemm_type, bool swap_ab);
+    static std::string getKernelStr(uint32_t n, uint32_t k, uint32_t bm, uint32_t bn, uint32_t bk, uint32_t num_groups, uint32_t num_stages, uint32_t num_tma_multicast, DeepGemmType gemm_type, bool swap_ab);
+public:
     static void runKernel(__nv_bfloat16*         output,
                           __nv_fp8_e4m3*         lhs,
                           float*                 lhs_scale,

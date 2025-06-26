@@ -2,7 +2,7 @@ load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("//rtp_llm/cpp/deep_gemm:def.bzl", "sub_lib", "sm90_cuda_copts", "gen_cu_and_lib", "gen_dispatch_code", "copy_filegroup")
+load("//rtp_llm/cpp/deep_gemm:def.bzl", "sm90_cuda_copts", "gen_cu_and_lib", "gen_dispatch_code", "copy_filegroup")
 load("//rtp_llm/cpp/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTIGUOUS_GEMM_CASES", "GROUPED_MASKED_GEMM_CASES",
                 "QWEN_NORMAL_CASES", "QWEN_CONTIGUOUS_CASES", "QWEN_MASKED_CASES", "template_header", "template", "template_tail",
                 "dispatch_template_header", "dispatch_template", "dispatch_template_tail")
@@ -18,11 +18,6 @@ cc_library(
         ]),
         "//conditions:default": [],
     }),
-    deps = [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        "@cutlass//:cutlass",
-    ] + torch_deps(),
     copts = sm90_cuda_copts,
     visibility = ["//visibility:public"],
 )
