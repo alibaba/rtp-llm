@@ -40,7 +40,7 @@ def merge_qkv_hf_fp8_with_scale_t(ts: List[torch.Tensor]):
     q = q * q_scale_inv
     k = k * k_scale_inv
     v = v * v_scale_inv
-    quanted_qkv = (torch.cat([q, k, v], dim=0) / max_scale).transpose(0, 1).to(torch.float8_e4m3fnuz)
+    quanted_qkv = (torch.cat([q, k, v], dim=0) / max_scale).transpose(0, 1).to(torch.float8_e4m3fn)
     return quanted_qkv
 
 
@@ -162,7 +162,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
 
         return [
             create_w8a8_fp8_weight(src_weight_info, W.attn_qkv_w, weights,
-                                   merge_te_qkv, data_type=torch.float8_e4m3fnuz, config=src_weight_info.config),
+                                   merge_te_qkv, data_type=torch.float8_e4m3fn, config=src_weight_info.config),
             create_w8a8_fp8_weight(src_weight_info, W.attn_qkv_s, [CkptWeightInfo(qkv_name+ self.qs_suffix)],
                                    identity, data_type=torch.float32, config=src_weight_info.config),
             create_w8a8_fp8_weight(src_weight_info, act_s[0],  [CkptWeightInfo(qkv_name+ self.act_s_suffix)],
@@ -177,7 +177,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
         act_s_inv = self.FP8_ACT_SCALE_MAP[src_weight_info.name][1]
 
         return [create_w8a8_fp8_weight(src_weight_info, W.attn_o_w, [CkptWeightInfo(w_name+ self.qw_suffix, identity)],
-                                       identity, data_type=torch.float8_e4m3fnuz, config=src_weight_info.config),
+                                       identity, data_type=torch.float8_e4m3fn, config=src_weight_info.config),
                 create_w8a8_fp8_weight(src_weight_info, W.attn_o_s, [CkptWeightInfo(w_name+ self.qs_suffix)],
                                        identity, data_type=torch.float32, config=src_weight_info.config),
                 create_w8a8_fp8_weight(src_weight_info, act_s[0],  [CkptWeightInfo(w_name+ self.act_s_suffix)],
@@ -210,7 +210,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
             return [
                 create_w8a8_fp8_weight(src_weight,
                     w, [CkptWeightInfo(name+ self.qw_suffix, identity) \
-                        for name in w_name], stack, data_type=torch.float8_e4m3fnuz,
+                        for name in w_name], stack, data_type=torch.float8_e4m3fn,
                         config=src_weight.config),
                 create_w8a8_fp8_weight(src_weight,
                     s, [CkptWeightInfo(name+ self.qs_suffix, identity) \
@@ -229,11 +229,11 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
             return [
                 create_w8a8_fp8_weight(src_weight,
                     w, [CkptWeightInfo(w1_name + self.qw_suffix, identity), CkptWeightInfo(w3_name + self.qw_suffix, identity)],
-                    concat_w13, data_type=torch.float8_e4m3fnuz,
+                    concat_w13, data_type=torch.float8_e4m3fn,
                         config=src_weight.config),
                 create_w8a8_fp8_weight(src_weight,
                     b, [CkptWeightInfo(w1_name + self.qs_suffix, identity), CkptWeightInfo(w3_name + self.qs_suffix, identity)],
-                    concat_w13, data_type=torch.float8_e4m3fnuz,
+                    concat_w13, data_type=torch.float8_e4m3fn,
                     config=src_weight.config),
                 create_w8a8_fp8_weight(src_weight,
                     act_s[0],  [CkptWeightInfo(w_name+ self.act_s_suffix)], act_s[1], data_type=torch.float32, config=src_weight.config
@@ -249,7 +249,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
             w_list = [
                 create_w8a8_fp8_weight(src_weight,
                     w, [CkptWeightInfo(w_name+ self.qw_suffix, identity)],
-                    identity, data_type=torch.float8_e4m3fnuz,
+                    identity, data_type=torch.float8_e4m3fn,
                         config=src_weight.config),
                 create_w8a8_fp8_weight(src_weight,
                     s, [CkptWeightInfo(w_name+ self.qs_suffix, identity)],
@@ -305,7 +305,7 @@ class TrtEngineStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
 
         return [
             create_w8a8_fp8_weight(src_weight_info, W.attn_qkv_w, [CkptWeightInfo(qkv_name+ self.qw_suffix)],
-                                   identity, data_type=torch.float8_e4m3fnuz, config=src_weight_info.config),
+                                   identity, data_type=torch.float8_e4m3fn, config=src_weight_info.config),
             create_w8a8_fp8_weight(src_weight_info, W.attn_qkv_s, [CkptWeightInfo(qkv_name+ self.qs_suffix)],
                                    identity, data_type=torch.float32, config=src_weight_info.config),
             create_w8a8_fp8_weight(src_weight_info, act_s[0],  [CkptWeightInfo(qkv_name+ self.act_s_suffix)],

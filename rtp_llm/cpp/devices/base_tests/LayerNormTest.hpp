@@ -62,7 +62,7 @@ protected:
         const auto torch_dtype = dataTypeToTorchType(data_type);
         auto input_tensor = (torch::arange(m * n, m * n * 2) / (n * n)).reshape({m, n}).to(torch_dtype);
         auto gamma_tensor = (torch::ones({n}) / 2).to(torch_dtype);
-        auto beta_tensor = (torch::ones({n}) / 3).to(torch_dtype);
+        auto beta_tensor = (torch::zeros({n})).to(torch_dtype);
         auto residual_tensor = torch::arange(m * n, - m * n, -2).reshape({m, n}).to(torch_dtype);
 
         auto input = tensorToBuffer(input_tensor);

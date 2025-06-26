@@ -4,7 +4,10 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+
+#ifdef USING_ROCM
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
+#endif
 
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
@@ -117,13 +120,14 @@ public:
                              size_t num_heads,
                              size_t num_key_value_heads,
                              size_t head_dim);
-
+#ifdef USING_ROCM
     void aiterPageAttentionOpTest(size_t batch_size,
                                   size_t seq_len,
                                   size_t kv_seq_len,
                                   size_t num_heads,
                                   size_t num_key_value_heads,
                                   size_t head_dim);                             
+#endif
 
 #ifdef USING_CUDA12
     void xqaAttentionOpTest(size_t batch_size,
@@ -296,7 +300,11 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
+    #ifdef USING_ROCM
     size_t tokensPerBlock = 16;
+    #else
+    size_t tokensPerBlock = 8;
+    #endif
 
     size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
     padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
@@ -328,7 +336,12 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
+    #ifdef USING_ROCM
     auto block_num = batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    #else
+    auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    #endif
+
     rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16}));
     cache_manager_ = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
@@ -336,6 +349,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto common_inputs = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+
     common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
@@ -384,7 +398,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
 
-
+#ifdef USING_ROCM
 void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
                                                size_t seq_len,
                                                size_t kv_seq_len,
@@ -501,6 +515,7 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     auto result = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 5e-2);
 }
+#endif
 
 #ifdef USING_CUDA12
 

@@ -418,6 +418,7 @@ BufferPtr loadTorchToBuffer(const std::string& fileName, DeviceBase* device) {
 void saveBufferData_(const Buffer& buffer, DeviceBase* device,
                      const std::string& fileName,
                      const std::string& sourceFile) {
+  #if (defined(WITH_CUDA) || defined(USE_CUDA))
   const auto log_level = alog::LOG_LEVEL_INFO;
 
   auto shouldFilter = [&]() {
@@ -482,11 +483,13 @@ void saveBufferData_(const Buffer& buffer, DeviceBase* device,
   } else {
     throw std::runtime_error("Failed to open file: " + outPath);
   }
+  #endif
 }
 
 void saveBufferData_(Buffer& buffer, DeviceBase* device,
                      const std::string& fileName,
                      const std::string& sourceFile) {
+  #if (defined(WITH_CUDA) || defined(USE_CUDA))
   const auto log_level = alog::LOG_LEVEL_INFO;
 
   auto shouldFilter = [&]() {
@@ -550,6 +553,7 @@ void saveBufferData_(Buffer& buffer, DeviceBase* device,
   } else {
     throw std::runtime_error("Failed to open file: " + outPath);
   }
+  #endif
 
   #if USING_ROCM
   #ifdef ENABLE_LOAD_H20_BUFFER_DATA
