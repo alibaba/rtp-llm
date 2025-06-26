@@ -1,10 +1,10 @@
-from aiter import aiter
+import aiter
+from aiter.fused_moe import fused_topk
 from aiter.ops.moe_op import fmoe_fp8_blockscale_g1u1
 from aiter.ops.moe_sorting import moe_sorting_fwd
-from aiter.ops.quant import dynamic_per_token_scaled_fp8_quant, pertoken_quant
+from aiter.ops.quant import dynamic_per_token_scaled_quant, pertoken_quant
 from aiter.ops.topk import biased_grouped_topk, biased_grouped_topk_torch
 from aiter.test_common import checkAllclose
-from aiter.fused_moe import fused_topk
 from einops import rearrange
 import multiprocessing as mp
 import os
@@ -106,12 +106,11 @@ def aiter_moe_fp8(input, w1_q, w2_q, w1_scale, w2_scale, gating_weight, correcti
     a_q = torch.empty((token, model_dim), dtype=quant_dtype, device='cuda')
     a_scale = torch.empty((token, model_dim//block_scale_k), dtype=torch.float32, device='cuda')
 
-    dynamic_per_token_scaled_fp8_quant(
-        a_q.view(token, model_dim//block_scale_k, block_scale_k),
+    dynamic_per_token_scaled_quant(
+        a_q,
         input.view(token, model_dim//block_scale_k, block_scale_k),
         a_scale
     )
-    a_q = a_q.view(-1, model_dim)
     a_scale = a_scale.t().contiguous()
 
     w1_scale = w1_scale.view(num_expert, -1)
@@ -149,14 +148,13 @@ def aiter_moe_fp8(input, w1_q, w2_q, w1_scale, w2_scale, gating_weight, correcti
         sorted_expert_ids,
         num_valid_ids,
         topk,
+        a_scale,
         w1_scale,
         w2_scale,
-        a_scale,
         block_scale_n,
         block_scale_k,
         None
     )
-
     return aiter_ref_output
 
 
@@ -300,6 +298,7 @@ def subprocess_moe_fp8(input_path, w1_q_path, w2_q_path, w1_scale_path, w2_scale
 
     checkAllclose(torch_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp')
     checkAllclose(aiter_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp')
+    checkAllclose(torch_ref_output, aiter_ref_output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp')
 
 
 class TestROCmFfnMoeFp8(unittest.TestCase):
@@ -396,15 +395,27 @@ class TestROCmFfnMoeFp8(unittest.TestCase):
 
 
     # blockscale quant, for deepseek-r1
+    # def test_moe_fp8(self):
+    #     # for ep_size in [1, 2]:
+    #     for ep_size in [2]:
+    #         for dtype in [torch.bfloat16]:
+    #             # for token in [1, 2, 5, 16, 32]:
+    #             for token in [2]:
+    #                 for model_dim in [7168]:
+    #                     for inter_dim in [256]:
+    #                         self._test_moe_fp8(token, model_dim, inter_dim, 256, 0, 8, 8, 4, ep_size, dtype, torch.float8_e4m3fnuz)
+
+
+    # blockscale quant, for qwen3
     def test_moe_fp8(self):
         # for ep_size in [1, 2]:
-        for ep_size in [2]:
+        for ep_size in [1]:
             for dtype in [torch.bfloat16]:
                 # for token in [1, 2, 5, 16, 32]:
-                for token in [2]:
-                    for model_dim in [7168]:
-                        for inter_dim in [256]:
-                            self._test_moe_fp8(token, model_dim, inter_dim, 256, 0, 8, 8, 4, ep_size, dtype, torch.float8_e4m3fnuz)
+                for token in [32]:
+                    for model_dim in [4096]:
+                        for inter_dim in [1536]:
+                            self._test_moe_fp8(token, model_dim, inter_dim, 128, 0, 8, 1, 1, ep_size, dtype, torch.float8_e4m3fnuz)
 
 
     # blockscale quant, for qwen3

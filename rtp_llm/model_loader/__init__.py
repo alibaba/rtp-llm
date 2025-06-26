@@ -1,4 +1,5 @@
 from .per_block_fp8_quant_weight import PerBlockFp8Weight
+from .per_channel_fp8_quant_weight import PerChannelFp8Weight
 from .smooth_quant_weight import SmoothQuantWeightInfo
 from .omni_quant_weight import OmniQuantWeightInfo
 from .weight_only_quant_weight import WeightOnlyPerColWeight

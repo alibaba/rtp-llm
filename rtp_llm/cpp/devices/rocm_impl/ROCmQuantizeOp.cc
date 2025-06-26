@@ -2,71 +2,95 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
 #include "rtp_llm/cpp/kernels/rocm/quantization_rocm.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "quant.h"
 
-using namespace std;
 namespace rtp_llm {
 using namespace rocm;
 
-inline rocm::QuantType quantTypeConvert(DataType dtype) {
-    switch (dtype) {
-        case DataType::TYPE_QINT8: {
-            return rocm::QuantType::INT8_WEIGHT_ONLY;
-        }
-        default: {
-            ROCM_FAIL("Invalid quant type");
-        }
-    }
-}
-
 BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
+    ROCM_CHECK_VALUE((params.input.dim() == 2), "quantize only support 2D.");
     ROCM_CHECK_VALUE((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
                         || params.input.type() == DataType::TYPE_BF16),
                        "quantize only support half or float quantize. but get %d.",
                        params.input.type());
 
-    ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QINT8 || params.qtype == DataType::TYPE_QINT4X2),
-                       "cuda quantize only support qint8 or qint4x2 quantize. but get %d.",
-                       params.qtype);
-
-    ROCM_CHECK_VALUE((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D input.");
-
-    ROCM_CHECK_VALUE((params.axis == (params.input.dim() - 1)), "quantize only support last axis.");
-
+    BufferPtr kernel, scales, zeros;
     if (params.input.where() == MemoryType::MEMORY_GPU) {
-        ROCM_CHECK_VALUE((params.input.dim() == 2), "quantize only support 2D input.");
-        size_t groupSize   = params.groupSize;
-        size_t scales_dim0 = params.input.shape()[0] / groupSize;
-
-        auto kernel =
-            allocateBuffer({params.qtype == DataType::TYPE_QINT8 ? DataType::TYPE_INT8 : DataType::TYPE_INT4X2,
-                            params.input.shape(),
-                            getMemAllocationType(params.input.where())},
-                           {"kernel"});
-        auto scales = allocateBuffer(
-            {DataType::TYPE_FP16, {scales_dim0, params.input.shape()[1]}, getMemAllocationType(params.input.where())},
-            {"scales"});
-        auto zeros = allocateBuffer(
-            {DataType::TYPE_FP16, {scales_dim0, params.input.shape()[1]}, getMemAllocationType(params.input.where())},
-            {"zeros"});
-
         if (params.qtype == DataType::TYPE_QINT4X2) {
+            ROCM_CHECK_VALUE((params.input.dim() == 2), "quantize only support 2D input.");
+            size_t groupSize   = params.groupSize;
+            size_t scales_dim0 = params.input.shape()[0] / groupSize;
+            
+            kernel =
+                allocateBuffer({QBufferDtype2BufferDtype(params.qtype),
+                                params.input.shape(),
+                                getMemAllocationType(params.input.where())},
+                              {"kernel"});
+            scales = allocateBuffer(
+                {DataType::TYPE_FP16, {scales_dim0, params.input.shape()[1]}, getMemAllocationType(params.input.where())},
+                {"scales"});
+            zeros = allocateBuffer(
+                {DataType::TYPE_FP16, {scales_dim0, params.input.shape()[1]}, getMemAllocationType(params.input.where())},
+                {"zeros"});
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                             invokePerColQuantizationInt4x2,
-                                             params.input.data(),
-                                             params.input.shape()[0],
-                                             params.input.shape()[1],
-                                             groupSize,
-                                             (uint8_t*)(kernel->data()),
-                                             scales->data<half>(),
-                                             zeros->data<half>(),
-                                             stream_);
+                invokePerColQuantizationInt4x2,
+                params.input.data(),
+                params.input.shape()[0],
+                params.input.shape()[1],
+                groupSize,
+                (uint8_t*)(kernel->data()),
+                scales->data<half>(),
+                zeros->data<half>(),
+                stream_);
+        } else if (params.qscheme == QScheme::Qfp8PerToken) {
+            ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QFP8_E4M3), "Qfp8PerToken only support qtype = TYPE_QFP8_E4M3");
+            ROCM_CHECK_VALUE((params.axis == 1), "Qfp8PerToken only support axis = 1");
+            size_t num_token = params.input.shape()[0];
+            size_t model_dim = params.input.shape()[1];
+            torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
+            kernel = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
+            scales = allocateBuffer({DataType::TYPE_FP32, {num_token, 1}}, {"quant_scale"});
+            zeros = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
+            torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
+            torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
+
+            // invoke aiter quant kernel
+            aiter::dynamic_per_token_scaled_quant(
+                /*out=*/kernel_tensor,
+                /*input=*/input_tensor,
+                /*scales=*/scales_tensor,
+                /*scale_ub=*/std::nullopt
+            );
+        } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+            ROCM_CHECK_VALUE((params.groupSize == 32 || params.groupSize == 64 || params.groupSize == 128), "Qfp8PerTokenBlock only support groupSize = 32,64 or 128");
+            ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QFP8_E4M3), "Qfp8PerTokenBlock only support qtype = TYPE_QFP8_E4M3");
+            ROCM_CHECK_VALUE((params.axis == 1), "Qfp8PerTokenBlock only support axis = 1");
+            size_t num_token = params.input.shape()[0];
+            size_t model_dim = params.input.shape()[1];
+            size_t block_scale_k = params.groupSize;
+            torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
+            kernel = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
+            scales = allocateBuffer({DataType::TYPE_FP32, {num_token, model_dim / block_scale_k}}, {"quant_scale"});
+            zeros = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
+            torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
+            torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
+
+            input_tensor = input_tensor.view({(int)num_token, (int)model_dim / (int)block_scale_k, (int)block_scale_k});
+
+            // invoke aiter quant kernel
+            aiter::dynamic_per_token_scaled_quant(
+                /*out=*/kernel_tensor,
+                /*input=*/input_tensor,
+                /*scales=*/scales_tensor,
+                /*scale_ub=*/std::nullopt
+            );
         } else {
             ROCM_FAIL("other quantize not implemented");
         }
 
         ROCM_CHECK_ERROR();
         return BufferPtr(new QBuffer(std::move(kernel), std::move(scales), std::move(zeros)));
-
     } else {
         ROCM_FAIL("cpu quantize not implemented");
     }

@@ -231,7 +231,7 @@ class TestROCmFfnMoe(unittest.TestCase):
         # for ep_size in [1, 2]:
         for ep_size in [1]:
             for dtype in [torch.bfloat16]:
-                for token in [2]:
+                for token in [1, 2, 5, 16, 32]:
                     for model_dim in [2048]:
                         for inter_dim in [1408]:
                             self._test_moe(token, model_dim, inter_dim, 60, 0, 4, 1, 1, False, ep_size, dtype)

@@ -15,7 +15,7 @@ from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
 from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode
 from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, preset_quant_config
+from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, Fp8PerChannelQuantConfig, preset_quant_config
 
 updated_params: Set[str] = set()
 
@@ -872,6 +872,9 @@ class GptInitModelParameters:
                 assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
+        if quant_method == "compressed-tensors":
+            bits = 8
+            quant_method = Fp8PerChannelQuantConfig.get_method()
         return QuantizationConfig.from_config({"bits": bits, "method": quant_method, "group_size": group_size, "is_quanted": True})
 
 

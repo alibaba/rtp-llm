@@ -107,6 +107,9 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
         quant_method_ = FP8Quant;
         weight_bits_ = 8;
 	    group_size_ = group_size;
+    } else if (quant_method == "compressed-tensors") {
+        quant_method_ = FP8PTPC;
+        weight_bits_ = 8;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
     }
@@ -259,6 +262,7 @@ void registerGptInitParameter(py::module m) {
     .def("isOmniQuant", &QuantAlgo::isOmniQuant)
     .def("isPerTensorQuant", &QuantAlgo::isPerTensorQuant)
     .def("isFp8", &QuantAlgo::isFp8)
+    .def("isFp8PTPC", &QuantAlgo::isFp8PTPC)
     .def("isQuant", &QuantAlgo::isQuant)
     .def("isGroupwise", &QuantAlgo::isGroupwise)
     .def("getGroupSize", &QuantAlgo::getGroupSize)

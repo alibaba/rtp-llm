@@ -19,7 +19,7 @@ cc_library(
         "include/**/*.inc",
         "include/**/*.hpp",
     ]) + [":config_h"],
-    
+    copts = rocm_default_copts(),
     strip_include_prefix = "include",
     visibility = ["//visibility:public"],
     deps = [
@@ -47,6 +47,7 @@ cc_library(
     hdrs = glob([
         "example/ck_tile/01_fmha/*.hpp",
     ]),
+    copts = rocm_default_copts(),
     deps = [
         ":ck_headers",
     ],
@@ -67,6 +68,18 @@ cc_library(
 )
 
 cc_library(
+    name = "ck_rmsnorm2d_example_headers",
+    hdrs = glob([
+        "example/ck_tile/10_rmsnorm2d/*.hpp",
+    ]),
+    deps = [
+        ":ck_headers",
+    ],
+    strip_include_prefix = "example/ck_tile/10_rmsnorm2d",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "ck_fused_moe_example_headers",
     srcs = glob([
         "example/ck_tile/15_fused_moe/instances/*.cpp",
@@ -79,6 +92,19 @@ cc_library(
     ],
     copts = rocm_default_copts(),
     strip_include_prefix = "example/ck_tile/15_fused_moe",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "ck_fmha_rmsnorm2d_libraries",
+    outs = ["libtile_example_fmha_fwd.so", "libtile_rmsnorm2d_fwd.so"],
+    cmd = """
+        cd external/composable_kernel_archive;
+        sh cmake_build.sh;
+        cd ../..;
+        cp external/composable_kernel_archive/build/lib/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
+        cp external/composable_kernel_archive/build/lib/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
+    """,
     visibility = ["//visibility:public"],
 )
 

@@ -118,7 +118,9 @@ cc_test(
     copts = test_copts + copts(),
     linkopts = test_linkopts,
     deps = test_deps + [
+        "@aiter//:module_aiter_enum",
         "@aiter//:module_moe_asm",
+        "@aiter//:module_moe",
         "@aiter//:module_quant",
         "@aiter//:module_moe_sorting",
     ],
@@ -208,4 +210,32 @@ cc_test(
     deps = test_deps,
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X'},
+)
+
+cc_binary(
+    name = "custom_ar_test",
+    srcs = [
+        "ops/CustomAllReduceTest.cc",
+    ],
+    deps = test_deps + [
+        "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
+        "//rtp_llm/cpp:models",
+    ],
+    visibility = ["//visibility:public"],
+    copts = test_copts,
+)
+
+cc_test(
+    name = "rocm_custom_all_reduce_test",
+    srcs = [
+        "ops/ROCmCustomAllReduceTest.cc"
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/devices/rocm_impl/test:custom_ar_test"
+    ],
+    tags = ["custom_ar_ut", "rocm"],
 )

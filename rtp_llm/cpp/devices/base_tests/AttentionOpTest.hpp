@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
@@ -116,6 +117,13 @@ public:
                              size_t num_heads,
                              size_t num_key_value_heads,
                              size_t head_dim);
+
+    void aiterPageAttentionOpTest(size_t batch_size,
+                                  size_t seq_len,
+                                  size_t kv_seq_len,
+                                  size_t num_heads,
+                                  size_t num_key_value_heads,
+                                  size_t head_dim);                             
 
 #ifdef USING_CUDA12
     void xqaAttentionOpTest(size_t batch_size,
@@ -288,7 +296,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
-    size_t tokensPerBlock = 8;
+    size_t tokensPerBlock = 16;
 
     size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
     padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
@@ -320,7 +328,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    auto block_num = batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
     rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16}));
     cache_manager_ = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
@@ -374,6 +382,124 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto result  = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
+}
+
+
+void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
+                                               size_t seq_len,
+                                               size_t kv_seq_len,
+                                               size_t num_heads,
+                                               size_t num_key_value_heads,
+                                               size_t head_dim) {
+    Attention attention = Attention();
+    attention.ptr()->to(torch::Device(torch::kCPU));
+    auto state_dict = attention.ptr()->named_parameters();
+    torch::NoGradGuard no_grad;
+    ROCmDevice* device = dynamic_cast<ROCmDevice*>(device_);
+    auto tensor_options = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
+    auto bf16_tensor_options = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
+    auto int_tensor_options = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
+    // auto fp8_tensor_options = torch::TensorOptions(torch::kFloat8_e4m3fnuz).device(torch::Device(torch::kCPU));
+    auto uint8_tensor_options = torch::TensorOptions(torch::kUInt8).device(torch::Device(torch::kCPU));
+    auto query_states_host = torch::rand(
+        {(int)batch_size, (int)seq_len, (int)num_heads, (int)head_dim}, bf16_tensor_options);
+    
+    auto qkv_states_host = query_states_host.view({(int)batch_size * (int)seq_len , (int)num_heads, (int)head_dim});
+    std::vector<int> sequence_lengths(batch_size);
+    std::vector<int> input_lengths(batch_size);
+    for (int i = 0; i < batch_size; i++) {
+        sequence_lengths[i] = kv_seq_len + seq_len - 1;
+        input_lengths[i]    = kv_seq_len;
+    }
+    size_t step = *std::max_element(sequence_lengths.begin(), sequence_lengths.end());
+    step = step + 1;
+    auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
+    auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
+    size_t tokens_per_block = 16;
+    size_t padding_kv_seq_len = ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) * tokens_per_block;
+    padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokens_per_block : padding_kv_seq_len;
+    auto kvcache_pad = torch::rand(  // hangy: [1, 2, 2, 256, 4 * 128]
+        {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
+        bf16_tensor_options);
+    auto kvcache_pad_fp8 = torch::zeros(
+        {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
+        uint8_tensor_options).view(torch::kFloat8_e4m3fnuz);
+    auto k_cache_host = kvcache_pad.index(
+        {0, torch::indexing::Slice(), 0, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).contiguous().clone();
+    auto v_cache_host = kvcache_pad.index(  // hangy: [batch_size, num_key_value_heads, kv_seq_len, head_dim]
+        {0, torch::indexing::Slice(), 1, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).contiguous().clone();
+    
+    int H_x = ((int)head_dim)/8;
+    int num_block = batch_size * kv_seq_len / tokens_per_block;
+    auto k_cache_host_view = k_cache_host.reshape({num_block, (int)tokens_per_block, (int)num_key_value_heads, H_x, 8}
+    ).permute({0,2,3,1,4}).reshape({1, (int)batch_size, 1, (int)kv_seq_len, (int)num_key_value_heads * (int)head_dim});
+    auto v_cache_host_view = v_cache_host.reshape({num_block, (int)tokens_per_block, (int)num_key_value_heads, (int)head_dim}
+		    ).permute({0,2,3,1}).reshape({1, (int)batch_size, 1,(int)kv_seq_len, (int)num_key_value_heads * (int)head_dim});
+    kvcache_pad = torch::cat({k_cache_host_view, v_cache_host_view}, 2);
+    auto attention_mask_host = torch::zeros(
+        {(int)batch_size, (int)seq_len, (int)kv_seq_len + (int)seq_len}, tensor_options);
+    auto bias_host = torch::zeros(
+        {(int)((num_heads + 2 * num_key_value_heads) * head_dim)}, tensor_options);
+    auto attention_mask_device   = createDeviceBuffer<float>(attention_mask_host);
+    auto bias_device             = createDeviceBuffer<__nv_bfloat16>(bias_host);
+    auto qkv_states_device       = createDeviceBuffer<__nv_bfloat16>(qkv_states_host);
+    auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
+    auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    // cache manager need one block for preserve and every seq need one block for preserve.
+    auto block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    rtp_llm::CacheConfig cache_conf(
+        rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16})
+    );
+    cache_manager_ = nullptr;
+    auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);  // hangy: copy kv cache content from kvcache_pad_fp8 to RTP local KV cache, kv_cache_block_id = [batch_size, xxx]
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    auto common_inputs = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
+    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.context_batch_size = 0;
+    common_inputs.context_max_seq_len = 0;
+    common_inputs.decoder_batch_size = batch_size;
+    common_inputs.decoder_max_seq_len = step - 1;
+    common_inputs.max_prefix_length = 0;
+    auto buffer_nullptr = BufferPtr(nullptr);
+    auto attention_weight = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
+    auto token_num = batch_size * seq_len;
+    auto attention_config = AttentionConfigs({num_heads,
+                                              num_key_value_heads,
+                                              head_dim,
+                                              num_heads * head_dim,
+                                              rope_config,
+                                              tokens_per_block});
+    auto qkv_output = device->allocateBuffer(
+        {qkv_states_device->type(), {token_num, num_heads, head_dim}}
+    );
+    AttentionModuleParams params = {0, 
+                                    *qkv_states_device,
+                                    *qkv_output,
+                                    common_inputs,
+                                    attention_weight,
+                                    attention_config};
+    const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
+    auto kv_cache_page_List = device->allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_page_List"}
+    );
+    KVBlockArray kv_block_array = device->getKVBlockArray(params, *kv_cache_page_List, batch_size, false);
+    runAiterPA(params,device,*qkv_states_device);
+    device->syncAndCheck();
+    auto q_host_fp32 = query_states_host.to(tensor_options);
+    auto k_host_fp32 = k_cache_host.to(tensor_options);
+    auto v_host_fp32 = v_cache_host.to(tensor_options);
+    auto result_ref = attention->forward(q_host_fp32,
+                                         k_host_fp32,
+                                         v_host_fp32);
+    
+    auto result = bufferToTensor(*qkv_output);
+    assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 5e-2);
 }
 
 #ifdef USING_CUDA12

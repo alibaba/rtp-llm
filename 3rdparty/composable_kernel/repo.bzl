@@ -9,9 +9,7 @@ alias(
 
 cc_library(
     name = "ck_fmha_example",
-    srcs = glob([
-        "fmha_example_gen/*.cpp",
-    ]),
+    srcs = ["@composable_kernel_archive//:libtile_example_fmha_fwd.so"],
     copts = rocm_copts(),
     deps = [
         "@composable_kernel_archive//:ck_fmha_example_headers",
@@ -30,6 +28,16 @@ cc_library(
     copts = rocm_copts(),
     deps = [
         "@composable_kernel_archive//:ck_layernorm2d_example_headers",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "ck_rmsnorm2d_example",
+    srcs = ["@composable_kernel_archive//:libtile_rmsnorm2d_fwd.so"],
+    copts = rocm_copts(),
+    deps = [
+        "@composable_kernel_archive//:ck_rmsnorm2d_example_headers",
     ],
     visibility = ["//visibility:public"],
 )
@@ -72,5 +80,3 @@ ck_repo = repository_rule(
         "CK_LYNM_GEN_ARGS",
     ],
 )
-
-

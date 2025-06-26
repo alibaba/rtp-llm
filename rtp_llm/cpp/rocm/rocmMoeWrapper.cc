@@ -96,7 +96,9 @@ uint32_t rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
                         params.gate_scale_ptr,
                         params.down_scale_ptr,
                         params.smooth_scale_ptr,
+                        nullptr, //local_expert_mask_ptr
                         params.output_ptr,
+                        nullptr, //ws_ptr
                         params.topk_ids_ptr,
                         params.topk_weight_ptr,
                         params.sorted_token_ids_ptr,

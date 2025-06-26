@@ -165,6 +165,17 @@ public:
         parent_ = parent;
     }
 
+    void swap(Buffer& other) noexcept {
+        // 交换所有成员变量
+        std::swap(where_, other.where_);
+        std::swap(type_, other.type_);
+        std::swap(shape_, other.shape_);
+        std::swap(data_, other.data_);
+        std::swap(deleter_, other.deleter_);
+        std::swap(parent_, other.parent_);
+        std::swap(view_count_, other.view_count_);
+    }
+
     std::string debugStringMeta() const;
 
 private:

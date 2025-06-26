@@ -72,6 +72,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     auto squant        = false;
     float scale_p       = 1.f;
     float scale_o       = 1.f;
+    float logits_soft_cap = 0.f;
     // if (squant) {
     //     scale_s = scale_s * (range_q / dtype_max) * (range_k / dtype_max);
     //     scale_p = dtype_max / range_p;
@@ -136,13 +137,14 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         return lse_acc_host.get_element_space_size_in_bytes();
     }
     //ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
-
+    auto has_logits_soft_cap = false;
 
     auto fmha_traits = fmha_fwd_traits{hdim_q,
                                        hdim_v,
                                        data_type,
                                        mode == mode_enum::group,
                                        is_v_rowmajor,
+                                       has_logits_soft_cap,
                                        mask.type,
                                        bias.type,
                                        lse,
@@ -209,6 +211,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         // setup split_stride_* arguments (only used in split-kv kernel)
         const ck_tile::index_t split_stride_lse_acc = (shape_batch * nhead * shape_seqlen_q);
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
+        const ck_tile::index_t min_seqlen_q         = 0;
 
         return fmha_fwd_args{q,
                              k,
@@ -235,6 +238,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              scale_s,
                              scale_p,
                              scale_o,
+                             logits_soft_cap,
                              stride_q,
                              stride_k,
                              stride_v,
@@ -265,6 +269,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              mask.left,
                              mask.right,
                              static_cast<ck_tile::index_t>(mask.type),
+                             min_seqlen_q,
                              p_drop,
                              s_randval,
                              std::make_pair(drop_seed, drop_offset)};
@@ -343,6 +348,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
     auto squant        = false;
     float scale_p       = 1.f;
     float scale_o       = 1.f;
+    float logits_soft_cap = 0.f;
     // if (squant) {
     //     scale_s = scale_s * (range_q / dtype_max) * (range_k / dtype_max);
     //     scale_p = dtype_max / range_p;
@@ -407,13 +413,14 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         return lse_acc_host.get_element_space_size_in_bytes();
     }
     //ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
-
+    auto has_logits_soft_cap = false;
 
     auto fmha_traits = fmha_fwd_traits{hdim_q,
                                        hdim_v,
                                        data_type,
                                        mode == mode_enum::group,
                                        is_v_rowmajor,
+                                       has_logits_soft_cap,
                                        mask.type,
                                        bias.type,
                                        lse,
@@ -480,6 +487,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         // setup split_stride_* arguments (only used in split-kv kernel)
         const ck_tile::index_t split_stride_lse_acc = (shape_batch * nhead * shape_seqlen_q);
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
+        const ck_tile::index_t min_seqlen_q         = 0;
 
         return fmha_fwd_args{q,
                              k,
@@ -506,6 +514,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              scale_s,
                              scale_p,
                              scale_o,
+                             logits_soft_cap,
                              stride_q,
                              stride_k,
                              stride_v,
@@ -536,6 +545,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              mask.left,
                              mask.right,
                              static_cast<ck_tile::index_t>(mask.type),
+                             min_seqlen_q,
                              p_drop,
                              s_randval,
                              std::make_pair(drop_seed, drop_offset)};

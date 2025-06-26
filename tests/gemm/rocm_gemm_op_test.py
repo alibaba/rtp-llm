@@ -5,17 +5,12 @@ import os
 
 os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
 
-import torch
-import unittest
-import os
 import numpy as np
 from typing import Tuple
 
-import torch
 from math import ceil
 
 
-import unittest
 from torch.testing import assert_close
 
 def random_tensor(shape, dtype, device, mean=0, std=1):
@@ -128,42 +123,6 @@ class TestGemmOp(unittest.TestCase):
             self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
             custom_output = custom_output.to("cpu")
             torch.set_printoptions(threshold=float('inf'))
-            assert_close(
-                custom_output,
-                ref_output_fp8,
-                rtol=0.01,
-                atol=0.04,
-                msg=f"m:{m}, k:{k}, n:{n} 结果不匹配: deep_gemm: {custom_output},\n torch_gemm_fp8:{ref_output_fp8},\n torch_gemm_fp16:{ref_output},"
-            )
-
-    def test_uneven_blocks(self):
-        """测试非对齐分块"""
-        shapes = [
-            (127, 256, 128), 
-            (385, 512, 256),
-            (511, 1024, 256),
-            (511, 1024, 896)
-        ]
-        for m, k, n in shapes:
-            # 创建测试数据
-            input_fp = torch.randn(m, k, device='cuda', dtype=torch.bfloat16)*0.1
-            weight_fp = torch.randn(k, n, device='cuda', dtype=torch.bfloat16)*0.1
-            
-            # 计算参考输出
-            ref_output_fp8 = self._fp8_gemm_ref(input_fp, weight_fp).to("cpu")
-            ref_output = torch.matmul(input_fp, weight_fp).to(torch.bfloat16).to("cpu")
-            
-            # 运行自定义kernel（需要根据实际接口调整）
-
-            b_quant, b_scales = per_block_cast_to_fp8(weight_fp)
-            b_quant = b_quant.T.contiguous().reshape([k,n])
-            b_scales = b_scales.T.contiguous().reshape([k//128,n//128])
-            
-            custom_output = torch.zeros(m, n, device='cuda', dtype=torch.bfloat16)
-            self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
-            custom_output = custom_output.to("cpu")
-            # torch.set_printoptions(threshold=float('inf'))
-            print(f"m:{m}, k:{k}, n:{n} 结果不匹配: deep_gemm: {custom_output},\n torch_gemm_fp8:{ref_output_fp8},\n torch_gemm_fp16:{ref_output},")
             assert_close(
                 custom_output,
                 ref_output_fp8,

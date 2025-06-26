@@ -12,6 +12,7 @@ enum QuantMethod {
     OmniQuant           = 5,
     PerTensorQuant      = 6,
     FP8Quant            = 7,
+    FP8PTPC             = 8,
 };
 
 
@@ -43,6 +44,9 @@ public:
     }
     bool isFp8() const {
         return quant_method_ == FP8Quant;
+    }
+    bool isFp8PTPC() const {
+        return quant_method_ == FP8PTPC;
     }
     bool isQuant() const {
         return quant_method_ != None;

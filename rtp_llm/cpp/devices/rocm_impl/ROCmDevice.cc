@@ -55,12 +55,12 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
 
     // Initialize custom all reduce communicator
-    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
+    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before
+    // allocator init
     if (tp_nccl_param_.world_size_ > 1) {
-        auto& nccl_param = tp_nccl_param_;
-        RTP_LLM_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param.rank_, nccl_param.world_size_);
-        std::vector<size_t> tp_ranks = fcNcclGatherRanks(nccl_param, stream_);
-        // custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        auto&               nccl_param = tp_nccl_param_;
+        std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
+        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
@@ -313,31 +313,6 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 
 void  ROCmDevice::checkError() {
     ROCM_CHECK_ERROR();
-
-void ROCmDevice::initNcclParam(size_t             rank,
-                               size_t             world_size,
-                               const std::string& ip,
-                               size_t             port,
-                               const string&      group_name,
-                               NcclParam&         nccl_param) {
-    nccl_param.rank_       = rank;
-    nccl_param.world_size_ = world_size;
-    auto       tcpStore    = createTcpStore(ip, port, world_size, rank);
-    const auto nccl_id     = &(nccl_param.nccl_uid_);
-
-    if (rank == 0) {
-        FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, group_name.c_str());
-        NCCLCHECK(ncclGetUniqueId(nccl_id));
-        setUniqueId(nccl_id, group_name, tcpStore);
-    } else {
-        FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, group_name.c_str());
-        getUniqueId(nccl_id, group_name, tcpStore);
-    }
-
-    FT_LOG_INFO("Initialize NCCL communicators [%s] rank %d of %d.", group_name.c_str(), rank, world_size);
-    NCCLCHECK(ncclGroupStart());
-    NCCLCHECK(ncclCommInitRank(&nccl_param.nccl_comm_, world_size, *nccl_id, rank));
-    NCCLCHECK(ncclGroupEnd());
 }
 
 void ROCmDevice::initNcclParam(size_t             rank,

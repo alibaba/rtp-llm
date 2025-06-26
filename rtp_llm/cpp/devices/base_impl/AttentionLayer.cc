@@ -69,7 +69,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         BufferPtr attn_input_ptr = nullptr;
         printBufferData(*attn_input_ptr, "attn_ag_input");
 
-        if (params.qscheme == NoQuantize) {
+        if (params.qscheme == NoQuantize || params.qscheme == Qfp8PerToken) {
             attn_input_ptr = params.input.slice(0, params.input.shape()[0]);
             ag_recv_buffer = allocateBuffer({attn_input_ptr->type(), {pad_token_num, attn_input_ptr->shape()[1]}}, {"ag_recv_buffer"});
         } else if (params.qscheme == Qint8PerToken){

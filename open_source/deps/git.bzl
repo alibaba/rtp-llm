@@ -11,8 +11,18 @@ def amd_ck_dep():
     new_git_repository(
         name = "composable_kernel_archive",
         remote = "https://github.com/ROCm/composable_kernel.git",
-        commit = "86d1b46aa6d4e0c8ca19f2048ac9c0c97cf7752e", # CommitTag: [CK_TILE] fix a bug for int4 scale weight only kernel (#1820)
-        patches = ["//3rdparty/composable_kernel:ck.patch"],
+        commit = "c42b957d654826bd9c218ccb66225865019a5140", # CommitTag: [CK_TILE] For FMHA forward kernels, assign block indices reversely if using mask (#2209)
+        patches = ["//3rdparty/composable_kernel:ck.patch", "//3rdparty/composable_kernel:fmhaCMakeLists.patch", "//3rdparty/composable_kernel:rmsnorm2dCMakeLists.patch"],
+        patch_cmds = [
+            "echo 'rm -rf build' >> cmake_build.sh",
+            "echo 'mkdir -p build && cd build' >> cmake_build.sh",
+            "echo 'export ROCM_PATH=/opt/rocm' >> cmake_build.sh",
+            "echo 'export PATH=/opt/cmake/cmake-3.26.4/bin:$ROCM_PATH/bin:$PATH' >> cmake_build.sh",
+            "echo 'export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH' >> cmake_build.sh",
+            "echo 'export CMAKE_PREFIX_PATH=$ROCM_PATH:$CMAKE_PREFIX_PATH' >> cmake_build.sh",
+            "echo 'sh ../script/cmake-ck-dev.sh ../ gfx942 -DBUILD_TESTING=OFF -DFMHA_FWD_ENABLE_APIS=fwd -DCK_USE_ALTERNATIVE_PYTHON=/opt/conda310/bin/python -DCMAKE_PREFIX_PATH=$ROCM_PATH -DROCM_PATH=$ROCM_PATH' >> cmake_build.sh",
+            "echo 'make -j100 tile_example_fmha_fwd tile_rmsnorm2d_fwd' >> cmake_build.sh"
+        ],
         build_file = "//3rdparty/composable_kernel:ck.BUILD",
         shallow_since = "1719582646 -0700",
     )
@@ -24,9 +34,9 @@ def git_deps():
     git_repository(
         name = "aiter",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "238029f0a4d6e709c9d0f2b213d48ea20e48ea84",
+        commit = "0884818336b46c458440cb7572c9ecff02b7034e", # MLA merge to main (#496)
         recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:0001-mla.patch", "//3rdparty/aiter:0002-mla.patch"],
+        patches = ["//3rdparty/aiter:rtp-llm.patch", "//3rdparty/aiter:0003-gemm_tune.patch"],
         patch_cmds = [
             "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
             "echo 'from typing import Dict' >> build_aiter_module.py",
@@ -41,6 +51,7 @@ def git_deps():
             "echo '' >> build_aiter_module.py",
             "echo '    md_name = custom_build_args.get(\"md_name\", md_name)' >> build_aiter_module.py",
             "echo '' >> build_aiter_module.py",
+
             "echo '    srcs = d_args[\"srcs\"]' >> build_aiter_module.py",
             "echo '    flags_extra_cc = d_args[\"flags_extra_cc\"]' >> build_aiter_module.py",
             "echo '    flags_extra_hip = d_args[\"flags_extra_hip\"]' >> build_aiter_module.py",
@@ -48,9 +59,22 @@ def git_deps():
             "echo '    extra_include = d_args[\"extra_include\"]' >> build_aiter_module.py",
             "echo '    extra_ldflags = d_args[\"extra_ldflags\"]' >> build_aiter_module.py",
             "echo '    verbose = d_args[\"verbose\"]' >> build_aiter_module.py",
-            "echo '    module = build_module(md_name, srcs, flags_extra_cc, flags_extra_hip,' >> build_aiter_module.py",
-            "echo '                            blob_gen_cmd, extra_include, extra_ldflags, verbose)' >> build_aiter_module.py",
-            "echo '' >> build_aiter_module.py",
+            "echo '    is_python_module = d_args[\"is_python_module\"]' >> build_aiter_module.py",
+            "echo '    is_standalone = d_args[\"is_standalone\"]' >> build_aiter_module.py",
+            "echo '    torch_exclude = d_args[\"torch_exclude\"]' >> build_aiter_module.py",
+            "echo '    module = build_module(' >> build_aiter_module.py",
+            "echo '                         md_name,' >> build_aiter_module.py",
+            "echo '                         srcs,' >> build_aiter_module.py",
+            "echo '                         flags_extra_cc,' >> build_aiter_module.py",
+            "echo '                         flags_extra_hip,' >> build_aiter_module.py",
+            "echo '                         blob_gen_cmd,' >> build_aiter_module.py",
+            "echo '                         extra_include,' >> build_aiter_module.py",
+            "echo '                         extra_ldflags,' >> build_aiter_module.py",
+            "echo '                         verbose,' >> build_aiter_module.py",
+            "echo '                         is_python_module,' >> build_aiter_module.py",
+            "echo '                         is_standalone,' >> build_aiter_module.py",
+            "echo '                         torch_exclude,' >> build_aiter_module.py",
+            "echo '    )' >> build_aiter_module.py",
             "echo 'if __name__ == \"__main__\":' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_custom_all_reduce\")' >> build_aiter_module.py",
             "echo '    # build_aiter_module(\"module_attention\")' >> build_aiter_module.py",
@@ -61,6 +85,8 @@ def git_deps():
             "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_sorting\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_asm\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_pa\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_moe\")' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
             "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
             "echo 'if [ -f $so_file ]; then' >> build_mla_kernel.sh",

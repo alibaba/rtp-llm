@@ -20,9 +20,10 @@
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
 #include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmCKGemmWrapper.h"
+#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
 
 #include "torch_hip_allocator.h"
-#include "custom_ar_comm.h"
 
 namespace rtp_llm {
 
@@ -180,9 +181,15 @@ public:
     void mlaAbsorbAttention(const MlaAttentionModuleParams& params);
     void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
     SliceOutput slice(const SliceParams& params) override;
+    KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
+                                 const Buffer&                kv_cache_offset_pointers,
+                                 int                          batch_size,
+                                 bool                         use_fp8_fmha);
 
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params,
+                            BufferPtr         output);
+    void InvokeROCmPTPCGemm(const GemmParams& params,
                             BufferPtr         output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 

@@ -16,7 +16,7 @@
 
 // aiter kenels
 #include "gemm_a8w8_blockscale.h"
-#include "quant.h"
+#include "gemm_a8w8_bpreshuffle.h"
 
 using namespace std;
 
@@ -185,7 +185,6 @@ struct ROCmGemmArguments {
 
 void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params,
                                     BufferPtr         output) {
-    constexpr size_t BLOCK_SCALE_K = 128;
     RTP_LLM_LOG_DEBUG("use rocm deep gemm.");
     RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "rocm deep gemm activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "rocm deep gemm bias should be nullopt");
@@ -196,22 +195,11 @@ void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params,
     const size_t k = params.A.shape()[1];
     const size_t n = W_kernel->shape()[1];
     
-    BufferPtr A_quant = allocateBuffer({DataType::TYPE_FP8_E4M3, {m, k}}, {"rocm_A_quant"});
-    BufferPtr A_quant_scale = allocateBuffer({DataType::TYPE_FP32, {m, k / BLOCK_SCALE_K, (size_t)1}}, {"rocm_A_quant_scale"});
+    QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
+      quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerTokenBlock, 128, 0)));
     
-    torch::Tensor A_tensor = Buffer2torchTensor(params.A, false);
-    torch::Tensor A_quant_tensor = Buffer2torchTensor(A_quant, false);
-    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(A_quant_scale, false);
-
-    A_tensor = A_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K, (int)BLOCK_SCALE_K});
-    A_quant_tensor = A_quant_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K, (int)BLOCK_SCALE_K});
-    
-    dynamic_per_token_scaled_fp8_quant(
-        /*out=*/A_quant_tensor,
-        /*input=*/A_tensor,
-        /*scales=*/A_quant_scale_tensor,
-        /*scale_ub=*/nullopt
-    );
+    torch::Tensor A_quant_tensor = Buffer2torchTensor(q_hidden->kernelPtr(), false);
+    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(q_hidden->scalesPtr(), false);
 
     torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
     torch::Tensor W_scale_tensor = Buffer2torchTensor(W_scales, false);
@@ -220,12 +208,39 @@ void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params,
     W_scale_tensor = W_scale_tensor.view({(int)W_scales->shape()[1],(int)W_scales->shape()[0]});
     
     torch::Tensor output_tensor = Buffer2torchTensor(output, false);
-
-    A_quant_tensor = A_quant_tensor.view({(int)m, (int)k}).contiguous();
-    A_quant_scale_tensor = A_quant_scale_tensor.view({(int)m, (int)k / (int)BLOCK_SCALE_K}).contiguous();
     
     gemm_a8w8_blockscale(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor);
-  }
+}
+
+void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params,
+                                    BufferPtr         output) {
+    RTP_LLM_LOG_DEBUG("use rocm per-token per-channel gemm.");
+    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "rocm per-token per-channel gemm activation type should be identity");
+    RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "rocm per-token per-channel gemm bias should be nullopt");
+    BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
+    BufferPtr W_scales = reinterpret_cast<const QBuffer&>(params.B).scalesPtr();
+
+    const size_t m = params.A.shape()[0];
+    const size_t k = params.A.shape()[1];
+    const size_t n = W_kernel->shape()[1];
+
+    QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
+      quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
+
+    torch::Tensor A_quant_tensor = Buffer2torchTensor(q_hidden->kernelPtr(), false);
+    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(q_hidden->scalesPtr(), false);
+
+    torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
+    torch::Tensor W_scale_tensor = Buffer2torchTensor(W_scales, false);
+
+    // view from [k,n] to [n,k]
+    W_kernel_tensor = W_kernel_tensor.view({(int)W_kernel->shape()[1],(int)W_kernel->shape()[0]});
+    W_scale_tensor = W_scale_tensor.view({(int)W_scales->shape()[1],(int)W_scales->shape()[0]});
+
+    torch::Tensor output_tensor = Buffer2torchTensor(output, false);
+
+    gemm_a8w8_bpreshuffle(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor);
+}
 
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C
@@ -337,12 +352,25 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
 #endif
             return std::move(output);
         } else if(params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3){
-            InvokeROCmDeepGemm(params, output);
+            const QBuffer& qB = reinterpret_cast<const QBuffer&>(params.B);
+            Buffer qB_kernel = qB.kernel();
+            Buffer qB_scales = qB.scales();
+            ROCM_CHECK_VALUE((qB_kernel.dim() == 2), "quant Gemm only support 2D");
+            size_t kernel_K = qB_kernel.shape()[0], kernel_N = qB_kernel.shape()[1];
+            size_t scale_K = qB_scales.shape()[0], scale_N = qB_scales.shape()[1];
+            if (kernel_K == scale_K * 128) {
+                InvokeROCmDeepGemm(params, output);
+            } else if (1 == scale_K && scale_N == kernel_N) {
+                InvokeROCmPTPCGemm(params, output);
+            } else {
+                ROCM_FAIL("[GEMM]: Other FP8 weight quantization not implemented, with weight kernel [%d, %d], weight scales [%d, %d]", 
+                          kernel_K, kernel_N, scale_K, scale_N);
+            }
             return std::move(output);
         } else {
             ROCM_FAIL("[GEMM]: Other weight quantization not implemented");
         }
-    } 
+    }
 
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);

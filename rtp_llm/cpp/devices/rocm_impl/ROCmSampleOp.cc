@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 
@@ -214,6 +215,23 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                 vocab_size_padded,
                 stream_);
     }
+
+    // fast path for topk = 1
+    if (std::all_of(top_k.data<uint32_t>(),
+                    top_k.data<uint32_t>() + batch_size,
+                    [&](auto t) { return t == 1; }) && !params.output_all_probs.has_value()) {
+        BufferPtr logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+        Buffer samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+        torch::Tensor samples_t = Buffer2torchTensor(samples, false);
+        torch::Tensor probs_t = Buffer2torchTensor(*logits_ref, false);
+        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        samples_t.copy_(selected_tokens);
+
+        auto output_tokens = transpose({*transposed_tokens});
+        copy({params.token_ids, *output_tokens});
+
+        return GreedyOutput{};
+    } 
 
     // 4. run sampling
     // 4.1 run top_k

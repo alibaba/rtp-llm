@@ -1,11 +1,15 @@
 #include <c10/core/TensorImpl.h>
 #include <sstream>
 #include <torch/torch.h>
+#include <filesystem>
+#include <regex>
 
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
+
+namespace fs = std::filesystem;
 
 namespace rtp_llm {
 
@@ -364,4 +368,204 @@ torch::Tensor loadTensorFromFile(const std::string& fileName) {
     return torch::pickle_load(pickledData).toTensor();
 }
 
+std::string getLastFilenameIfMoe(const std::string& outPath) {
+    if (outPath.find("moe_out_after_barrier") == std::string::npos) {
+        return "";
+    }
+
+    std::filesystem::path dirPath(outPath);
+    if (!std::filesystem::is_directory(dirPath)) {
+        return "";
+    }
+
+    std::string lastFileName;
+    std::filesystem::file_time_type lastWriteTime = std::filesystem::file_time_type::min();
+
+    for (const auto& entry : std::filesystem::directory_iterator(dirPath)) {
+        auto currentWriteTime = std::filesystem::last_write_time(entry.path());
+        if (currentWriteTime > lastWriteTime) {
+            lastWriteTime = currentWriteTime;
+            lastFileName = entry.path().filename().string();
+        }
+    }
+
+    return lastFileName;
+}
+
+BufferPtr loadTorchToBuffer(const std::string& fileName, DeviceBase* device) {
+    if (!device) {
+        device = DeviceFactory::getDefaultDevice();
+    }
+    std::ifstream fin(fileName, std::ios::binary);
+    if (!fin) {
+        throw std::runtime_error("Cannot open file: " + fileName);
+    }
+    std::vector<char> pickled((std::istreambuf_iterator<char>(fin)),
+                                std::istreambuf_iterator<char>());
+    fin.close();
+    auto ivalue = torch::pickle_load(pickled);
+    torch::Tensor tensor = ivalue.toTensor();
+    tensor = tensor.contiguous();
+    auto buffer = torchTensor2Buffer(tensor);
+    auto new_buffer = device->allocateBuffer(
+        {buffer->type(), buffer->shape(), AllocationType::DEVICE});
+    device->copy({*new_buffer, *buffer});
+    device->syncAndCheck();
+    return new_buffer;
+}
+
+
+void saveBufferData_(const Buffer& buffer, DeviceBase* device,
+                     const std::string& fileName,
+                     const std::string& sourceFile) {
+  const auto log_level = alog::LOG_LEVEL_INFO;
+
+  auto shouldFilter = [&]() {
+    static const std::vector<std::string> filters = {"cuda_impl", "rocm_impl"};
+    for (const auto& keyword : filters) {
+      if (sourceFile.find(keyword) != std::string::npos) return true;
+    }
+    return false;
+  };
+
+  if (shouldFilter()) {
+    RTP_LLM_LOG(log_level, "filter source file : %s", sourceFile.c_str());
+    return;
+  }
+
+  auto prepareOutputPath = [&]() -> std::string {
+    namespace fs = std::filesystem;
+
+    std::string folderName = fs::exists("/dev/nvidia0") ? "H20" : "308X";
+    fs::path folderPath = fs::current_path() / folderName;
+
+    if (!fs::exists(folderPath)) {
+      fs::create_directory(folderPath);
+    }
+
+    int count = std::distance(fs::directory_iterator(folderPath),
+                              fs::directory_iterator{});
+
+    std::string cleanedFileName =
+        std::regex_replace(fileName, std::regex(R"([\\/:*?"<>|'\s])"), "_") +
+        "_count" + std::to_string(count) + ".pt";
+
+    return (folderPath / cleanedFileName).string();
+  };
+
+  std::string outPath = prepareOutputPath();
+
+  RTP_LLM_LOG(log_level, "saving buffer to file: %s", outPath.c_str());
+
+  std::ofstream ofs(outPath, std::ios::out | std::ios::binary);
+  if (ofs.is_open()) {
+    if (!device) {
+      device = DeviceFactory::getDefaultDevice();
+    }
+
+    auto host_buffer = device->allocateBuffer(
+        {buffer.type(), buffer.shape(), AllocationType::HOST});
+    device->copy({*host_buffer, buffer});
+    device->syncAndCheck();
+    auto tensor =
+        torch::from_blob(host_buffer->data(), bufferShapeToTorchShape(buffer),
+                         c10::TensorOptions()
+                             .device(torch::Device(torch::kCPU))
+                             .dtype(dataTypeToTorchType(buffer.type())));
+    if (tensor.dtype() == torch::kFloat8_e4m3fn ||
+        tensor.dtype() == torch::kFloat8_e4m3fnuz) {
+      tensor = tensor.view(torch::kChar);
+    }
+    auto pickled = torch::pickle_save(tensor);
+    ofs.write(pickled.data(), pickled.size());
+    ofs.close();
+  } else {
+    throw std::runtime_error("Failed to open file: " + outPath);
+  }
+}
+
+void saveBufferData_(Buffer& buffer, DeviceBase* device,
+                     const std::string& fileName,
+                     const std::string& sourceFile) {
+  const auto log_level = alog::LOG_LEVEL_INFO;
+
+  auto shouldFilter = [&]() {
+    static const std::vector<std::string> filters = {"cuda_impl", "rocm_impl"};
+    for (const auto& keyword : filters) {
+      if (sourceFile.find(keyword) != std::string::npos) return true;
+    }
+    return false;
+  };
+
+  if (shouldFilter()) {
+    RTP_LLM_LOG(log_level, "filter source file : %s", sourceFile.c_str());
+    return ;
+  }
+
+  auto prepareOutputPath = [&]() -> std::string {
+    namespace fs = std::filesystem;
+
+    std::string folderName = fs::exists("/dev/nvidia0") ? "H20" : "308X";
+    fs::path folderPath = fs::current_path() / folderName;
+
+    if (!fs::exists(folderPath)) {
+      fs::create_directory(folderPath);
+    }
+
+    int count = std::distance(fs::directory_iterator(folderPath),
+                              fs::directory_iterator{});
+
+    std::string cleanedFileName =
+        std::regex_replace(fileName, std::regex(R"([\\/:*?"<>|'\s])"), "_") +
+        "_count" + std::to_string(count) + ".pt";
+
+    return (folderPath / cleanedFileName).string();
+  };
+
+  std::string outPath = prepareOutputPath();
+  RTP_LLM_LOG(log_level, "saving buffer to file: %s", outPath.c_str());
+
+  std::ofstream ofs(outPath, std::ios::out | std::ios::binary);
+  if (ofs.is_open()) {
+    if (!device) {
+      device = DeviceFactory::getDefaultDevice();
+    }
+
+    auto host_buffer = device->allocateBuffer(
+        {buffer.type(), buffer.shape(), AllocationType::HOST});
+    device->copy({*host_buffer, buffer});
+    device->syncAndCheck();
+    auto tensor =
+        torch::from_blob(host_buffer->data(), bufferShapeToTorchShape(buffer),
+                         c10::TensorOptions()
+                             .device(torch::Device(torch::kCPU))
+                             .dtype(dataTypeToTorchType(buffer.type())));
+    if (tensor.dtype() == torch::kFloat8_e4m3fn ||
+        tensor.dtype() == torch::kFloat8_e4m3fnuz) {
+      tensor = tensor.view(torch::kChar);
+    }
+    auto pickled = torch::pickle_save(tensor);
+    ofs.write(pickled.data(), pickled.size());
+    ofs.close();
+  } else {
+    throw std::runtime_error("Failed to open file: " + outPath);
+  }
+
+  #if USING_ROCM
+  #ifdef ENABLE_LOAD_H20_BUFFER_DATA
+  fs::path p(outPath);
+  std::string filename = p.filename().string();
+  // 获取环境变量 LOAD_CUDA_VALUE
+  const char* loadDir = std::getenv("LOAD_CUDA_FILE_VALUE");
+  if (!loadDir) {
+      throw std::runtime_error("Environment variable LOAD_CUDA_FILE_VALUE is not set.");
+  }
+  fs::path h20Path(loadDir);
+  h20Path /= filename;
+  RTP_LLM_LOG(log_level, "loading tensor from CUDA , filename is %s", h20Path.c_str());
+  BufferPtr loadedBuffer = loadTorchToBuffer(h20Path.string(), nullptr);
+  buffer.swap(*loadedBuffer);
+  #endif
+  #endif
+}
 }  // namespace rtp_llm

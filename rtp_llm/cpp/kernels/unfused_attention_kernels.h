@@ -155,6 +155,31 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const bool                       store_cache,
                                     cudaStream_t                     stream);
 
+#if USING_ROCM
+template <typename T>
+void invokeAddFusedQKVBiasTransposePrefill(
+    T* q_buf, T* k_buf, T* v_buf, PrefixPromptBatchWeightsParam* param, T* QKV,
+    void* QuantizedQKV, const int* position_ids, const T* qkv_bias,
+    const int* padding_offset, const int* cu_seqlens, const int batch_size,
+    const int seq_len, const int token_num, const int head_num,
+    const int head_num_kv, const int size_per_head,
+    const RopeConfig rope_config, const bool use_logn_attn, const float* scale,
+    const int int8_mode, const bool use_paged_fmha, const bool store_qkv,
+    const bool store_q, const bool store_kv, const bool store_cache,
+    cudaStream_t stream);
+template <typename T>
+void invokeAddFusedQKVBiasTransposeDecode(
+    T* q_buf, T* k_buf, T* v_buf, PrefixPromptBatchWeightsParam* param, T* QKV,
+    void* QuantizedQKV, const int* position_ids, const T* qkv_bias,
+    const int* padding_offset, const int* cu_seqlens,
+    const int* sequence_lengths, const int batch_size, const int seq_len,
+    const int token_num, const int head_num, const int head_num_kv,
+    const int size_per_head, const RopeConfig rope_config,
+    const bool use_logn_attn, const float* scale, const int int8_mode,
+    const bool use_paged_fmha, const bool store_qkv, const bool store_q,
+    const bool store_kv, const bool store_cache, cudaStream_t stream);
+#endif
+
 template<typename T>
 void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
                                           T*               k_buf,

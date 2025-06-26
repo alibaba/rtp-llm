@@ -112,7 +112,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                             mayGetRef(params.weights.act_scale)});
             } else {
                 printBufferData(*up_output, "ffn_up_gate");
-                bool is_cuda = init_params_.device_type == DeviceType::Cuda;
+                bool is_cuda = (init_params_.device_type == DeviceType::Cuda) || (init_params_.device_type == DeviceType::ROCm);
                 if (is_cuda && (params.configs.activation_type == ActivationType::Swiglu ||
                         params.configs.activation_type == ActivationType::Silu ||
                         params.configs.activation_type == ActivationType::Gelu)) {
@@ -158,7 +158,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             up_output = loraLinearWithActivation({lora_linear_params, activation_params});
         }
 
-        if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock) {
+        if (params.qscheme != QScheme::NoQuantize && params.qscheme != QScheme::Qfp8PerTokenBlock &&
+            params.qscheme != QScheme::Qfp8PerToken) {
 	        DataType quant_out_data_type = params.qscheme == QScheme::Qfp8PerTensor ||  params.qscheme == QScheme::Qfp8PerTokenBlock ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
             auto quant_params = QuantizeParams(
                 *up_output,

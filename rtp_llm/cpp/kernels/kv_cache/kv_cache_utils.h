@@ -32,6 +32,24 @@
 namespace rtp_llm
 {
 
+#if USING_ROCM
+template <KvCacheDataType CType>
+struct ElementSizeInBytes;
+
+template <>
+struct ElementSizeInBytes<KvCacheDataType::BASE> {
+  static constexpr int value = 2;
+};
+template <>
+struct ElementSizeInBytes<KvCacheDataType::INT8> {
+  static constexpr int value = 1;
+};
+template <>
+struct ElementSizeInBytes<KvCacheDataType::FP8> {
+  static constexpr int value = 1;
+};
+#endif
+
 // Internal for K and V cache indexing
 enum class KVIdxType : int32_t
 {
@@ -192,6 +210,37 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
         // NOTE: we have remapped K layout as the same of V.
         return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
     }
+
+#if USING_ROCM
+    template <KvCacheDataType CType>
+    __host__ __device__ inline int32_t getKLocalIdx(int32_t globalTokenIdx,
+                                                    int32_t headIdx,
+                                                    int32_t dimsPerHead,
+                                                    int32_t channelIdx) const {
+      constexpr int element_size = ElementSizeInBytes<CType>::value;
+      static_assert(16 % element_size == 0,
+                    "kv cache element size must divide 16");
+      constexpr int vectorize_size = 16 / element_size;
+
+      assert(dimsPerHead % vectorize_size == 0);
+      // shape: [numHeads, dimsPerHead/vs, mTokensPerBlock, vs]
+      // stride: [dimsPerHead*mTokensPerBlock, mTokensPerBlock*vs, vs, 1]
+      return headIdx * dimsPerHead * mTokensPerBlock +
+             channelIdx / vectorize_size * mTokensPerBlock * vectorize_size +
+             getLocalIdx(globalTokenIdx) * vectorize_size +
+             channelIdx % vectorize_size;
+    }
+
+    __host__ __device__ inline int32_t getVLocalIdx(int32_t globalTokenIdx,
+                                                    int32_t headIdx,
+                                                    int32_t dimsPerHead,
+                                                    int32_t channelIdx) const {
+        // shape: [numHeads, dimsPerHead, mTokensPerBlock]
+        // stride: [dimsPerHead*mTokensPerBlock, mTokensPerBlock, 1]
+        return headIdx * dimsPerHead * mTokensPerBlock +
+                channelIdx * mTokensPerBlock + getLocalIdx(globalTokenIdx);
+    }
+#endif
 
     __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx) const
     {

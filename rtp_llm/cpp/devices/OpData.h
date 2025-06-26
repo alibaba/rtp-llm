@@ -1097,6 +1097,13 @@ struct QuantizeParams {
         axis(axis),
         qscheme(qscheme),
         paddingSize(paddingSize) {}
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis, QScheme qscheme, int64_t groupSize, int64_t paddingSize):
+        input(input),
+        qtype(qtype),
+        axis(axis),
+        qscheme(qscheme),
+        groupSize(groupSize),
+        paddingSize(paddingSize) {}
 };
 
 }  // namespace rtp_llm

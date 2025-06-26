@@ -251,7 +251,7 @@ cc_library(
     copts = rocm_copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
-	tags = ["rocm"],
+	  tags = ["rocm"],
 )
 
 cc_binary(
@@ -275,6 +275,27 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
+    tags = [
+        "rocm",
+    ],
+)
+
+py_test(
+    name = "rocm_ptpc_gemm_op_test",
+    srcs = [
+        "gemm/rocm_ptpc_gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
     tags = [
         "rocm",
     ],

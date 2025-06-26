@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/kernels/mla_kernels/mla_merge_transpose_kernel.h"
 #include <iostream>
-#include "mla/asm_mla_decode_fwd_torch.h"
+// #include "mla/asm_mla_decode_fwd_torch.h"
 #include <vector>
 #include <fstream>
 #include <hip/hip_runtime.h>

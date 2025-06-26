@@ -11,7 +11,8 @@ enum QScheme : size_t {
     Qint8PerToken,
     Qint8PerTensor,
     Qfp8PerTensor,
-    Qfp8PerTokenBlock
+    Qfp8PerTokenBlock,
+    Qfp8PerToken
 };
 
 class QBuffer final : public Buffer {

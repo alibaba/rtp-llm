@@ -72,6 +72,8 @@ public:
             act_qscheme = rtp_llm::QScheme::Qfp8PerTensor;
         } else if (params.quant_algo_.isFp8() && params.quant_algo_.isGroupwise()) {
             act_qscheme = rtp_llm::QScheme::Qfp8PerTokenBlock;
+        } else if (params.quant_algo_.isFp8PTPC()) {
+            act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
         }
 
         return {attention_config,

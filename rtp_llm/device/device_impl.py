@@ -204,8 +204,10 @@ class GpuImpl(DeviceBase):
 
     def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
         return x
-    #def convert_fp8_weight_params(self, weight: torch.Tensor, weight_scale: torch.Tensor):
-    #    return [weight, weight_scale]
+    def shuffle_gemm_weight(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+    def convert_fp8_weight_params(self, weight: torch.Tensor, weight_scale: torch.Tensor):
+        return [weight, weight_scale]
 
 class CudaImpl(GpuImpl):
     def __init__(self, exported_device: DeviceExporter):
@@ -422,4 +424,37 @@ class RocmImpl(GpuImpl):
      #   # https://onnx.ai/onnx/technical/float8.html
      #   weight_scale = weight_scale * 2.0
      #   return weight, weight_scale
+    def shuffle_gemm_weight(self, x: torch.Tensor) -> torch.Tensor:
+        # Hardcode BLOCK_K and BLOCK_N
+        layout=(16, 16)
+        use_int4=False
+        IN, IK = layout
+        BK = IK * 2
+        K = 16 // x.element_size() if not use_int4 else 32
+        BN = IN
+        assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN }"
+        assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK }"
+
+        x_ = x
+        x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+        x_ = x_.permute(0, 1, 3, 4, 2, 5)
+        x_ = x_.contiguous()
+        x_ = x_.view(*x.shape)
+        return x_
+
+    def convert_fp8_weight_params(self, weight: torch.Tensor, weight_scale: torch.Tensor):
+        assert weight.dtype == torch.float8_e4m3fn
+        # The bits pattern 10000000(-128) represents zero in e4m3fn
+        # but NaN in e4m3fnuz. So here we set it to 0.
+        # https://onnx.ai/onnx/technical/float8.html
+        weight_as_int8 = weight.view(torch.int8)
+        ROCM_FP8_NAN_AS_INT = -128
+        weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+        weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+        # For the same bits representation, e4m3fnuz value is half of
+        # the e4m3fn value, so we should double the scaling factor to
+        # get the same dequantized value.
+        # https://onnx.ai/onnx/technical/float8.html
+        weight_scale = weight_scale * 2.0
+        return weight, weight_scale
 

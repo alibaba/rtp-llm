@@ -1,4 +1,5 @@
 #include "layernorm2d_fwd.hpp"
+#include "rmsnorm2d_fwd.hpp"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
@@ -132,7 +133,9 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     const auto  eps       = params.eps;
     const auto& weights   = params.norm_weight;
 
-    if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock)) {
+    if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize ||
+            params.qscheme == QScheme::Qfp8PerTokenBlock ||
+            params.qscheme == QScheme::Qfp8PerToken)) {
         norm_output = allocateBufferLike(*params.input);
     } else if (params.qscheme == Qint8PerToken) {
         auto kernel  = allocateBuffer({DataType::TYPE_INT8, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
@@ -309,21 +312,37 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         } else if (params.norm_type == NormType::rmsnorm) {
-            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(data_type,
-                                                       quant_data_type,
-                                                       invokeGeneralRmsNorm,
-                                                       norm_output->data(),
-                                                       input->data(),
-                                                       gamma,
-                                                       beta,
-                                                       eps,
-                                                       m,
-                                                       n,
-                                                       stream_,
-                                                       nullptr,      // scale
-                                                       scales_ptr,   // dynamic_scale
-                                                       quant_output  // out_quant
-            );
+            std::string prec_i;
+            if (data_type == DataType::TYPE_FP16)
+                prec_i = "fp16";
+            else if(data_type == DataType::TYPE_BF16)
+                prec_i = "bf16";
+            else
+                throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            
+            rmsnorm2d_fwd_traits traits{prec_i, prec_i, "fp32", "fp32", 0, 0, 0, 0};
+            
+            rmsnorm2d_fwd_args args{input->data(),
+                                    nullptr,
+                                    nullptr,
+                                    gamma,
+                                    norm_output->data(),
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    static_cast<float>(eps),
+                                    static_cast<int32_t>(m),
+                                    static_cast<int32_t>(n),
+                                    static_cast<int32_t>(n),
+                                    static_cast<int32_t>(n),
+                                    static_cast<int32_t>(n),
+                                    static_cast<int32_t>(n)};
+            
+            float run_time = rmsnorm2d_fwd(traits, args, {stream_, false, 0, 0, 1});
+            
+            // std::cout << "rmsnorm2d_fwd run_time: " << run_time * 1.E3 << " us"<< std::endl;
+
             check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
         }
