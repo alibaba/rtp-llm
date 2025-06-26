@@ -2,7 +2,7 @@ py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
@@ -17,7 +17,7 @@ py_test (
     name = "rmsresnorm_test",
     srcs = ["rmsresnorm_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
@@ -32,7 +32,7 @@ py_test (
     name = "mlp_test",
     srcs = ["mlp_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:utils",
         "//rtp_llm:testlib",
@@ -48,7 +48,7 @@ py_test (
     name = "fusedqkrmsnorm_test",
     srcs = ["fusedqkrmsnorm_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:utils",
         "//rtp_llm:testlib",
@@ -64,7 +64,7 @@ py_test (
     name = "layernorm_test",
     srcs = ["layernorm_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:utils",
         "//rtp_llm:testlib",
@@ -80,7 +80,7 @@ py_test (
     name = "fused_add_layernorm_test",
     srcs = ["fused_add_layernorm_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:utils",
         "//rtp_llm:testlib",
@@ -96,7 +96,7 @@ py_test (
     name = "embeding_test",
     srcs = ["embeding_test.py"],
     deps = [
-        "//rtp_llm:py_models",
+        "//rtp_llm/models_py:models",
         "//rtp_llm:config",
         "//rtp_llm:utils",
         "//rtp_llm:testlib",

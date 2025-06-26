@@ -3,8 +3,8 @@
 #include <string>
 #include <mutex>
 
-#include <pybind11/pybind11.h> // Core pybind11 functionality
-#include <pybind11/embed.h>   // For py::initialize_interpreter, etc.
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
 
 namespace py = pybind11;
 

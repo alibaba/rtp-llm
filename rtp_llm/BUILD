@@ -166,17 +166,6 @@ py_library(
 )
 
 py_library(
-    name = "py_models",
-    srcs = glob([
-        "models_py/*.py",
-        "models_py/**/*.py",
-    ]),
-    deps = [
-        "//rtp_llm/model_loader:loader",
-    ],
-)
-
-py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -206,7 +195,7 @@ py_library(
         ":matplotlib",
         ":av",
         "//rtp_llm/model_loader:loader",
-        ":py_models",
+        "//rtp_llm/models_py:models",
     ] + arch_dep + select({
         "@//:using_cuda12": tensorrt,
         "//conditions:default": []

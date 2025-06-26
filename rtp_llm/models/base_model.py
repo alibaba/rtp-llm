@@ -21,7 +21,6 @@ from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.models_py.module_base import GptModelBase
-from rtp_llm.models_py.module_impl_example import GptModelExample
 from rtp_llm.models_py.qwen3 import Qwen3Model
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048

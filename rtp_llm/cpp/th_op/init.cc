@@ -16,6 +16,9 @@
 using namespace rtp_llm;
 
 namespace torch_ext {
+
+// TODO(wangyin.yx): organize these regsiter function into classified registration functions
+
 PYBIND11_MODULE(libth_transformer, m) {
     rtp_llm::registerLoadBalanceInfo(m);
     rtp_llm::registerEngineScheduleInfo(m);
