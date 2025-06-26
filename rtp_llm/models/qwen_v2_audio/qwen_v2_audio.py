@@ -53,9 +53,4 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
 
         config.mm_sep_tokens = [[sep_token]] # image_token_index
 
-    @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: str, images: List[str],
-                                    img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
-        raise Exception("qwen v2 audio only support openai format request")
-
 register_model('qwen_v2_audio', QWenV2Audio)
