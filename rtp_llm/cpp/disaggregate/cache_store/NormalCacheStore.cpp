@@ -41,9 +41,6 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
 
     // always has metric
     metrics_reporter_ = params.metrics_reporter;
-    if (metrics_reporter_ == nullptr) {
-        RTP_LLM_LOG_INFO("normal cache store init with metrics reporter is nullptr");
-    }
 
     messager_ = createMessager(memory_util_, request_block_buffer_store_, metrics_reporter_);
     MessagerInitParams messager_init_params;

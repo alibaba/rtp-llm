@@ -458,15 +458,16 @@ struct AttentionCommonInputs {
 
     lora::AttentionLayerLoraInput lora_input;
 
-    int                      layer_id = 0;
-    BufferPtr                request_id;             // [context_batch_size]
-    BufferPtr                request_pd_separation;  // [context_batch_size]
-    std::vector<std::string> cache_keys;             // [context_batch_size]
-    size_t                   k_block_size     = 0;
-    size_t                   v_block_size     = 0;
-    size_t                   scale_block_size = 0;
-    bool                     pd_separation    = false;
-    size_t                   model_id         = 0;
+    int layer_id = 0;
+    BufferPtr                                 request_id;               // [context_batch_size]
+    BufferPtr                                 request_pd_separation;    // [context_batch_size]
+    std::vector<std::string>                  cache_keys;               // [context_batch_size]
+    size_t                                    k_block_size = 0;
+    size_t                                    v_block_size = 0;
+    size_t                                    scale_block_size = 0;
+    bool                                      pd_separation = false;
+    size_t                                    model_id = 0;
+    bool                                      decode_entrance = false;
 
     bool warmup;
 

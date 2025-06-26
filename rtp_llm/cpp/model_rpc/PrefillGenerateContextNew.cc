@@ -1,0 +1,42 @@
+#include "rtp_llm/cpp/model_rpc/PrefillGenerateContextNew.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
+namespace rtp_llm {
+
+ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& engine) {
+    RTP_LLM_LOG_INFO("request [%s] start to prepare generate context", request_key.c_str());
+
+    generate_input                                        = QueryConverter::transQuery(&request->input());
+    generate_input->generate_config->pd_separation        = true;
+    if (engine->isMTPEagle()) {
+        generate_input->generate_config->force_disable_sp_run = false;
+    } else {
+        generate_input->generate_config->force_disable_sp_run = true;
+    }
+
+    stream_            = engine->makeStream(generate_input);
+    request_timeout_ms = stream_->getTimeoutMs();
+
+    auto status = stream_->initKVBlock(0);
+    if (!status.ok()) {
+        RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed");
+        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "malloc kv cache block failed at decode node");
+        return error_info;
+    }
+
+    RTP_LLM_LOG_INFO("request [%s] prepare generate context done", request_key.c_str());
+    return ErrorInfo::OkStatus();
+}
+
+void PrefillGenerateContextNew::stopStream() {
+    if (stream_) {
+        // TODO: 如何安全的停止prefill generate
+        stream_->cancelIfNotRunning();
+        while (stream_->running()) {
+            RTP_LLM_LOG_INFO("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
+            usleep(1000);
+        }
+    }
+}
+
+}  // namespace rtp_llm

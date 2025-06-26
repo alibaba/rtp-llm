@@ -23,7 +23,7 @@ CacheStoreStoreMetricsCollector::~CacheStoreStoreMetricsCollector() {
     collector_.latency_us                 = subZeroOrAbove(currentTimeUs(), start_time_us_);
 
     if (reporter_ != nullptr) {
-        reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreStoreMetricsCollector>(nullptr, &collector_);
+       reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreStoreMetricsCollector>(nullptr, &collector_);
     }
 }
 

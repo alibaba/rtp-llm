@@ -248,6 +248,51 @@ message BroadcastPutCacheRequestPB {
 }
 
 message BroadcastPutCacheResponsePB {}
+message RemoteGenerateRequestPBNew {
+    GenerateInputPB input = 1;
+    string client_id = 2;
+    int64 start_time_us = 3;
+    repeated string addrs = 4;
+    repeated int32 block_ids = 5;
+    int64 reuse_block_size = 6;
+    string mtp_hidden_states_key = 7;
+    bool use_mla = 8;
+    int32 layer_num = 9;
+    int64 deadline_us = 10;
+}
+
+message RemoteGenerateResponsePBNew {
+    ErrorDetailsPB error_info = 1;
+    GenerateOutputsPB output = 2;
+    int32 first_generate_token_id = 3;
+    int64 first_token_rt_us = 4;
+    bool finished = 5;
+}
+
+message RemoteStorePartition {
+    string remote_addr = 1;
+    int32 remote_partition_id = 2;
+    int32 remote_partition_count = 3;
+    int32 local_partition_id = 4;
+    int32 local_partition_count = 5;
+}
+
+message RemoteStoreRequestPB {
+    int64 dp_rank = 1;
+    int64 request_id = 2;
+    string request_key = 3;
+    repeated int32 decode_block_ids = 4;
+    repeated int32 prefill_block_ids = 5;
+    int64 reuse_block_size = 6;
+    repeated RemoteStorePartition partition_infos = 7;
+    int64 deadline_us = 8;
+    string client_id = 9;
+}
+
+message RemoteStoreResponsePB { 
+    RpcErrorPB error_info = 1;
+    int64 done_time_us = 2; 
+}
 
 service RpcService {
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
@@ -259,6 +304,8 @@ service RpcService {
     rpc RemoteGetCache(BroadcastGetCacheRequestPB) returns (BroadcastGetCacheResponsePB);
     // offload cache from gpu to 3fs, for each rank
     rpc RemotePutCache(BroadcastPutCacheRequestPB) returns (BroadcastPutCacheResponsePB);
+    rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
+    rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 }
 
 service MultimodalRpcService {

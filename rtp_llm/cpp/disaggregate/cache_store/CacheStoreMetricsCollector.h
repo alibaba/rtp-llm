@@ -7,8 +7,6 @@
 
 namespace rtp_llm {
 
-class CacheStoreMetricsReporter;
-
 class CacheStoreStoreMetricsCollector {
 
 public:

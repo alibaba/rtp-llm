@@ -253,6 +253,7 @@ public:
     int64_t     load_cache_timeout_ms_           = 0;
     int64_t     max_rpc_timeout_ms_              = 0;
     int64_t     worker_port_offset_              = 0;
+    bool        decode_entrance_                 = false;
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 

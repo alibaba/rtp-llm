@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/core/Buffer.h"
@@ -57,7 +58,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
 #endif
 }
 
-void CacheManager::regUserMr() {
+void CacheManager::regUserMr(size_t model_id) {
     if (device_->cacheStore() && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");
         auto memory_util = static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
@@ -93,6 +94,33 @@ void CacheManager::regUserMr() {
         mr_cost_time_ms_ += cost_time_ms;
 
         kvcache_reg_mr_ = true;
+
+        auto k_block_size = getKBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
+        auto v_block_size = getVBlockSize() / (size_t)config_.layer_num / (size_t)config_.block_nums;
+        auto k_scale_block_size = (size_t)config_.kv_scale_block_stride;
+        auto v_scale_block_size = (size_t)config_.kv_scale_block_stride;
+        std::vector<std::shared_ptr<BlockBuffer>> buffers;
+        for (int block_index = 0; block_index < config_.block_nums; ++block_index) {
+            for (int layer_index = 0; layer_index < config_.layer_num; ++layer_index) {
+                auto block_key = makeCacheKey(model_id, std::to_string(block_index), layer_index);
+                auto addr_info = convertIndexToAddr(block_index, layer_index);
+                auto k_buffer = std::make_shared<BlockBuffer>("k_" + block_key, std::shared_ptr<void>(addr_info.k_addr, [](void*){}), k_block_size, true, true);
+                buffers.push_back(k_buffer);
+                auto v_buffer = std::make_shared<BlockBuffer>("v_" + block_key, std::shared_ptr<void>(addr_info.v_addr, [](void*){}), v_block_size, true, true);
+                buffers.push_back(v_buffer);
+
+                if (addr_info.k_scale_addr) {
+                    auto k_scale_buffer = std::make_shared<BlockBuffer>("k_scale_" + block_key, std::shared_ptr<void>(addr_info.k_scale_addr, [](void*){}), k_scale_block_size, true, true);
+                    buffers.push_back(k_scale_buffer);
+                }
+
+                if (addr_info.v_scale_addr) {
+                    auto v_scale_buffer = std::make_shared<BlockBuffer>("v_scale_" + block_key, std::shared_ptr<void>(addr_info.v_scale_addr, [](void*){}), v_scale_block_size, true, true);
+                    buffers.push_back(v_scale_buffer);
+                }
+            }
+        }
+        device_->cacheStore()->regUserBuffers(buffers);
     }
 }
 
@@ -221,8 +249,6 @@ void CacheManager::initKvCache() {
     }
 
     initKVCacheScale();
-
-    regUserMr();
 }
 
 void CacheManager::initKVCacheScale() {

@@ -149,9 +149,8 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         return;
     }
     if (!param.pd_separation || param.context_batch_size == 0) {
-        RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
-                          param.pd_separation,
-                          param.context_batch_size);
+        RTP_LLM_LOG_INFO("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
+            param.pd_separation, param.context_batch_size);
         return;
     }
 
@@ -191,12 +190,16 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %d, blocks num is %ld", request_id, block_num + reuse_block_num);
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
-            auto cache_key = makeCacheKey(
-                params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+            std::string cache_key;
+            if (param.decode_entrance) {
+                cache_key = makeCacheKey(params.common.model_id, std::to_string(block_id), param.layer_id);
+            } else {
+                cache_key = makeCacheKey(params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            }
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
-            auto  block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
-            void* k_addr   = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
-            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
+            void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
+            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) { });
             request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
             // if (k_scale_data) {
             //     void* k_scale_addr = (void*)((int8_t*)k_scale_data + block_id * param.scale_block_size);

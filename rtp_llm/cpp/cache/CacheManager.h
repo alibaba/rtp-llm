@@ -137,7 +137,7 @@ public:
 
     void beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_llm::BufferPtr target_block_offset);
 
-    void regUserMr();
+    void                                    regUserMr(size_t model_id);
 
     bool getCacheFrom3FSForRank(const std::vector<int64_t>& cache_keys,
                                 const std::vector<int32_t>& block_indices,

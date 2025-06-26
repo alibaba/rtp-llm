@@ -999,24 +999,7 @@ class GptInitModelParameters:
             logging.info(
                 f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
             )
-            self.pd_sep_enable_fallback = bool(
-                int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
-            )
-            logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
-            self.load_balance_policy_name = os.environ.get(
-                "LOAD_BALANCE_POLICY_NAME", "RR"
-            )
-            logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
-            policy_list = ["RR", "WRR"]
-            if not self.load_balance_policy_name in policy_list:
-                raise Exception(
-                    f"load_balance_policy_name {self.load_balance_policy_name} "
-                    f"is not right, it must in {policy_list}"
-                )
-            self.sync_status_interval_ms = int(
-                os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
-            )
-            logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
+        
 
         if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
             self.cache_store_rdma_mode = bool(
@@ -1053,19 +1036,37 @@ class GptInitModelParameters:
                 f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
             )
 
-        self.scheduler_reserve_resource_ratio = int(
-            os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)
-        )
-        logging.info(
-            f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
-        )
-        self.reuse_cache = (
-            os.environ.get("REUSE_CACHE", None) == "1"
-            or os.environ.get("USE_BLOCK_CACHE", None) == "1"
-        )
-        logging.info(f"reuse_cache: {self.reuse_cache}")
-        self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
-        logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
+            self.decode_entrance = bool(int(os.environ.get('DECODE_ENTRANCE', 1)))
+            logging.info(f'decode_entrance: {self.decode_entrance}')
+
+        if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
+            self.pd_sep_enable_fallback = bool(
+                int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
+            )
+            logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
+            self.load_balance_policy_name = os.environ.get(
+                "LOAD_BALANCE_POLICY_NAME", "RR"
+            )
+            logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
+            policy_list = ["RR", "WRR"]
+            if not self.load_balance_policy_name in policy_list:
+                raise Exception(
+                    f"load_balance_policy_name {self.load_balance_policy_name} "
+                    f"is not right, it must in {policy_list}"
+                )
+            self.sync_status_interval_ms = int(
+                os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
+            )
+            logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
+            
+
+
+        self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
+        logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
+        self.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
+        logging.info(f'reuse_cache: {self.reuse_cache}')
+        self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
+        logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         self.kv_cache_data_type = self.data_type
         if bool(int(os.environ.get("INT8_KV_CACHE", 0))):
             self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()

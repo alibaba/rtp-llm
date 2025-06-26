@@ -20,7 +20,8 @@ public:
         memory_util_(memory_util),
         request_block_buffer_store_(request_block_buffer_store),
         metrics_reporter_(metrics_reporter),
-        timer_manager_(new TimerManager) {}
+        timer_manager_(new TimerManager),
+        locked_block_buffer_manager_(new LockedBlockBufferManager) {}
     virtual ~Messager() = default;
 
 public:

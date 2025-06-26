@@ -58,4 +58,63 @@ void BaseLoadBalancer::discovery() {
     }
 }
 
+
+bool BaseLoadBalancer::makeLocalSubscribeConfig(SubscribeServiceConfig& config,
+                                                const std::string&      cluster_name,
+                                                const std::string&      str_ips,
+                                                int64_t                 default_port) {
+    if (str_ips.empty()) {
+        return false;
+    }
+    std::vector<std::string>    remote_addrs = split(str_ips, ',');
+    LocalSubscribeServiceConfig local_config;
+    if (remote_addrs.size() == 1) {
+        const auto& addr    = remote_addrs.front();
+        auto [ip, port_str] = split_ip_port(addr);
+        uint32_t port       = default_port;
+
+        if (ip.empty() || port_str.empty()) {
+            RTP_LLM_LOG_WARNING("Using Deprecated method to get remote rpc server addr");
+            ip = remote_addrs.front();
+        } else {
+            port = parse_port(port_str);
+        }
+        local_config.nodes.emplace_back(cluster_name, ip, port);
+    } else {
+        for (const auto& addr : remote_addrs) {
+            auto [ip, port_str] = split_ip_port(addr);
+            if (ip.empty() || port_str.empty()) {
+                RTP_LLM_LOG_WARNING("Using Deprecated method to get remote rpc server addr %s", addr.c_str());
+                continue;
+            }
+            uint32_t port = parse_port(port_str);
+            local_config.nodes.emplace_back(cluster_name, ip, port);
+            RTP_LLM_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
+        }
+    }
+    config.local_configs.push_back(local_config);
+    return true;
+}
+
+bool BaseLoadBalancer::makeCm2SubscribeConfig(SubscribeServiceConfig& config,
+                                              std::string&            cluster_name,
+                                              const std::string&      str_cm2_cluster_desc) {
+    CM2SubscribeClusterConfig cm2_config;
+    try {
+        FromJsonString(cm2_config, str_cm2_cluster_desc);
+    } catch (autil::legacy::ExceptionBase& e) {
+        RTP_LLM_LOG_ERROR("create json from str[%s] failed", str_cm2_cluster_desc.c_str());
+        return false;
+    }
+    cluster_name = cm2_config.cluster_name;
+
+    CM2SubscribeServiceConfig cm2_service_config;
+    cm2_service_config.zk_host       = cm2_config.zk_host;
+    cm2_service_config.zk_path       = cm2_config.zk_path;
+    cm2_service_config.zk_timeout_ms = 10 * 1000;
+    cm2_service_config.clusters      = {cm2_config.cluster_name};
+    config.cm2_configs.push_back(cm2_service_config);
+    return true;
+}
+
 }  // namespace rtp_llm

@@ -33,7 +33,7 @@ void CacheTransferServiceClosure::Run() {
         return;
     }
 
-    RTP_LLM_LOG_DEBUG("rdma read service closure success, request %s", transfer_request_->request_id.c_str());
+    RTP_LLM_LOG_INFO("rdma read service closure success, request %s", transfer_request_->request_id.c_str());
     end(true, CacheStoreErrorCode::None);
 }
 

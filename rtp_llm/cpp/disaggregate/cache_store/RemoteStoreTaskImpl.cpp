@@ -123,7 +123,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             transfer_request->buffer_pairs[key] = iter->second;
             loading_buffers_[key]               = iter->second;
             to_load_buffers_.erase(iter);
-            RTP_LLM_LOG_INFO("remote store task %s found local key %s", request_->request_id.c_str(), key.c_str());
+            //RTP_LLM_LOG_INFO("remote store task %s found local key %s", request_->request_id.c_str(), key.c_str());
         }
     }
 

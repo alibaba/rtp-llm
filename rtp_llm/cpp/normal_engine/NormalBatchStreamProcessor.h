@@ -21,6 +21,7 @@ public:
         mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),
         position_id_len_factor_(params.position_id_len_factor_),
         role_type_(params.role_type_),
+        decode_entrance_(params.decode_entrance_),
         k_block_size_(cache_config.k_block_stride),
         v_block_size_(cache_config.v_block_stride),
         scale_block_size_(cache_config.kv_scale_block_stride),
@@ -54,6 +55,7 @@ protected:
     PositionIdsStyle mm_position_ids_style_;
     size_t           position_id_len_factor_;
     RoleType         role_type_;
+    bool             decode_entrance_;
     // size_t           block_size_;
     size_t               k_block_size_;
     size_t               v_block_size_;

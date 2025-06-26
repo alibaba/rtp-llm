@@ -28,7 +28,15 @@ public:
 public:
     virtual bool                        init(const LoadBalancerInitParams& params)                      = 0;
     virtual std::shared_ptr<const Host> chooseHost(const std::string& biz, int32_t global_counter = -1) = 0;
-    bool                                isReady(const std::string& biz);
+    bool                                isReady(const std::string& biz);    
+
+    static bool makeLocalSubscribeConfig(SubscribeServiceConfig& config,
+                                         const std::string&      cluster_name,
+                                         const std::string&      str_ips,
+                                         int64_t                 default_port);
+    static bool makeCm2SubscribeConfig(SubscribeServiceConfig& config,
+                                       std::string&            cluster_name,
+                                       const std::string&      str_cm2_cluster_desc);
 
 protected:
     void discovery();

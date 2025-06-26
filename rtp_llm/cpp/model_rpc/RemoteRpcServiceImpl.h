@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
 
 namespace rtp_llm {
 
@@ -18,6 +20,15 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (decode_entrance_) {
+            if (!decode_server_new_) {
+                auto error_msg = "server not implememt GenerateStreamCall";
+                RTP_LLM_LOG_ERROR(error_msg);
+                return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+            }
+            return decode_server_new_->GenerateStreamCall(context, request, writer);
+        }
+
         if (!prefill_server_) {
             auto error_msg = "server not implememt GenerateStreamCall";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -56,6 +67,26 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
+     grpc::Status RemoteGenerateNew(grpc::ServerContext* context,
+                const RemoteGenerateRequestPBNew* request, RemoteGenerateResponsePBNew* response) override {
+        if (!prefill_server_new_) {
+            auto error_msg = "server not implememt RemoteGenerateNew";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return prefill_server_new_->RemoteGenerateNew(context, request, response);
+    }
+
+    grpc::Status RemoteStore(grpc::ServerContext* context, const RemoteStoreRequestPB* request,
+                              RemoteStoreResponsePB* response) override {
+        if (!prefill_server_new_) {
+            auto error_msg = "server not implememt RemoteStore";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return prefill_server_new_->RemoteStore(context, request, response);
+    }
+
     bool ready() override {
         if (prefill_server_) {
             return prefill_server_->ready();
@@ -74,7 +105,10 @@ public:
 
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer>  decode_server_;
+    std::shared_ptr<DecodeRpcServer> decode_server_;
+    bool decode_entrance_ = false;
+    std::shared_ptr<PrefillRpcServerNew> prefill_server_new_;
+    std::shared_ptr<DecodeRpcServerNew> decode_server_new_;
 };
 
 }  // namespace rtp_llm

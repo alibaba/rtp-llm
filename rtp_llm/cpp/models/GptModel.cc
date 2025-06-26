@@ -163,7 +163,6 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
         attention_inputs.kv_cache = kv_cache;
     }
-
     const auto& input_lengths      = inputs.input_lengths;
     const auto& sequence_lengths   = inputs.sequence_lengths;
     const auto& prefix_lengths     = inputs.prefix_lengths;
@@ -270,6 +269,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
     attention_inputs.scale_block_size      = inputs.scale_block_size;
     attention_inputs.pd_separation         = inputs.pd_separation;
     attention_inputs.model_id              = model_id_;
+    attention_inputs.decode_entrance       = inputs.decode_entrance;
 
     if (context_batch_size && prep_output.need_mask) {
         attention_inputs.attention_mask =
@@ -1679,6 +1679,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                 inputs.cache_keys = device->allocateBuffer(
                     {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
             }
+            RTP_LLM_LOG_INFO("allocate kv cache bloc id");
         }
         inputs.request_id = device->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});

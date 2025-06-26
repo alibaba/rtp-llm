@@ -26,8 +26,6 @@ protected:
                            uint32_t                            local_partition_id) override;
 
 private:
-    MessagerInitParams init_params_;
-
     std::shared_ptr<TcpServer>                tcp_server_;
     std::shared_ptr<TcpCacheStoreServiceImpl> service_;
 };

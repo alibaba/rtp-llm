@@ -74,14 +74,15 @@ struct GptModelInputs {
     rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     rtp_llm::BufferPtr mm_features_locs;  // features index
 
-    rtp_llm::BufferPtr request_id;             // int64, [context_batch_size]
-    rtp_llm::BufferPtr request_pd_separation;  // bool, [context_batch_size]
-    rtp_llm::BufferPtr cache_keys;             // [context_batch_size]
-    size_t             k_block_size;
-    size_t             v_block_size;
-    size_t             scale_block_size;
-    size_t             seq_size_per_block;
-    bool               pd_separation = false;
+    rtp_llm::BufferPtr                        request_id;               // int64, [context_batch_size]
+    rtp_llm::BufferPtr                        request_pd_separation;    // bool, [context_batch_size]
+    rtp_llm::BufferPtr                        cache_keys;               // [context_batch_size]
+    size_t                                    k_block_size;
+    size_t                                    v_block_size;
+    size_t                                    scale_block_size;
+    size_t                                    seq_size_per_block;
+    bool                                      pd_separation = false;
+    bool                                      decode_entrance = false;
 
     bool need_all_logits = false;
     bool warmup          = false;
