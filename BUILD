@@ -80,12 +80,7 @@ filegroup(
         "//rtp_llm/cpp:th_op/common/InitEngineOps.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingLookup.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpNorm.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FlashInferOp.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FusedQKRmsNorm.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/Torch_ext.h",
     ],
 )
 
@@ -104,12 +99,8 @@ filegroup(
         "//rtp_llm/cpp:th_op/init.cc",
         "//rtp_llm/cpp:th_op/common/InitEngineOps.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingLookup.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpNorm.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FlashInferOp.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/FusedQKRmsNorm.cc",
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp:th_op/common/NcclOp.cc",
@@ -138,8 +129,11 @@ cc_library(
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp/cuda:allocator_torch",
+            "//rtp_llm/models_py/bindings/cuda:cuda_register",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings:dummy_register",
+        ],
     }),
     copts = copts(),
     alwayslink = True,

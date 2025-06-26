@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/th_op/multi_gpu_gpt/Torch_ext.h"
+#include "rtp_llm/models_py/bindings/cuda/Torch_ext.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include <cuda_bf16.h>
 #include <cuda_device_runtime_api.h>
@@ -13,7 +13,7 @@ namespace th = torch;
 using namespace rtp_llm;
 namespace torch_ext {
 
-void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t cuda_stream) 
+void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t cuda_stream)
 {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
@@ -30,22 +30,22 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_
         const int vecSize = sizeof(float4) / sizeof(c_type);
         if (hidden_size % vecSize == 0) {
             invokeEmebeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
-                static_cast<const c_type*>(weight.data_ptr()), 
+                static_cast<const c_type*>(weight.data_ptr()),
                 1.0,
                 static_cast<const c_type*>(nullptr), // postition_table
                 static_cast<const c_type*>(nullptr), // token_type_table
-                static_cast<const int*>(input.data_ptr()), 
+                static_cast<const int*>(input.data_ptr()),
                 static_cast<const int*>(nullptr), // position_ids
                 static_cast<const int*>(nullptr), // token_types
                 static_cast<const int*>(nullptr), // mask
                 tokens, hidden_size, stream);
         } else {
             invokeEmebeddingLookup(static_cast<c_type*>(output.data_ptr()),
-                static_cast<const c_type*>(weight.data_ptr()), 
+                static_cast<const c_type*>(weight.data_ptr()),
                 1.0,
                 static_cast<const c_type*>(nullptr), // postition_table
                 static_cast<const c_type*>(nullptr), // token_type_table
-                static_cast<const int*>(input.data_ptr()), 
+                static_cast<const int*>(input.data_ptr()),
                 static_cast<const int*>(nullptr), // position_ids
                 static_cast<const int*>(nullptr), // token_types
                 static_cast<const int*>(nullptr), // mask

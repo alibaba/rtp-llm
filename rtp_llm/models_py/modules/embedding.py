@@ -23,6 +23,6 @@ class Embedding(nn.Module):
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty((tokens, hidden_size), dtype=self.weight.dtype, device=input.device)
-        torch.ops.libth_transformer.embedding(output, input, self.weight.data, 0)
+        torch.ops.rtp_llm_ops.embedding(output, input, self.weight.data, 0)
         return output
 

@@ -42,6 +42,6 @@ class FusedSiluActDenseMLP(nn.Module):
         d = gate_up.shape[-1] // 2
         output_shape = gate_up.shape[:-1] + (d,)
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
-        torch.ops.libth_transformer.silu_and_mul(output, gate_up, 0)
+        torch.ops.rtp_llm_ops.silu_and_mul(output, gate_up, 0)
         down_proj = self.down_proj(output)
         return down_proj

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/th_op/multi_gpu_gpt/FlashInferOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"

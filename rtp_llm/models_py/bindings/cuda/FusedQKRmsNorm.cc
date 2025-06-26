@@ -1,8 +1,8 @@
-#include "rtp_llm/cpp/th_op/multi_gpu_gpt/FusedQKRmsNorm.h"
+#include "rtp_llm/models_py/bindings/cuda/FusedQKRmsNorm.h"
 
-void FusedQKRMSNorm(at::Tensor& input, 
-                    at::Tensor& q_gamma, 
-                    at::Tensor& k_gamma, 
+void FusedQKRMSNorm(at::Tensor& input,
+                    at::Tensor& q_gamma,
+                    at::Tensor& k_gamma,
                     const double layernorm_eps,
                     const int64_t q_group_num,
                     const int64_t k_group_num,
@@ -19,7 +19,7 @@ void FusedQKRMSNorm(at::Tensor& input,
     CHECK_DIM(2, input);   // input: (batch_size, hidden_size)
     CHECK_DIM(1, q_gamma);  // weight: (hidden_size)
     CHECK_DIM(1, k_gamma);  // weight: (hidden_size)
-    
+
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
         rtp_llm::invokeFusedQkRmsNorm(
