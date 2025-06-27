@@ -55,6 +55,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("LOG_LEVEL"), "INFO")
         self.assertEqual(env.get("LOG_LEVEL"), "INFO")
         self.assertEqual(env.get("GEN_TIMELINE_SYNC"),"0")
+        self.assertEqual(env.get("TORCH_CUDA_PROFILER_DIR"),"")
 
         # 6. 硬件/Kernel 特定优化
         self.assertIsNone(env.get("DEEP_GEMM_NUM_SM"))
@@ -129,6 +130,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("LOAD_BALANCE"), "0")
         self.assertEqual(env.get("STEP_RECORDS_TIME_RANGE"), "60000000")
         self.assertEqual(env.get("STEP_RECORDS_MAX_SIZE"), "1000")
+        self.assertEqual(env.get("STEP_RECORDS_MAX_SIZE"), "1000")
+        self.assertEqual(env.get("DISABLE_PDL"),"0")
 
 class ServerArgsSetTest(TestCase):
     def setUp(self):
@@ -182,6 +185,7 @@ class ServerArgsSetTest(TestCase):
             "--ft_alog_conf_path", "/tmp/another_log.conf",
             "--log_level", "ERROR",
             "--gen_timeline_sync", "True",
+            "--torch_cuda_profiler_dir", "/path/to/dir",
 
             # 6. 硬件/Kernel 特定优化
             "--deep_gemm_num_sm", "16",
@@ -255,7 +259,8 @@ class ServerArgsSetTest(TestCase):
             # 17. Miscellaneous 配置
             "--load_balance", "True",
             "--step_records_time_range", "240000000",
-            "--step_records_max_size", "4000"
+            "--step_records_max_size", "4000",
+            "--disable_pdl", "True",
         ]
 
         # 重新加载 server_args 并执行 setup_args
@@ -303,7 +308,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["FT_CORE_DUMP_ON_EXCEPTION"], "1")
         self.assertEqual(env["FT_ALOG_CONF_PATH"], "/tmp/another_log.conf")
         self.assertEqual(env["LOG_LEVEL"], "ERROR")
-        self.assertEqual(env.get("GEN_TIMELINE_SYNC"),"1")
+        self.assertEqual(env["GEN_TIMELINE_SYNC"],"1")
+        self.assertEqual(env["TORCH_CUDA_PROFILER_DIR"],"/path/to/dir")
 
         # 硬件/Kernel 特定优化
         self.assertEqual(env["DEEP_GEMM_NUM_SM"], "16")
@@ -378,6 +384,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["LOAD_BALANCE"], "1")
         self.assertEqual(env["STEP_RECORDS_TIME_RANGE"], "240000000")
         self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
+        self.assertEqual(env["DISABLE_PDL"],"1")
 
 if __name__ == '__main__':
     main()

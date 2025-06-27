@@ -1,14 +1,13 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include <string>
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
 
 size_t CudaProfiler::count = 0;
 
 CudaProfiler::CudaProfiler(const std::string& prefix): prefix_(prefix) {
-    char* env = getenv("TORCH_CUDA_PROFILER_DIR");
-    dest_dir_ = env ? std::string(env) : ".";
+    dest_dir_ = (StaticConfig::user_torch_cuda_profiler_dir != "") ? StaticConfig::user_torch_cuda_profiler_dir : ".";
     tap::prepareProfiler(config_, activities_);
 }
 

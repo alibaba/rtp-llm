@@ -382,7 +382,13 @@ def setup_args():
         default=False,
         help="是否开启收集Timeline信息用于性能分析"
     )
-
+    profile_debug_logging_group.add_argument(
+        '--torch_cuda_profiler_dir',
+        env_name="TORCH_CUDA_PROFILER_DIR",
+        type=str,
+        default="",
+        help="指定开启Torch的Profile时对应的生成目录"
+    )
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
@@ -851,6 +857,14 @@ def setup_args():
         type=int,
         default=1000,
         help="保留的性能记录 (step records) 的最大条数。与 `STEP_RECORDS_TIME_RANGE` 共同决定记录的保留策略。"
+    )
+
+    misc_group.add_argument(
+        '--disable_pdl',
+        env_name="DISABLE_PDL",
+        type=bool,
+        default=False,
+        help="是否禁用PDL"
     )
 
     parser.parse_args()

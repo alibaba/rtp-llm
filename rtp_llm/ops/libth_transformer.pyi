@@ -1,7 +1,15 @@
 from __future__ import annotations
 import torch
 import typing
-__all__ = ['BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceExporter', 'DeviceResourceConfig', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'LoadBalanceInfo', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'MultimodalInput', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'create_linear_softmax_handler', 'get_device']
+__all__ = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceExporter', 'DeviceResourceConfig', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'LoadBalanceInfo', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'MultimodalInput', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'create_linear_softmax_handler', 'get_device']
+class ArpcConfig:
+    ioThreadNum: int
+    queueNum: int
+    threadNum: int
+    def __init__(self, threadNum: int = 10, queueNum: int = 50, ioThreadNum: int = 2) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
     def __init__(self, batch_decode_scheduler_batch_size: int = 1) -> None:
@@ -214,6 +222,7 @@ class FMHAConfig:
 class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
+    arpc_config: ArpcConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     block_nums: int
     cache_store_config: CacheStoreConfig
@@ -355,7 +364,6 @@ class GptInitParameter:
     size_per_head: int
     softmax_extra_scale: float
     sp_config: SpeculativeExecutionConfig
-    arpc_config: ArpcConfig
     special_tokens: SpecialTokens
     sync_status_interval_ms: int
     tokenizer_path: str
@@ -437,22 +445,15 @@ class LoadBalanceInfo:
     def __init__(self) -> None:
         ...
 class MiscellaneousConfig:
+    disable_pdl: bool
     load_balance: int
     step_records_max_size: int
     step_records_time_range: int
-    def __init__(self, load_balance: int = 0, step_records_time_range: int = 60000000, step_records_max_size: int = 1000) -> None:
+    def __init__(self, load_balance: int = 0, step_records_time_range: int = 60000000, step_records_max_size: int = 1000, disable_pdl: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...
     def update_from_env_for_test(self) -> None:
-        ...
-class ArpcConfig:
-    threadNum: int
-    queueNum: int
-    ioThreadNum: int
-    def __init__(self, threadNum: int = 10, queueNum: int = 50, ioThreadNum: int = 2) -> None:
-        ...
-    def to_string(self) -> str:
         ...
 class MlaOpsType:
     """
@@ -553,7 +554,8 @@ class ProfilingDebugLoggingConfig:
     py_inference_log_response: bool
     rtp_llm_trace_malloc_stack: bool
     rtp_llm_trace_memory: bool
-    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False) -> None:
+    torch_cuda_profiler_dir: str
+    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '') -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -671,15 +673,14 @@ class SpecialTokens:
     def __init__(self) -> None:
         ...
 class SpeculativeExecutionConfig:
+    force_score_context_attention: bool
+    force_stream_sample: bool
     gen_num_per_cycle: int
     sp_max_token_match: int
     sp_min_token_match: int
     sp_model_type: str
     sp_type: str
     tree_decode_config: str
-    gen_num_per_cycle: int
-    force_stream_sample: bool
-    force_score_context_attention: bool
     def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
         ...
     def to_string(self) -> str:

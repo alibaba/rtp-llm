@@ -11,6 +11,8 @@ namespace rtp_llm {
 int StaticConfig::user_deep_gemm_num_sm = -1;
 bool StaticConfig::user_arm_gemm_use_kai = false;
 bool StaticConfig::user_ft_core_dump_on_exception = false;
+bool StaticConfig::user_disable_pdl = false;
+std::string StaticConfig::user_torch_cuda_profiler_dir = "";
 
 std::string to_lower(const std::string& s) {
     std::string result = s;
@@ -178,12 +180,13 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test(){
     ft_alog_conf_path = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
     log_level = autil::EnvUtil::getEnv("LOG_LEVEL", "INFO");
     gen_timeline_sync = bool_from_env_for_test("GEN_TIMELINE_SYNC", false);
+    torch_cuda_profiler_dir = autil::EnvUtil::getEnv("TORCH_CUDA_PROFILER_DIR","");
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
     pybind11::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(pybind11::init<
-            bool, bool, bool, bool, bool, bool, std::string, std::string, bool
+            bool, bool, bool, bool, bool, bool, std::string, std::string, bool, std::string
         >(),
         pybind11::arg("ft_nvtx") = false,
         pybind11::arg("py_inference_log_response") = false,
@@ -193,7 +196,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         pybind11::arg("ft_core_dump_on_exception") = false,
         pybind11::arg("ft_alog_conf_path") = "",
         pybind11::arg("log_level") = "INFO",
-        pybind11::arg("gen_timeline_sync") = false
+        pybind11::arg("gen_timeline_sync") = false,
+        pybind11::arg("torch_cuda_profiler_dir") = ""
         )
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env_for_test", &ProfilingDebugLoggingConfig::update_from_env_for_test)
@@ -205,7 +209,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("log_level", &ProfilingDebugLoggingConfig::log_level)
-        .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync);
+        .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
+        .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir);
 }
 
 // HWKernelConfig
@@ -518,22 +523,25 @@ void MiscellaneousConfig::update_from_env_for_test(){
     load_balance = autil::EnvUtil::getEnv("LOAD_BALANCE", 0);
     step_records_time_range = autil::EnvUtil::getEnv("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000);
     step_records_max_size = autil::EnvUtil::getEnv("STEP_RECORDS_MAX_SIZE", 1000);
+    disable_pdl = bool_from_env_for_test("DISABLE_PDL", false);
 }
 
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
         .def(pybind11::init<
-            int, int, int
+            int, int, int, bool
         >(),
         pybind11::arg("load_balance") = 0,
         pybind11::arg("step_records_time_range") = 60 * 1000 * 1000,
-        pybind11::arg("step_records_max_size") = 1000
+        pybind11::arg("step_records_max_size") = 1000,
+        pybind11::arg("disable_pdl") = false
         )
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env_for_test", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("load_balance", &MiscellaneousConfig::load_balance)
         .def_readwrite("step_records_time_range", &MiscellaneousConfig::step_records_time_range)
-        .def_readwrite("step_records_max_size", &MiscellaneousConfig::step_records_max_size);
+        .def_readwrite("step_records_max_size", &MiscellaneousConfig::step_records_max_size)
+        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
 }
 
 // ParallelismDistributedConfig
@@ -593,7 +601,8 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "log_level: " << log_level << "\n"
-        << "gen_timeline_sync: "<< gen_timeline_sync;
+        << "gen_timeline_sync: "<< gen_timeline_sync << "\n"
+        << "torch_cuda_profiler_dir" << torch_cuda_profiler_dir << "\n";
     return oss.str();
 }
 
@@ -717,7 +726,8 @@ inline std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "load_balance: " << load_balance << "\n"
         << "step_records_time_range: " << step_records_time_range << "\n"
-        << "step_records_max_size: " << step_records_max_size << "\n";
+        << "step_records_max_size: " << step_records_max_size << "\n"
+        << "disable_pdl" << disable_pdl<< "\n";
     return oss.str();
 }
 

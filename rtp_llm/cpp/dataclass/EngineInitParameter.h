@@ -38,6 +38,8 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         StaticConfig::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
         StaticConfig::user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
         StaticConfig::user_ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
+        StaticConfig::user_disable_pdl = gpt_init_parameter.misc_config.disable_pdl;
+        StaticConfig::user_torch_cuda_profiler_dir = gpt_init_parameter.profiling_debug_logging_config.torch_cuda_profiler_dir;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
         StepRecorder::STEP_RECORDS_MAX_SIZE = gpt_init_parameter.misc_config.step_records_max_size;

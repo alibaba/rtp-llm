@@ -455,7 +455,8 @@ class GptInitModelParameters:
             ft_core_dump_on_exception=get_env_bool("FT_CORE_DUMP_ON_EXCEPTION", False),
             ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
             log_level=get_env_str("LOG_LEVEL", "INFO"),
-            gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False)
+            gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False),
+            torch_cuda_profiler_dir=get_env_str("TORCH_CUDA_PROFILER_DIR","")
         )
 
         # HWKernelConfig
@@ -548,9 +549,10 @@ class GptInitModelParameters:
 
         # MiscellaneousConfig
         self.gpt_init_params.misc_config = MiscellaneousConfig(
-            load_balance=get_env_int("LOAD_BALANCE",0),
+            load_balance=get_env_int("LOAD_BALANCE", 0),
             step_records_time_range=get_env_int("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
+            disable_pdl=get_env_bool("DISABLE_PDL", False)
         )
 
         # ArpcConfig

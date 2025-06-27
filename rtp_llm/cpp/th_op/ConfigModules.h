@@ -8,11 +8,13 @@
 
 namespace rtp_llm {
 
-// these configs are used in static method.
+// these configs are used in static or global method.
 struct StaticConfig {
     static int user_deep_gemm_num_sm;
     static bool user_arm_gemm_use_kai;
     static bool user_ft_core_dump_on_exception;
+    static bool user_disable_pdl;
+    static std::string user_torch_cuda_profiler_dir;
 };
 
 struct ParallelismDistributedConfig {
@@ -67,6 +69,7 @@ struct ProfilingDebugLoggingConfig {
     std::string ft_alog_conf_path = "";
     std::string log_level = "INFO";
     bool gen_timeline_sync = false;
+    std::string torch_cuda_profiler_dir = "";
     std::string to_string() const;
     void update_from_env_for_test();
 };
@@ -181,6 +184,7 @@ struct MiscellaneousConfig {
     int load_balance = 0;
     int64_t step_records_time_range = 60 * 1000 * 1000;
     int64_t step_records_max_size = 1000;
+    bool disable_pdl = false;
     std::string to_string() const;
     void update_from_env_for_test();
 };
