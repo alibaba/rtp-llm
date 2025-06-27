@@ -497,6 +497,7 @@ class GptInitModelParameters:
         # ModelSpecificConfig
         self.gpt_init_params.model_specific_config = ModelSpecificConfig(
             max_lora_model_size=get_env_int("MAX_LORA_MODEL_SIZE"),
+            load_python_model=get_env_bool("LOAD_PYTHON_MODEL", False),
         )
 
         # ServiceDiscoveryConfig
@@ -551,7 +552,7 @@ class GptInitModelParameters:
             step_records_time_range=get_env_int("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
         )
-        
+
         # ArpcConfig
         self.gpt_init_params.arpc_config = ArpcConfig(
             threadNum=get_env_int("ARPC_THREAD_NUM", 10),

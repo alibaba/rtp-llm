@@ -5,7 +5,7 @@
 
 namespace torch_ext {
 
-void registerPyModuleOps(py::module &m);
+void registerPyModuleOps(pybind11::module &m);
 
 }
 

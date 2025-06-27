@@ -499,7 +499,8 @@ class MlaOpsType:
         ...
 class ModelSpecificConfig:
     max_lora_model_size: int
-    def __init__(self, max_lora_model_size: int = -1) -> None:
+    load_python_model: bool
+    def __init__(self, max_lora_model_size: int = -1, load_python_model: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...

@@ -119,6 +119,7 @@ struct MoeConfig {
 
 struct ModelSpecificConfig {
     int64_t max_lora_model_size = -1;
+    bool load_python_model = false;
     std::string to_string() const;
     void update_from_env_for_test();
 };

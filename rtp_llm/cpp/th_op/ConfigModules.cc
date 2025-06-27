@@ -344,18 +344,20 @@ void register_moe_config(pybind11::module& m) {
 // ModelSpecificConfig
 void ModelSpecificConfig::update_from_env_for_test(){
     max_lora_model_size = autil::EnvUtil::getEnv("MAX_LORA_MODEL_SIZE", -1);
+    load_python_model = bool_from_env_for_test("LOAD_PYTHON_MODEL", false);
 }
 
 void register_model_specific_config(pybind11::module& m) {
     pybind11::class_<ModelSpecificConfig>(m, "ModelSpecificConfig")
-        .def(pybind11::init<
-            int64_t
-        >(),
-        pybind11::arg("max_lora_model_size") = -1
+        .def(pybind11::init<int64_t, bool>(),
+            pybind11::arg("max_lora_model_size") = -1,
+            pybind11::arg("load_python_model") = false
         )
         .def("to_string", &ModelSpecificConfig::to_string)
         .def("update_from_env_for_test", &ModelSpecificConfig::update_from_env_for_test)
-        .def_readwrite("max_lora_model_size", &ModelSpecificConfig::max_lora_model_size);
+        .def_readwrite("max_lora_model_size", &ModelSpecificConfig::max_lora_model_size)
+        .def_readwrite("load_python_model", &ModelSpecificConfig::load_python_model)
+        ;
 }
 
 // SpeculativeExecutionConfig
@@ -647,6 +649,7 @@ inline std::string MoeConfig::to_string() const {
 inline std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_lora_model_size: " << max_lora_model_size << "\n";
+    oss << "load_python_model:" << load_python_model << "\n";
     return oss.str();
 }
 

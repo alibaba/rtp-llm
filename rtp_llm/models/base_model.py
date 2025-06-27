@@ -1,6 +1,8 @@
 
 import torch
 
+import logging
+
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
@@ -201,7 +203,8 @@ class BaseModel(object):
         self.model_weights_loader = self.create_model_loader(parallel_info)
         self._load(self.device)
 
-        if True:  # TODO: add a config option to disable this
+        if self.config.model_specific_config.load_python_model:
+            logging.info(f"Creating python model for {self.config.ckpt_path} on {self.device}")
             self._create_python_model()
 
     def _create_python_model(self) -> Optional[GptModelBase]:
