@@ -48,8 +48,8 @@ import logging
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
-        from transformers.modeling_flash_attention_utils import apply_rotary_emb, flash_attn_varlen_func
-        from transformers.modeling_flash_attention_utils import _flash_attention_forward
+        from flash_attn.layers.rotary import apply_rotary_emb
+        from flash_attn import flash_attn_varlen_func
         default_attn_impl = "flash_attention_2"
 except Exception as e:
     logging.info(f'initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit')
