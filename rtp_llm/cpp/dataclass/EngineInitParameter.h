@@ -51,7 +51,6 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         global_parallel_info.setLocalWorldSize(gpt_init_parameter.parallelism_distributed_config.local_world_size);
         Logger::log_level_ = gpt_init_parameter.profiling_debug_logging_config.log_level;
         gpt_init_parameter.showDebugInfo();
-        initialize(gpt_init_parameter);
     }
 
     size_t model_id;

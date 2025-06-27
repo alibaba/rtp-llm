@@ -10,6 +10,7 @@ test_deps = [
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp:normal_engine",
     "//rtp_llm/cpp:dataclass",
+    "//rtp_llm/cpp:models",
     "//:gpt_init_params",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",

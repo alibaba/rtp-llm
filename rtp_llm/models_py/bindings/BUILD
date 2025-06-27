@@ -19,4 +19,5 @@ cc_library(
         ":register_ops_hdr",
     ],
     visibility = ["//visibility:public"],
+    alwayslink = 1,
 )

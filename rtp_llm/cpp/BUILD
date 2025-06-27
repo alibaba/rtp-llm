@@ -202,7 +202,7 @@ cc_library(
             "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
         ],
     }),
-    visibility = ["//visibility:public"]
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

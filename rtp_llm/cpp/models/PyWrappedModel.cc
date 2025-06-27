@@ -2,12 +2,8 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include <stdexcept>
 #include <mutex>
-// pybind11/stl.h might still be needed if GptModelInputs/Outputs use STL containers
-#include <pybind11/stl.h>
-#include <pybind11/iostream.h>
 #include "rtp_llm/cpp/utils/PyUtils.h"
 
 #include <cstdlib>
@@ -15,28 +11,6 @@
 
 
 namespace rtp_llm {
-
-PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance)
-    : GptModel(params)
-    , py_instance_(std::move(py_instance)) // Take ownership of the passed py::object
-{
-    if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
-        RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
-    } else {
-        RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
-    }
-
-    k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_, false);
-    v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_, false);
-
-    py::gil_scoped_acquire gil; // Acquire GIL for safety, though direct operations are minimal now
-
-    if (!py_instance_ || py_instance_.is_none()) {
-        throw std::runtime_error("PyWrappedModel constructor: Python instance is null or none.");
-    }
-
-    RTP_LLM_LOG_INFO("PyWrappedModel initialized with a pre-existing Python object instance.");
-}
 
 PyWrappedModel::~PyWrappedModel() {
     try {

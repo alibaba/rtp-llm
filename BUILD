@@ -124,8 +124,6 @@ cc_library(
         "//rtp_llm/cpp:http_api_server",
         "//rtp_llm/cpp:model_rpc_server",
         "@grpc//:grpc++",
-        ":flashinfer",
-        "//3rdparty/flashinfer:flashinfer",
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp/cuda:allocator_torch",
