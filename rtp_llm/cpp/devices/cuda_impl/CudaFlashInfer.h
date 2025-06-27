@@ -61,7 +61,8 @@ public:
                              const BufferPtr&                 input_lengths_host,
                              const BufferPtr&                 kv_cache_block_id_host,
                              const BufferPtr&                 kv_cache_block_id_device,
-                             DataType                         dtype);
+                             DataType                         dtype,
+                             bool                             skip_no_prefix = true);
     void run(const AttentionModuleParams& params,
              const BufferPtr &fp16_out,
              std::function<void()> moe_insertion_callback,

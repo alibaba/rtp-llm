@@ -6,6 +6,7 @@ py_library(
     srcs = glob([
         "model_desc/*.py",
         "modules/*.py",
+        "utils/*.py",
     ]),
     deps = [
         "//rtp_llm/model_loader:loader",

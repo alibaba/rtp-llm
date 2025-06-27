@@ -1,3 +1,8 @@
+
+test_envs = {
+    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
+}
+
 py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],
@@ -7,9 +12,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -22,9 +25,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -38,9 +39,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -54,9 +53,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -70,9 +67,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -86,9 +81,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -102,8 +95,6 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    env = {
-        "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    },
+    env = test_envs,
     exec_properties = {'gpu':'A10'},
 )

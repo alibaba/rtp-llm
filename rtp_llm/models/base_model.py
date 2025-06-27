@@ -23,7 +23,6 @@ from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -206,13 +205,11 @@ class BaseModel(object):
         if self.config.model_specific_config.load_python_model:
             logging.info(f"Creating python model for {self.config.ckpt_path} on {self.device}")
             self._create_python_model()
+        else:
+            logging.info(f"Skip creating python model, use legacy cpp GptModel")
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        # TODO(wangyin): in base_model this function should only return None
-        # and the actual create method should be implemented in each derived class of specific models
-        # There should also be a option to disable this python model creation
-        self.py_model = Qwen3Model(self.config, self.weight)
-        # self.py_model = GptModelExample(self.config, self.weight)
+        raise NotImplementedError("Python Model is not implemented for this model.")
 
     def _load(self, device: str):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(device=self.device)

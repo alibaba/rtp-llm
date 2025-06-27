@@ -1,7 +1,7 @@
 import torch
 import itertools
 from unittest import TestCase, main, SkipTest
-from rtp_llm.models_py.modules import RMSResNorm, RMSResNormTorch
+from rtp_llm.models_py.modules.norm import RMSResNorm, RMSResNormTorch
 from torch import dtype as _dtype
 
 

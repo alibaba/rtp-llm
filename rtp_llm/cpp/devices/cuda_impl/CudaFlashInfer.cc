@@ -320,7 +320,8 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                                         const BufferPtr&                 input_lengths_host,
                                         const BufferPtr&                 kv_cache_block_id_host,
                                         const BufferPtr&                 kv_cache_block_id_device,
-                                        DataType                         dtype) {
+                                        DataType                         dtype,
+                                        bool                             skip_no_prefix) {
     if (rtp_llm::get_sm() < 80) {
         return nullptr;
     }
@@ -357,10 +358,15 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
             *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
 
         RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d", max_context_input_seq_len, min_prefix_len, sp_seq_len);
-        // TODO(wangyin): pass python mode arg to this prepare function and check whether should return null.
-        // if (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1) {
-        //     return nullptr;
-        // }
+
+        if (max_context_input_seq_len > sp_seq_len + 1) {
+            return nullptr;
+        }
+
+        // TODO: This check logic needs to be refined
+        if (skip_no_prefix && (min_prefix_len == 0)) {
+            return nullptr;
+        }
     }
 
     const bool disable_flash_infer = device->initParams().fmha_config.disable_flash_infer;

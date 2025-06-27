@@ -1,7 +1,7 @@
 import torch
 import itertools
 from unittest import TestCase, main, SkipTest
-from rtp_llm.models_py.modules import LayerNormTorch, LayerNorm
+from rtp_llm.models_py.modules.norm import LayerNormTorch, LayerNorm
 from torch import dtype as _dtype
 from torch.profiler import profile, ProfilerActivity, record_function
 

@@ -3,7 +3,7 @@ import itertools
 from unittest import TestCase, main, SkipTest
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
-from rtp_llm.models_py.modules import QKRMSNorm, FusedQKRMSNorm
+from rtp_llm.models_py.modules.norm import QKRMSNorm, FusedQKRMSNorm
 from torch import dtype as _dtype
 import math
 from torch.profiler import profile, ProfilerActivity, record_function
@@ -32,13 +32,13 @@ class FusedQKRMSNormTest(TestCase):
         torch.manual_seed(0)
 
         hidden_size = head_num * size_per_head + 2 * kv_head_num * size_per_head
-        
+
         q_weight = torch.randn(size_per_head, dtype=dtype)
         k_weight = torch.randn(size_per_head, dtype=dtype)
-        
+
         qkrmsnorm = QKRMSNorm(q_weight, k_weight, head_num, kv_head_num, size_per_head)
         fused_qkrmsnorm = FusedQKRMSNorm(q_weight, k_weight, head_num, kv_head_num, size_per_head)
-        
+
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
 
         # for _ in range(5):

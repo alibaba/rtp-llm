@@ -2,7 +2,7 @@
 import functools
 import os
 import json
-from typing import List
+from typing import List, Optional
 
 from rtp_llm.utils.model_weight import W,  CkptWeightInfo, \
     identity, sp_0, sp_head_lora, sp_id, sp_neg1, zeros, transpose, transpose_pad
@@ -14,6 +14,8 @@ from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 
 def hidden_to_inter(hidden_size):
     ffn_m = 256
@@ -60,14 +62,14 @@ class QWenWeight(ModelDeployWeightInfo):
             AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
                        identity),
             AttnAtomicWeight(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.weight', identity)],
-                       transpose, 
-                       config=attn_config, 
+                       transpose,
+                       config=attn_config,
                        lora_a_process_func=transpose, lora_b_process_func=transpose,
                        lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora),
             AttnAtomicWeight(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias', identity)],
                        identity, config=attn_config),
             AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.weight', identity)],
-                       transpose, config=attn_config, 
+                       transpose, config=attn_config,
                        lora_a_process_func=transpose, lora_b_process_func=transpose,
                        lora_a_split_func=sp_0, lora_b_split_func=sp_id),
             FfnWeight(sub_weights = [
@@ -116,6 +118,9 @@ class QWenBase(BaseModel):
     @staticmethod
     def get_weight_cls():
         return QWenWeight
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        self.py_model = Qwen3Model(self.config, self.weight)
 
     @staticmethod
     def _common_config(config, ckpt_path: str) -> GptInitModelParameters:

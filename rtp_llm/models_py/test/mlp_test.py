@@ -3,7 +3,7 @@ import itertools
 from unittest import TestCase, main, SkipTest
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
-from rtp_llm.models_py.modules import Qwen3MLP, Qwen3MLP_TrochFused
+from rtp_llm.models_py.modules.mlp import DenseMLP, FusedSiluActDenseMLP
 from torch import dtype as _dtype
 import math
 from torch.profiler import profile, ProfilerActivity, record_function
@@ -14,7 +14,7 @@ class MLPTest(TestCase):
     NUM_TOKENS = [7, 83, 4096, 5120]
     HIDDEN_SIZES = [768, 2048, 4096, 5120, 8192]
 
-    # 
+    #
     # DTYPES = [torch.bfloat16]
     # NUM_TOKENS = [5120]
     # HIDDEN_SIZES = [512]
@@ -29,6 +29,7 @@ class MLPTest(TestCase):
     def _run_mlp_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
         model_param = GptInitModelParameters(1, 128, 1, 1, 5120)
+        model_param.activation_type = "SiGLU"
         weights = {}
         weights[W.ffn_w1] = torch.randn(hidden_size, 4 * hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w1])
@@ -36,10 +37,10 @@ class MLPTest(TestCase):
         torch.nn.init.xavier_uniform_(weights[W.ffn_w3])
         weights[W.ffn_w2] = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w2])
-        
-        qwen3_mlp = Qwen3MLP(model_param, weights)
-        qwen3_mlp_fused = Qwen3MLP_TrochFused(model_param, weights)
-        
+
+        qwen3_mlp = DenseMLP(model_param, weights)
+        qwen3_mlp_fused = FusedSiluActDenseMLP(model_param, weights)
+
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
 
         # for _ in range(5):
