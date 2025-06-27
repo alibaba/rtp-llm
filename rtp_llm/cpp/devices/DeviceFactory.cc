@@ -137,6 +137,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     RTP_LLM_LOG_INFO("use deepep moe: %d, use deepep low latency: %d",
                 device_params.use_deepep_moe, device_params.use_deepep_low_latency);
 
+    device_params.model_specific_config = params.model_specific_config;
+
     if (!global_params.device_params.size()) {
         RTP_LLM_LOG_ERROR("No device is specified to init !");
         abort();
@@ -151,7 +153,6 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
         auto device = it->second.create(device_params);
         getCurrentDevices().push_back(device);
     }
-    device_params.model_specific_config = params.model_specific_config;
     RTP_LLM_LOG_INFO("init devices done");
 }
 

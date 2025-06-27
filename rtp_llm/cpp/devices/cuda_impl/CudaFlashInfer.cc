@@ -357,14 +357,9 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         size_t min_prefix_len =
             *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
 
-        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d", max_context_input_seq_len, min_prefix_len, sp_seq_len);
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d skip_no_prefix %d", max_context_input_seq_len, min_prefix_len, sp_seq_len, skip_no_prefix);
 
-        if (max_context_input_seq_len > sp_seq_len + 1) {
-            return nullptr;
-        }
-
-        // TODO: This check logic needs to be refined
-        if (skip_no_prefix && (min_prefix_len == 0)) {
+        if (skip_no_prefix && (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1)) {
             return nullptr;
         }
     }

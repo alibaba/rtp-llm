@@ -41,7 +41,6 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     so_path = find_th_transformer(bazel_bin_dir)
 logging.info(f"so path: {so_path}")
 sys.path.append(so_path)
-torch.ops.load_library(os.path.join(so_path, 'libth_transformer.so'))
 # load intel xft lib
 xft_loaded = False
 # for path in sys.path:
@@ -70,6 +69,8 @@ try:
         logging.info(f"loaded libcaffe2_nvrtc.so from {so_load_path}")
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+
+torch.ops.load_library(os.path.join(so_path, 'libth_transformer.so'))
 
 try:
     from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo, EngineScheduleInfo, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode, EplbConfig
