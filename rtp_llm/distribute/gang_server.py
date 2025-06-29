@@ -6,6 +6,7 @@ import os
 import traceback
 import datetime
 import logging
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import uvicorn
 from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -44,7 +45,7 @@ class FailedRankInfo:
         self.timestamp = timestamp
         self.formatted_time = formatted_time
         self.reporter = reporter
-        
+
     def __str__(self):
         return (f"FailedRankInfo(failed_ip='{self.failed_ip}', "
                 f"failed_local_rank={self.failed_local_rank}, "
@@ -94,7 +95,7 @@ class GangServer:
         def handle_failure_report(req: Dict[str, Any]):
             logging.info(f"receive handle_failure_report info {req}")
             try:
-                failed_info = FailedRankInfo(req['failed_ip'], req['failed_local_rank'], req['failed_world_rank'], 
+                failed_info = FailedRankInfo(req['failed_ip'], req['failed_local_rank'], req['failed_world_rank'],
                                             req['timestamp'], req['formatted_time'], [req['reporter']])
                 self._update_failure_table(failed_info)
                 return {"status": "ok"}
@@ -260,7 +261,7 @@ class GangServer:
                 logging.error(f"Gang server {member.ip}:{member.gang_hb_port} hb failed {e}")
                 failed_member = member
                 break
-        
+
         if failed_member:
             logging.info(f"broadcast for failed member [world rank {failed_member.world_rank}]")
             self.broadcast_failure(failed_member)
@@ -316,12 +317,12 @@ class GangServer:
         self.store = create_store(master_url, g_parallel_info.world_rank, g_parallel_info.world_size)
         store_based_barrier(g_parallel_info.world_rank, g_parallel_info.world_size, self.store, timeout=timedelta(seconds=timeout))
 
-    def start(self):
+    def start(self, py_env_configs: PyEnvConfigs):
         if g_parallel_info.world_size == 1:
             logging.info("world_size==1, do not start gang_server")
             update_master_info(
                 "",
-                int(os.environ.get('START_PORT', DEFAULT_START_PORT)))
+                py_env_configs.server_config.start_port)
             return
         self._start()
         self._wait_ready()

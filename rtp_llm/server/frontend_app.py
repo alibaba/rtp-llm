@@ -6,6 +6,7 @@ import logging
 import logging.config
 from functools import cached_property
 from typing_extensions import override
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import uvicorn
 from uvicorn import Server, Config
 import asyncio
@@ -58,7 +59,8 @@ class GracefulShutdownServer(Server):
         await super().shutdown(sockets)
 
 class FrontendApp(object):
-    def __init__(self):
+    def __init__(self, py_env_configs: PyEnvConfigs):
+        self.py_env_configs = py_env_configs
         self.frontend_server = FrontendServer()
 
     def start(self):
@@ -77,7 +79,7 @@ class FrontendApp(object):
         sock.bind(('0.0.0.0', g_worker_info.server_port))
         sock.listen()
         fd = sock.fileno()
-        timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
+        timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
         config = Config(
             app,

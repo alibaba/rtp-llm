@@ -39,12 +39,13 @@ void ParallelismDistributedConfig::update_from_env_for_test(){
     world_size = autil::EnvUtil::getEnv("WORLD_SIZE", 1);
     world_rank = autil::EnvUtil::getEnv("WORLD_RANK", 0);
     local_world_size = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
+    ffn_sp_size = autil::EnvUtil::getEnv("FFN_SP_SIZE", 1);
 }
 
 void register_parallelism_distributed_config(pybind11::module& m) {
     pybind11::class_<ParallelismDistributedConfig>(m, "ParallelismDistributedConfig")
         .def(pybind11::init<
-            int, int, int, int, int, int, int
+            int, int, int, int, int, int, int, int
         >(),
         pybind11::arg("tp_size") = 1,
         pybind11::arg("ep_size") = 1,
@@ -52,7 +53,8 @@ void register_parallelism_distributed_config(pybind11::module& m) {
         pybind11::arg("pp_size") = 1,
         pybind11::arg("world_size") = 1,
         pybind11::arg("world_rank") = 0,
-        pybind11::arg("local_world_size") = 1
+        pybind11::arg("local_world_size") = 1,
+        pybind11::arg("ffn_sp_size") = 1
         )
         .def("to_string", &ParallelismDistributedConfig::to_string)
         .def("update_from_env", &ParallelismDistributedConfig::update_from_env_for_test)
@@ -62,7 +64,8 @@ void register_parallelism_distributed_config(pybind11::module& m) {
         .def_readwrite("pp_size", &ParallelismDistributedConfig::pp_size)
         .def_readwrite("world_size", &ParallelismDistributedConfig::world_size)
         .def_readwrite("world_rank", &ParallelismDistributedConfig::world_rank)
-        .def_readwrite("local_world_size", &ParallelismDistributedConfig::local_world_size);
+        .def_readwrite("local_world_size", &ParallelismDistributedConfig::local_world_size)
+        .def_readwrite("ffn_sp_size", &ParallelismDistributedConfig::ffn_sp_size);
 }
 
 void register_arpc_config(pybind11::module& m) {
@@ -193,7 +196,7 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test(){
 void register_profiling_debug_logging_config(pybind11::module& m) {
     pybind11::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(pybind11::init<
-            bool, bool, bool, bool, bool, bool, std::string, std::string, std::string, bool, std::string, int, std::string, bool, int, int, bool
+            bool, bool, bool, bool, bool, bool, std::string, std::string, bool, std::string, std::string, int, std::string, bool, int, int, bool
         >(),
         pybind11::arg("ft_nvtx") = false,
         pybind11::arg("py_inference_log_response") = false,
@@ -203,8 +206,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         pybind11::arg("ft_core_dump_on_exception") = false,
         pybind11::arg("ft_alog_conf_path") = "",
         pybind11::arg("log_level") = "INFO",
-        pybind11::arg("torch_cuda_profiler_dir") = "",
         pybind11::arg("gen_timeline_sync") = false,
+        pybind11::arg("torch_cuda_profiler_dir") = "",
         pybind11::arg("log_path") = "logs",
         pybind11::arg("log_file_backup_count") = 16,
         pybind11::arg("nccl_debug_file") = "",
@@ -574,7 +577,8 @@ inline std::string ParallelismDistributedConfig::to_string() const {
         << "world_size: " << world_size << "\n"
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
-        << "local_world_size: " << local_world_size;
+        << "local_world_size: " << local_world_size << "\n"
+        << "ffn_sp_size" << ffn_sp_size;
     return oss.str();
 }
 

@@ -65,8 +65,8 @@ class BackendServer(object):
         self._embedding_endpoint = None
         self.py_env_configs = py_env_configs
 
-    def start(self):
-        self._gang_server.start()
+    def start(self, py_env_configs: PyEnvConfigs):
+        self._gang_server.start(py_env_configs)
         if os.environ.get('DEBUG_START_FAKE_PROCESS', None) is not None:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")

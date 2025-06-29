@@ -150,7 +150,7 @@ class GangTest(unittest.TestCase):
         except RuntimeError as e:
             logging.warn(str(e))
             pass
-        
+
         torch_device_count.return_value = 2
         g_parallel_info.reload()
         procs: List[Process] = list()

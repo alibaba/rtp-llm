@@ -58,14 +58,15 @@ class GracefulShutdownServer(Server):
 
 class BackendApp(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
+        self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 
     def start(self):
-        self.backend_server.start()
+        self.backend_server.start(self.py_env_configs)
         app = self.create_app()
         self.backend_server.wait_all_worker_ready()
 
-        timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
+        timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
         loop = "auto"
         if (threading.current_thread() != threading.main_thread()):

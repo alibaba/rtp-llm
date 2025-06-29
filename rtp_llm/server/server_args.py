@@ -194,6 +194,13 @@ def setup_args():
         default=None,
         help='在多节点分布式设置中，当前节点（Node）上使用的GPU设备数量。'
     )
+    parallel_group.add_argument(
+        '--ffn_sp_size',
+        env_name="FFN_SP_SIZE",
+        type=int,
+        default=1,
+        help='FFN层序列并行大小。'
+    )
 
     ##############################################################################################################
     # Concurrency 控制

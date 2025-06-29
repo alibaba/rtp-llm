@@ -38,7 +38,7 @@ def local_rank_start(global_controller: ConcurrencyController, py_env_configs: P
             setproctitle(f"maga_ft_rank-{g_parallel_info.local_rank}")
         logging.info(f'start local {g_worker_info}, {g_parallel_info}')
         set_global_controller(global_controller)
-        app = BackendApp()
+        app = BackendApp(py_env_configs)
         app.start()
     except BaseException as e:
         logging.error(f'start server error: {e}, trace: {traceback.format_exc()}')

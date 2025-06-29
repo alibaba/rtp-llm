@@ -35,14 +35,14 @@ def check_server_health(server_port):
 
 def start_backend_server_impl(global_controller, py_env_configs: PyEnvConfigs):
     # only for debug
-    if os.environ.get('DEBUG_LOAD_SERVER', None) == '1':
+    if py_env_configs.profiling_debug_config.debug_load_server:
         start_backend_server(global_controller)
         os._exit(-1)
     backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, py_env_configs), name="backend_server")
     backend_process.start()
 
     retry_interval_seconds = 5
-    start_port = int(os.environ.get('START_PORT', DEFAULT_START_PORT))
+    start_port = py_env_configs.server_config.start_port
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:
         if not backend_process.is_alive():
@@ -61,8 +61,8 @@ def start_backend_server_impl(global_controller, py_env_configs: PyEnvConfigs):
 
     return backend_process
 
-def start_frontend_server_impl(global_controller, backend_process):
-    frontend_server_count = int(os.environ.get('FRONTEND_SERVER_COUNT', 4))
+def start_frontend_server_impl(global_controller, backend_process,  py_env_configs: PyEnvConfigs):
+    frontend_server_count = py_env_configs.server_config.fronted_server_count
     if frontend_server_count < 1:
         logging.info("frontend server's count is {frontend_server_count}, this may be a mistake")
 
@@ -76,7 +76,7 @@ def start_frontend_server_impl(global_controller, backend_process):
         process.start()
 
     retry_interval_seconds = 5
-    start_port = int(os.environ.get('START_PORT', DEFAULT_START_PORT))
+    start_port = py_env_configs.server_config.start_port
     while True:
         if not all(proc.is_alive() for proc in frontend_processes):
             monitor_and_release_process(backend_process, frontend_processes)
@@ -117,7 +117,7 @@ def main():
         logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(global_controller, backend_process)
+        frontend_process = start_frontend_server_impl(global_controller, backend_process, py_env_configs)
         logging.info(f"frontend server process = {frontend_process}")
 
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")

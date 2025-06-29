@@ -391,6 +391,7 @@ class GptInitModelParameters:
             world_rank=parallel_info.world_rank,
             local_world_size=parallel_info.local_world_size,
             pp_size=parallel_info.pp_size,
+            ffn_sp_size=parallel_info.ffn_sp_size
         )
         logging.info(f"parallelism_distributed_config.world_size: {self.gpt_init_params.parallelism_distributed_config.world_size}")
 

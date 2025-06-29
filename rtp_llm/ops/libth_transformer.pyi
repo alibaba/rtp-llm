@@ -538,12 +538,13 @@ class MultimodalInput:
 class ParallelismDistributedConfig:
     dp_size: int
     ep_size: int
+    ffn_sp_size: int
     local_world_size: int
     pp_size: int
     tp_size: int
     world_rank: int
     world_size: int
-    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1) -> None:
+    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -693,16 +694,16 @@ class SpeculativeExecutionConfig:
     sp_type: str
     tree_decode_config: str
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 <<<<<<< HEAD
     gen_num_per_cycle: int
     force_stream_sample: bool
     force_score_context_attention: bool
 >>>>>>> finish py_env_configs
-    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
 =======
-    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1) -> None:
->>>>>>> finish py_env_configs
+>>>>>>> finish ServerConfig
+    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
         ...
     def to_string(self) -> str:
         ...

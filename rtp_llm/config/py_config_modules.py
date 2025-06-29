@@ -25,7 +25,7 @@ def get_env_bool(name:str, default:bool=False):
 class ServerConfig:
     def __init__(self):
         self.fronted_server_count = 4
-        self.start_port = 8088
+        self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.fronted_server_id = 0
 
@@ -428,6 +428,7 @@ class PyEnvConfigs:
         self.engine_config: EngineConfig = EngineConfig()
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.worker_config: WorkerConfig = WorkerConfig()
+        self.parallelism_distributed_config: ParallelismDistributedConfig = ParallelismDistributedConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -448,3 +449,4 @@ class PyEnvConfigs:
         self.engine_config.update_from_env()
         self.embedding_config.update_from_env()
         self.worker_config.update_from_env()
+        self.parallelism_distributed_config.update_from_env()
