@@ -12,6 +12,7 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
+
 std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
