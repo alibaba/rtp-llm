@@ -247,7 +247,7 @@ class AtomicWeight(WeightModule):
         for ckpt_weight in self.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
-                before_merge_tensors.append(ckpt_weight.merge_fun([x.to("cpu") for x in database.load_tensor(name, convert_type)]))
+                before_merge_tensors.append(ckpt_weight.merge_fun([x.to(device) for x in database.load_tensor(name, convert_type)]))
             except Exception as e:
                 logging.error(f"加载 {self.name}: {name} 失败，完整堆栈:\n{traceback.format_exc()}")
                 raise e

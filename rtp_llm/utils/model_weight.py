@@ -243,7 +243,6 @@ def stack_moe_w1(ts: List[torch.Tensor]):
 
 def get_sp_tensor(t: torch.Tensor, head_num: int, head_num_kv: int, size_per_head: int,
                   tp: int, tp_rank: int, **kwargs):
-    t = t.to("cpu")
     t = t.reshape([-1, (head_num + head_num_kv * 2) * size_per_head])
     q_hidden = head_num * size_per_head
     kv_hidden = head_num_kv * size_per_head
@@ -609,10 +608,7 @@ def sp_0_w13(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Ten
     w1, w3 = torch.chunk(t, 2, dim=0)
     w1 = sp_0(w1, tp, tp_rank, **kwargs)
     w3 = sp_0(w3, tp, tp_rank, **kwargs)
-    device = w1.device
-    w1 = w1.to("cpu")
-    w3 = w3.to("cpu")
-    return torch.concat([w1, w3], dim=0).to(device)
+    return torch.concat([w1, w3], dim=0)
  
 def split_slopes_tp(slopes: torch.Tensor, head_num: int, tp: int, tp_rank: int):
     local_head_num = 1 if head_num == 1 else head_num // tp
