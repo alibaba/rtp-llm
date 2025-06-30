@@ -12,7 +12,7 @@ cc_library(
 
 cc_library(
     name = "dummy_register",
-    hdrs = [
+    srcs = [
         "DummyRegister.cc",
     ],
     deps = [
