@@ -297,7 +297,6 @@ class GptInitModelParameters:
             "activation_type": "setActivationType",
             "kv_cache_data_type": "setKvCacheDataType"
         }
-        self.update_gpt_init_params_from_env()
         self.has_lm_head_bias = False
         self.normalize_lm_head_weight = False
         self.src_quantization_bit = 0
@@ -342,6 +341,14 @@ class GptInitModelParameters:
         self.use_qk_norm = False
         self.enable_merge_w13 = False
         self.quant_config = None
+
+        ## For cpp, we use `gpt_init_params`, `py_env_configs` for python.
+        ## There are some common envs in cpp and python, so they will
+        ## share some configs together.
+        self.update_gpt_init_params_from_env()
+        self.py_env_configs = PyEnvConfigs()
+        self.py_env_configs.update_from_env()
+        self.py_env_configs.parallelism_distributed_config = self.gpt_init_params.parallelism_distributed_config
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -393,7 +400,6 @@ class GptInitModelParameters:
             pp_size=parallel_info.pp_size,
             ffn_sp_size=parallel_info.ffn_sp_size
         )
-        logging.info(f"parallelism_distributed_config.world_size: {self.gpt_init_params.parallelism_distributed_config.world_size}")
 
         # CacheStoreConfig
         self.gpt_init_params.cache_store_config = CacheStoreConfig(
@@ -447,7 +453,7 @@ class GptInitModelParameters:
             debug_load_server=get_env_bool("DEBUG_LOAD_SERVER",False),
             hack_layer_num=get_env_int("HACK_LAYER_NUM",0),
             test_layer_num=get_env_int("TEST_LAYER_NUM",0),
-            debug_start_fake_process=get_env_int("DEBUG_START_FAKE_PROCESS",False)
+            debug_start_fake_process=get_env_bool("DEBUG_START_FAKE_PROCESS",False)
         )
         # HWKernelConfig
         self.gpt_init_params.hw_kernel_config = HWKernelConfig(

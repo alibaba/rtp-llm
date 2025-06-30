@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import torch
 from collections import OrderedDict
 import safetensors
@@ -28,13 +29,15 @@ class ModelLoader:
                  weights_info: ModelDeployWeightInfo,
                  misc_weights_info: Optional[CustomAtomicWeight],
                  compute_dtype: torch.dtype,
-                 database: BaseDatabase):
+                 database: BaseDatabase,
+                 py_env_configs: PyEnvConfigs
+                 ):
         self._task_type = task_type
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         self._model_weights_info: Optional[ModelWeightInfo] = self._weights_info.create_model_weight_info(database)
-
-        use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
+        self.py_env_configs = py_env_configs
+        use_fp32 = py_env_configs.model_config.use_float32
         if use_fp32:
             compute_dtype = torch.float32
 
@@ -307,10 +310,11 @@ class ModelLoader:
             if weights_info.config.is_mtp:
                 model_path = weights_info.config.ckpt_path
             else:
+                path = self.py_env_configs.model_config.original_checkpoint_path
+                if path is None:
+                    path = weights_info.config.ckpt_path
                 model_path = fetch_remote_file_to_local(
-                    os.environ.get(
-                        "ORIGINAL_CHECKPOINT_PATH", weights_info.config.ckpt_path
-                    )
+                    path
                 )
 
             ep_lb_database = CkptDatabase(model_path)
@@ -318,7 +322,8 @@ class ModelLoader:
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
                 phy2log=weights_info.config.phy2log,
-                database=ep_lb_database
+                database=ep_lb_database,
+                py_env_configs=self.py_env_configs
             )
             weights_info.config.py_eplb = self.ep_balancer
 
@@ -358,4 +363,5 @@ def get_model_loader(task_type: TaskType,
     if weights_info._head_num_kv % weights_info.tp_size != 0 and weights_info._head_num_kv != 1:
         raise Exception('invalid tp_size %d for config.head_num_kv %d' \
                         % (weights_info.tp_size, weights_info._head_num_kv))
-    return ModelLoader(task_type, weights_info, misc_weights_info, compute_dtype, database)
+    py_env_configs = PyEnvConfigs()
+    return ModelLoader(task_type, weights_info, misc_weights_info, compute_dtype, database, py_env_configs)

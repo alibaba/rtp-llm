@@ -1,5 +1,6 @@
 import logging
 
+from rtp_llm.config.py_config_modules import StaticConfig
 import torch
 import functools
 import os
@@ -158,7 +159,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 ], config=ffn_config
                 ),
             ]
-         
+
     def _create_rope_w(self) -> Optional[AtomicWeight]:
         if self.config.mla_ops_type == MlaOpsType.MHA:
             return None
@@ -183,7 +184,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
         return AtomicWeight(W.rope_cos_sin_cache, [], process_fun=functools.partial(__create_rope_w, config=config), data_type=torch.float32)
 
-        
+
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []
@@ -235,7 +236,7 @@ class DeepSeekV2(BaseModel):
 
             # MLA config
             config.use_mla = True
-            config.mla_ops_type = MlaOpsType.__members__[os.environ.get('MLA_OPS_TYPE', 'AUTO')]
+            config.mla_ops_type = MlaOpsType.__members__[StaticConfig.model_config.mla_ops_type]
             logging.info(f"deepseek2 mla_ops_type: {config.mla_ops_type.name}")
             config.q_lora_rank = config_json['q_lora_rank']
             config.kv_lora_rank = config_json['kv_lora_rank']

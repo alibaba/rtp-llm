@@ -3,7 +3,7 @@ import os
 import logging.config
 import importlib.util
 from rtp_llm.config.log_config import LOGGING_CONFIG
-
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 LOG_PATH = os.environ.get('LOG_PATH', 'logs')
 os.makedirs(LOG_PATH, exist_ok=True)
@@ -54,6 +54,7 @@ if os.environ.get('FT_ALOG_CONF_PATH') is None:
 
 logging.info("init logger end")
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import transformers
 logging.info(f"transformers version: {transformers.__version__}")
 

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+from rtp_llm.config.py_config_modules import StaticConfig
 import torch
 from typing import Any, Dict, Type, Union,  Optional
 
@@ -131,24 +132,25 @@ class ModelFactory:
 
     @staticmethod
     def create_normal_model_config():
-        model_type = os.environ["MODEL_TYPE"]
-        ckpt_path = os.environ["CHECKPOINT_PATH"]
-        tokenizer_path = os.environ.get("TOKENIZER_PATH", ckpt_path)
-        lora_infos = os.environ.get("LORA_INFO", "{}")
-        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "0"))
-        seq_size_per_block = int(os.environ.get("SEQ_SIZE_PER_BLOCK", "8"))
+        model_type = StaticConfig.model_config.model_type
+        ckpt_path = StaticConfig.model_config.checkpoint_path
+        tokenizer_path = StaticConfig.model_config.tokenizer_path
+        if tokenizer_path == "":
+            tokenizer_path = ckpt_path
+        lora_infos = StaticConfig.lora_config.lora_info
+        max_seq_len = StaticConfig.engine_config.max_seq_len
+        seq_size_per_block = StaticConfig.py_kv_cache_config.seq_size_per_block
 
         tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
         ckpt_path = fetch_remote_file_to_local(ckpt_path)
 
-        extra_data_path = os.environ.get('EXTRA_DATA_PATH', "")
+        extra_data_path = StaticConfig.model_config.extra_data_path
         if extra_data_path:
             extra_data_path = fetch_remote_file_to_local(extra_data_path)
-            os.environ['LOCAL_EXTRA_DATA_PATH'] = extra_data_path
+            StaticConfig.model_config.local_extra_data_path = extra_data_path
 
-        ptuning_path = None
-        if 'PTUNING_PATH' in os.environ:
-            ptuning_path = os.environ['PTUNING_PATH']
+        ptuning_path = StaticConfig.model_config.ptuning_path
+        if ptuning_path is not None:
             ptuning_path = fetch_remote_file_to_local(ptuning_path)
 
         lora_infos = json.loads(lora_infos)
@@ -161,8 +163,8 @@ class ModelFactory:
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
         # TODO(xinfei.sxf) fix this
         ACT_TYPE = "ACT_TYPE"
-        if os.environ.get(ACT_TYPE, None):
-            act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
+        if StaticConfig.model_config.act_type:
+            act_type = WEIGHT_TYPE.from_str(StaticConfig.model_config.act_type)
 
         quantization = os.environ.get(ModelConfig.QUANTIZATION_KEY, None)
         model_config = ModelConfig(model_type=model_type,
@@ -196,10 +198,10 @@ class ModelFactory:
 
             propose_weight_type = get_propose_weight_type_from_env(os.environ)
             propose_act_type = propose_weight_type if propose_weight_type in [WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
-            SP_ACT_TYPE = "ACT_TYPE"
-            if os.environ.get(SP_ACT_TYPE, None):
-                propose_act_type = WEIGHT_TYPE.from_str(os.environ.get(SP_ACT_TYPE))
-            quantization = os.environ.get(ModelConfig.SP_QUANTIZATION_KEY, None)
+            ## SP_ACT_TYPE = "ACT_TYPE"
+            if StaticConfig.model_config.act_type:
+                propose_act_type = WEIGHT_TYPE.from_str(StaticConfig.model_config.act_type)
+            quantization = StaticConfig.py_speculative_execution_config.sp_quantization
             propose_model_config = ModelConfig(model_type=propose_model_type,
                                           ckpt_path=propose_ckpt_path,
                                           tokenizer_path=normal_model_config.tokenizer_path,

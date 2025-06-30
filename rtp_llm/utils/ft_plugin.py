@@ -2,6 +2,7 @@ import os
 import logging
 from typing import Any, List, Protocol, Callable, Optional, Tuple
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.import_util import load_module
 
 # here declare the expected format for plugin, **kwargs used for back compatibility
@@ -52,7 +53,7 @@ class PluginLoader(object):
 
     def reload(self):
         self.plugin_cls = None
-        plugin_path = os.environ.get('FT_PLUGIN_PATH', None)
+        plugin_path = StaticConfig.model_config.ft_plugin_path
         if plugin_path is not None:
             try:
                 module = load_module(plugin_path)

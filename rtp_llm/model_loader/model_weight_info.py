@@ -211,10 +211,10 @@ class ModelDeployWeightInfo:
             is_moe=False
         )
         return ffn_config
-            
+
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
-        use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
+        use_fp32 = self.config.py_env_configs.model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 
@@ -227,11 +227,11 @@ class ModelDeployWeightInfo:
         if self.weight_style != WeightStyle.NONE:
             logging.info("fix weight style")
             weight_info = self._fix_weight_style_layer_weight(weight_info)
-            
+
         if self.enable_merge_w13_:
             logging.info("fix merge_w13")
             weight_info = self._fix_merge_w1_w3(weight_info)
-            
+
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
@@ -428,7 +428,7 @@ class ModelDeployWeightInfo:
             if src_tp_size != self.tp_size or src_dp_size != self.dp_size or src_ep_size != self.ep_size:
                 raise ValueError(f"ft_style ParallelInfo is not match weight's ParallelInfo," + \
                     f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}")
-            
+
         load_config = LoadConfig(
             database = database,
             num_layers = self._num_layers,

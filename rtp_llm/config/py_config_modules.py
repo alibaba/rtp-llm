@@ -45,20 +45,21 @@ class ServerConfig:
 
 class ModelConfig:
     def __init__(self):
-        self.extra_data_path: Optional[str] = None
+        self.extra_data_path: str = ""
         self.local_extra_data_path: Optional[str] = None
-        self.tokenizer_path: Optional[str] = None
+        self.tokenizer_path: str = ""
         self.act_type: str = 'FP16'
-        self.use_float32: Optional[bool] = None
+        self.use_float32: bool = False
         self.original_checkpoint_path: Optional[str] = None
         self.mla_ops_type: str = 'AUTO'
-        self.parallel_batch: int = 0
+        self.parallel_batch: bool = False
         self.ft_plugin_path: Optional[str] = None
         self.weight_type: Optional[str] = None
+
         self.task_type: Optional[str] = None
-        self.model_type: Optional[str] = None
-        self.checkpoint_path: Optional[str] = None
-        self.oss_endpoint: Optional[str] = None
+        self.model_type: str = ""
+        self.checkpoint_path: str = ""
+        self.oss_endpoint: str = ""
         self.ptuning_path: Optional[str] = None
 
     def update_from_env(self):
@@ -66,12 +67,10 @@ class ModelConfig:
         self.local_extra_data_path = os.environ.get("LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path)
         self.tokenizer_path = os.environ.get("TOKENIZER_PATH", self.tokenizer_path)
         self.act_type = os.environ.get("ACT_TYPE", self.act_type)
-        use_float32 = os.environ.get("USE_FLOAT32")
-        if use_float32 is not None:
-            self.use_float32 = get_env_bool(use_float32)
+        self.use_float32 = get_env_bool("USE_FLOAT32", self.use_float32)
         self.original_checkpoint_path = os.environ.get("ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path)
         self.mla_ops_type = os.environ.get("MLA_OPS_TYPE", self.mla_ops_type)
-        self.parallel_batch = int(os.environ.get("PARALLEL_BATCH", self.parallel_batch))
+        self.parallel_batch = get_env_bool("PARALLEL_BATCH", self.parallel_batch)
         self.ft_plugin_path = os.environ.get("FT_PLUGIN_PATH", self.ft_plugin_path)
         self.weight_type = os.environ.get("WEIGHT_TYPE", self.weight_type)
         self.task_type = os.environ.get("TASK_TYPE", self.task_type)
@@ -279,6 +278,7 @@ class GenerateConfig:
 class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
+        self.quantization: str = ""
 
     def update_from_env(self):
         self.int8_mode = int(os.environ.get("INT8_MODE", self.int8_mode))
@@ -320,14 +320,14 @@ class PyKvCacheConfig:
     def __init__(self):
         self.int8_kv_cache: int = 0
         self.kv_cache_mem_mb: int = -1
-        self.seq_size_per_block: Optional[str] = None
+        self.seq_size_per_block: int = 8
         self.test_block_num: int = 0
         self.use_block_cache: Optional[int] = None
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
         self.kv_cache_mem_mb = int(os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb))
-        self.seq_size_per_block = os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
+        self.seq_size_per_block = int(os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block))
         self.test_block_num = int(os.environ.get("TEST_BLOCK_NUM", self.test_block_num))
         use_block_cache = os.environ.get("USE_BLOCK_CACHE")
         if use_block_cache is not None:
@@ -450,3 +450,14 @@ class PyEnvConfigs:
         self.embedding_config.update_from_env()
         self.worker_config.update_from_env()
         self.parallelism_distributed_config.update_from_env()
+
+## some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
+## we should use configs alone. This design can make the codes of this project more clear. All configs
+## should be retrived from `StaticConfig` or a top-down `PyEnvConfigs`. Notably, we don't modify smoke
+## test envs and that's necessary.
+StaticConfig = PyEnvConfigs()
+StaticConfig.update_from_env()
+
+#### The envs we reserve below:
+#### 1. weights convert: because we don't use it in our project.
+#### 2. smoke test.

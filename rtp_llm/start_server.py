@@ -10,6 +10,7 @@ import signal
 import multiprocessing
 from typing import Generator, Union, Any, Dict, List
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.metrics import kmonitor
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
@@ -69,9 +70,10 @@ def start_frontend_server_impl(global_controller, backend_process,  py_env_confi
     frontend_processes = []
 
     for i in range(frontend_server_count) :
-        os.environ['FRONTEND_SERVER_ID'] = str(i)
+        kmonitor.frontend_server_id = i
+        py_env_configs.server_config.fronted_server_id = i
         process = multiprocessing.Process(target=start_frontend_server,
-                args=(i, global_controller), name=f"frontend_server_{i}")
+                args=(i, global_controller, py_env_configs), name=f"frontend_server_{i}")
         frontend_processes.append(process)
         process.start()
 

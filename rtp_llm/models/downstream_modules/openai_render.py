@@ -26,7 +26,7 @@ class OpenAIRenderBasicInfo(object):
         self.stop_word_ids_list = self.config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
-            model_type=os.environ["MODEL_TYPE"],
+            model_type=config.py_env_configs.model_config.model_type,
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,

@@ -45,7 +45,7 @@ class OpenaiEndpoint(object):
         self.stop_words_id_list = self.model_config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
-            model_type=os.environ["MODEL_TYPE"],
+            model_type=model_config.py_env_configs.model_config.model_type,
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
@@ -78,7 +78,7 @@ class OpenaiEndpoint(object):
         else:
             self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
-        
+
         logging.info(f"use stop_words_str_list [{self.stop_words_str_list}], " \
                     f"stop_words_id_list [{self.stop_words_id_list}]")
 

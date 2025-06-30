@@ -2,6 +2,7 @@ import datetime
 import os
 import json
 import random
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 import torch
 import logging
 import traceback
@@ -45,18 +46,19 @@ class SelectLayerMethod(Enum):
 class ExpertBalancer:
     def __init__(
         self,
-        weights_info: ModelDeployWeightInfo, 
-        compute_dtype: torch.dtype, 
+        weights_info: ModelDeployWeightInfo,
+        compute_dtype: torch.dtype,
         phy2log: Any,
-        database: BaseDatabase, 
+        database: BaseDatabase,
+        py_env_configs: PyEnvConfigs
     ):
         self.database: BaseDatabase = database
         self._weights_info: ModelDeployWeightInfo = weights_info
         self._model_weight_info: ModelWeightInfo = self._weights_info.create_model_weight_info(database)
-        use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
+        use_fp32 = py_env_configs.model_config.use_float32
         if use_fp32:
             compute_dtype = torch.float32
-            
+
         self._load_config: LoadConfig = self._weights_info.create_load_config(compute_dtype, database, get_current_device())
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num
@@ -65,8 +67,8 @@ class ExpertBalancer:
         self.num_gpu = self._load_config.ep_size
         self.moe_layer_index = self._load_config.moe_layer_index
         self.num_experts = self._load_config.expert_num
-        
-        
+
+
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
         select_layer_method = os.environ.get("BALANCE_METHOD", "mix")

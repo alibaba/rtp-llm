@@ -4,6 +4,7 @@ import sys
 import json
 import logging
 import pathlib
+from rtp_llm.config.py_config_modules import StaticConfig
 import torch
 import asyncio
 import traceback
@@ -99,7 +100,7 @@ class FrontendWorker():
                 generators.append(self._yield_generate(request.request_id + i * 10000, text, urls, generate_config=generate_config, **kwargs))
             has_num_beams = any(config.num_beams > 1 for config in request.generate_configs)
             in_test = bool(int(os.environ.get('FT_SERVER_TEST', 0)))
-            parallel_batch = bool(int(os.environ.get('PARALLEL_BATCH', 0)))
+            parallel_batch = StaticConfig.model_config.parallel_batch
             if has_num_beams or (in_test and not parallel_batch):
                 return self._batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
             else:

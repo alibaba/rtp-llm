@@ -1,5 +1,6 @@
 import os
 from enum import Enum
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.util import get_config_from_path
 '''
 embedding: return model embedding output
@@ -17,15 +18,15 @@ class TaskType(Enum):
     LINEAR_SOFTMAX            = "LINEAR_SOFTMAX"
     PLUGIN_TASK               = "PLUGIN_TASK"
     BGE_M3                    = "BGE_M3"
-    
+
     @staticmethod
     def from_str(task_type: str):
         for val in TaskType:
             if val.value == task_type:
                 return val
         raise Exception(f"unknown task type: {task_type}")
-    
-def check_task_type(ckpt_path: str):        
+
+def check_task_type(ckpt_path: str):
     def _is_dense_embedding_task(ckpt_path: str) -> bool:
         def _check_is_sentence_transformer_repo() -> bool:
             if os.path.exists(os.path.join(ckpt_path, "config_sentence_transformers.json")):
@@ -50,8 +51,8 @@ def check_task_type(ckpt_path: str):
         return False
 
     # from_env
-    if 'TASK_TYPE' in os.environ and os.environ['TASK_TYPE'] != '':
-        return TaskType.from_str(os.environ['TASK_TYPE'])
+    if StaticConfig.model_config.task_type:
+        return TaskType.from_str(StaticConfig.model_config.task_type)
     # from config
     elif _is_dense_embedding_task(ckpt_path):
         return TaskType.DENSE_EMBEDDING

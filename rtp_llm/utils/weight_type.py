@@ -2,6 +2,8 @@ import os
 from enum import Enum
 from typing import Optional, Union, Dict, Any
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+
 class WEIGHT_TYPE(Enum):
     INT4 = ["int4"]
     INT8 = ["int8"]
@@ -20,8 +22,8 @@ class WEIGHT_TYPE(Enum):
     def to_str(self) -> str:
         return self.value[0]
 
-def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
-    weight_type_str = env_param.get("WEIGHT_TYPE", None)
+def get_weight_type_from_env(py_env_configs: PyEnvConfigs) -> WEIGHT_TYPE:
+    weight_type_str = py_env_configs.model_config.weight_type
     if weight_type_str:
         weight_type = WEIGHT_TYPE.from_str(weight_type_str)
         return weight_type

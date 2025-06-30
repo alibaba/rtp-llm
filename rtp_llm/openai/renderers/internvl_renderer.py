@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from enum import Enum, auto
+from rtp_llm.config.py_config_modules import StaticConfig
 from transformers import PreTrainedTokenizerBase
 
 from dataclasses import dataclass
@@ -110,7 +111,7 @@ class InternVLRenderer(CustomChatRenderer):
         self.video_frame_num = 8
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
-        ckpt_path: str = os.environ['CHECKPOINT_PATH']
+        ckpt_path: str = StaticConfig.model_config.checkpoint_path
         config_path = os.path.join(fetch_remote_file_to_local(ckpt_path), "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
@@ -124,7 +125,7 @@ class InternVLRenderer(CustomChatRenderer):
                 return res
         else:
             raise Exception("no config.json found")
-    
+
     async def _update_single_status(self, status: StreamStatus, output: GenerateOutput, max_new_tokens: int, stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
@@ -142,7 +143,7 @@ class InternVLRenderer(CustomChatRenderer):
             status.delta_output_string = decoded_string[1:]
         elif len(decoded_prev_token) > 0 and len(decoded_string) > 0 and decoded_string[0] == ' ' and decoded_prev_token[0] != ' ':
             status.delta_output_string = decoded_string[len(decoded_prev_token) + 1: ]
-        else: 
+        else:
             status.delta_output_string = decoded_string[len(decoded_prev_token):]
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop

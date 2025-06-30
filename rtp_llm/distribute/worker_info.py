@@ -6,7 +6,7 @@ import torch
 import logging
 from typing import Any, Dict
 from dataclasses import dataclass
-from rtp_llm.config.py_config_modules import DEFAULT_START_PORT, MASTER_INFO_PORT_NUM, MIN_WORKER_INFO_PORT_NUM, WORKER_INFO_PORT_NUM
+from rtp_llm.config.py_config_modules import DEFAULT_START_PORT, MASTER_INFO_PORT_NUM, MIN_WORKER_INFO_PORT_NUM, WORKER_INFO_PORT_NUM, StaticConfig
 
 def get_worker_port_num():
     global WORKER_INFO_PORT_NUM
@@ -23,24 +23,8 @@ class FrontendServerInfo(object):
     def __init__(self, frontend_server_id: int):
         self.frontend_server_id = frontend_server_id
 
-    @staticmethod
-    def from_env() -> FrontendServerInfo:
-        return FrontendServerInfo.from_params(dict(os.environ))
-
-    @staticmethod
-    def from_params(params: Dict[str, str]) -> FrontendServerInfo:
-        info = FrontendServerInfo(
-                frontend_server_id=int(params.get('FRONTEND_SERVER_ID', '0')))
-        return info
-
-    def reload(self):
-        new_info = self.from_env()
-        self.frontend_server_id = new_info.frontend_server_id
-
     def __str__(self):
         return f"FrontendServerInfo:[ frontend_server_id={self.frontend_server_id} ]"
-
-g_frontend_server_info = FrontendServerInfo.from_env()
 
 class ParallelInfo(object):
     # EP从TP里分
@@ -210,7 +194,7 @@ class WorkerInfo(object):
 
     @staticmethod
     def self_server_port():
-        return int(os.environ.get('START_PORT', DEFAULT_START_PORT))
+        return StaticConfig.server_config.start_port
 
     @staticmethod
     def server_port_offset(local_rank: int, server_port: int = -1) -> int:

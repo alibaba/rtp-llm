@@ -58,7 +58,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             self.image_newline = nn.Parameter(
                 torch.empty(self.config.mm_related_params.config["hidden_size"])
             )
-    
+
     @torch.inference_mode()
     def mm_process(self, mm_input, **kwargs):
         mm_type = kwargs.get("mm_type")
@@ -95,7 +95,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             return self.load_video(data, **kwargs)
         else:
             raise Exception("unknown mm url type")
-    
+
     def load_image(self, data, configs, **kwargs):
         image = Image.open(data).convert("RGB")
         if configs.width > 0 and configs.height > 0:
@@ -111,12 +111,12 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         # set frame num between 1 and 100
         max_frame_num = configs.max_frames if configs.max_frames != -1 else 100
         min_frame_num = configs.min_frames if configs.min_frames != -1 else 1
-        
+
         frame_num = max(min_frame_num, min(max_frame_num, frame_num))
-        
+
         frame_idx = np.linspace(0, total_frame_num - 1, frame_num).tolist()
         frame_idx = [int(idx) for idx in frame_idx]
-        
+
         video = vr.get_batch(frame_idx).asnumpy()
 
         num_frames_to_sample = num_frames = len(frame_idx)
@@ -134,14 +134,14 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         mm_patch_merge_type = config.get("mm_patch_merge_type", "flat")
         mm_newline_position = config.get("mm_newline_position", "one_token")
 
-        processed_images = process_images(images, 
-                                          image_aspect_ratio, 
-                                          self.vision_tower.image_processor, 
+        processed_images = process_images(images,
+                                          image_aspect_ratio,
+                                          self.vision_tower.image_processor,
                                           self._device,
                                           self._data_type,
                                           mm_type,
                                           image_grid_pinpoints = config.get("image_grid_pinpoints", []))
-        
+
         processed_images = [image.unsqueeze(0) if image.ndim == 3 else image for image in processed_images]
         split_sizes = [processed_image.shape[0] for processed_image in processed_images]
         processed_images = torch.cat(processed_images)
@@ -174,7 +174,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     elif mm_newline_position == "frame":
                         image_feature = self.add_token_per_frame(image_feature)
                         new_image_features.append(image_feature.flatten(0, 1))
-                        
+
                     elif mm_newline_position == "one_token":
                         # one-token
                         image_feature = image_feature.flatten(0, 1)
@@ -183,7 +183,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                                 image_feature,
                                 self.image_newline[None].to(image_feature.device)
                             ), dim=0)
-                        new_image_features.append(image_feature)      
+                        new_image_features.append(image_feature)
                     elif mm_newline_position == "no_token":
                         new_image_features.append(image_feature.flatten(0, 1))
                     else:
@@ -255,14 +255,14 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             image_features = new_image_features
 
         return image_features
-    
+
     def encode_images(self, images):
         if images.shape[0] == 0:
             return images
         image_features = self.vision_tower(images)
         image_features = self.mm_projector(image_features)
         return image_features
-    
+
     def add_token_per_grid(self, image_feature):
         resize_h = int(math.sqrt(image_feature.shape[1]))
         num_frames = image_feature.shape[0]
@@ -279,7 +279,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             return image_feature
         image_feature = image_feature.flatten(1, 2).transpose(0, 1)
         return image_feature
-    
+
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.vision_tower.num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
@@ -302,10 +302,10 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_feature = image_feature.view(num_frames, -1, num_dim)
         return image_feature
 
-    
+
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
-        vision_tower_name = os.environ.get('EXTRA_DATA_PATH', '')
-        vision_tower = os.environ.get('LOCAL_EXTRA_DATA_PATH', None)
+        vision_tower_name = self.config.py_env_configs.model_config.extra_data_path
+        vision_tower = self.config.py_env_configs.model_config.local_extra_data_path
         if vision_tower is None:
             vision_tower_name = vision_tower_cfg['vit_tower_path']
             vision_tower = vision_tower_cfg['vit_tower_path']
@@ -316,15 +316,15 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
                     select_feature=vision_tower_cfg.get("mm_vision_select_feature", "patch"),
                     **kwargs)
-            
+
         raise ValueError(f'Unknown vision tower: {vision_tower}')
-    
+
     def add_token_per_frame(self, image_feature):
         image_feature = image_feature.permute(2, 0, 1).contiguous()
         image_feature =  torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
-    
+
     def build_vision_projector(self, config, delay_load=False, **kwargs):
         projector_type = config.get('mm_projector_type', 'linear')
 
@@ -377,7 +377,7 @@ class CLIPVisionTower(nn.Module):
         else:
             raise ValueError(f'Unexpected select feature: {self.select_feature}')
         return image_features
-    
+
     @torch.no_grad()
     def forward(self, images):
         if type(images) is list:

@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from enum import Enum, auto
+from rtp_llm.config.py_config_modules import StaticConfig
 from transformers import PreTrainedTokenizerBase
 
 from dataclasses import dataclass
@@ -63,7 +64,7 @@ class Conversation:
 
             return PromptWithMMInput(tokenizer.apply_chat_template(chat_template_messages, tokenize=False, add_generation_prompt=True),
                                     images, mm_types)
-        
+
         def get_preprocess_config(config):
             return MMPreprocessConfig(width=config.resized_width or -1,
                                       height=config.resized_height or -1,
@@ -160,7 +161,7 @@ class LlavaRenderer(CustomChatRenderer):
         return conv_templates[conv_mode]
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
-        ckpt_path: str = os.environ['CHECKPOINT_PATH']
+        ckpt_path: str = StaticConfig.model_config.checkpoint_path
         model_name: str = ckpt_path.split('?')[0] # oss style path
         model_name = model_name.strip('/').split('/')[-1]
         llava_template_env: str = os.environ.get('LLAVA_CHAT_TEMPLATE', '')
