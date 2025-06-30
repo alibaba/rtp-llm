@@ -65,8 +65,12 @@ public:
         RTP_LLM_LOG_DEBUG("total_token_num %d, mtp_token_index: %d, input_token_num: %d", total_token_num, mtp_token_index_, input_token_num);
         // check hidden states num is equal to token ids
         RTP_LLM_CHECK_WITH_INFO(last_hidden_states_->shape()[0] == input_token_num,
-            "hidde_states_num: %d, input_token_num: %d",
-            last_hidden_states_->shape()[0], input_token_num);
+            "hidden states num: %d, total_token_num: %d, execute token num: %d, input_token_num: %d, mtp_token_index_: %d",
+            last_hidden_states_->shape()[0],
+            total_token_num,
+            currentExecuteTokenSize(),
+            input_token_num,
+            mtp_token_index_);
 
         if (input_token_num > 1) {
             setReuseLength(mtp_token_index_);
@@ -78,6 +82,15 @@ public:
         // after success create mtp stream, we need to change mtp_token_index_
         mtp_token_index_ += input_token_num;
         history_max_propose_len_ = std::max(propose_step, history_max_propose_len_);
+
+        RTP_LLM_CHECK_WITH_INFO(
+            last_hidden_states_->shape()[0] == currentExecuteTokenSize(),
+            "hidden states num: %d, total_token_num: %d, execute token num: %d, input_token_num: %d, mtp_token_index_: %d",
+            last_hidden_states_->shape()[0],
+            total_token_num,
+            currentExecuteTokenSize(),
+            input_token_num,
+            mtp_token_index_);
     }
 
     ErrorResult<GenerateOutputs> nextOutput() override {
@@ -113,10 +126,14 @@ public:
         size_t input_token_num = total_token_num - last_mtp_index - 1;
         RTP_LLM_LOG_DEBUG("last_mtp_index: %d, input_token_num: %d", last_mtp_index, input_token_num);
 
-        RTP_LLM_CHECK_WITH_INFO(last_hidden_states_->shape()[0] == input_token_num,
-                                "hidde_states_num: %d, input_token_num: %d",
-                                last_hidden_states_->shape()[0],
-                                input_token_num);
+        RTP_LLM_CHECK_WITH_INFO(
+            last_hidden_states_->shape()[0] == input_token_num,
+            "hidden states num: %d, total_token_num: %d, execute token num: %d, input_token_num: %d, mtp_token_index_: %d",
+            last_hidden_states_->shape()[0],
+            total_token_num,
+            currentExecuteTokenSize(),
+            input_token_num,
+            mtp_token_index_);
 
         complete_token_ids_->setSeqLength(stream.seqLength() - 1);
 
@@ -125,6 +142,15 @@ public:
             setFallbackPrefixLength(0);
             setIsContextStream(true);
         }
+
+        RTP_LLM_CHECK_WITH_INFO(
+            last_hidden_states_->shape()[0] == currentExecuteTokenSize(),
+            "hidden states num: %d, total_token_num: %d, execute token num: %d, input_token_num: %d, mtp_token_index_: %d",
+            last_hidden_states_->shape()[0],
+            total_token_num,
+            currentExecuteTokenSize(),
+            input_token_num,
+            mtp_token_index_);
     }
 
 private:

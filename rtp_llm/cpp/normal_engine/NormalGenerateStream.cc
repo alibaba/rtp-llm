@@ -172,7 +172,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     //TODO: move it to better position
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
-        need_remote_generate_ = true;
+        setNeedRemoteGenerateWithoutLock(true);
     }
 
     bool pd_sep_first_token = queryPdSep();

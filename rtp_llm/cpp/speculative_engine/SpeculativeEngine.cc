@@ -374,14 +374,21 @@ absl::Status SpeculativeEngine::step() {
         auto stream_group = StreamGroups(streams);
         auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
                           + device_->getDeviceProperties().tp_rank;
-        auto profiler_prefix = autil::StringUtil::formatString("normal_profiler_wr%d_b%d_s%d_prefill%d_",
+        auto profiler_prefix = autil::StringUtil::formatString("sp_profiler_wr%d_b%d_s%d_prefill%d_",
                                                                world_rank,
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
         profiler_            = std::make_shared<CudaProfiler_E>(profiler_prefix);
         profiler_->start();
-        profiler_step_ = (*streams.begin())->profileStep();
+        auto it = std::max_element(
+            streams.begin(),
+            streams.end(),
+            [](const auto& a, const auto& b) {
+                return a->profileStep() < b->profileStep();
+            }
+        );
+        profiler_step_ = (*it)->profileStep();
     }
     tpSyncDisableSPRun(all_streams_disable_sp_run);
 
@@ -512,7 +519,11 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
                 stream->setNeedRemoteGenerate(true);
             }
             BufferPtr propose_tokens = stream->getProposeStream()->getSPOutputBuffer()->tokens;
-            stream->setProposeToken(propose_tokens->data<int>()[0]);
+            vector<int> propose_tokens_vec;
+            for (int i = 0; i < propose_tokens->shape()[1]; ++i) {
+                propose_tokens_vec.push_back(propose_tokens->data<int>()[i]);
+            }
+            stream->setProposeToken(propose_tokens_vec);
             stream->setReuseLength(stream->seqLength() - 1);
             stream->setFallbackPrefixLength(stream->reuseLength());
             stream->setSpEditRun(false);
@@ -594,8 +605,9 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
 
             SpeculativeExecutorStreamOutputPtr sp_output_buffer_ = propose_stream->getSPOutputBuffer();
             sp_output_buffer_->propose_step = propose_step;
-            sp_output_buffer_->tokens = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1}, rtp_llm::AllocationType::HOST}, {});
-            *((int*)sp_output_buffer_->tokens->data()) = stream->getProposeToken();
+            vector<int> propose_tokens = stream->getProposeToken();
+            sp_output_buffer_->tokens = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, propose_tokens.size()}, rtp_llm::AllocationType::HOST}, {});
+            memcpy(sp_output_buffer_->tokens->data(), propose_tokens.data(), sizeof(int) * propose_tokens.size());
 
             stream->setProposeStream(propose_stream);
         }

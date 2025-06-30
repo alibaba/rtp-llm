@@ -130,7 +130,6 @@ public:
     bool returnCumLogProbs() const;
     bool genTimeline() const;
     int  profileStep() const;
-    void setProfileStep(int profile_step);
     void setGenTimeline(bool gen_timeline);
     bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
@@ -168,6 +167,7 @@ public:
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
+    void spStep();
 
     std::vector<torch::Tensor> multimodalFeatures() const;
     int multimodalFeaturesLength() const;
@@ -196,6 +196,8 @@ public:
     bool needRemoteGenerate() const;
     void setRemoteGenerate();
     size_t iterCount() const;
+    size_t spIterCount() const;
+    void setSpIterCount(int sp_iter_count);
 
     const ResourceContext& resourceContext() const;
     void setKVCache(const BatchKVCacheResource &kv_cache_resource);
@@ -282,6 +284,12 @@ public:
     }
 
     void setNeedRemoteGenerate(bool need_remote_generate) {
+        std::lock_guard<std::mutex> lock(*output_mutex_);
+        need_remote_generate_ = need_remote_generate;
+        cv_->notify_one();
+    }
+
+    void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
         need_remote_generate_ = need_remote_generate;
     }
 
@@ -325,11 +333,11 @@ public:
         sp_edit_first_time_ = sp_edit_first_time;
     }
 
-    void setProposeToken(int propose_token) {
+    void setProposeToken(std::vector<int>& propose_token) {
         propose_token_ = propose_token;
     }
 
-    int getProposeToken() {
+    std::vector<int>& getProposeToken() {
         return propose_token_;
     }
 
@@ -448,6 +456,7 @@ protected:
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
     std::shared_ptr<bool>               is_context_stream_;
     size_t                              iter_count_             = 0;
+    size_t                              sp_iter_count_          = 0;
     size_t                              last_output_pos_        = 0;
     int                                 initial_reuse_length_   = 0;
     int                                 reuse_length_           = 0;
@@ -471,7 +480,6 @@ protected:
     bool                                use_cache_store_        = false;
 
     bool                                gen_timeline_           = false;
-    int                                 profile_step_           = 3;
 
     // The number of times this stream has been interfered by prefills
     int32_t                             batch_with_prefill_times_ = 0;
@@ -483,7 +491,7 @@ protected:
     rtp_llm::BufferPtr                  all_probs_;
     rtp_llm::BufferPtr                  softmax_probs_;
     rtp_llm::BufferPtr                  loss_;
-    rtp_llm::BufferPtr                  last_hidden_states_;
+    rtp_llm::BufferPtr                  last_hidden_states_ = nullptr;
     int                                 loss_index_ = 0;
     std::shared_ptr<std::mutex>         output_mutex_;
     std::shared_ptr<std::condition_variable> cv_;
@@ -497,7 +505,7 @@ protected:
     int                                sp_edit_search_index_  = 0;
     bool                               sp_edit_first_time_    = true;
     bool                               sp_edit_run_           = false;
-    int                                propose_token_         = 0;
+    std::vector<int>                   propose_token_;
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;

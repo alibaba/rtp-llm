@@ -64,7 +64,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
     }
 
     if (stream->needReturnHiddenStates()) {
-        if (stream->getContainProposeToken() || (stream->getProposeStream() != nullptr && stream->iterCount() > 0)) {
+        if (stream->getContainProposeToken() || (stream->getProposeStream() != nullptr && stream->spIterCount() > 0)) {
             hidden_states = score_stream_output->hidden_states->slice(0, accept_len, false);
             hidden_states->updateParent(score_stream_output->hidden_states);
         } else {
@@ -86,6 +86,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
 
     stream->step();
+    stream->spStep();
     StreamUpdateInfo update_info{std::move(accept_tokens), (int)accept_len, hidden_states, std::move(logits), std::move(softmax_probs), nullptr, nullptr, std::move(loss), hidden_states};
 
     stream->update(update_info);
@@ -116,7 +117,7 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
 
         if (propose_step == 0) {
             accept_len = 1;
-        } else if (stream_config->top1()) {
+        } else if (stream_config->top1() || propose_stream_output->all_probs == nullptr) {
             accept_len = top1Sample(propose_step, propose_stream_output, score_stream_output, stream->forceSpAccept()).value();
         } else {
             // TODO(xyz): catch exception for specified stream
@@ -145,6 +146,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams) const {
     RTP_LLM_LOG_DEBUG("batch rejection sample");
     std::list<GenerateStreamPtr> sample_streams;
+
+    std::list<GenerateStreamPtr> top1_sample_streams;
     for (const GenerateStreamPtr& stream : streams) {
         SpeculativeExecutorStreamOutputPtr propose_stream_output = stream->getProposeStream()->getSPOutputBuffer();
         SpeculativeExecutorStreamOutputPtr score_stream_output   = stream->getScoreStream()->getSPOutputBuffer();
@@ -167,8 +170,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             continue;
         }
 
-        sample_streams.push_back(stream);
+        if (stream->generateConfig()->top1() == true || (propose_stream_output->propose_step > 0 && !propose_stream_output->all_probs)) {
+            top1_sample_streams.push_back(stream);
+        } else {
+            sample_streams.push_back(stream);
+        }
     }
+
+    streamSample(sample_output, top1_sample_streams);
 
     if (sample_streams.empty()) {
         return;
@@ -197,11 +206,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             break;
         }
 
-        if (!propose_stream_output->all_probs) {
-            RTP_LLM_LOG_DEBUG("Fallback to stream rejection sampling since propose stream doesn't contain all probs");
-            fallback_to_stream_sample = true;
-            break;
-        }
+        
 
         draft_probs_buffer_list.push_back(Buffer2torchTensor(propose_stream_output->all_probs, false));
         draft_token_ids_buffer_list.push_back(Buffer2torchTensor(propose_stream_output->tokens, false));
@@ -252,8 +257,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     torch::Tensor output_token_ids_h         = output_token_ids_d.to(host_device).contiguous();
     torch::Tensor output_emitted_token_num_h = output_emitted_token_num_d.to(host_device).contiguous();
-
-    std::cout << output_token_ids_h << std::endl;
 
     size_t i = 0;
     for (const GenerateStreamPtr& stream : sample_streams) {

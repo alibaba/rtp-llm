@@ -70,6 +70,7 @@ class GenerateConfig(BaseModel):
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
     profile_step: int = 3
+    out_prefix: str = ""
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

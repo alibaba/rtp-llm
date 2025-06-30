@@ -1503,6 +1503,7 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] = inputs.last_hidden_states.get() ? inputs.last_hidden_states->size() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] ? (std::uint8_t)inputs.last_hidden_states->type() : 0;
+    shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -1511,6 +1512,10 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     rtp_llm::BufferPtr mm_features_shape;
     int32_t* mm_features_shape_ptr = nullptr;
     inputs.need_all_logits = shape_hints_ptr[GptModelInputIndex::needAllLogits];
+    inputs.skip_run = shape_hints_ptr[GptModelInputIndex::skipRun];
+    if (inputs.skip_run) {
+        return;
+    }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape =
@@ -1529,6 +1534,7 @@ void tpSyncModelInputs(GptModelInputs &inputs, rtp_llm::DeviceBase* device) {
     auto text_tokens_mask_size = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto mm_features_locs_size = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
     auto hidden_states_size = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+
 
     if (device->getDeviceProperties().tp_rank) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];

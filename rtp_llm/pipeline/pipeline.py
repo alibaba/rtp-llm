@@ -250,6 +250,9 @@ class Pipeline(object):
                     generate_config=generate_config.model_dump(),
                     **kwargs)
 
+            if generate_config.out_prefix:
+                text = generate_config.out_prefix + text
+
             texts.append(text)
             all_texts.append(all_text)
             i += 1
@@ -268,6 +271,7 @@ class Pipeline(object):
                               generate_config=generate_config,
                               tokenizer=self.tokenizer,
                               token_type_ids=token_type_ids)
+        
         stop_word_strs = generate_config.stop_words_str
         stop_word_str_slices = get_stop_word_slices(stop_word_strs)
         stop_word_ids = generate_config.stop_words_list

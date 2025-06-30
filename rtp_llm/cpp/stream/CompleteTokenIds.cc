@@ -164,7 +164,7 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens, int64_t begi
 }
 
 void CompleteTokenIds::setSeqLength(int seq_length) {
-    RTP_LLM_CHECK(seq_length <= max_seq_len_);
+    RTP_LLM_CHECK(seq_length <= complete_token_ids_->shape()[1]);
     if (seq_length > seq_length_) {
         start_check_seq_length_ = seq_length_ + 1;
     } else {

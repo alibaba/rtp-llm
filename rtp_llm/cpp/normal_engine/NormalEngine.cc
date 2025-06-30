@@ -315,7 +315,14 @@ absl::Status NormalEngine::step() {
                                                                int(stream_group.totalContextBatchSize() > 0));
         profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
         profiler_->start();
-        profiler_step_ = (*streams.begin())->profileStep();
+        auto it = std::max_element(
+            streams.begin(),
+            streams.end(),
+            [](const auto& a, const auto& b) {
+                return a->profileStep() < b->profileStep();
+            }
+        );
+        profiler_step_ = (*it)->profileStep();
     }
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status;

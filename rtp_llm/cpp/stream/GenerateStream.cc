@@ -30,7 +30,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , enable_fast_gen_(params.enable_fast_gen_)
     , use_cache_store_(params.use_cache_store_)
     , gen_timeline_(input->generate_config->gen_timeline)
-    , profile_step_(input->generate_config->profile_step)
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
     , output_mutex_(std::make_shared<std::mutex>())
@@ -237,7 +236,7 @@ bool GenerateStream::returnCumLogProbs() const {
 }
 
 bool GenerateStream::genTimeline() const {
-    return seqLength() <= inputLength() + 2 ? gen_timeline_ : false;
+    return seqLength() <= inputLength() + profileStep() - 1 ? gen_timeline_ : false;
 }
 
 void GenerateStream::setGenTimeline(bool gen_timeline) {
@@ -245,11 +244,7 @@ void GenerateStream::setGenTimeline(bool gen_timeline) {
 }
 
 int GenerateStream::profileStep() const {
-    return profile_step_;
-}
-
-void GenerateStream::setProfileStep(int profile_step) {
-    profile_step_ = profile_step;
+    return generate_input_->generate_config->profile_step;
 }
 
 bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
@@ -464,6 +459,10 @@ void GenerateStream::step() {
     }
 }
 
+void GenerateStream::spStep() {
+    sp_iter_count_++;
+}
+
 int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
 }
@@ -592,6 +591,14 @@ void GenerateStream::setRemoteGenerate() {
 
 size_t GenerateStream::iterCount() const {
     return iter_count_;
+}
+
+size_t GenerateStream::spIterCount() const {
+    return sp_iter_count_;
+}
+
+void GenerateStream::setSpIterCount(int sp_iter_count) {
+    sp_iter_count_ = sp_iter_count;
 }
 
 void GenerateStream::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
@@ -801,9 +808,13 @@ std::string GenerateStream::debugString() const {
                 << ", need_release_resource: " << need_release_resource_
                 << ", fallback_prefix_length: " << fallback_prefix_length_
                 << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
-                << ", need_remote_generate_" << need_remote_generate_ << ", propose_token_ " << propose_token_
-                << ", contain_propose_token_ " << contain_propose_token_;
+                << ", need_remote_generate: " << need_remote_generate_
+                << ", contain_propose_token: " << contain_propose_token_
+                << ", propose_token: ";
 
+    for (int i = 0; i < propose_token_.size(); i++) {
+        debug_string << propose_token_[i] << " ";
+    }
     if (last_hidden_states_) {
         debug_string << ", hidden_state_token_num: " << last_hidden_states_->shape()[0];
     }

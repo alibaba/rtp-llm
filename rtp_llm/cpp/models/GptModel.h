@@ -87,6 +87,7 @@ struct GptModelInputs {
 
     bool                                      need_all_logits = false;
     bool                                      warmup          = false;
+    bool                                      skip_run        = false;
 
 public:
     std::string debugString() const;
@@ -111,6 +112,7 @@ enum GptModelInputIndex : size_t{
     needAllLogits,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
+    skipRun,
     gptModelInputLength
 };
 

@@ -160,7 +160,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         generate_stream->setSpEditRun(false);
         generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
         generate_stream->setContainProposeToken(true);
-        generate_stream->setProposeToken(generate_request.propose_generate_token_id());
+        std::vector<int> propose_tokens;
+        propose_tokens.assign(
+            generate_request.propose_token_ids().begin(),
+            generate_request.propose_token_ids().end()
+        );
+        generate_stream->setProposeToken(propose_tokens);
     }
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG("decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());

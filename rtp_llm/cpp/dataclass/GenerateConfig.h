@@ -134,6 +134,7 @@ public:
                      << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline
+                     << ", profile_step: " << profile_step
                      << "}";
         return debug_string.str();
     }
@@ -204,6 +205,7 @@ public:
         JSONIZE(max_thinking_tokens);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
+        JSONIZE(profile_step);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

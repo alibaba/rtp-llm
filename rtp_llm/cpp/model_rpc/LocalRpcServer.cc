@@ -99,10 +99,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         if (stream->needRemoteGenerate()) {
             break;
         }
-        if (stream->queryPdSep()) {
-            if (stream->waitForRemoteGenerate()) {
-                break;
-            }
+        if (stream->queryPdSep() && stream->waitForRemoteGenerate()) {
+            break;
         }
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());

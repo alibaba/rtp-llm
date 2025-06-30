@@ -11,10 +11,26 @@ from PIL import Image
 from dataclasses import dataclass, field
 import hashlib
 import base64
+import logging
 
-from rtp_llm.utils.ssrf_check import check_ssrf
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
+
+logger = logging.get_logger(__name__)
+
+SSRF_CHECKER = None
+
+def safe_check_ssrf(url):
+    global SSRF_CHECKER
+    if SSRF_CHECKER is None:
+        try:
+            from internal_source.rtp_llm.utils.ssrf_check import check_ssrf
+            SSRF_CHECKER = check_ssrf
+        except ImportError:
+            logger.info("SSRF check module not available, skipping")
+            SSRF_CHECKER = lambda _: True 
+    
+    return SSRF_CHECKER(url)
 
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':
     HTTP_HEADS = json.loads(os.environ['DOWNLOAD_HEADERS'])
@@ -70,9 +86,13 @@ def get_vit_compute_dtype(dtype: str):
     else:
         return torch.half
 
+
+
+
 def get_bytes_io_from_url(url: str):
-    if not check_ssrf(url):
-        raise Exception(f"urrl ssrf chekc failed {url}")
+    ssrf_success = safe_check_ssrf(url)
+    if not ssrf_success:    
+        raise Exception(f"url ssrf check failed {url}")
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         try:

@@ -320,7 +320,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    generate_request.set_propose_generate_token_id(stream->getProposeToken());
+    generate_request.mutable_propose_token_ids()->CopyFrom(
+        {stream->getProposeToken().begin(), stream->getProposeToken().end()});
     generate_request.set_stage(RemoteStage::GENERATE);
 
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.client_stream->Write(generate_request),

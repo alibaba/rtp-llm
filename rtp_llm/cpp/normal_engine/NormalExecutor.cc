@@ -89,7 +89,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_input.skip_run = streams.empty();
         tpSyncModelInputs(model_input, device_);
+        if (model_input.skip_run) {
+            return absl::OkStatus();
+        }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     // get lora input

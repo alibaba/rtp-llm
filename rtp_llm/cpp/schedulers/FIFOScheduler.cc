@@ -119,6 +119,12 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
                     "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                     stream->streamId(), stream->inputLength(), stream->seqLength(), stream->maxBlockSize(), need_block_num);
                 stream->tryReleaseKVBlock(need_block_num);
+
+                if (stream->spIterCount() > 0) {
+                    // sp doesn't support fallback
+                    stream->releaseResource();
+                    stream->setStop(ErrorCode::MALLOC_FAILED, "cancel stream since lack kv memory");
+                }
                 fallback_streams++;
             }
         }
@@ -135,8 +141,14 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             RTP_LLM_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                 last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength(), last_stream->maxBlockSize(), need_release_blocks);
             last_stream->tryReleaseKVBlock(need_release_blocks);
-            last_stream->setPaused();
-            waiting_streams_.emplace_front(last_stream);
+            if (last_stream->spIterCount() > 0) {
+                // sp doesn't support fallback
+                last_stream->releaseResource();
+                last_stream->setStop(ErrorCode::MALLOC_FAILED, "cancel stream since lack kv memory");
+            } else {
+                last_stream->setPaused();
+                waiting_streams_.emplace_front(last_stream);
+            }
             running_streams_.pop_back();
             fallback_streams++;
         }
