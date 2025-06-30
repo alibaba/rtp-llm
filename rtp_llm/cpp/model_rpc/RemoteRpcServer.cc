@@ -82,6 +82,7 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params, rtp_ll
     params.thread_count     = 4;
     params.queue_size       = 500;
     params.device           = device;
+    params.metrics_reporter = metrics_reporter_;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                 params.listen_port,
                 params.rdma_listen_port,

@@ -4,14 +4,14 @@
 #include "autil/EnvUtil.h"
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreServiceImplContext.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/CacheLoadServiceClosure.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/MessagerClient.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
-class MockCacheLoadServiceClosure: public CacheLoadServiceClosure {
+class MockCacheLoadServiceClosure: public RPCClosure {
 public:
     MockCacheLoadServiceClosure(const std::shared_ptr<MemoryUtil>&                           memory_util,
                                 const std::shared_ptr<RequestBlockBuffer>                    request_block_buffer,
@@ -19,9 +19,7 @@ public:
                                 CacheLoadRequest*                                            request,
                                 CacheLoadResponse*                                           response,
                                 CacheStoreLoadDoneCallback                                   callback,
-                                const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector):
-        CacheLoadServiceClosure(memory_util, request_block_buffer, controller, request, response, callback, collector) {
-    }
+                                const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) {}
 
     virtual ~MockCacheLoadServiceClosure() {}
 
@@ -29,7 +27,7 @@ public:
     MOCK_METHOD0(Run, void());
 };
 
-class CacheStoreServiceImplContextTest: public CacheStoreTestBase {
+class TcpCacheStoreServiceImplContextTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();
     bool initContext();
@@ -49,15 +47,14 @@ protected:
     }
 
 protected:
-    std::shared_ptr<NormalCacheStore>                     cache_store1_;
-    std::shared_ptr<NormalCacheStore>                     cache_store2_;
-    CacheLoadRequest*                                     request_;
-    CacheLoadResponse*                                    response_;
-    std::shared_ptr<CacheStoreServerLoadMetricsCollector> collector_;
-    MockCacheLoadServiceClosure*                          done_{nullptr};
-    std::shared_ptr<arpc::TimerManager>                   timer_manager_;
+    std::shared_ptr<NormalCacheStore>   cache_store1_;
+    std::shared_ptr<NormalCacheStore>   cache_store2_;
+    CacheLoadRequest*                   request_;
+    CacheLoadResponse*                  response_;
+    MockCacheLoadServiceClosure*        done_{nullptr};
+    std::shared_ptr<arpc::TimerManager> timer_manager_;
 
-    std::shared_ptr<CacheStoreServiceImplContext> context_;
+    std::shared_ptr<TcpCacheStoreServiceImplContext> context_;
 
     uint32_t port1_;
     uint32_t port2_;
@@ -65,18 +62,18 @@ protected:
     uint32_t rdma_port2_;
 };
 
-bool CacheStoreServiceImplContextTest::initCacheStores() {
+bool TcpCacheStoreServiceImplContextTest::initCacheStores() {
     port1_      = autil::NetUtil::randomPort();
     port2_      = autil::NetUtil::randomPort();
     rdma_port1_ = autil::NetUtil::randomPort();
     rdma_port2_ = autil::NetUtil::randomPort();
 
     CacheStoreInitParams params1;
-    params1.listen_port       = port1_;
-    params1.rdma_listen_port  = rdma_port1_;
-    params1.enable_metric     = false;
-    params1.memory_util       = memory_util_;
-    params1.device            = device_util_->device_;
+    params1.listen_port      = port1_;
+    params1.rdma_listen_port = rdma_port1_;
+    params1.enable_metric    = false;
+    params1.memory_util      = memory_util_;
+    params1.device           = device_util_->device_;
 
     cache_store1_ = NormalCacheStore::createNormalCacheStore(params1);
     if (!cache_store1_) {
@@ -84,25 +81,30 @@ bool CacheStoreServiceImplContextTest::initCacheStores() {
     }
 
     CacheStoreInitParams params2;
-    params2.listen_port       = port2_;
-    params2.rdma_listen_port  = rdma_port2_;
-    params2.enable_metric     = false;
-    params2.memory_util       = memory_util_;
-    params2.device            = device_util_->device_;
+    params2.listen_port      = port2_;
+    params2.rdma_listen_port = rdma_port2_;
+    params2.enable_metric    = false;
+    params2.memory_util      = memory_util_;
+    params2.device           = device_util_->device_;
 
     cache_store2_ = NormalCacheStore::createNormalCacheStore(params2);
     return cache_store2_ != nullptr;
 }
-bool CacheStoreServiceImplContextTest::initContext() {
+bool TcpCacheStoreServiceImplContextTest::initContext() {
     auto request_block_buffer = std::make_shared<RequestBlockBuffer>("request-1");
     for (int i = 0; i < 10; i++) {
         auto block = block_buffer_util_->makeBlockBuffer("b" + std::to_string(i), 1024, '0' + i, true);
         request_block_buffer->addBlock(block);
     }
-    request_ = cache_store1_->messager_client_->makeLoadRequest(request_block_buffer, 1000, 1, 0);
+
+    auto load_request =
+        std::make_shared<LoadRequest>("1.2.3.4", 12345, 12346, request_block_buffer, nullptr, 1000, 1, 0);
+
+    request_ = cache_store1_->messager_->makeLoadRequest(load_request);
     if (request_ == nullptr) {
         return false;
     }
+
     arpc::ANetRPCController* controller = new arpc::ANetRPCController();
     controller->SetExpireTime(1000);
 
@@ -116,26 +118,29 @@ bool CacheStoreServiceImplContextTest::initContext() {
     if (done_ == nullptr) {
         return false;
     }
-    timer_manager_ = cache_store1_->messager_server_->timer_manager_;
+
+    timer_manager_ = cache_store1_->messager_->timer_manager_;
     if (timer_manager_ == nullptr) {
         return false;
     }
 
-    context_ = std::make_shared<CacheStoreServiceImplContext>(
-        request_, response_, nullptr, done_, cache_store1_->request_block_buffer_store_);
+    auto collector = std::make_shared<CacheStoreServerLoadMetricsCollector>(nullptr, 1, 1, 1);
+    context_       = std::make_shared<TcpCacheStoreServiceImplContext>(
+        request_, response_, collector, done_, cache_store1_->request_block_buffer_store_);
     return context_ != nullptr;
 }
 
-void CacheStoreServiceImplContextTest::verifyContextRunDone(int                          unloaded_block_cnt,
-                                                            int                          write_cnt,
-                                                            bool                         context_done_run,
-                                                            KvCacheStoreServiceErrorCode error_code) {
+void TcpCacheStoreServiceImplContextTest::verifyContextRunDone(int                          unloaded_block_cnt,
+                                                               int                          write_cnt,
+                                                               bool                         context_done_run,
+                                                               KvCacheStoreServiceErrorCode error_code) {
     ASSERT_EQ(context_->unloaded_blocks_.size(), unloaded_block_cnt);
     ASSERT_EQ(context_->write_cnt_.load(), write_cnt);
     ASSERT_EQ(context_->done_run_.load(), context_done_run);
     ASSERT_EQ(response_->error_code(), error_code);
 }
-void CacheStoreServiceImplContextTest::storeBlocks(int num) {
+
+void TcpCacheStoreServiceImplContextTest::storeBlocks(int num) {
     std::string requestid   = "test-request-id";
     auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
     for (int i = 0; i < num; i++) {
@@ -160,7 +165,7 @@ void CacheStoreServiceImplContextTest::storeBlocks(int num) {
 }
 
 // cache_store2 store block, cache_store1 load from cache_store2
-TEST_F(CacheStoreServiceImplContextTest, loadBlock_Success) {
+TEST_F(TcpCacheStoreServiceImplContextTest, loadBlock_Success) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
@@ -192,7 +197,7 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_Success) {
     }
 }
 
-TEST_F(CacheStoreServiceImplContextTest, loadBlock_Timeout) {
+TEST_F(TcpCacheStoreServiceImplContextTest, loadBlock_Timeout) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
@@ -226,7 +231,7 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_Timeout) {
     verifyContextRunDone(3, 7, true, KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
 }
 
-TEST_F(CacheStoreServiceImplContextTest, loadBlock_Canceled) {
+TEST_F(TcpCacheStoreServiceImplContextTest, loadBlock_Canceled) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
@@ -251,7 +256,7 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_Canceled) {
     verifyContextRunDone(5, 5, true, KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
 }
 
-TEST_F(CacheStoreServiceImplContextTest, loadBlock_AfterDoneRun) {
+TEST_F(TcpCacheStoreServiceImplContextTest, loadBlock_AfterDoneRun) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);
@@ -268,13 +273,13 @@ TEST_F(CacheStoreServiceImplContextTest, loadBlock_AfterDoneRun) {
     context_->loadBlockOnTcp(true, {block});
 }
 
-void CacheStoreServiceImplContextTest::loadThreadFunction(int i) {
+void TcpCacheStoreServiceImplContextTest::loadThreadFunction(int i) {
     auto block = cache_store2_->request_block_buffer_store_->request_cache_map_["test-request-id"]
                      ->blocks_["b" + std::to_string(i)];
     context_->loadBlockOnTcp(true, {block});
 }
 
-TEST_F(CacheStoreServiceImplContextTest, loadBlockMultiThread) {
+TEST_F(TcpCacheStoreServiceImplContextTest, loadBlockMultiThread) {
     ASSERT_TRUE(initCacheStores());
     ASSERT_TRUE(initContext());
     ASSERT_EQ(context_->unloaded_blocks_.size(), 10);

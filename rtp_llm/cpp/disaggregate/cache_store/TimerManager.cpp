@@ -2,16 +2,16 @@
 
 namespace arpc {
 
-TimerManager::TimerManager(const std::string &threadName, int64_t timeoutIntevalUs) {
+TimerManager::TimerManager(const std::string& threadName, int64_t timeoutIntevalUs) {
     _timerThread =
         autil::LoopThread::createLoopThread(std::bind(&TimerManager::timeoutProc, this), timeoutIntevalUs, threadName);
 }
 
 TimerManager::~TimerManager() {}
 
-std::shared_ptr<Timer> TimerManager::addTimer(int64_t timeoutMs, Timer::Callback &&callback) {
+std::shared_ptr<Timer> TimerManager::addTimer(int64_t timeoutMs, Timer::Callback&& callback) {
     auto expiredTimeUs = timeoutMs * 1000 + autil::TimeUtility::currentTimeInMicroSeconds();
-    auto timer = std::make_shared<Timer>(expiredTimeUs, std::move(callback));
+    auto timer         = std::make_shared<Timer>(expiredTimeUs, std::move(callback));
 
     {
         autil::ScopedWriteLock lock(_rwlock);
@@ -32,15 +32,15 @@ void TimerManager::timeoutProc() {
     {
         // extract all timeout timer
         autil::ScopedWriteLock lock(_rwlock);
-        auto upperIter = _timeoutCheckTimers.upper_bound(currentTimeUs);
+        auto                   upperIter = _timeoutCheckTimers.upper_bound(currentTimeUs);
         timeoutTimers.insert(_timeoutCheckTimers.begin(), upperIter);
         _timeoutCheckTimers.erase(_timeoutCheckTimers.begin(), upperIter);
     }
 
     // callback may be set to thread pool for nonblock call
-    for (auto &iter : timeoutTimers) {
+    for (auto& iter : timeoutTimers) {
         iter.second->callback();
     }
 }
 
-} // namespace arpc
+}  // namespace arpc

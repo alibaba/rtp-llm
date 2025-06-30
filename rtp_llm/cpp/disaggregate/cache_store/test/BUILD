@@ -3,18 +3,22 @@ package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpacka
 load("//:def.bzl", "copts")
 load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
 
+test_base_sources = [
+    "test_util/BlockBufferUtil.cpp",
+    "test_util/DeviceUtil.cpp",
+]
+
+test_base_includes = [
+    "CacheStoreTestBase.h",
+    "test_util/MockMemoryUtil.h",
+    "test_util/BlockBufferUtil.h",
+    "test_util/DeviceUtil.h",
+]
+
 cc_library(
     name = "cache_store_test_base",
-    srcs = [
-        "test_util/BlockBufferUtil.cpp",
-        "test_util/DeviceUtil.cpp",
-    ],
-    hdrs = [
-        "CacheStoreTestBase.h",
-        "test_util/MockMemoryUtil.h",
-        "test_util/BlockBufferUtil.h",
-        "test_util/DeviceUtil.h",
-    ],
+    srcs = test_base_sources,
+    hdrs = test_base_includes,
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/devices:devices_base",
@@ -26,16 +30,7 @@ cc_library(
 
 cc_test(
     name = "cache_store_gtest",
-    srcs = [
-        "main.cpp",
-        "NormalCacheStoreTest.cpp",
-        "MemoryUtilTest.cpp",
-        "MessagerClientTest.cpp",
-        "CacheLoadServiceClosureTest.cpp",
-        "CacheStoreServiceImplContextTest.cpp",
-        "RequestBlockBufferTest.cpp",
-        "RequestBlockBufferStoreTest.cpp",
-    ],
+    srcs = glob(["*.cpp"], exclude = test_base_sources),
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
@@ -46,7 +41,7 @@ cc_test(
         "CACHE_STORE_RDMA_MODE": "0",
         "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
     },
-    copts = ["-fno-access-control",] + copts(),
+    copts = ["-fno-access-control"] + copts(),
     linkopts = device_linkopts(),
     exec_properties = {'gpu':'A10'},
     linkstatic = 1,

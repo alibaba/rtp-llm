@@ -8,21 +8,21 @@ namespace arpc {
 
 class TimerManager {
 public:
-    TimerManager(const std::string &threadName = "TimerManager", int64_t timeoutIntervalUs = 2500);
+    TimerManager(const std::string& threadName = "TimerManager", int64_t timeoutIntervalUs = 2500);
     ~TimerManager();
 
 public:
-    std::shared_ptr<Timer> addTimer(int64_t timeoutMs, Timer::Callback &&callback);
-    size_t getActiveTimerCount() const;
+    std::shared_ptr<Timer> addTimer(int64_t timeoutMs, Timer::Callback&& callback);
+    size_t                 getActiveTimerCount() const;
 
 private:
     void timeoutProc();
 
 private:
-    mutable autil::ReadWriteLock _rwlock;
+    mutable autil::ReadWriteLock              _rwlock;
     std::map<int64_t, std::shared_ptr<Timer>> _timeoutCheckTimers;
 
     autil::LoopThreadPtr _timerThread;
 };
 
-} // namespace arpc
+}  // namespace arpc

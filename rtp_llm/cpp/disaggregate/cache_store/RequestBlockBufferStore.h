@@ -22,6 +22,7 @@ public:
     ~RequestBlockBufferStore() = default;
 
 public:
+    void stop();
     bool setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& layer_cache);
     bool setRequestBlockBufferWatchFunc(const std::string& requestid, RequestBlockBuffer::WatchFunc&& func);
 
@@ -41,7 +42,7 @@ private:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
-    rtp_llm::DeviceBase*                 device_;
+    rtp_llm::DeviceBase*        device_;
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;

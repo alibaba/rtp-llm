@@ -7,23 +7,23 @@
 namespace rtp_llm {
 
 enum class CacheStoreErrorCode {
-    None,
+    None = 0,
 
     // common error
-    InvalidParams,
-    PushWorkerItemFailed,
+    InvalidParams        = 1,
+    PushWorkerItemFailed = 2,
 
     // load failed error
-    LoadConnectFailed,
-    LoadSendRequestFailed,
-    CallPrefillTimeout,
-    LoadRdmaConnectFailed,
-    LoadRdmaWriteFailed,
-    LoadBufferTimeout,
-    LoadErrorUnknown,
+    LoadConnectFailed     = 3,
+    LoadSendRequestFailed = 4,
+    CallPrefillTimeout    = 5,
+    LoadRdmaConnectFailed = 6,
+    LoadRdmaWriteFailed   = 7,
+    LoadBufferTimeout     = 8,
+    LoadErrorUnknown      = 9,
 
     // store failed
-    StoreFailed,
+    StoreFailed = 10,
 };
 
 inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
@@ -58,8 +58,8 @@ inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
 typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreStoreDoneCallback;
 typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreLoadDoneCallback;
 typedef std::function<void(bool)>                      WriteBlockDoneCallback;
-const std::string kEnvRdmaMode     = "CACHE_STORE_RDMA_MODE";
-const std::string kEnvRdmaWriteBlockConcat = "CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT";
-const uint32_t    kTcpRdmaPortDiff = 100;
+const std::string                                      kEnvRdmaMode             = "CACHE_STORE_RDMA_MODE";
+const std::string                                      kEnvRdmaWriteBlockConcat = "CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT";
+const uint32_t                                         kTcpRdmaPortDiff         = 100;
 
 }  // namespace rtp_llm

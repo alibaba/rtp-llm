@@ -470,6 +470,101 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+
+class RtpLLMCacheStoreLoadClientMetricsCollector final {
+public:
+    bool success = true;
+    int64_t block_count = 0;
+    int64_t total_block_size = 0; 
+    int64_t latency_us = 0; // 从调用CacheStore::load 到load完成的时间
+    int64_t wait_task_run_latency_us = 0; // 从调用CacheStore::load 到 开始处理的时间
+    int64_t prepare_call_latency_us = 0; // 准备发送请求/建连的时间
+    int64_t server_call_latency_us = 0; // 从调用CacheStore::load 到 收到响应的时间
+    int64_t response_send_cost_us = 0; // server到client response传输的时间
+};
+
+class RtpLLMCacheStoreLoadServerMetricsCollector final {
+public:
+    bool success = true;
+    int64_t block_count = 0;
+    int64_t total_block_size = 0; 
+    int64_t latency_us = 0; // 从接收到请求 到 最后一个 block 传输完的时间
+    int64_t request_send_cost_us = 0; // load 请求从 client 发送到 server 耗时
+    int64_t first_block_ready_latency_us = 0; // 等待第一block可以传输的耗时
+    int64_t all_block_ready_latency_us = 0; // 从接收到请求到最后一个block ready 可以传输的时间.
+    int64_t transfer_gap_latency_us = 0; // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
+
+    std::vector<int64_t> write_block_count; // 调用write的block数量
+    std::vector<int64_t> write_total_block_size; //  调用write的block size
+    std::vector<int64_t> write_latency_us; // 调用write的单次延迟
+};
+
+class RtpLLMCacheStoreStoreMetricsCollector final {
+public:
+    bool success = true;
+    int64_t block_count = 0;
+    int64_t total_block_size = 0;
+    int64_t latency_us = 0;
+    int64_t wait_task_run_latency_us = 0;
+    int64_t wait_event_sync_latency_us = 0;
+};
+
+class RtpLLMCacheStoreRemoteStoreMetricsCollector final {
+public:
+    bool success = true;
+    int64_t block_count = 0;
+    int64_t total_block_size = 0; 
+    int64_t latency_us = 0; // 从调用CacheStore::submitStoreTask 到store完成的时间
+    int64_t wait_task_run_latency_us = 0; // 从调用CacheStore::submitStoreTask 到 开始处理的时间
+    int64_t first_block_ready_latency_us = 0; // 第一block可以传输
+    int64_t all_block_ready_latency_us = 0; // 从调用CacheStore::submitStoreTask 到最后一个block ready 可以传输的时间.
+    int64_t transfer_gap_latency_us = 0; // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
+};
+
+class RtpLLMCacheStoreMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreLoadClientMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreLoadServerMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreStoreMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreRemoteStoreMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* load_client_qps_metric = nullptr;
+    kmonitor::MutableMetric* load_client_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* load_client_block_count_metric = nullptr;
+    kmonitor::MutableMetric* load_client_total_block_size_metric = nullptr;
+    kmonitor::MutableMetric* load_client_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_client_wait_task_run_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_client_prepare_call_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_client_server_call_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_client_response_send_cost_us_metric = nullptr;
+
+    kmonitor::MutableMetric* load_server_qps_metric = nullptr;
+    kmonitor::MutableMetric* load_server_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* load_server_block_count_metric = nullptr;
+    kmonitor::MutableMetric* load_server_total_block_size_metric = nullptr;
+    kmonitor::MutableMetric* load_server_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_request_send_cost_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_first_block_ready_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_all_block_ready_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_transfer_gap_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_write_block_count_metric = nullptr;
+    kmonitor::MutableMetric* load_server_write_total_block_size = nullptr;
+    kmonitor::MutableMetric* load_server_write_latency_us_metric = nullptr;
+
+    kmonitor::MutableMetric* store_qps_metric = nullptr;
+    kmonitor::MutableMetric* store_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* store_block_count_metric = nullptr;
+    kmonitor::MutableMetric* store_total_block_size_metric = nullptr;
+    kmonitor::MutableMetric* store_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* store_wait_task_run_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* store_wait_event_sync_latency_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 void stopKmonitorFactory();
 

@@ -1,25 +1,26 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-
-
 namespace rtp_llm {
 
 RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util,
-                                                 rtp_llm::DeviceBase*                    device):
+                                                 rtp_llm::DeviceBase*               device):
     memory_util_(memory_util), device_(device) {}
 
-bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
-    // event to sync wait compute
-    auto event = request_block_buffer->getEvent();
-    if (event) {
-        event->synchronize();
-    }
+void RequestBlockBufferStore::stop() {
+    std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+    auto                                tmp_buffers = std::move(request_cache_map_);
+    lock.unlock();
 
+    // avoid deadlock
+    tmp_buffers.clear();
+}
+
+bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     auto store_request_block_buffer = getOrInsertRequestBlockBuffer(request_block_buffer->getRequestId());
     if (store_request_block_buffer == nullptr) {
         RTP_LLM_LOG_WARNING("set request block buffer failed to get block buffer, request id %s",
-                       request_block_buffer->getRequestId().c_str());
+                            request_block_buffer->getRequestId().c_str());
         return false;
     }
 
@@ -35,7 +36,7 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         auto valid_block = makeValidBlock(block);
         if (!valid_block) {
             RTP_LLM_LOG_WARNING("set request block buffer failed to make valid block, request id %s",
-                           request_block_buffer->getRequestId().c_str());
+                                request_block_buffer->getRequestId().c_str());
             return false;
         }
         valid_blocks.push_back(valid_block);
@@ -50,7 +51,7 @@ bool RequestBlockBufferStore::setRequestBlockBufferWatchFunc(const std::string& 
     auto request_block_buffer = getOrInsertRequestBlockBuffer(requestid);
     if (request_block_buffer == nullptr) {
         RTP_LLM_LOG_WARNING("set request block buffer to request block buffer store failed, request id %s",
-                       requestid.c_str());
+                            requestid.c_str());
         return false;
     }
     return request_block_buffer->setWatchFunc(std::move(watch_func));
@@ -112,7 +113,7 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
     if (iter != request_cache_map_.end()) {
         if (iter->second == nullptr) {
             RTP_LLM_LOG_WARNING("request block buffer store try get expired request block buffer, request id %s",
-                           requestid.c_str());
+                                requestid.c_str());
         }
         return iter->second;
     }
@@ -120,7 +121,7 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
     auto ret = request_cache_map_.insert(std::make_pair(requestid, std::make_shared<RequestBlockBuffer>(requestid)));
     if (!ret.second) {
         RTP_LLM_LOG_WARNING("request block buffer store new request block buffer to request map failed, request id %s",
-                       requestid.c_str());
+                            requestid.c_str());
         return nullptr;
     }
 

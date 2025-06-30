@@ -1,0 +1,39 @@
+#pragma once
+
+#include "rtp_llm/cpp/disaggregate/cache_store/MessagerRequest.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/InitParams.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/proto/cache_store_service.pb.h"
+
+namespace rtp_llm {
+
+class Messager {
+public:
+    Messager(const std::shared_ptr<MemoryUtil>&              memory_util,
+             const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
+             const kmonitor::MetricsReporterPtr&             metrics_reporter):
+        memory_util_(memory_util),
+        request_block_buffer_store_(request_block_buffer_store),
+        metrics_reporter_(metrics_reporter),
+        timer_manager_(new arpc::TimerManager) {}
+    virtual ~Messager() = default;
+
+public:
+    virtual bool init(MessagerInitParams params) = 0;
+
+    virtual void load(const std::shared_ptr<LoadRequest>&                          request,
+                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) = 0;
+
+protected:
+    CacheLoadRequest* makeLoadRequest(const std::shared_ptr<LoadRequest>& request);
+
+protected:
+    std::shared_ptr<MemoryUtil>              memory_util_;
+    std::shared_ptr<RequestBlockBufferStore> request_block_buffer_store_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    std::shared_ptr<arpc::TimerManager>      timer_manager_;
+};
+}  // namespace rtp_llm

@@ -16,8 +16,6 @@ public:
         memory_util_       = createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode);
         device_util_       = std::make_shared<DeviceUtil>();
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);
-
-        initTestDataDir();
     }
     void TearDown() override {}
 
@@ -37,7 +35,7 @@ protected:
         const auto test_binary     = getenv("TEST_BINARY");
         if (!(test_src_dir && test_work_space && test_binary)) {
             std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
-            abort();
+            return;
         }
 
         std::string test_binary_str = std::string(test_binary);

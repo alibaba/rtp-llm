@@ -3,8 +3,19 @@
 #include <stdint.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
+
+struct MessagerInitParams {
+    uint32_t server_port         = 0;
+    uint32_t io_thread_count     = 2;
+    uint32_t worker_thread_count = 4;
+
+    uint32_t rdma_server_port         = 0;
+    uint32_t rdma_io_thread_count     = 1;
+    uint32_t rdma_worker_thread_count = 2;
+};
 
 class CacheStoreInitParams {
 public:
@@ -20,7 +31,8 @@ public:
 
     bool enable_metric{true};
 
-    rtp_llm::DeviceBase* device{nullptr};
+    rtp_llm::DeviceBase*         device{nullptr};
+    kmonitor::MetricsReporterPtr metrics_reporter;
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;

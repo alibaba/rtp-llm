@@ -20,8 +20,8 @@ protected:
 protected:
     std::shared_ptr<NormalCacheStore> cache_store1_;
     std::shared_ptr<NormalCacheStore> cache_store2_;
-    uint32_t port1_;
-    uint32_t port2_;
+    uint32_t                          port1_;
+    uint32_t                          port2_;
 };
 
 bool NormalCacheStoreTest::initCacheStores() {
@@ -667,7 +667,8 @@ TEST_F(NormalCacheStoreTest, testLoadContext_Success) {
     load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("abc", block_size, 'c', true));
     std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
-    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, 1, 0);
+    auto load_context = cache_store1_->loadBuffers(
+        load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, 1, 0);
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();
 
@@ -692,7 +693,8 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadTimeout) {
     load_cache2->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true));
     std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
-    auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, 1, 0);
+    auto load_context = cache_store1_->loadBuffers(
+        load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, 1, 0);
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();
 
@@ -716,9 +718,15 @@ TEST_F(NormalCacheStoreTest, testLoadContext_loadCancel) {
     std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
     auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-    auto load_context  = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, [start_time_ms]() {
-        return start_time_ms + 100 < autil::TimeUtility::currentTimeInMilliSeconds();
-    }, 1, 0);
+    auto load_context  = cache_store1_->loadBuffers(
+        load_caches,
+        autil::NetUtil::getBindIp(),
+        port2_,
+        0,
+        1000,
+        [start_time_ms]() { return start_time_ms + 100 < autil::TimeUtility::currentTimeInMilliSeconds(); },
+        1,
+        0);
 
     ASSERT_TRUE(load_context != nullptr);
     load_context->waitDone();
@@ -824,7 +832,6 @@ TEST_F(NormalCacheStoreTest, testLoadPatition_Success) {
         });
     });
 
-    
     auto block1 = block_buffer_util_->makeBlockBuffer("a", block_size, 'a', true);
     auto block2 = block_buffer_util_->makeBlockBuffer("ab", block_size, 'b', true);
     auto block3 = block_buffer_util_->makeBlockBuffer("abc", block_size, 'c', true);
@@ -832,23 +839,24 @@ TEST_F(NormalCacheStoreTest, testLoadPatition_Success) {
     auto partition_count = 8;
     auto part_block_size = block_size / partition_count;
     ASSERT_EQ(part_block_size, 2);
-    for(int i = 0; i < partition_count; i++) {
-        auto load_cache1 = std::make_shared<RequestBlockBuffer>(requestid);
-        void* part_block1_addr = (void*)((int64_t)block1->addr.get() + part_block_size * i);
+    for (int i = 0; i < partition_count; i++) {
+        auto                  load_cache1      = std::make_shared<RequestBlockBuffer>(requestid);
+        void*                 part_block1_addr = (void*)((int64_t)block1->addr.get() + part_block_size * i);
         std::shared_ptr<void> part_block1(part_block1_addr, [](void* ptr) {});
         load_cache1->addBlock("a", part_block1, part_block_size, true, true);
 
-        auto load_cache2 = std::make_shared<RequestBlockBuffer>(requestid);
-        void* part_block2_addr = (void*)((int64_t)block2->addr.get() + part_block_size * i);
+        auto                  load_cache2      = std::make_shared<RequestBlockBuffer>(requestid);
+        void*                 part_block2_addr = (void*)((int64_t)block2->addr.get() + part_block_size * i);
         std::shared_ptr<void> part_block2(part_block2_addr, [](void* ptr) {});
         load_cache2->addBlock("ab", part_block2, part_block_size, true, true);
 
-        void* part_block3_addr = (void*)((int64_t)block3->addr.get() + part_block_size * i);
+        void*                 part_block3_addr = (void*)((int64_t)block3->addr.get() + part_block_size * i);
         std::shared_ptr<void> part_block3(part_block3_addr, [](void* ptr) {});
         load_cache2->addBlock("abc", part_block3, part_block_size, true, true);
         std::vector<std::shared_ptr<RequestBlockBuffer>> load_caches{load_cache1, load_cache2};
 
-        auto load_context = cache_store1_->loadBuffers(load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, partition_count, i);
+        auto load_context = cache_store1_->loadBuffers(
+            load_caches, autil::NetUtil::getBindIp(), port2_, 0, 1000, []() { return false; }, partition_count, i);
         ASSERT_TRUE(load_context != nullptr);
         load_context->waitDone();
         ASSERT_TRUE(load_context->success());
@@ -857,7 +865,7 @@ TEST_F(NormalCacheStoreTest, testLoadPatition_Success) {
         verifyBlock(load_cache2->getBlock("abc"), "abc", block_size / partition_count, true, '2');
         ASSERT_EQ(load_cache1->getBlock("a")->addr.get(), part_block1_addr);
         ASSERT_EQ(load_cache2->getBlock("ab")->addr.get(), part_block2_addr);
-        ASSERT_EQ(load_cache2->getBlock("abc")->addr.get(), part_block3_addr);      
+        ASSERT_EQ(load_cache2->getBlock("abc")->addr.get(), part_block3_addr);
     }
 
     set_block_thread.join();

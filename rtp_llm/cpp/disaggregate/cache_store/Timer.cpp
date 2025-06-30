@@ -3,8 +3,8 @@
 
 ARPC_BEGIN_NAMESPACE(arpc);
 
-Timer::Timer(int64_t expiredTimeUs, Callback &&callback)
-    : _stoped(false), _expiredTimeUs(expiredTimeUs), _callback(callback) {}
+Timer::Timer(int64_t expiredTimeUs, Callback&& callback):
+    _stoped(false), _expiredTimeUs(expiredTimeUs), _callback(callback) {}
 
 Timer::~Timer() {}
 
@@ -14,7 +14,7 @@ void Timer::stop() {
     }
 
     autil::ScopedLock lock(_mutex);
-    _stoped = true;
+    _stoped   = true;
     _callback = nullptr;
 }
 

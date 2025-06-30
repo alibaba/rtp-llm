@@ -19,6 +19,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -359,6 +360,90 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
     }
 }
 
+bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(load_client_qps_metric, "rtp_llm.cache_store.load.client.qps");
+    REGISTER_QPS_MUTABLE_METRIC(load_client_error_qps_metric, "rtp_llm.cache_store.load.client.error_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_block_count_metric, "rtp_llm.cache_store.load.client.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_total_block_size_metric, "rtp_llm.cache_store.load.client.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_latency_us_metric, "rtp_llm.cache_store.load.client.latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_wait_task_run_latency_us_metric, "rtp_llm.cache_store.load.client.wait_task_run_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_prepare_call_latency_us_metric, "rtp_llm.cache_store.load.client.prepare_call_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_server_call_latency_us_metric, "rtp_llm.cache_store.load.client.server_call_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_client_response_send_cost_us_metric, "rtp_llm.cache_store.load.client.response_send_cost_us");
+
+    REGISTER_QPS_MUTABLE_METRIC(load_server_qps_metric, "rtp_llm.cache_store.load.server.qps");
+    REGISTER_QPS_MUTABLE_METRIC(load_server_error_qps_metric, "rtp_llm.cache_store.load.server.error_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_block_count_metric, "rtp_llm.cache_store.load.server.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_total_block_size_metric, "rtp_llm.cache_store.load.server.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_latency_us_metric, "rtp_llm.cache_store.load.server.latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_request_send_cost_us_metric, "rtp_llm.cache_store.load.server.request_send_cost_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_first_block_ready_latency_us_metric, "rtp_llm.cache_store.load.server.first_block_ready_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_all_block_ready_latency_us_metric, "rtp_llm.cache_store.load.server.all_block_ready_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric, "rtp_llm.cache_store.load.server.transfer_gap_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_write_block_count_metric, "rtp_llm.cache_store.load.server.write.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_write_total_block_size, "rtp_llm.cache_store.load.server.write.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_write_latency_us_metric, "rtp_llm.cache_store.load.server.write.latency_us");
+
+    REGISTER_QPS_MUTABLE_METRIC(store_qps_metric, "rtp_llm.cache_store.store.qps");
+    REGISTER_QPS_MUTABLE_METRIC(store_error_qps_metric, "rtp_llm.cache_store.store.error_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_block_count_metric, "rtp_llm.cache_store.store.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_total_block_size_metric, "rtp_llm.cache_store.store.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_latency_us_metric, "rtp_llm.cache_store.store.latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_task_run_latency_us_metric, "rtp_llm.cache_store.store.wait_task_run_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_event_sync_latency_us_metric, "rtp_llm.cache_store.store.wait_event_sync_latency_us");
+    return true;
+}
+
+#define REPORT_NON_ZERO_MUTABLE_METRIC(metric_name, value) \
+    if (value > 0) { \
+        REPORT_MUTABLE_METRIC(metric_name, value); \
+    }
+
+void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreLoadClientMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(load_client_qps_metric);
+    if (!collector->success) {
+        REPORT_MUTABLE_QPS(load_client_error_qps_metric);
+    }
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_block_count_metric, collector->block_count);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_total_block_size_metric, collector->total_block_size);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_latency_us_metric, collector->latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_wait_task_run_latency_us_metric, collector->wait_task_run_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_prepare_call_latency_us_metric, collector->prepare_call_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_server_call_latency_us_metric, collector->server_call_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_client_response_send_cost_us_metric, collector->response_send_cost_us);
+}
+
+void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreLoadServerMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(load_server_qps_metric);
+    if (!collector->success) {
+        REPORT_MUTABLE_QPS(load_server_error_qps_metric);
+    }
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_block_count_metric, collector->block_count);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_total_block_size_metric, collector->total_block_size);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_latency_us_metric, collector->latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_request_send_cost_us_metric, collector->request_send_cost_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_all_block_ready_latency_us_metric, collector->all_block_ready_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric, collector->transfer_gap_latency_us);
+    for (int i = 0; i < collector->write_block_count.size(); ++i) {
+        REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_block_count_metric, collector->write_block_count[i]);
+        REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_total_block_size, collector->write_total_block_size[i]);
+        REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_latency_us_metric, collector->write_latency_us[i]);
+    }
+}
+
+void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreStoreMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(store_qps_metric);
+    if (!collector->success) {
+        REPORT_MUTABLE_QPS(store_error_qps_metric);
+    }
+    REPORT_NON_ZERO_MUTABLE_METRIC(store_block_count_metric, collector->block_count);
+    REPORT_NON_ZERO_MUTABLE_METRIC(store_total_block_size_metric, collector->total_block_size);
+    REPORT_NON_ZERO_MUTABLE_METRIC(store_latency_us_metric, collector->latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(store_wait_task_run_latency_us_metric, collector->wait_task_run_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(store_wait_event_sync_latency_us_metric, collector->wait_event_sync_latency_us);
+}
+
+#undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS
 #undef REPORT_GAUGE
 

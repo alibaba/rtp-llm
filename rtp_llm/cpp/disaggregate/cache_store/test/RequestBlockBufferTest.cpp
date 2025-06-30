@@ -17,17 +17,20 @@ TEST_F(RequestBlockBufferTest, testBlockOps) {
     ASSERT_EQ(1, buffer.getBlocksCount());
     ASSERT_TRUE(buffer.isValid());
     ASSERT_EQ(buffer1, buffer.getBlock("b1")->addr);
+    ASSERT_EQ(10, buffer.getBlocksSize());
 
     std::shared_ptr<void> buffer2((void*)0x2, [](void* p) {});
     buffer.addBlock("b2", buffer2, 10, true, true);
     ASSERT_EQ(2, buffer.getBlocksCount());
     ASSERT_TRUE(buffer.isValid());
     ASSERT_EQ(buffer2, buffer.getBlock("b2")->addr);
+    ASSERT_EQ(20, buffer.getBlocksSize());
 
     buffer.addBlock("b3", nullptr, 10, true, true);
     ASSERT_EQ(3, buffer.getBlocksCount());
     ASSERT_FALSE(buffer.isValid());
     ASSERT_EQ(nullptr, buffer.getBlock("b3")->addr);
+    ASSERT_EQ(30, buffer.getBlocksSize());
 }
 
 TEST_F(RequestBlockBufferTest, testWatchFunc_SetWatchFunc) {

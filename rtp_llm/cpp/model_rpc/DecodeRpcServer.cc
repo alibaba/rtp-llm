@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "autil/LockFreeThreadPool.h"
 
 using namespace std;
 using namespace autil::legacy;

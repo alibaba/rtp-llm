@@ -1,10 +1,8 @@
 #pragma once
 
-#include "rtp_llm/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsReporter.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsCollector.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/MessagerClient.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/MessagerServer.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "autil/ThreadPool.h"
 
@@ -55,9 +53,9 @@ public:
 
 private:
     bool init(const CacheStoreInitParams& params);
-    void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&                    value,
-                      CacheStoreStoreDoneCallback                                   callback,
-                      const std::shared_ptr<CacheStoreClientStoreMetricsCollector>& collector);
+    void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
+                      CacheStoreStoreDoneCallback                             callback,
+                      const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector);
 
     void runLoadTask(const std::shared_ptr<RequestBlockBuffer>&                   value,
                      CacheStoreLoadDoneCallback                                   callback,
@@ -72,14 +70,12 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    CacheStoreInitParams                       params_;
-    std::shared_ptr<MemoryUtil>                memory_util_;
-    std::shared_ptr<RequestBlockBufferStore>   request_block_buffer_store_;
-    std::shared_ptr<CacheStoreMetricsReporter> metrics_reporter_;
-    std::unique_ptr<MessagerClient>            messager_client_;
-    std::unique_ptr<MessagerServer>            messager_server_;
-    autil::ThreadPoolBasePtr                   thread_pool_;  // task executor
-    std::shared_ptr<arpc::TimerManager>        timer_manager_;
+    CacheStoreInitParams                     params_;
+    std::shared_ptr<MemoryUtil>              memory_util_;
+    std::shared_ptr<RequestBlockBufferStore> request_block_buffer_store_;
+    std::shared_ptr<Messager>                messager_;
+    autil::ThreadPoolBasePtr                 thread_pool_;  // task executor
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
 };
 
 }  // namespace rtp_llm

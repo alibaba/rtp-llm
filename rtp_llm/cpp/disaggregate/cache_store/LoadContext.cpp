@@ -55,15 +55,15 @@ void SyncContext::updateResult(bool                                       succes
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
         RTP_LLM_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
-                       request_block_buffer->getRequestKey().c_str(),
-                       success ? "success" : "failed",
-                       CacheStoreErrorCodeToString(ec).c_str(),
-                       autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
+                            request_block_buffer->getRequestKey().c_str(),
+                            success ? "success" : "failed",
+                            CacheStoreErrorCodeToString(ec).c_str(),
+                            autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
     } else {
         RTP_LLM_LOG_DEBUG("request %s call finished, state:[%s], cost time %ldms",
-                     request_block_buffer->getRequestKey().c_str(),
-                     success ? "success" : "failed",
-                     autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
+                          request_block_buffer->getRequestKey().c_str(),
+                          success ? "success" : "failed",
+                          autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
     }
 
     if (++done_layer_cnt_ == expect_layer_cnt_) {

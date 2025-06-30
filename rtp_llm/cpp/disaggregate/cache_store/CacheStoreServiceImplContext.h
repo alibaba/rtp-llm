@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/disaggregate/cache_store/proto/cache_store_service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/metrics/CacheStoreMetricsCollector.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
@@ -15,10 +15,9 @@ public:
                                  const std::shared_ptr<CacheStoreServerLoadMetricsCollector>& collector,
                                  ::google::protobuf::Closure*                                 done,
                                  const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store);
-    virtual ~CacheStoreServiceImplContext();
+    virtual ~CacheStoreServiceImplContext() = default;
 
 public:
-    void loadBlockOnTcp(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& block);
     void setTimer(const std::shared_ptr<arpc::Timer>& timer) {
         timer_ = std::weak_ptr<arpc::Timer>(timer);
     }
@@ -29,18 +28,14 @@ protected:
     void                             stopTimer();
     void                             runSuccess(bool direct_write);
 
-private:
-    bool writeResponseBlock(const std::shared_ptr<BlockBuffer>&     block,
-                            const std::shared_ptr<BlockBufferInfo>& peer_block);
-
 protected:
     const CacheLoadRequest* request_;
     const int64_t           request_send_start_time_us_{0};
     const uint32_t          total_block_count_{0};
     const std::string       request_id_;
     const std::string       peer_ip_;
-    const int32_t partition_count_{1};
-    const int32_t partition_id_{0};
+    const int32_t           partition_count_{1};
+    const int32_t           partition_id_{0};
 
     std::mutex         response_mutex_;
     CacheLoadResponse* response_;

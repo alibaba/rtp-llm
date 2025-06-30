@@ -3,8 +3,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-
-
 namespace rtp_llm {
 
 rtp_llm::Buffer BlockBuffer::toDeviceBuffer() {
@@ -54,6 +52,11 @@ size_t RequestBlockBuffer::getBlocksCount() const {
     return blocks_.size();
 }
 
+size_t RequestBlockBuffer::getBlocksSize() const {
+    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+    return blocks_size_;
+}
+
 void RequestBlockBuffer::addBlock(const std::shared_ptr<BlockBuffer>& block) {
     if (block == nullptr) {
         return;
@@ -62,6 +65,7 @@ void RequestBlockBuffer::addBlock(const std::shared_ptr<BlockBuffer>& block) {
     {
         std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
         blocks_[block->key] = block;
+        blocks_size_ += block->len;
     }
     triggerWatchFunc(true, {block});
 }
@@ -77,6 +81,7 @@ void RequestBlockBuffer::addBlocks(const std::vector<std::shared_ptr<BlockBuffer
         std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
         for (auto& block : blocks) {
             blocks_[block->key] = block;
+            blocks_size_ += block->len;
         }
     }
 

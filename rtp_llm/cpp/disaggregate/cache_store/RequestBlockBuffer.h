@@ -38,13 +38,14 @@ public:
     ~RequestBlockBuffer();
 
 public:
-    const std::string&                    getRequestId() const;
-    const std::string&                    getRequestKey() const;
+    const std::string&          getRequestId() const;
+    const std::string&          getRequestKey() const;
     const rtp_llm::DeviceEvent* getEvent() const;
 
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> getBlocks() const;
     std::shared_ptr<BlockBuffer>                                  getBlock(const std::string& id) const;
     size_t                                                        getBlocksCount() const;
+    size_t                                                        getBlocksSize() const;
 
     void addBlock(const std::shared_ptr<BlockBuffer>& block);
     void addBlock(const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted);
@@ -62,13 +63,14 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
-    std::string                       requestid_;
-    std::string                       request_key_;
+    std::string requestid_;
+    std::string request_key_;
 
     rtp_llm::DeviceEventPtr event_;
 
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;
+    size_t                                                        blocks_size_ = 0;
 
     mutable std::shared_mutex watch_func_mutex_;
     std::vector<WatchFunc>    watch_funcs_;

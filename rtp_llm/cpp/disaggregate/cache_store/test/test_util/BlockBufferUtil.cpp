@@ -104,4 +104,37 @@ std::vector<std::shared_ptr<RequestBlockBuffer>> BlockBufferUtil::makeRequestBlo
     return request_block_buffer_vec;
 }
 
+bool BlockBufferUtil::verifyBlock(const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val) {
+    if (block == nullptr) {
+        return false;
+    }
+
+    if (key != block->key || len != block->len || gpu_mem != block->gpu_mem) {
+        return false;
+    }
+
+    if (len == 0) {
+        return true;
+    }
+
+    if (!gpu_mem) {
+        return val == ((char*)(block->addr.get()))[0];
+    }
+
+    auto buf = device_util_->mallocCPU(len);
+    if (buf == nullptr) {
+        return false;
+    }
+
+    auto ret = device_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len);
+    if (!ret) { 
+        device_util_->freeCPU(buf);
+        return false;
+    }
+
+    ret = val == ((char*)(buf))[0];
+    device_util_->freeCPU(buf);
+    return ret;
+}
+
 }  // namespace rtp_llm
