@@ -16,7 +16,7 @@ import logging
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 SSRF_CHECKER = None
 
