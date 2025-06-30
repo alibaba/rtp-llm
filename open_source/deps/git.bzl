@@ -222,6 +222,7 @@ def git_deps():
         remote = "https://github.com/Tencent/rapidjson.git",
         # tag = "v1.1.0",
         commit = "f54b0e47a08782a6131cc3d60f94d038fa6e0a51",
+        patches = ["//3rdparty/rapidjson:0001-document_h.patch"],
         build_file = clean_dep("//3rdparty/rapidjson:rapidjson.BUILD"),
     )
 
