@@ -275,6 +275,9 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:rtp_llm_lib",
     ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
+    },
     tags = [
         "rocm",
     ],
